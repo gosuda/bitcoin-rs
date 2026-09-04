@@ -49,8 +49,8 @@ pub struct MempoolEntry {
     ///
     /// P2SH sigops cannot be counted from the transaction alone — the spent
     /// `scriptPubKey` is what says how many there are — so this is computed
-    /// once by `accept_to_mempool`, where the prevouts are already resolved,
-    /// and carried from there. Bitcoin Core does the same, storing
+    /// once by the acceptance verdict (`crate::accept`), where the prevouts
+    /// are already resolved, and carried from there. Bitcoin Core does the same, storing
     /// `sigOpCost` on `CTxMemPoolEntry` at acceptance rather than recounting
     /// per block template.
     ///
@@ -99,8 +99,8 @@ impl MempoolEntry {
 
     /// Attaches a sigop cost counted against resolved prevouts.
     ///
-    /// Only `accept_to_mempool` is in a position to call this correctly, since
-    /// only it has the prevouts. Kept as a separate builder rather than a
+    /// Only the acceptance verdict is in a position to call this correctly,
+    /// since only it has the prevouts. Kept as a separate builder rather than a
     /// `new` parameter so the ~30 fixtures that construct entries directly do
     /// not have to invent a number they cannot compute.
     #[must_use]

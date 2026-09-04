@@ -1388,8 +1388,8 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
     let (root, original) = {
         let mut pool = ctx.mempool.pool().write();
         pool.limits.cluster_count = 2;
-        // OP_TRUE so the RPC path can spend the root without a witness.
-        // P2WPKH here is what produced consensus-verification-failed.
+        // OP_TRUE so the RPC path can spend the root without a witness; a
+        // P2WPKH root would fail script verification on both outlets.
         let root = Tx {
             outputs: vec![TxOut {
                 value: 50_000,
@@ -1820,6 +1820,93 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class() -> Result<(), 
             submitted.is_ok(),
             preview_allowed,
             "row {index}: preview and submission must agree"
+        );
+    }
+    Ok(())
+}
+
+/// Funds a signature-guarded (P2WPKH) output the fixture then spends with an
+/// empty witness.
+fn fund_p2wpkh_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
+    let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0);
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        outpoint,
+        TxOut {
+            value,
+            script_pubkey: p2wpkh_script(),
+        },
+        false,
+        1,
+    ));
+    ctx.utxo
+        .commit_block(&changes, &Hash256::from_le_bytes(&[0xab; 32]))
+        .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
+    outpoint
+}
+
+/// Consensus rules are part of the one acceptance verdict, so both outlets
+/// refuse an unsigned spend, a non-final locktime, and a duplicate input
+/// with the same reason text; none of them enters the pool.
+#[test]
+fn consensus_rejections_agree_on_both_rpcs_and_never_enter_the_pool() -> Result<(), Box<dyn Error>>
+{
+    let ctx = Arc::new(Context::new());
+    let unsigned = tx(fund_p2wpkh_utxo(&ctx, 0x74, 10_000), 9_000, 0xffff_ffff);
+    let non_final = Tx {
+        lock_time: 500_000,
+        ..tx(fund_utxo(&ctx, 0x75, 10_000), 9_000, 0xffff_fffe)
+    };
+    let funded = fund_utxo(&ctx, 0x76, 10_000);
+    let duplicate_input = Tx {
+        inputs: vec![
+            tx(funded, 9_000, 0xffff_ffff).inputs[0].clone(),
+            tx(funded, 9_000, 0xffff_ffff).inputs[0].clone(),
+        ],
+        ..tx(funded, 15_000, 0xffff_ffff)
+    };
+    let cases = [
+        (&unsigned, "script verification failed"),
+        (&non_final, "non-final"),
+        (&duplicate_input, "duplicate input"),
+    ];
+
+    let handler = Handler::new(Arc::clone(&ctx));
+    for (tx, reason_fragment) in cases {
+        let rows = handler
+            .dispatch("testmempoolaccept", &json!([[raw_tx_hex(tx)]]))?
+            .as_array()
+            .ok_or("expected an array of results")?
+            .clone();
+        let row = rows.first().ok_or("missing row")?;
+        assert_eq!(
+            row.get("allowed").and_then(JsonValueTrait::as_bool),
+            Some(false),
+            "{reason_fragment}: the preview must refuse"
+        );
+        let previewed = row
+            .get("reject-reason")
+            .and_then(JsonValueTrait::as_str)
+            .ok_or("refused rows carry a reject-reason")?
+            .to_owned();
+        assert!(
+            previewed.contains(reason_fragment),
+            "{reason_fragment}: unexpected preview reason {previewed}"
+        );
+
+        let submitted = reject_message(
+            &handler
+                .dispatch("sendrawtransaction", &json!([raw_tx_hex(tx)]))
+                .err()
+                .ok_or("submission must refuse what the preview refused")?,
+        );
+        assert!(
+            submitted.contains(&previewed),
+            "{reason_fragment}: submission quotes {submitted}, preview quoted {previewed}"
+        );
+        assert!(
+            !ctx.mempool.read().contains_txid(&rpc_txid(tx)),
+            "{reason_fragment}: nothing is inserted on rejection"
         );
     }
     Ok(())

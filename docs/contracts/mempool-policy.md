@@ -14,9 +14,10 @@ ledger. This page adds nothing normative; it places the policy under the
 - **Owner**: `docs/policies/mempool-policy.md` owns the mempool relay policy
   surface against Bitcoin Core 31.1. Consensus script and sighash validation
   are governed by consensus rules.
-- **Scope**: admission checks in `crates/mempool/src/standardness.rs`,
-  `policy.rs`, `pool.rs`, `rbf.rs`, `eviction.rs`, and the RPC surface
-  `sendrawtransaction` / `testmempoolaccept` in `crates/rpc/src/handlers/tx.rs`.
+- **Scope**: the acceptance verdict in `crates/mempool/src/accept.rs` and the
+  admission checks it composes from `standardness.rs`, `policy.rs`, `pool.rs`,
+  `rbf.rs`, `eviction.rs`, and the RPC surface `sendrawtransaction` /
+  `testmempoolaccept` in `crates/rpc/src/handlers/tx.rs`.
 - Standardness rules, BIP125 RBF rules 1–6, ancestor/descendant package
   limits, cluster count/size limits, and eviction ranking follow the policy
   document.

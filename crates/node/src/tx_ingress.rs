@@ -1,7 +1,8 @@
 //! P2P transaction ingress consumer for the node.
 //!
-//! Each transaction is evaluated through the mempool's standardness +
-//! acceptance policy, and admitted through the one
+//! Each transaction is evaluated through the mempool's one acceptance
+//! verdict — the same standardness, consensus, script, fee, and replacement
+//! rules `sendrawtransaction` commits — and admitted through the one
 //! [`MempoolGateway`](bitcoin_rs_mempool::MempoolGateway).
 //!
 //! # Ordering and side effects
@@ -17,19 +18,22 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
+use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{
-    AdmissionOrigin, MempoolGateway, PeerToken, ReplacementCandidate,
-    standardness::{PackageTxContext, evaluate_package_acceptance},
+    AcceptanceContext, AcceptanceRejectReason, AdmissionOrigin, MempoolGateway, PeerToken,
+    ReplacementCandidate, TxAcceptanceFact, evaluate_package_acceptance,
 };
 use bitcoin_rs_primitives::{Hash256, Tx, Txid};
 use bitcoin_rs_rpc::context::MiningControl;
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::state::NodeState;
 use crate::tx_admission::TxAdmission;
 use crate::tx_relay::{PeerRelaySink, TxRelayQueue, spawn_tx_relay_worker};
+use crate::utxo_view::UtxoSetView;
 
 /// The drain poll interval when the channel is empty.
 const TX_INGRESS_POLL: Duration = Duration::from_millis(100);
@@ -60,6 +64,8 @@ pub fn spawn_tx_ingress_consumer(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let utxo = state.utxo();
     let transactions = state.transactions();
+    let applied_tip = state.applied_tip();
+    let block_tree = state.block_tree();
     let peer_table = state.peer_table();
     let (relay, relay_rx) = TxRelayQueue::new(TX_RELAY_QUEUE_CAPACITY);
     let relay_sink = PeerRelaySink::new(peer_table);
@@ -70,6 +76,8 @@ pub fn spawn_tx_ingress_consumer(
             let consumer = TxIngressConsumer {
                 utxo,
                 transactions,
+                applied_tip,
+                block_tree,
                 mempool_gateway: gateway,
                 mining_control,
                 relay,
@@ -96,6 +104,11 @@ pub fn spawn_tx_ingress_consumer(
 struct TxIngressConsumer {
     utxo: Arc<UtxoSet>,
     transactions: Arc<parking_lot::RwLock<hashbrown::HashMap<Txid, Tx>>>,
+    /// The applied tip: the block a mempool candidate follows, for finality
+    /// and the stored entry height.
+    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Source of the applied tip's median time past (BIP113 cutoff).
+    block_tree: Arc<RwLock<BlockTree>>,
     mempool_gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
     /// Outbound relay queue: enqueues `inv` announcements for the relay
@@ -140,35 +153,34 @@ impl TxIngressConsumer {
             return;
         }
 
-        // Evaluate acceptance policy (standardness, fee, missing inputs).
-        let (fact, policy) = {
+        // The acceptance verdict against the live pool, with the confirmed
+        // UTXO set as its chain layer.
+        let context = self.acceptance_context();
+        let (fact, incremental_relay_fee_sat_per_kvb) = {
             let pool = self.mempool_gateway.read();
-            let policy = pool.policy_snapshot();
-            let contexts = self.package_contexts(&pool, std::slice::from_ref(&tx));
+            let incremental_relay_fee_sat_per_kvb =
+                pool.policy_snapshot().incremental_relay_fee_sat_per_kvb;
             let facts = evaluate_package_acceptance(
                 &pool,
-                &policy.standardness,
+                &UtxoSetView::new(Arc::clone(&self.utxo)),
+                context,
                 std::slice::from_ref(&tx),
-                &contexts,
-                None,
-                policy.incremental_relay_fee_sat_per_kvb,
             );
-            let fact = facts.results.into_iter().next().unwrap_or_else(|| {
-                let mut fact = bitcoin_rs_mempool::standardness::TxAcceptanceFact {
+            let fact = facts
+                .results
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| TxAcceptanceFact {
                     txid,
-                    wtxid: tx.wtxid(),
+                    wtxid,
                     allowed: Some(false),
                     vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
                     weight: tx.weight(),
                     sigop_cost: 0,
                     base_fee: None,
-                    reject_reason: None,
-                };
-                fact.reject_reason =
-                    Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::PackageTooLarge);
-                fact
-            });
-            (fact, policy)
+                    reject_reason: Some(AcceptanceRejectReason::PackageTooLarge),
+                });
+            (fact, incremental_relay_fee_sat_per_kvb)
         };
 
         // Rejected: record in recent-rejects so the Inv filter suppresses
@@ -196,15 +208,14 @@ impl TxIngressConsumer {
             Arc::new(tx.clone()),
             fact.vsize,
             fact.base_fee.unwrap_or(0),
-            policy.incremental_relay_fee_sat_per_kvb,
+            incremental_relay_fee_sat_per_kvb,
         );
         let time = unix_time_secs();
-        let height = self.applied_height();
         let result = self.mempool_gateway.replace_transaction(
             AdmissionOrigin::Peer(token),
             candidate,
             time,
-            height,
+            context.height,
             fact.sigop_cost,
         );
 
@@ -235,79 +246,22 @@ impl TxIngressConsumer {
         }
     }
 
-    /// Resolves prevout contexts for a package of transactions, using the
-    /// mempool and UTXO set — the same logic as the RPC
-    /// `sendrawtransaction` handler.
-    fn package_contexts(
-        &self,
-        pool: &bitcoin_rs_mempool::Mempool,
-        txs: &[Tx],
-    ) -> Vec<PackageTxContext> {
-        use bitcoin_rs_primitives::OutPoint;
-        use hashbrown::HashMap;
-
-        let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
-        let mut contexts = Vec::with_capacity(txs.len());
-
-        for tx in txs {
-            let mut missing_inputs = false;
-            let mut input_value = 0_u64;
-
-            for input in &tx.inputs {
-                if input.previous_output == OutPoint::default() {
-                    missing_inputs = true;
-                    continue;
-                }
-                let key = (input.previous_output.txid, input.previous_output.vout);
-                if let Some(value) = package_outputs.get(&key) {
-                    input_value = input_value.saturating_add(*value);
-                    continue;
-                }
-                if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-                    && let Ok(vout) = usize::try_from(input.previous_output.vout)
-                    && let Some(output) = parent.outputs.get(vout)
-                {
-                    input_value = input_value.saturating_add(output.value);
-                    continue;
-                }
-                if let Some(live) = self.utxo.get_entry(&input.previous_output) {
-                    input_value = input_value.saturating_add(live.txout.value);
-                    continue;
-                }
-                missing_inputs = true;
-            }
-
-            let output_value = tx
-                .outputs
-                .iter()
-                .fold(0_u64, |sum, output| sum.saturating_add(output.value));
-            let fee = input_value.saturating_sub(output_value);
-            let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-            let sigop_cost = bitcoin_rs_script::count_tx_legacy(tx);
-
-            contexts.push(PackageTxContext {
-                fee,
-                vsize,
-                sigop_cost,
-                missing_inputs,
-            });
-
-            let txid = tx.txid();
-            for (vout, output) in tx.outputs.iter().enumerate() {
-                let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-                package_outputs.insert((txid, vout), output.value);
-            }
+    /// The chain position the verdict is evaluated under: the applied tip's
+    /// height and median time past. Before the first applied block both are
+    /// zero, which disables the BIP113 cutoff.
+    fn acceptance_context(&self) -> AcceptanceContext {
+        let Some(tip) = self.applied_tip.load_full() else {
+            return AcceptanceContext::default();
+        };
+        AcceptanceContext {
+            height: tip.height,
+            locktime_cutoff: self
+                .block_tree
+                .read()
+                .median_time_past_at(tip.tip_id, 11)
+                .unwrap_or(0),
+            max_feerate_sat_per_kvb: None,
         }
-
-        contexts
-    }
-
-    /// Returns the current applied tip height.
-    fn applied_height(&self) -> u32 {
-        let _ = self;
-        // The admission height is used for mempool entry ancestor
-        // accounting. The apply path corrects it on block connect.
-        0
     }
 }
 
@@ -325,7 +279,6 @@ mod tests {
         Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
     };
     use bitcoin_rs_primitives::{Block, OutPoint, TxIn, TxOut};
-    use parking_lot::{Mutex, RwLock};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::AtomicUsize;
     /// A recording mining control that counts `publish_generation` calls.
@@ -402,9 +355,13 @@ mod tests {
         }
     }
 
-    /// Builds a tx that spends a known UTXO, passing standardness checks.
+    /// Builds a tx that spends the known `OP_TRUE` UTXO with an empty
+    /// scriptSig, paying a standard P2WPKH output: it passes standardness,
+    /// script verification, and the fee floor.
     fn spending_tx() -> Tx {
         let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
+        let mut p2wpkh = vec![0x00, 0x14];
+        p2wpkh.extend([0x11_u8; 20]);
         Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -412,20 +369,20 @@ mod tests {
                     txid: parent_txid,
                     vout: 0,
                 },
-                script_sig: vec![0x52, 0x02, 0xAA, 0xBB],
+                script_sig: Vec::new(),
                 sequence: 0xFFFF_FFFF,
                 witness: Vec::new(),
             }],
             outputs: vec![TxOut {
                 value: 49_000,
-                script_pubkey: vec![0x6A],
+                script_pubkey: p2wpkh,
             }],
             lock_time: 0,
         }
     }
 
-    /// Creates a consumer with a pre-funded UTXO so `spending_tx` passes
-    /// standardness (`missing-inputs`) checks.
+    /// Creates a consumer with a pre-funded `OP_TRUE` UTXO so `spending_tx`
+    /// resolves its input and verifies.
     fn make_consumer_with_utxo(
         gateway: &Arc<MempoolGateway>,
         mining: Arc<RecordingMining>,
@@ -441,7 +398,7 @@ mod tests {
             },
             TxOut {
                 value: 50_000,
-                script_pubkey: Vec::new(),
+                script_pubkey: vec![0x51],
             },
             false,
             100,
@@ -453,6 +410,8 @@ mod tests {
         TxIngressConsumer {
             utxo,
             transactions,
+            applied_tip: Arc::new(ArcSwapOption::empty()),
+            block_tree: Arc::new(RwLock::new(BlockTree::new())),
             mempool_gateway: Arc::clone(gateway),
             mining_control: mining,
             relay,
@@ -480,6 +439,8 @@ mod tests {
         TxIngressConsumer {
             utxo,
             transactions,
+            applied_tip: Arc::new(ArcSwapOption::empty()),
+            block_tree: Arc::new(RwLock::new(BlockTree::new())),
             mempool_gateway: Arc::clone(gateway),
             mining_control: mining,
             relay,

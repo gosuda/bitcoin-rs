@@ -1,21 +1,16 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::script_util::{
-    Instruction, count_segwit, count_tx_legacy, instructions, is_p2sh, is_witness_program, opcode,
-    push_data,
-};
+use crate::script_util::{opcode, push_data};
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext as MempoolPackageTxContext,
-    evaluate_package_acceptance_all,
-};
+use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_mempool::{
-    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MutationResult,
+    AcceptanceContext, AcceptanceRejectReason, AdmissionOrigin, AdmissionRequest, AdmitError,
+    AdmitOutcome, MutationResult, evaluate_package_acceptance_all,
 };
 use bitcoin_rs_primitives::{
     Block as NativeBlock, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -432,10 +427,9 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
 /// `sendrawtransaction` and [`crate::context::Context::admit_transaction`]
 /// map this into their respective envelopes.
 pub(crate) enum AdmissionFailure {
-    /// Mempool or standardness policy refused the transaction.
-    Policy(AcceptanceRejectReason),
-    /// Consensus verification failed.
-    Consensus,
+    /// The acceptance verdict refused the transaction: policy, consensus, or
+    /// input scripts.
+    Rejected(AcceptanceRejectReason),
     /// Generation or mempool tokens kept changing across the retry budget.
     RetryExhausted,
 }
@@ -448,8 +442,7 @@ impl AdmissionFailure {
     /// [`crate::context::Context::admit_transaction`].
     pub(crate) fn into_string(self) -> String {
         match self {
-            Self::Policy(reason) => reason.to_string(),
-            Self::Consensus => "consensus-verification-failed".to_owned(),
+            Self::Rejected(reason) => reason.to_string(),
             Self::RetryExhausted => Self::RETRY_EXHAUSTED.to_owned(),
         }
     }
@@ -460,10 +453,12 @@ impl AdmissionFailure {
 /// This is the shared typed admission operation: `sendrawtransaction` and
 /// the embedded `Node::broadcast` both run it. Each attempt reads a fresh
 /// stable generation, captures the exact mempool sequence under a read
-/// guard, resolves UTXO data without the guard, then calls
-/// [`MempoolGateway::admit_transaction`] with both tokens. A chain change
-/// or mempool mutation between capture and commit returns a transient
-/// error and the loop retries with fresh facts.
+/// guard, resolves confirmed prevouts without the guard, then calls
+/// [`MempoolGateway::admit_transaction`] with both tokens. The gateway
+/// layers the pool over those prevouts under its write lock and runs the
+/// one acceptance verdict `testmempoolaccept` previews. A chain change or
+/// mempool mutation between capture and commit returns a transient error
+/// and the loop retries with fresh facts.
 ///
 /// Membership follows `POL-01` Duplicate submission in
 /// `docs/policies/mempool-policy.md`. The RPC lookup cache is not membership.
@@ -495,34 +490,26 @@ pub(crate) fn admit_transaction(
             continue; // chain change active or failed — retry
         };
 
-        // Under one gateway read guard: already-in-pool lookup, capture exact
-        // sequence, snapshot policy, resolve mempool-dependent context.
-        let (sequence, _policy, mempool_prevouts) = {
+        // Under one gateway read guard: already-in-pool lookup and the exact
+        // sequence the write-lock check revalidates.
+        let sequence = {
             let pool = ctx.mempool.read();
             if pool.contains_txid(&txid) {
                 return Ok(MutationResult::empty());
             }
-            let sequence = pool.sequence_number();
-            let policy = pool.policy_snapshot();
-            let mempool_prevouts = resolve_mempool_prevouts(&pool, tx);
-            (sequence, policy, mempool_prevouts)
+            pool.sequence_number()
         };
 
-        // Without a pool guard: resolve UTXO data and combine with the
-        // mempool-dependent prevouts captured above.
-        let (context, prevouts) = resolve_full_context(ctx, tx, &mempool_prevouts);
-        let locktime_cutoff = ctx
-            .median_time_past_for_hash(ctx.applied_hash())
-            .unwrap_or(0);
+        // Without a pool guard: the confirmed prevouts. Inputs the UTXO set
+        // does not hold may be unconfirmed parents; the gateway resolves
+        // those against the pool under the write lock.
+        let prevouts = confirmed_prevouts(ctx, tx);
 
         let request = AdmissionRequest {
             tx: Arc::new(tx.clone()),
-            context,
             prevouts,
-            locktime_cutoff,
-            max_feerate_sat_per_kvb,
+            context: acceptance_context(ctx, max_feerate_sat_per_kvb),
             time: unix_time_secs(),
-            height: ctx.applied_height(),
             origin: AdmissionOrigin::Rpc,
             expected_generation: generation,
             expected_sequence: sequence,
@@ -539,10 +526,7 @@ pub(crate) fn admit_transaction(
             }
             Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => continue,
             Err(AdmitError::Policy(reason)) => {
-                return Err(AdmissionFailure::Policy(reason));
-            }
-            Err(AdmitError::Consensus) => {
-                return Err(AdmissionFailure::Consensus);
+                return Err(AdmissionFailure::Rejected(reason));
             }
         }
     }
@@ -565,10 +549,7 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
 
     match admit_transaction(ctx, &tx, max_feerate) {
         Ok(_) => typed_to_sonic(&v31::SendRawTransaction(txid.to_string())),
-        Err(AdmissionFailure::Policy(reason)) => Err(reject_reason_to_rpc_error(reason)),
-        Err(AdmissionFailure::Consensus) => Err(RpcError::TxRejected(
-            "consensus-verification-failed".to_owned(),
-        )),
+        Err(AdmissionFailure::Rejected(reason)) => Err(reject_reason_to_rpc_error(&reason)),
         Err(AdmissionFailure::RetryExhausted) => Err(RpcError::Internal(
             AdmissionFailure::RETRY_EXHAUSTED.to_owned(),
         )),
@@ -591,16 +572,15 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
         txs.push(decode_tx(raw)?);
     }
 
+    // The same verdict `sendrawtransaction` commits, previewed against the
+    // live pool under a read guard: the pool layers its unconfirmed outputs
+    // over the confirmed UTXO set itself.
     let pool = ctx.mempool.read();
-    let policy = pool.policy_snapshot();
-    let contexts = package_contexts(ctx, &pool, &txs);
     let facts = evaluate_package_acceptance_all(
         &pool,
-        &policy.standardness,
+        &ConfirmedUtxos(&ctx.utxo),
+        acceptance_context(ctx, max_feerate),
         &txs,
-        &contexts,
-        max_feerate,
-        policy.incremental_relay_fee_sat_per_kvb,
     );
 
     let mut rows = Vec::with_capacity(facts.results.len());
@@ -616,7 +596,10 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
             allowed: fact.allowed.unwrap_or(false),
             vsize: fact.allowed.unwrap_or(false).then(|| i64::from(fact.vsize)),
             fees,
-            reject_reason: fact.reject_reason.map(reject_reason_to_frozen_string),
+            reject_reason: fact
+                .reject_reason
+                .as_ref()
+                .map(reject_reason_to_frozen_string),
             reject_details: None,
         });
     }
@@ -818,7 +801,7 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
 }
 
 // ---------------------------------------------------------------------------
-// Prevout / context resolution and frozen reason mapping.
+// Acceptance inputs and frozen reason mapping.
 // ---------------------------------------------------------------------------
 
 /// Maps an [`AcceptanceRejectReason`] to the Core-compatible RPC error.
@@ -828,7 +811,7 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
 /// `RPC_VERIFY_REJECTED` code. The string for `MinRelayFeeNotMet` uses
 /// the frozen hyphenated form `min-relay-fee-not-met`, not the mempool's
 /// Display.
-fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
+fn reject_reason_to_rpc_error(reason: &AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
         other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
@@ -838,223 +821,49 @@ fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
 /// Maps an [`AcceptanceRejectReason`] to the frozen RPC reject-reason string.
 /// Every variant matches the mempool's `Display` except `MinRelayFeeNotMet`,
 /// which uses the frozen hyphenated form.
-fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
+fn reject_reason_to_frozen_string(reason: &AcceptanceRejectReason) -> String {
     match reason {
         AcceptanceRejectReason::MinRelayFeeNotMet => "min-relay-fee-not-met".to_owned(),
         other => other.to_string(),
     }
 }
 
-/// Resolves mempool-dependent prevouts for a single tx under a read guard.
-/// Returns `(txid, vout, value, script_pubkey)` tuples for inputs whose
-/// prevout is a mempool parent transaction.
-fn resolve_mempool_prevouts(
-    pool: &bitcoin_rs_mempool::Mempool,
-    tx: &Tx,
-) -> HashMap<OutPoint, TxOut> {
-    let mut prevouts = HashMap::new();
-    for input in &tx.inputs {
-        if input.previous_output == OutPoint::default() {
-            continue;
-        }
-        if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-            && let Ok(vout) = usize::try_from(input.previous_output.vout)
-            && let Some(output) = parent.outputs.get(vout)
-        {
-            prevouts.insert(input.previous_output, output.clone());
-        }
+/// The chain position and submitter ceiling the acceptance verdict reads:
+/// the applied tip (the block a mempool candidate follows) and its median
+/// time past for BIP113 finality.
+fn acceptance_context(ctx: &Context, max_feerate_sat_per_kvb: Option<u64>) -> AcceptanceContext {
+    AcceptanceContext {
+        height: ctx.applied_height(),
+        locktime_cutoff: ctx
+            .median_time_past_for_hash(ctx.applied_hash())
+            .unwrap_or(0),
+        max_feerate_sat_per_kvb,
     }
-    prevouts
 }
 
-/// Combines mempool-dependent prevouts (captured under a read guard) with
-/// UTXO-set prevouts (resolved without a pool guard) to build the full
-/// per-transaction context. Inputs found in neither source are marked
-/// missing.
-fn resolve_full_context(
-    ctx: &Context,
-    tx: &Tx,
-    mempool_prevouts: &HashMap<OutPoint, TxOut>,
-) -> (MempoolPackageTxContext, Vec<(OutPoint, TxOut)>) {
-    let mut missing_inputs = false;
-    let mut input_value = 0_u64;
-    let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
+/// The confirmed UTXO set as the acceptance verdict's chain layer.
+struct ConfirmedUtxos<'a>(&'a bitcoin_rs_utxo::UtxoSet);
 
-    for input in &tx.inputs {
-        if input.previous_output == OutPoint::default() {
-            missing_inputs = true;
-            continue;
-        }
-        if let Some(output) = mempool_prevouts.get(&input.previous_output) {
-            input_value = input_value.saturating_add(output.value);
-            prevouts.push((input.previous_output, output.clone()));
-            continue;
-        }
-        if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-            input_value = input_value.saturating_add(live.txout.value);
-            prevouts.push((input.previous_output, live.txout.clone()));
-            continue;
-        }
-        missing_inputs = true;
+impl UtxoView for ConfirmedUtxos<'_> {
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        self.0.get(outpoint)
     }
+}
 
-    let output_value = tx
-        .outputs
+/// Resolves the inputs of `tx` the confirmed UTXO set holds, for an
+/// admission request built without a pool guard. Inputs found nowhere here
+/// are either unconfirmed parents the gateway resolves against the pool or
+/// missing, and the verdict decides which.
+fn confirmed_prevouts(ctx: &Context, tx: &Tx) -> Vec<(OutPoint, TxOut)> {
+    let chain = ConfirmedUtxos(&ctx.utxo);
+    tx.inputs
         .iter()
-        .fold(0_u64, |sum, output| sum.saturating_add(output.value));
-    let fee = input_value.saturating_sub(output_value);
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
-
-    (
-        MempoolPackageTxContext {
-            fee,
-            vsize,
-            sigop_cost,
-            missing_inputs,
-        },
-        prevouts,
-    )
-}
-
-fn package_contexts(
-    ctx: &Context,
-    pool: &bitcoin_rs_mempool::Mempool,
-    txs: &[Tx],
-) -> Vec<MempoolPackageTxContext> {
-    let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
-    let mut contexts = Vec::with_capacity(txs.len());
-
-    for tx in txs {
-        let mut missing_inputs = false;
-        let mut input_value = 0_u64;
-        let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
-
-        for input in &tx.inputs {
-            if input.previous_output == OutPoint::default() {
-                missing_inputs = true;
-                continue;
-            }
-            let key = (input.previous_output.txid, input.previous_output.vout);
-            if let Some(value) = package_outputs.get(&key) {
-                input_value = input_value.saturating_add(*value);
-                prevouts.push((
-                    input.previous_output,
-                    TxOut {
-                        value: *value,
-                        script_pubkey: Vec::new(),
-                    },
-                ));
-                continue;
-            }
-            if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-                && let Ok(vout) = usize::try_from(input.previous_output.vout)
-                && let Some(output) = parent.outputs.get(vout)
-            {
-                input_value = input_value.saturating_add(output.value);
-                prevouts.push((input.previous_output, output.clone()));
-                continue;
-            }
-            if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-                input_value = input_value.saturating_add(live.txout.value);
-                prevouts.push((input.previous_output, live.txout.clone()));
-                continue;
-            }
-            missing_inputs = true;
-        }
-
-        let output_value = tx
-            .outputs
-            .iter()
-            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
-        let fee = input_value.saturating_sub(output_value);
-        let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-        let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
-
-        contexts.push(MempoolPackageTxContext {
-            fee,
-            vsize,
-            sigop_cost,
-            missing_inputs,
-        });
-
-        let txid = tx.txid();
-        for (vout, output) in tx.outputs.iter().enumerate() {
-            let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert((txid, vout), output.value);
-        }
-    }
-
-    contexts
-}
-
-/// Computes the total sigop cost for a transaction given resolved prevouts.
-///
-/// Mirrors the consensus `total_sigop_cost` using public script-crate counters:
-/// legacy sigops × 4, plus P2SH redeem-script accurate sigops × 4, plus
-/// segwit witness-program sigops.
-fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u64 {
-    let mut cost = u64::from(count_tx_legacy(tx)).saturating_mul(4);
-    for input in &tx.inputs {
-        let prevout = prevouts
-            .iter()
-            .find(|(op, _)| *op == input.previous_output)
-            .map(|(_, txout)| txout);
-        let Some(prevout) = prevout else {
-            continue;
-        };
-        let redeem_script = last_push(&input.script_sig);
-        if is_p2sh(&prevout.script_pubkey) {
-            if let Some(redeem) = redeem_script {
-                cost = cost.saturating_add(u64::from(count_accurate(redeem)).saturating_mul(4));
-            }
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem_script.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(u64::from(count_segwit(program, &input.witness)));
-        }
-    }
-    cost
-}
-
-/// Returns the last data push from a script, or `None`.
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
-}
-
-/// Counts sigops accurately (multisig uses the preceding pushnum value).
-fn count_accurate(script: &[u8]) -> u32 {
-    let mut count = 0_u32;
-    let mut pushed_number = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(op)) => match op {
-                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
-                    count = count.saturating_add(1);
-                    pushed_number = None;
-                }
-                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
-                    count = count.saturating_add(u32::from(pushed_number.unwrap_or(20)));
-                    pushed_number = None;
-                }
-                other => pushed_number = opcode::decode_pushnum(other),
-            },
-            Ok(Instruction::PushBytes(_)) => pushed_number = None,
-            Err(_) => break,
-        }
-    }
-    count
+        .filter_map(|input| {
+            chain
+                .lookup(&input.previous_output)
+                .map(|prevout| (input.previous_output, prevout))
+        })
+        .collect()
 }
 
 pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -2791,9 +2600,8 @@ mod acceptance_tests {
     /// Standardness is relay policy, enforced on mainnet.
     ///
     /// The mempool crate tests the gate itself; this covers the wiring that
-    /// passes the policy through. Network-based relaxation (regtest) is not
-    /// wired in the admission path yet — see the `require_standard` field
-    /// gap in `PackageTxContext` / `evaluate_one`.
+    /// passes the policy through. Network-based relaxation (regtest,
+    /// Core's `-acceptnonstdtxn`) is not wired in the acceptance verdict yet.
     #[test]
     fn standardness_is_enforced_on_mainnet() {
         let mainnet = Arc::new(Context::new());

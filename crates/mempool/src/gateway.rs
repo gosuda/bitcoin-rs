@@ -18,17 +18,15 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{UtxoView, verify_transaction};
+use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
-use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Adapter that lets the consensus verifier look up prevouts from a
-/// resolved `(OutPoint, TxOut)` slice, layered under the mempool by
-/// `MempoolUtxoView`.
+/// The confirmed outputs a caller resolved without holding the pool guard,
+/// presented to the acceptance verdict as the chain layer under the mempool.
 struct PrevoutMap<'a>(&'a [(OutPoint, TxOut)]);
 
 impl UtxoView for PrevoutMap<'_> {
@@ -74,28 +72,16 @@ pub enum ChainChangeError {
 pub struct AdmissionRequest {
     /// The transaction to admit.
     pub tx: Arc<Tx>,
-    /// Resolved per-transaction context (fee, vsize, sigop cost, missing
-    /// inputs) from the mempool and UTXO set.
-    pub context: crate::standardness::PackageTxContext,
-    /// Resolved prevouts for consensus verification. Empty when the caller
-    /// has not resolved them (e.g., missing inputs); the admission path
-    /// rejects the transaction outright rather than admitting it unverified.
-    pub prevouts: Vec<(
-        bitcoin_rs_primitives::OutPoint,
-        bitcoin_rs_primitives::TxOut,
-    )>,
-    /// Median-time-past of the applied chain tip for BIP113 finality checks.
-    /// Zero disables the locktime cutoff (pre-genesis).
-    pub locktime_cutoff: u32,
-    /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
-    pub max_feerate_sat_per_kvb: Option<u64>,
+    /// Confirmed outputs the caller resolved from the UTXO set without a pool
+    /// guard. Inputs absent here are looked up in the pool under the write
+    /// lock; inputs found nowhere reject as missing.
+    pub prevouts: Vec<(OutPoint, TxOut)>,
+    /// Chain position and submitter's fee ceiling the verdict is evaluated
+    /// under. `context.height` is also the applied tip height the stored
+    /// entry keeps.
+    pub context: crate::accept::AcceptanceContext,
     /// Wall-clock seconds for the mempool entry timestamp.
     pub time: u64,
-    /// Current applied block height for the mempool entry. Finality is
-    /// evaluated at the next block height (`height + 1`), matching Core's
-    /// `CheckFinalTxAtTip`, while the stored entry keeps this applied tip
-    /// height.
-    pub height: u32,
     /// How the transaction entered the node.
     pub origin: AdmissionOrigin,
     /// Exact even chain generation the caller captured before admission.
@@ -116,7 +102,7 @@ pub enum AdmitOutcome {
 }
 
 /// Why an admission attempt did not commit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AdmitError {
     /// The chain generation changed between capture and the write-lock
     /// check. The caller must retry with a fresh stable generation.
@@ -126,15 +112,10 @@ pub enum AdmitError {
     /// check. The caller must retry with fresh facts.
     #[error("mempool sequence changed before admission")]
     MempoolChanged,
-    /// The transaction was rejected by policy. The reason is mempool-owned.
+    /// The acceptance verdict refused the transaction: policy, consensus, or
+    /// input scripts under Core's policy flags. The reason is mempool-owned.
     #[error(transparent)]
-    Policy(#[from] crate::standardness::AcceptanceRejectReason),
-    /// The transaction failed consensus verification (finality, duplicate
-    /// inputs, overspend, sigop limits) or failed its input scripts under
-    /// Core's policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp
-    /// `PolicyScriptChecks`).
-    #[error("consensus verification failed")]
-    Consensus,
+    Policy(#[from] crate::accept::AcceptanceRejectReason),
 }
 
 /// Interns one [`MempoolGateway`] per pool `Arc` identity.
@@ -583,11 +564,13 @@ impl MempoolGateway {
     ///
     /// The exact duplicate returns [`AdmitOutcome::AlreadyKnown`] successfully
     /// and creates no envelope, sequence, or publication. For a new
-    /// transaction, policy is evaluated under the same write guard and the
-    /// established `replace_transaction` path performs the mutation —
-    /// preserving under-lock BIP125 and package-limit revalidation. On
-    /// success, one `MutationResult` whose ordered removals precede exactly
-    /// one accepted change is published via the existing commit/publish seam.
+    /// transaction, the acceptance verdict ([`crate::accept`]) is evaluated
+    /// under the same write guard — the same verdict `testmempoolaccept`
+    /// previews — and the established `replace_transaction` path performs
+    /// the mutation, preserving under-lock BIP125 and package-limit
+    /// revalidation. On success, one `MutationResult` whose ordered removals
+    /// precede exactly one accepted change is published via the existing
+    /// commit/publish seam.
     /// A replacement the post-insert trim shed after commit publishes its
     /// committed removals and then rejects with the same
     /// [`AdmitError::Policy`] the pre-commit refusal produced.
@@ -622,65 +605,22 @@ impl MempoolGateway {
         if pool.contains_txid(&txid) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
-        // 4. Policy evaluation under the same write guard. `evaluate_one`
-        //    checks standardness, missing inputs, coinbase, min-relay,
-        //    max-fee, and replacement — but NOT package limits (those are
-        //    enforced by `replace_transaction` below).
-        let policy = pool.policy_snapshot();
-        let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
-            &pool,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
-        let fact = crate::standardness::evaluate_one(
-            &pool,
-            &policy.standardness,
-            &request.tx,
-            request.context,
-            request.max_feerate_sat_per_kvb,
-            mempool_min_fee,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
+        // 4. The acceptance verdict under the same write guard: standardness,
+        //    prevout resolution against the caller's confirmed outputs with
+        //    the pool layered over them, consensus rules, fee floors, sigop
+        //    limit, BIP125 replacement, package limits, and input scripts
+        //    under Core's policy flags. Its derived fee, vsize, and sigop
+        //    cost are what the entry stores.
+        let chain_view = PrevoutMap(&request.prevouts);
+        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
+        let fact = crate::accept::evaluate_one(&pool, &view, request.context, &request.tx);
         if let Some(reason) = fact.reject_reason {
             return Err(AdmitError::Policy(reason));
         }
 
-        // 4b. Consensus verification (finality, duplicate inputs, overspend,
-        //     sigop limits) plus Core's policy script checks over the
-        //     resolved prevouts layered with the mempool. A non-coinbase
-        //     transaction with no resolved prevouts must be rejected
-        //     outright — policy may not have caught it if the caller set
-        //     missing_inputs=false. Scripts run here under
-        //     `VerifyFlags::STANDARD`, matching Core's `PolicyScriptChecks`
-        //     (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp): an
-        //     unrelayable transaction must not occupy pool capacity until
-        //     block connection evicts it.
-        if request.prevouts.is_empty() {
-            // Coinbase transactions are never admitted via the gateway.
-            // Empty prevouts on a non-coinbase tx means the caller did not
-            // resolve inputs — reject rather than admit unverified.
-            return Err(AdmitError::Consensus);
-        }
-        let chain_view = PrevoutMap(&request.prevouts);
-        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
-        // Finality is evaluated at the height of the next block the
-        // transaction could be mined in (`height + 1`), exactly Core's
-        // `CheckFinalTxAtTip`.
-        // A u32 overflow on the next block height is not a valid chain
-        // state, but failing closed here matches the conservative choice:
-        // nothing is admitted when the finality question is unanswerable.
-        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
-        if let Err(_err) = verify_transaction(
-            &request.tx,
-            &view,
-            finality_height,
-            request.locktime_cutoff,
-            VerifyFlags::STANDARD,
-        ) {
-            return Err(AdmitError::Consensus);
-        }
-
         // 5. Mutate under the same write guard via `replace_transaction`,
         //    which handles BIP125 replacement, package limits, and insert.
+        let policy = pool.policy_snapshot();
         let candidate = ReplacementCandidate::new(
             Arc::clone(&request.tx),
             fact.vsize,
@@ -688,20 +628,24 @@ impl MempoolGateway {
             policy.incremental_relay_fee_sat_per_kvb,
         );
         let outcome = pool
-            .replace_transaction(candidate, request.time, request.height, fact.sigop_cost)
+            .replace_transaction(
+                candidate,
+                request.time,
+                request.context.height,
+                fact.sigop_cost,
+            )
             .map_err(|rbf| {
-                // Map RbfError to the correct AcceptanceRejectReason variant.
                 // `replace_transaction` re-checks replacement and package
                 // limits; its errors must map to the same reason class the
-                // preview would have reported.
+                // verdict would have reported.
                 match rbf {
                     RbfError::Mempool(crate::pool::MempoolError::Policy(policy_err)) => {
-                        AdmitError::Policy(
-                            crate::standardness::AcceptanceRejectReason::PackageLimit(policy_err),
-                        )
+                        AdmitError::Policy(crate::accept::AcceptanceRejectReason::PackageLimit(
+                            policy_err,
+                        ))
                     }
                     other => AdmitError::Policy(
-                        crate::standardness::AcceptanceRejectReason::Replacement(other),
+                        crate::accept::AcceptanceRejectReason::Replacement(other),
                     ),
                 }
             })?;
@@ -730,7 +674,7 @@ impl MempoolGateway {
             // size-limit trim; report the same failure the pre-commit
             // refusal produced, after the removals above were published.
             return Err(AdmitError::Policy(
-                crate::standardness::AcceptanceRejectReason::Replacement(RbfError::Mempool(
+                crate::accept::AcceptanceRejectReason::Replacement(RbfError::Mempool(
                     crate::pool::MempoolError::Full,
                 )),
             ));
@@ -991,13 +935,14 @@ mod tests {
         AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, CompositeObserver,
         MempoolGateway, MempoolObserver,
     };
+    use crate::accept::{AcceptanceContext, AcceptanceRejectReason};
     use crate::mutation::{
         AdmissionOrigin, InsertionOutcome, MutationEnvelope, MutationOutcome, RemovalReason,
     };
-    use crate::standardness::PackageTxContext;
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
+    use bitcoin_rs_consensus::ConsensusError;
     use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
     use core::sync::atomic::Ordering;
     use parking_lot::{Mutex, RwLock};
@@ -1123,12 +1068,6 @@ mod tests {
         let sequence = gateway.read().sequence_number();
         AdmissionRequest {
             tx: Arc::new(tx.clone()),
-            context: PackageTxContext {
-                fee: 1_000,
-                vsize: 100,
-                sigop_cost: 0,
-                missing_inputs: false,
-            },
             prevouts: vec![(
                 tx.inputs[0].previous_output,
                 TxOut {
@@ -1138,10 +1077,12 @@ mod tests {
                     script_pubkey: vec![0x51],
                 },
             )],
-            locktime_cutoff: 0,
-            max_feerate_sat_per_kvb: None,
+            context: AcceptanceContext {
+                height: 1,
+                locktime_cutoff: 0,
+                max_feerate_sat_per_kvb: None,
+            },
             time: 1,
-            height: 1,
             origin,
             expected_generation: generation,
             expected_sequence: sequence,
@@ -2155,7 +2096,7 @@ mod tests {
         tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
 
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
-        request.height = 100;
+        request.context.height = 100;
 
         let result = gateway.admit_transaction(request);
         assert!(
@@ -2174,11 +2115,16 @@ mod tests {
         tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
 
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
-        request.height = 100;
+        request.context.height = 100;
 
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Bip { .. }
+                )))
+            ),
             "lock_time == tip_height + 1 must still be non-final: {result:?}"
         );
     }
@@ -2198,11 +2144,16 @@ mod tests {
         // The applied-tip MTP is lower than the header-tip MTP; a tx with
         // lock_time between them is rejected when the cutoff comes from the
         // applied tip and would be admitted when it comes from the header tip.
-        request.locktime_cutoff = 1_700_000_000;
+        request.context.locktime_cutoff = 1_700_000_000;
 
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Bip { .. }
+                )))
+            ),
             "lock_time above applied-tip MTP must be non-final: {result:?}"
         );
     }
@@ -2225,7 +2176,12 @@ mod tests {
 
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Script { .. }
+                )))
+            ),
             "a script-invalid spend must fail verification: {result:?}"
         );
         assert!(gateway.read().is_empty());
@@ -2377,18 +2333,12 @@ mod tests {
             .expect("original admitted");
         observer.seen.lock().clear();
 
-        // Build a request for the replacement. The context has
-        // missing_inputs: false because the parent is in the pool.
+        // Build a request for the replacement: the confirmed prevout it and
+        // the original both spend, so the verdict derives fee 5 000.
         let generation = gateway.stable_generation().expect("generation is even");
         let sequence = gateway.read().sequence_number();
         let request = AdmissionRequest {
             tx: Arc::new(replacement.clone()),
-            context: PackageTxContext {
-                fee: 5_000, // 10 000 - 5 000
-                vsize: 100,
-                sigop_cost: 0,
-                missing_inputs: false,
-            },
             prevouts: vec![(
                 replacement.inputs[0].previous_output,
                 TxOut {
@@ -2398,10 +2348,12 @@ mod tests {
                     script_pubkey: vec![0x51],
                 },
             )],
-            locktime_cutoff: 0,
-            max_feerate_sat_per_kvb: None,
+            context: AcceptanceContext {
+                height: 1,
+                locktime_cutoff: 0,
+                max_feerate_sat_per_kvb: None,
+            },
             time: 1,
-            height: 1,
             origin: AdmissionOrigin::Rpc,
             expected_generation: generation,
             expected_sequence: sequence,
@@ -2741,8 +2693,9 @@ mod tests {
         );
     }
 
-    /// A non-coinbase transaction with no resolved prevouts must be rejected
-    /// by consensus verification, not admitted to the mempool.
+    /// A transaction whose inputs the caller could not resolve and that the
+    /// pool does not hold either is missing its inputs: the verdict derives
+    /// that from the prevouts, so no caller-supplied flag can say otherwise.
     #[test]
     fn admit_transaction_rejects_a_transaction_with_no_prevouts() {
         let gateway = MempoolGateway::new(
@@ -2752,43 +2705,34 @@ mod tests {
             }))),
             None,
         );
-        // A standard transaction with one input, but the caller passes empty
-        // prevouts — simulating a caller that did not resolve inputs. Policy
-        // passes (missing_inputs=false, standard output, fee>0), but the
-        // consensus gate rejects because prevouts are empty.
         let tx = standard_tx(0x44);
         let generation = gateway.stable_generation().expect("generation is even");
         let sequence = gateway.read().sequence_number();
         let request = AdmissionRequest {
             tx: Arc::new(tx),
-            context: PackageTxContext {
-                fee: 1_000,
-                vsize: 100,
-                sigop_cost: 0,
-                missing_inputs: false,
-            },
             prevouts: Vec::new(),
-            locktime_cutoff: 0,
-            max_feerate_sat_per_kvb: None,
+            context: AcceptanceContext {
+                height: 1,
+                locktime_cutoff: 0,
+                max_feerate_sat_per_kvb: None,
+            },
             time: 1,
-            height: 1,
             origin: AdmissionOrigin::Rpc,
             expected_generation: generation,
             expected_sequence: sequence,
         };
         let result = gateway.admit_transaction(request);
-        assert!(
-            matches!(result, Err(AdmitError::Consensus)),
-            "a non-coinbase tx with no prevouts must be rejected: {result:?}"
+        assert_eq!(
+            result,
+            Err(AdmitError::Policy(AcceptanceRejectReason::MissingInputs)),
+            "a non-coinbase tx with no resolvable prevouts must be rejected"
         );
         assert!(gateway.read().is_empty());
     }
-    /// A transaction spending the same prevout twice must be rejected by
-    /// consensus verification. Policy does not check for duplicate inputs
-    /// and pool insertion admits the double claim, so only the step-4b
-    /// `verify_transaction` call can produce this rejection: any
-    /// other outcome fails this assertion. Observed red with the guard
-    /// neutered (the double-spend committed as `Accepted`).
+
+    /// A transaction spending the same prevout twice must be rejected by the
+    /// consensus rules inside the verdict. Pool insertion would admit the
+    /// double claim, so only that check can produce this rejection.
     #[test]
     fn admit_transaction_rejects_duplicate_inputs_as_consensus() {
         let gateway = MempoolGateway::new(
@@ -2804,30 +2748,31 @@ mod tests {
         let sequence = gateway.read().sequence_number();
         let request = AdmissionRequest {
             tx: Arc::new(tx.clone()),
-            context: PackageTxContext {
-                fee: 1_000,
-                vsize: 100,
-                sigop_cost: 0,
-                missing_inputs: false,
-            },
             prevouts: vec![(
                 tx.inputs[0].previous_output,
                 TxOut {
                     value: 11_000,
-                    script_pubkey: Vec::new(),
+                    script_pubkey: vec![0x51],
                 },
             )],
-            locktime_cutoff: 0,
-            max_feerate_sat_per_kvb: None,
+            context: AcceptanceContext {
+                height: 1,
+                locktime_cutoff: 0,
+                max_feerate_sat_per_kvb: None,
+            },
             time: 1,
-            height: 1,
             origin: AdmissionOrigin::Rpc,
             expected_generation: generation,
             expected_sequence: sequence,
         };
         let result = gateway.admit_transaction(request);
         assert!(
-            matches!(result, Err(AdmitError::Consensus)),
+            matches!(
+                result,
+                Err(AdmitError::Policy(AcceptanceRejectReason::Consensus(
+                    ConsensusError::DuplicateInput { .. }
+                )))
+            ),
             "duplicate inputs must fail consensus verification: {result:?}"
         );
         assert!(gateway.read().is_empty());

@@ -1,36 +1,46 @@
-//! Mempool acceptance, the gate Bitcoin Core calls `AcceptToMemoryPool`.
+//! Mempool acceptance, the verdict Bitcoin Core calls `AcceptToMemoryPool`.
 //!
-//! Every policy piece this needs already existed in this crate — standardness,
-//! BIP125 replacement, ancestor and descendant limits, size eviction — and
-//! nothing called any of it: no production path inserted into the mempool at
-//! all. This module is the ignition, not a new engine.
+//! One function decides whether a transaction may enter the pool:
+//! [`evaluate_package_acceptance`] (and its report-every-row twin
+//! [`evaluate_package_acceptance_all`]). `sendrawtransaction`,
+//! `testmempoolaccept`, and peer ingress all read the same verdict, so the
+//! two RPC outlets cannot disagree and no ingress path can skip a rule the
+//! others enforce. The verdict is computed against the live pool without
+//! mutating it; the gateway commits it under its write lock.
 //!
-//! The order below follows Core's `MemPoolAccept::PreChecks`: cheap
-//! non-contextual rejections first, then standardness, then prevout
-//! resolution, then full consensus verification, and only then the policy
-//! checks that need to see the rest of the pool.
+//! The order follows Core's `MemPoolAccept::PreChecks` and
+//! `PolicyScriptChecks`: cheap non-contextual rejections first, then
+//! standardness, then prevout resolution, then the non-script consensus
+//! rules, then the policy checks that need to see the rest of the pool, and
+//! script verification last so a transaction every cheaper rule refuses never
+//! pays for signature checks.
 //!
-//! One thing is computed here rather than anywhere else: **sigop cost**. P2SH
-//! sigops cannot be counted from a transaction alone — the spent
-//! `scriptPubKey` says how many there are — so the only place that can count
-//! them without a second UTXO pass is the place that has already resolved the
-//! prevouts. Core stores `sigOpCost` on the entry at acceptance for exactly
-//! this reason, and `MempoolEntry::sigop_cost` is the same decision.
+//! Everything the verdict needs about the spent outputs it derives here from
+//! the resolved prevouts — fee, sigop cost, missing inputs — rather than
+//! trusting a caller's arithmetic. P2SH and witness sigops are attributed
+//! through the spent `scriptPubKey` and are invisible to anyone holding only
+//! the transaction, so the place that resolved the prevouts is the only place
+//! that can count them. Core stores `sigOpCost` on the entry at acceptance
+//! for the same reason, and `MempoolEntry::sigop_cost` is the same decision.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bitcoin_rs_consensus::rust_path::UtxoView;
-use bitcoin_rs_consensus::{ConsensusError, verify_transaction};
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_consensus::{ConsensusError, verify_transaction, verify_transaction_non_script};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{Instruction, instructions, is_p2sh, is_witness_program, opcode};
 use bitcoin_rs_script::sigops::{count_segwit, count_tx_legacy};
+use hashbrown::{HashMap, HashSet};
 use thiserror::Error;
 
-use crate::rbf::{RbfError, ReplacementCandidate};
-use crate::standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
-use crate::{EntryId, Mempool, MempoolError};
+use crate::rbf::ReplacementCandidate;
+use crate::standardness::{StandardnessError, is_standard_tx};
+use crate::{EntryId, Mempool, PolicyError, RbfError};
+
+/// Bitcoin Core `MAX_PACKAGE_COUNT` for package acceptance / `testmempoolaccept`.
+pub const MAX_PACKAGE_COUNT: usize = 25;
 
 /// Relay limit on one transaction's sigop cost.
 ///
@@ -39,127 +49,103 @@ use crate::{EntryId, Mempool, MempoolError};
 /// sigop budget.
 pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
 
-/// Chain and policy state for one acceptance attempt.
-#[derive(Clone, Copy, Debug)]
-pub struct AcceptContext {
-    /// Height the transaction is evaluated at.
-    ///
-    /// This is the height of the **next** block, not the tip: Core evaluates
-    /// finality against `tip->nHeight + 1`, because a transaction entering the
-    /// mempool is a candidate for the block being built, not for one already
-    /// mined.
-    pub height: u32,
-    /// Timestamp `nLockTime` is compared against.
-    ///
-    /// The tip's median time past after BIP113, which is what makes a
-    /// timelocked transaction enter the mempool at the same moment it would
-    /// become valid in a block.
-    pub locktime_cutoff: u32,
-    /// Acceptance time recorded on the entry, in seconds.
-    pub time: u64,
-    /// Relay standardness policy.
-    pub standardness: StandardnessPolicy,
-    /// Whether to enforce standardness.
-    ///
-    /// Core's `-acceptnonstdtxn`, which defaults to off (that is, standardness
-    /// enforced) everywhere except regtest.
-    pub require_standard: bool,
-    /// Absolute fee ceiling for this submission, in satoshis.
-    ///
-    /// `None` means no ceiling. Bitcoin Core derives one from
-    /// `sendrawtransaction`'s `maxfeerate` and the transaction's vsize, checks
-    /// it against the fee a test-accept computed, and only then submits. The
-    /// ceiling lives here so that check happens inside the same operation that
-    /// admits the transaction: computing the fee, comparing it, and mutating
-    /// the pool must not be three separately-locked steps.
-    pub max_fee: Option<u64>,
-}
-
-/// Reason a transaction was not accepted.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum AcceptError {
-    /// The transaction is already in the mempool.
-    #[error("transaction already in mempool")]
-    AlreadyInPool,
-    /// A coinbase transaction can only arrive inside a block.
-    #[error("coinbase transaction is not accepted to the mempool")]
-    Coinbase,
-    /// The transaction is valid but not relayed under standardness policy.
-    #[error("non-standard transaction: {0}")]
-    Standardness(#[from] StandardnessError),
-    /// One or more prevouts were resolved by neither the chain nor the mempool.
-    ///
-    /// Core reports `bad-txns-inputs-missingorspent` and cannot distinguish
-    /// "never existed" from "already spent" either. The outpoints are returned
-    /// so the caller can decide whether this is an orphan worth holding.
-    #[error("missing or spent inputs")]
-    MissingInputs(Vec<OutPoint>),
-    /// The transaction failed consensus verification.
-    #[error("consensus check failed: {0}")]
-    Consensus(#[from] ConsensusError),
-    /// Input values summed past the satoshi range.
-    #[error("input value overflows satoshi range")]
-    InputValueOverflow,
-    /// Output values summed past the satoshi range.
-    #[error("output value overflows satoshi range")]
-    OutputValueOverflow,
-    /// Virtual size did not fit the entry field width.
-    #[error("transaction vsize does not fit in u32")]
-    VsizeOverflow,
-    /// The fee is above the ceiling the submitter set.
-    ///
-    /// Not a policy rejection: the transaction is acceptable and the caller
-    /// asked not to send it anyway. Bitcoin Core's
-    /// "Fee exceeds maximum configured by user".
-    #[error("fee {fee} exceeds the configured maximum {max_fee}")]
-    FeeExceedsMaximum {
-        /// Fee the transaction pays, in satoshis.
-        fee: u64,
-        /// Ceiling the submitter set, in satoshis.
-        max_fee: u64,
-    },
-    /// Sigop cost exceeds what relay policy allows for a single transaction.
-    #[error("sigop cost {cost} exceeds the standard maximum {max}")]
-    TooManySigops {
-        /// Sigop cost counted against the resolved prevouts.
-        cost: u32,
-        /// Relay policy maximum.
-        max: u32,
-    },
-    /// BIP125 replacement was rejected.
-    #[error("replacement rejected: {0}")]
-    Rbf(#[from] RbfError),
-    /// Insertion failed a mempool policy limit.
-    #[error("mempool rejected the entry: {0}")]
-    Mempool(#[from] MempoolError),
-}
-
-/// Everything acceptance determined, before anything was inserted.
+/// Caller-captured facts for one acceptance evaluation.
 ///
-/// Split out from insertion so `testmempoolaccept` can answer with the real
-/// verdict instead of guessing. Core makes the same split with its
-/// `test_accept` flag.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AcceptChecks {
-    /// Transaction id of the checked transaction.
-    pub txid: Txid,
-    /// Fee in satoshis, derived from the resolved prevouts.
-    pub fee: u64,
-    /// Virtual size in vbytes.
-    pub vsize: u32,
-    /// BIP141 sigop cost against the resolved prevouts.
-    pub sigop_cost: u32,
-    /// Transactions a BIP125 replacement would evict, empty for a plain accept.
-    pub replaced: Vec<Txid>,
+/// The chain position is read once by the caller so every transaction in a
+/// package — and the commit that follows a preview — is judged against the
+/// same tip.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AcceptanceContext {
+    /// Applied tip height. Finality is evaluated at `height + 1`, Core's
+    /// `CheckFinalTxAtTip`: a transaction entering the mempool is a
+    /// candidate for the block being built, not for one already mined.
+    pub height: u32,
+    /// Timestamp `nLockTime` is compared against: the tip's median time past
+    /// after BIP113. Zero disables the cutoff (pre-genesis).
+    pub locktime_cutoff: u32,
+    /// Submitter's fee-rate ceiling in sat/kvB; `None` means no ceiling.
+    ///
+    /// Bitcoin Core derives it from `sendrawtransaction`'s `maxfeerate` and
+    /// checks it only on an admission-valid result, so a transaction every
+    /// other rule refuses quotes that refusal, not the ceiling.
+    pub max_feerate_sat_per_kvb: Option<u64>,
 }
 
-/// What acceptance produced.
+/// Per-transaction acceptance fact for RPC / admission consumers.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AcceptResult {
-    /// Identifier of the inserted entry.
-    pub id: EntryId,
-    /// The checks that admitted it.
-    pub checks: AcceptChecks,
+pub struct TxAcceptanceFact {
+    /// Transaction id.
+    pub txid: Txid,
+    /// Witness transaction id.
+    pub wtxid: Wtxid,
+    /// Whether the transaction was accepted or rejected. `None` means package
+    /// evaluation stopped before this row was validated.
+    pub allowed: Option<bool>,
+    /// Policy virtual size in vbytes.
+    pub vsize: u32,
+    /// Consensus weight.
+    pub weight: u64,
+    /// BIP141 sigop cost against the resolved prevouts; zero until they are.
+    pub sigop_cost: u32,
+    /// Fee derived from the resolved prevouts, once they resolved and the
+    /// inputs cover the outputs.
+    pub base_fee: Option<u64>,
+    /// Rejection reason when `allowed` is false.
+    pub reject_reason: Option<AcceptanceRejectReason>,
+}
+
+/// Package-level acceptance facts: optional package error plus per-tx rows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageAcceptanceFacts {
+    /// Package-wide failure (for example package count bounds).
+    pub package_error: Option<AcceptanceRejectReason>,
+    /// One row per submitted transaction, in input order.
+    pub results: Vec<TxAcceptanceFact>,
+}
+
+/// Why a transaction was not accepted.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum AcceptanceRejectReason {
+    /// Package length is outside `1..=MAX_PACKAGE_COUNT`.
+    #[error("package-too-large")]
+    PackageTooLarge,
+    /// Transaction is already present in the mempool.
+    #[error("txn-already-in-mempool")]
+    AlreadyInMempool,
+    /// One or more inputs were resolved by neither the chain, the mempool,
+    /// nor an earlier package transaction. Core reports
+    /// `bad-txns-inputs-missingorspent` and cannot distinguish "never
+    /// existed" from "already spent" either.
+    #[error("missing-inputs")]
+    MissingInputs,
+    /// Fee rate is below the live min-relay / mempool-min floor.
+    #[error("min relay fee not met")]
+    MinRelayFeeNotMet,
+    /// Fee rate exceeds the caller-supplied maximum.
+    #[error("max-fee-exceeded")]
+    MaxFeeExceeded,
+    /// Transaction fails standardness policy.
+    #[error(transparent)]
+    NonStandard(#[from] StandardnessError),
+    /// Sigop cost exceeds what relay policy allows for a single transaction.
+    #[error("bad-txns-too-many-sigops")]
+    TooManySigops,
+    /// The transaction failed a consensus rule — finality, duplicate inputs,
+    /// value balance — or its input scripts under Core's policy flags
+    /// (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp `PolicyScriptChecks`).
+    /// A transaction rejected here may still be valid in a block someone
+    /// else mines.
+    #[error(transparent)]
+    Consensus(#[from] ConsensusError),
+    /// Conflicting replacement fails BIP125.
+    #[error(transparent)]
+    Replacement(#[from] RbfError),
+    /// Transaction exceeds ancestor or descendant package limits.
+    #[error(transparent)]
+    PackageLimit(#[from] PolicyError),
+    /// Next-block BIP68 relative sequence locks are unmet.
+    #[error("non-BIP68-final")]
+    NonBip68Final,
 }
 
 /// Chain UTXO set with the mempool's unconfirmed outputs layered on top.
@@ -198,175 +184,262 @@ where
     }
 }
 
-/// Runs every acceptance check against `pool` without modifying it.
-///
-/// `chain` supplies confirmed outputs; unconfirmed parents already in `pool`
-/// are layered over it, so a child arriving before its parent confirms is
-/// checked against that parent rather than reported as missing its inputs.
-///
-/// # Errors
-///
-/// Returns [`AcceptError`] describing the first check that rejected the
-/// transaction. [`AcceptError::MissingInputs`] carries the unresolved
-/// outpoints so the caller can route the transaction to an orphan pool.
-pub fn check_acceptance<V>(
-    pool: &Mempool,
-    tx: &Arc<Tx>,
-    chain: &V,
-    ctx: &AcceptContext,
-) -> Result<AcceptChecks, AcceptError>
+/// Outputs of the package transactions evaluated so far, layered over the
+/// mempool view, so a child later in the package resolves its parent.
+struct PackageUtxoView<'a, V> {
+    earlier: HashMap<OutPoint, TxOut>,
+    inner: MempoolUtxoView<'a, V>,
+}
+
+impl<V> PackageUtxoView<'_, V> {
+    fn add_outputs(&mut self, tx: &Tx) {
+        let txid = tx.txid();
+        for (vout, output) in tx.outputs.iter().enumerate() {
+            let Ok(vout) = u32::try_from(vout) else {
+                break;
+            };
+            self.earlier
+                .insert(OutPoint::new(txid, vout), output.clone());
+        }
+    }
+}
+
+impl<V> UtxoView for PackageUtxoView<'_, V>
 where
     V: UtxoView,
 {
-    let txid = tx.txid();
-    if pool.contains_txid(&txid) {
-        return Err(AcceptError::AlreadyInPool);
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        self.earlier
+            .get(outpoint)
+            .cloned()
+            .or_else(|| self.inner.lookup(outpoint))
     }
+}
+
+/// Evaluates a package against the live pool, stopping after the first
+/// rejected row; later rows report `allowed: None`.
+///
+/// `chain` supplies confirmed outputs; the pool's unconfirmed outputs and the
+/// outputs of earlier package transactions are layered over it. Nothing is
+/// inserted.
+#[must_use]
+pub fn evaluate_package_acceptance<V>(
+    pool: &Mempool,
+    chain: &V,
+    context: AcceptanceContext,
+    txs: &[Tx],
+) -> PackageAcceptanceFacts
+where
+    V: UtxoView,
+{
+    evaluate_package(pool, chain, context, txs, true)
+}
+
+/// Evaluates every row of a package independently, without stopping after
+/// a rejection.
+///
+/// This is the `testmempoolaccept` form: it reports every row's acceptance
+/// status, including rows after an earlier rejected row.
+#[must_use]
+pub fn evaluate_package_acceptance_all<V>(
+    pool: &Mempool,
+    chain: &V,
+    context: AcceptanceContext,
+    txs: &[Tx],
+) -> PackageAcceptanceFacts
+where
+    V: UtxoView,
+{
+    evaluate_package(pool, chain, context, txs, false)
+}
+
+fn evaluate_package<V>(
+    pool: &Mempool,
+    chain: &V,
+    context: AcceptanceContext,
+    txs: &[Tx],
+    stop_after_rejection: bool,
+) -> PackageAcceptanceFacts
+where
+    V: UtxoView,
+{
+    if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
+        return PackageAcceptanceFacts {
+            package_error: Some(AcceptanceRejectReason::PackageTooLarge),
+            results: Vec::new(),
+        };
+    }
+
+    let mut view = PackageUtxoView {
+        earlier: HashMap::new(),
+        inner: MempoolUtxoView::new(pool, chain),
+    };
+    let mut results = Vec::with_capacity(txs.len());
+    let mut package_failed = false;
+
+    for tx in txs {
+        if package_failed {
+            let mut fact = unresolved_fact(tx);
+            fact.allowed = None;
+            results.push(fact);
+            continue;
+        }
+        let fact = evaluate_one(pool, &view, context, tx);
+        if stop_after_rejection && fact.allowed == Some(false) {
+            package_failed = true;
+        }
+        view.add_outputs(tx);
+        results.push(fact);
+    }
+
+    PackageAcceptanceFacts {
+        package_error: None,
+        results,
+    }
+}
+
+/// The verdict for one transaction against `pool`, with `view` supplying
+/// every spendable output: chain, unconfirmed pool outputs, and — inside a
+/// package — earlier package transactions.
+///
+/// The gateway runs this under its write lock immediately before committing
+/// the same transaction, so the facts it reports (fee, vsize, sigop cost) are
+/// the facts the entry stores.
+pub(crate) fn evaluate_one<V>(
+    pool: &Mempool,
+    view: &V,
+    context: AcceptanceContext,
+    tx: &Tx,
+) -> TxAcceptanceFact
+where
+    V: UtxoView,
+{
+    let mut fact = unresolved_fact(tx);
+    match check_one(pool, view, context, tx, &mut fact) {
+        Ok(()) => fact.allowed = Some(true),
+        Err(reason) => fact.reject_reason = Some(reason),
+    }
+    fact
+}
+
+/// The fact for a transaction whose prevouts have not been consulted: the
+/// shape is known, the fee and sigop cost are not.
+fn unresolved_fact(tx: &Tx) -> TxAcceptanceFact {
+    TxAcceptanceFact {
+        txid: tx.txid(),
+        wtxid: tx.wtxid(),
+        allowed: Some(false),
+        vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
+        weight: tx.weight(),
+        sigop_cost: 0,
+        base_fee: None,
+        reject_reason: None,
+    }
+}
+
+fn check_one<V>(
+    pool: &Mempool,
+    view: &V,
+    context: AcceptanceContext,
+    tx: &Tx,
+    fact: &mut TxAcceptanceFact,
+) -> Result<(), AcceptanceRejectReason>
+where
+    V: UtxoView,
+{
+    if pool.contains_txid(&fact.txid) {
+        return Err(AcceptanceRejectReason::AlreadyInMempool);
+    }
+    // A coinbase can only arrive inside a block; its null prevout resolves
+    // nowhere, which is the same answer Core gives (`coinbase`).
     if is_coinbase(tx) {
-        return Err(AcceptError::Coinbase);
-    }
-    if ctx.require_standard {
-        is_standard_tx(tx, &ctx.standardness)?;
+        return Err(AcceptanceRejectReason::MissingInputs);
     }
 
-    let view = MempoolUtxoView::new(pool, chain);
-
-    let mut missing = Vec::new();
-    let mut value_in = 0_u64;
     let mut prevouts = Vec::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
-        match view.lookup(&input.previous_output) {
-            Some(prevout) => {
-                value_in = value_in
-                    .checked_add(prevout.value)
-                    .ok_or(AcceptError::InputValueOverflow)?;
-                prevouts.push((input.previous_output, prevout));
-            }
-            None => missing.push(input.previous_output),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(AcceptError::MissingInputs(missing));
+        let Some(prevout) = view.lookup(&input.previous_output) else {
+            return Err(AcceptanceRejectReason::MissingInputs);
+        };
+        prevouts.push((input.previous_output, prevout));
     }
 
-    // Counted here, before script verification, for the same reason Core
-    // counts it in `PreChecks` rather than in `PolicyScriptChecks`: the sigop
-    // limit is a cheap rejection and there is no sense running scripts for a
+    let policy = pool.policy_snapshot();
+    is_standard_tx(tx, &policy.standardness)?;
+
+    // Finality is evaluated at the height of the next block the transaction
+    // could be mined in. A tip at `u32::MAX` is not a reachable chain state;
+    // saturating keeps the arithmetic total without inventing a reject class.
+    let finality_height = context.height.saturating_add(1);
+    verify_transaction_non_script(tx, view, finality_height, context.locktime_cutoff)?;
+
+    // The non-script pass rejected value overflow and `value_in <
+    // value_out`, so the plain arithmetic below cannot wrap or underflow.
+    let value_in = prevouts
+        .iter()
+        .fold(0_u64, |sum, (_, prevout)| sum.saturating_add(prevout.value));
+    let value_out = tx
+        .outputs
+        .iter()
+        .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+    let fee = value_in.saturating_sub(value_out);
+    fact.base_fee = Some(fee);
+
+    let fee_rate = if fact.vsize == 0 {
+        0
+    } else {
+        fee.saturating_mul(1_000) / u64::from(fact.vsize)
+    };
+    let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
+        pool,
+        policy.incremental_relay_fee_sat_per_kvb,
+    );
+    if fee_rate < mempool_min_fee {
+        return Err(AcceptanceRejectReason::MinRelayFeeNotMet);
+    }
+
+    // Counted before script verification, for the same reason Core counts
+    // it in `PreChecks` rather than in `PolicyScriptChecks`: the sigop limit
+    // is a cheap rejection and there is no sense running scripts for a
     // transaction that cannot be relayed anyway.
     let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
+    fact.sigop_cost = sigop_cost;
     if sigop_cost > MAX_STANDARD_TX_SIGOPS_COST {
-        return Err(AcceptError::TooManySigops {
-            cost: sigop_cost,
-            max: MAX_STANDARD_TX_SIGOPS_COST,
-        });
+        return Err(AcceptanceRejectReason::TooManySigops);
     }
 
-    // Full verification, scripts included, under relay flags. Core runs policy
-    // flags in the mempool and consensus flags in a block, so a transaction
-    // rejected here may still be valid in a block someone else mines.
+    let candidate = ReplacementCandidate::new(
+        Arc::new(tx.clone()),
+        fact.vsize,
+        fee,
+        policy.incremental_relay_fee_sat_per_kvb,
+    );
+    let plan = pool.check_replacement(&candidate)?;
+    let excluded: HashSet<EntryId> = plan.evicted.iter().copied().collect();
+    pool.check_package_limits(tx, fact.vsize, &excluded)?;
+
+    // Scripts last, under relay flags: Core runs policy flags in the
+    // mempool and consensus flags in a block, so a transaction rejected here
+    // may still be valid in a block someone else mines.
     verify_transaction(
         tx,
-        &view,
-        ctx.height,
-        ctx.locktime_cutoff,
+        view,
+        finality_height,
+        context.locktime_cutoff,
         VerifyFlags::STANDARD,
     )?;
 
-    let mut value_out = 0_u64;
-    for output in &tx.outputs {
-        value_out = value_out
-            .checked_add(output.value)
-            .ok_or(AcceptError::OutputValueOverflow)?;
-    }
-    // Verification already rejected `value_out > value_in`; saturating rather
-    // than unwrapping keeps this from becoming a panic if that check moves.
-    let fee = value_in.saturating_sub(value_out);
-
-    let vsize = u32::try_from(tx.vsize()).map_err(|_| AcceptError::VsizeOverflow)?;
-    let candidate = replacement_candidate(pool, tx, vsize, fee, sigop_cost);
-    let replaced = pool
-        .check_replacement(&candidate)?
-        .evicted
-        .iter()
-        .filter_map(|id| pool.entry(*id).map(|entry| entry.txid))
-        .collect::<Vec<_>>();
-
-    Ok(AcceptChecks {
-        txid,
-        fee,
-        vsize,
-        sigop_cost,
-        replaced,
-    })
-}
-
-/// Validates `tx` and inserts it into `pool`.
-///
-/// Runs [`check_acceptance`] and, if it passes, applies any BIP125 eviction
-/// and inserts the entry with the sigop cost the checks derived.
-///
-/// # Errors
-///
-/// As [`check_acceptance`], plus [`AcceptError::Mempool`] if insertion hits a
-/// policy limit that only applies once the entry is placed.
-pub fn accept_to_mempool<V>(
-    pool: &mut Mempool,
-    tx: Tx,
-    chain: &V,
-    ctx: &AcceptContext,
-) -> Result<AcceptResult, AcceptError>
-where
-    V: UtxoView,
-{
-    let tx = Arc::new(tx);
-    let checks = check_acceptance(pool, &tx, chain, ctx)?;
-    // Before anything is removed or inserted. The fee is only known once the
-    // prevouts are resolved, so the ceiling cannot be applied earlier -- but it
-    // must be applied before the pool is touched, or a transaction the caller
-    // capped has already replaced the originals by the time it is refused.
-    if let Some(max_fee) = ctx.max_fee
-        && checks.fee > max_fee
+    // Checked only on an admission-valid result, as Core's
+    // `BroadcastTransaction` does: the ceiling is the submitter's guard
+    // against a fee mistake, not a reason a broken transaction is broken.
+    if context
+        .max_feerate_sat_per_kvb
+        .is_some_and(|max| fee_rate > max)
     {
-        return Err(AcceptError::FeeExceedsMaximum {
-            fee: checks.fee,
-            max_fee,
-        });
+        return Err(AcceptanceRejectReason::MaxFeeExceeded);
     }
-    let candidate = replacement_candidate(pool, &tx, checks.vsize, checks.fee, checks.sigop_cost);
-    // `replace_transaction` re-runs `check_replacement` internally. Paying for
-    // one extra walk of the conflict set keeps BIP125 eviction implemented in
-    // exactly one place; inlining it here would be a second copy to drift.
-    let outcome = pool
-        .replace_transaction(candidate, ctx.time, ctx.height, checks.sigop_cost)
-        .map_err(|error| match error {
-            // `replace_transaction` reports every failure as an `RbfError`,
-            // including the plain insertion limits, which have nothing to do
-            // with replacement. Reporting "below min relay fee" as
-            // "replacement rejected" would send the caller looking for a
-            // conflict that never existed.
-            RbfError::Mempool(mempool) => AcceptError::Mempool(mempool),
-            rbf => AcceptError::Rbf(rbf),
-        })?;
-    if outcome.is_shed() {
-        // The entry committed and was shed by the size-limit trim in the
-        // same step: the same refusal the pre-commit limit check produced.
-        return Err(AcceptError::Mempool(MempoolError::Full));
-    }
-    let id = pool
-        .entry_id_by_txid(&checks.txid)
-        .ok_or(AcceptError::Mempool(MempoolError::TooManyEntries))?;
-    Ok(AcceptResult { id, checks })
-}
 
-fn replacement_candidate(
-    pool: &Mempool,
-    tx: &Arc<Tx>,
-    vsize: u32,
-    fee: u64,
-    sigop_cost: u32,
-) -> ReplacementCandidate {
-    ReplacementCandidate::new(Arc::clone(tx), vsize, fee, pool.min_relay_fee_sat_per_kvb())
-        .with_sigop_cost(sigop_cost)
+    Ok(())
 }
 
 /// Returns true if `tx` is a coinbase: exactly one input with the null outpoint.
@@ -383,14 +456,7 @@ fn is_coinbase(tx: &Tx) -> bool {
 /// segwit witness-program sigops.
 fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u64 {
     let mut cost = u64::from(count_tx_legacy(tx)).saturating_mul(4);
-    for input in &tx.inputs {
-        let prevout = prevouts
-            .iter()
-            .find(|(op, _)| *op == input.previous_output)
-            .map(|(_, txout)| txout);
-        let Some(prevout) = prevout else {
-            continue;
-        };
+    for (input, (_, prevout)) in tx.inputs.iter().zip(prevouts) {
         let redeem_script = last_push(&input.script_sig);
         if is_p2sh(&prevout.script_pubkey) {
             if let Some(redeem) = redeem_script {
@@ -446,40 +512,39 @@ fn count_accurate(script: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::MempoolLimits;
-    use alloc::collections::BTreeMap;
+    use crate::{MempoolEntry, MempoolLimits};
     use alloc::vec;
     use bitcoin_rs_primitives::{Hash256, TxIn};
-    use bitcoin_rs_script::script::{opcode, push_data, push_int};
-    use bitcoin_rs_script::sigops::count_tx_legacy;
+    use bitcoin_rs_script::script::{push_data, push_int};
+    use sha2::{Digest as _, Sha256};
 
-    /// A local `UtxoView` over a map. The trait is only implemented for
-    /// `hashbrown::HashMap` upstream, and `OutPoint` has no `Ord`, so the
-    /// fixtures key the map by the outpoint's wire bytes instead.
-    struct ChainView(BTreeMap<[u8; 36], TxOut>);
+    /// Confirmed outputs keyed by outpoint.
+    struct ChainView(HashMap<OutPoint, TxOut>);
 
     impl UtxoView for ChainView {
         fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
-            self.0.get(&outpoint_key(outpoint)).cloned()
+            self.0.get(outpoint).cloned()
         }
     }
 
-    fn outpoint_key(outpoint: &OutPoint) -> [u8; 36] {
-        let mut key = [0_u8; 36];
-        key[..32].copy_from_slice(outpoint.txid.as_bytes());
-        key[32..].copy_from_slice(&outpoint.vout.to_le_bytes());
-        key
-    }
-
-    /// A prevout script anyone can spend with an empty scriptSig.
+    /// `OP_TRUE`: a prevout anyone can spend with an empty scriptSig.
     ///
     /// Keeps these tests about acceptance. Producing real signatures would
-    /// turn every fixture into a signing exercise, and a prevout's own script
-    /// is not what standardness looks at.
+    /// turn every fixture into a signing exercise, and a prevout's own
+    /// script is not what standardness looks at.
     fn anyone_can_spend() -> Vec<u8> {
         vec![0x51]
+    }
+
+    /// P2WSH wrapping `OP_TRUE`: a standard output template that a one-item
+    /// witness spends, for fixtures whose outputs must themselves be spent.
+    fn p2wsh_op_true() -> Vec<u8> {
+        let mut out = vec![0x00, 0x20];
+        out.extend_from_slice(&Sha256::digest([0x51_u8]));
+        out
     }
 
     fn p2pkh(tag: u8) -> Vec<u8> {
@@ -490,6 +555,12 @@ mod tests {
         out.extend_from_slice(&[tag; 20]);
         out.push(opcode::OP_EQUALVERIFY);
         out.push(opcode::OP_CHECKSIG);
+        out
+    }
+
+    fn p2wpkh(tag: u8) -> Vec<u8> {
+        let mut out = vec![0x00, 0x14];
+        out.extend_from_slice(&[tag; 20]);
         out
     }
 
@@ -529,15 +600,19 @@ mod tests {
     }
 
     fn chain_with(entries: &[(OutPoint, u64)]) -> ChainView {
+        chain_paying(entries, &anyone_can_spend())
+    }
+
+    fn chain_paying(entries: &[(OutPoint, u64)], script_pubkey: &[u8]) -> ChainView {
         ChainView(
             entries
                 .iter()
                 .map(|(outpoint, value)| {
                     (
-                        outpoint_key(outpoint),
+                        *outpoint,
                         TxOut {
                             value: *value,
-                            script_pubkey: anyone_can_spend(),
+                            script_pubkey: script_pubkey.to_vec(),
                         },
                     )
                 })
@@ -545,17 +620,11 @@ mod tests {
         )
     }
 
-    fn context() -> AcceptContext {
-        AcceptContext {
-            height: 800_001,
+    fn context() -> AcceptanceContext {
+        AcceptanceContext {
+            height: 800_000,
             locktime_cutoff: 1_700_000_000,
-            time: 42,
-            standardness: StandardnessPolicy {
-                dust_relay_fee: 3_000,
-                max_datacarrier_bytes: Some(83),
-            },
-            require_standard: true,
-            max_fee: None,
+            max_feerate_sat_per_kvb: None,
         }
     }
 
@@ -563,19 +632,39 @@ mod tests {
         Mempool::new(MempoolLimits::default())
     }
 
+    fn verdict(pool: &Mempool, chain: &ChainView, tx: &Tx) -> TxAcceptanceFact {
+        verdict_with(pool, chain, context(), tx)
+    }
+
+    fn verdict_with(
+        pool: &Mempool,
+        chain: &ChainView,
+        context: AcceptanceContext,
+        tx: &Tx,
+    ) -> TxAcceptanceFact {
+        evaluate_package_acceptance(pool, chain, context, core::slice::from_ref(tx))
+            .results
+            .pop()
+            .expect("one row per submitted transaction")
+    }
+
     #[test]
     fn accepts_a_standard_transaction_and_derives_its_fee_from_the_prevouts() {
-        let mut pool = pool();
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
         let tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
 
-        let Ok(result) = accept_to_mempool(&mut pool, tx, &chain, &context()) else {
-            panic!("a standard transaction spending a confirmed output must be accepted");
-        };
+        let fact = verdict(&pool(), &chain, &tx);
 
-        assert_eq!(result.checks.fee, 10_000, "fee is value_in minus value_out");
-        assert!(pool.contains_txid(&result.checks.txid));
-        assert_eq!(pool.len(), 1);
+        assert_eq!(fact.reject_reason, None);
+        assert_eq!(fact.allowed, Some(true));
+        assert_eq!(
+            fact.base_fee,
+            Some(10_000),
+            "fee is value_in minus value_out"
+        );
+        assert_eq!(fact.vsize, u32::try_from(tx.vsize()).expect("fits"));
+        assert_eq!(fact.txid, tx.txid());
+        assert_eq!(fact.wtxid, tx.wtxid());
     }
 
     /// The fee must come from the prevouts, not from anything the transaction
@@ -584,30 +673,26 @@ mod tests {
     fn fee_tracks_the_prevout_value() {
         let tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
         let fee_for = |input_value: u64| {
-            let mut pool = pool();
             let chain = chain_with(&[(outpoint(1, 0), input_value)]);
-            accept_to_mempool(&mut pool, tx.clone(), &chain, &context())
-                .map(|result| result.checks.fee)
+            verdict(&pool(), &chain, &tx).base_fee
         };
 
-        assert_eq!(fee_for(100_000), Ok(10_000));
-        assert_eq!(fee_for(95_000), Ok(5_000));
+        assert_eq!(fee_for(100_000), Some(10_000));
+        assert_eq!(fee_for(95_000), Some(5_000));
     }
 
     #[test]
-    fn reports_the_outpoints_it_could_not_resolve() {
-        let mut pool = pool();
+    fn reports_missing_inputs_without_a_fee() {
         let chain = chain_with(&[]);
         let tx = spending_tx(&[outpoint(9, 0)], 90_000, 7);
 
-        let outcome = accept_to_mempool(&mut pool, tx, &chain, &context());
+        let fact = verdict(&pool(), &chain, &tx);
 
         assert_eq!(
-            outcome,
-            Err(AcceptError::MissingInputs(vec![outpoint(9, 0)])),
-            "the unresolved outpoint must be named so the caller can orphan it"
+            fact.reject_reason,
+            Some(AcceptanceRejectReason::MissingInputs)
         );
-        assert!(pool.is_empty(), "a rejected transaction must not be stored");
+        assert_eq!(fact.base_fee, None, "no prevouts, no fee to report");
     }
 
     /// The layered view: a child spending an unconfirmed parent resolves
@@ -616,31 +701,68 @@ mod tests {
     fn accepts_a_child_spending_an_unconfirmed_parent() {
         let mut pool = pool();
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
-        // The parent pays to a script the child can spend with an empty
-        // scriptSig, which is not a standard output — so standardness is off
-        // for this pair. What is under test is prevout resolution against the
-        // pool; a signing fixture would prove the same thing more slowly.
-        let relaxed = AcceptContext {
-            require_standard: false,
-            ..context()
-        };
         let mut parent = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-        parent.outputs[0].script_pubkey = anyone_can_spend();
+        parent.outputs[0].script_pubkey = p2wsh_op_true();
         let parent_txid = parent.txid();
-        let Ok(_parent) = accept_to_mempool(&mut pool, parent, &chain, &relaxed) else {
-            panic!("parent must be accepted or the child case is untested");
-        };
-
-        let child = spending_tx(&[OutPoint::new(parent_txid, 0)], 80_000, 8);
-        let Ok(result) = accept_to_mempool(&mut pool, child, &chain, &relaxed) else {
-            panic!("a child spending an unconfirmed parent must resolve against the pool");
-        };
-
+        let parent_fact = verdict(&pool, &chain, &parent);
         assert_eq!(
-            result.checks.fee, 10_000,
+            parent_fact.reject_reason, None,
+            "the parent must be acceptable"
+        );
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(parent),
+            parent_fact.vsize,
+            parent_fact.base_fee.expect("accepted rows carry a fee"),
+            1,
+            1,
+        ))
+        .expect("insert parent");
+
+        let mut child = spending_tx(&[OutPoint::new(parent_txid, 0)], 80_000, 8);
+        child.inputs[0].witness = vec![vec![0x51]];
+        let fact = verdict(&pool, &chain, &child);
+
+        assert_eq!(fact.reject_reason, None);
+        assert_eq!(
+            fact.base_fee,
+            Some(10_000),
             "the child's fee comes from its parent's unconfirmed output"
         );
-        assert_eq!(pool.len(), 2);
+    }
+
+    /// Inside a package the same layering reaches earlier rows, and it
+    /// carries the real script: a child of a package parent is script
+    /// verified against the parent's output, not a value-only placeholder.
+    #[test]
+    fn a_package_child_resolves_and_verifies_against_an_earlier_row() {
+        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
+        let mut parent = spending_tx(&[outpoint(1, 0)], 90_000, 7);
+        parent.outputs[0].script_pubkey = p2wsh_op_true();
+        let mut child = spending_tx(&[OutPoint::new(parent.txid(), 0)], 80_000, 8);
+        child.inputs[0].witness = vec![vec![0x51]];
+        let mut unsigned_child = child.clone();
+        unsigned_child.inputs[0].witness = Vec::new();
+
+        let facts = evaluate_package_acceptance_all(
+            &pool(),
+            &chain,
+            context(),
+            &[parent, child, unsigned_child],
+        );
+
+        assert_eq!(facts.results[0].reject_reason, None);
+        assert_eq!(facts.results[1].reject_reason, None);
+        assert_eq!(facts.results[1].base_fee, Some(10_000));
+        assert!(
+            matches!(
+                facts.results[2].reject_reason,
+                Some(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Script { .. }
+                ))
+            ),
+            "an unsigned spend of a package parent must fail script verification, got {:?}",
+            facts.results[2].reject_reason
+        );
     }
 
     #[test]
@@ -648,170 +770,198 @@ mod tests {
         let mut pool = pool();
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
         let tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-        let Ok(_first) = accept_to_mempool(&mut pool, tx.clone(), &chain, &context()) else {
-            panic!("the first acceptance must succeed");
-        };
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 10_000, 1, 1))
+            .expect("insert");
 
         assert_eq!(
-            accept_to_mempool(&mut pool, tx, &chain, &context()),
-            Err(AcceptError::AlreadyInPool)
+            verdict(&pool, &chain, &tx).reject_reason,
+            Some(AcceptanceRejectReason::AlreadyInMempool)
         );
-        assert_eq!(pool.len(), 1);
     }
 
     #[test]
-    fn rejects_a_coinbase() {
-        let mut pool = pool();
+    fn rejects_a_coinbase_as_missing_inputs() {
         let chain = chain_with(&[]);
         let mut tx = spending_tx(&[OutPoint::new(Txid::default(), u32::MAX)], 90_000, 7);
         tx.inputs[0].script_sig = push_int(800_001);
         assert!(is_coinbase(&tx), "the fixture must be a coinbase");
 
         assert_eq!(
-            accept_to_mempool(&mut pool, tx, &chain, &context()),
-            Err(AcceptError::Coinbase)
+            verdict(&pool(), &chain, &tx).reject_reason,
+            Some(AcceptanceRejectReason::MissingInputs)
         );
     }
 
-    /// Standardness must be a gate the caller controls, and the fixture must
-    /// be consensus-valid so that toggling the flag is the only difference.
+    /// The fixture is consensus-valid, so the version is the only thing
+    /// standardness can object to.
     #[test]
-    fn standardness_is_enforced_only_when_required() {
+    fn rejects_a_non_standard_version() {
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
         let mut tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-        // Version 4 is consensus-valid and non-standard.
         tx.version = 4;
 
-        let mut strict = pool();
         assert_eq!(
-            accept_to_mempool(&mut strict, tx.clone(), &chain, &context()),
-            Err(AcceptError::Standardness(StandardnessError::Version))
-        );
-
-        let mut permissive = pool();
-        let relaxed = AcceptContext {
-            require_standard: false,
-            ..context()
-        };
-        assert!(
-            accept_to_mempool(&mut permissive, tx, &chain, &relaxed).is_ok(),
-            "the same transaction must be accepted once standardness is off"
+            verdict(&pool(), &chain, &tx).reject_reason,
+            Some(AcceptanceRejectReason::NonStandard(
+                StandardnessError::Version
+            ))
         );
     }
 
     #[test]
     fn rejects_a_transaction_below_the_min_relay_fee() {
-        let mut pool = pool();
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
         // One satoshi of fee on a ~110 vbyte transaction is far below 1 sat/vB.
         let tx = spending_tx(&[outpoint(1, 0)], 99_999, 7);
 
-        let outcome = accept_to_mempool(&mut pool, tx, &chain, &context());
-
-        assert!(
-            matches!(outcome, Err(AcceptError::Mempool(_))),
-            "expected a policy rejection, got {outcome:?}"
-        );
-        assert!(pool.is_empty());
-    }
-
-    /// `testmempoolaccept`'s contract: the verdict without the side effect.
-    #[test]
-    fn check_acceptance_leaves_the_pool_untouched() {
-        let mut pool = pool();
-        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
-        let tx = Arc::new(spending_tx(&[outpoint(1, 0)], 90_000, 7));
-
-        let Ok(checks) = check_acceptance(&pool, &tx, &chain, &context()) else {
-            panic!("the transaction must pass its checks");
-        };
-
-        assert_eq!(checks.fee, 10_000);
-        assert!(pool.is_empty(), "checking must not insert");
-        // The same transaction still accepts afterwards, so the check did not
-        // consume anything either.
-        let tx = Arc::unwrap_or_clone(tx);
-        assert!(accept_to_mempool(&mut pool, tx, &chain, &context()).is_ok());
-    }
-
-    #[test]
-    fn a_replacement_reports_the_transaction_it_evicted() {
-        let mut pool = pool();
-        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
-        let mut original = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-        original.inputs[0].sequence = 0xffff_fffd;
-        let original_txid = original.txid();
-        let Ok(_first) = accept_to_mempool(&mut pool, original, &chain, &context()) else {
-            panic!("the original must be accepted");
-        };
-
-        // Same input, higher fee, different output so it is a distinct txid.
-        let mut replacement = spending_tx(&[outpoint(1, 0)], 50_000, 8);
-        replacement.inputs[0].sequence = 0xffff_fffd;
-        let Ok(result) = accept_to_mempool(&mut pool, replacement, &chain, &context()) else {
-            panic!("a higher-feerate replacement must be accepted");
-        };
+        let fact = verdict(&pool(), &chain, &tx);
 
         assert_eq!(
-            result.checks.replaced,
-            vec![original_txid],
-            "the evicted transaction must be named"
+            fact.reject_reason,
+            Some(AcceptanceRejectReason::MinRelayFeeNotMet)
         );
-        assert!(!pool.contains_txid(&original_txid));
-        assert_eq!(pool.len(), 1);
+        assert_eq!(
+            fact.base_fee,
+            Some(1),
+            "the fee is known when the floor refuses it"
+        );
     }
 
-    /// The sigop cost must reach the stored entry, not just the return value.
-    ///
-    /// A single P2PKH output carries one legacy sigop, scaled by four. Pinning
-    /// the number keeps a mutation that reports zero — or that drops the field
-    /// on the way into the pool — from passing.
+    /// The ceiling applies only to an otherwise-acceptable transaction, so a
+    /// transaction that is both below the floor and above the ceiling quotes
+    /// the floor, and one above the ceiling with a bad script quotes the
+    /// script.
     #[test]
-    fn the_sigop_cost_is_carried_onto_the_stored_entry() {
-        let mut pool = pool();
+    fn max_feerate_is_checked_only_on_an_admission_valid_result() {
         let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
         let tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
-
-        let Ok(result) = accept_to_mempool(&mut pool, tx, &chain, &context()) else {
-            panic!("the transaction must be accepted");
+        let capped = AcceptanceContext {
+            max_feerate_sat_per_kvb: Some(1_000),
+            ..context()
         };
 
         assert_eq!(
-            result.checks.sigop_cost, 4,
-            "one P2PKH output is one legacy sigop, scaled by four"
+            verdict_with(&pool(), &chain, capped, &tx).reject_reason,
+            Some(AcceptanceRejectReason::MaxFeeExceeded)
         );
+
+        let one_sat = spending_tx(&[outpoint(1, 0)], 99_999, 7);
+        let capped_at_zero = AcceptanceContext {
+            max_feerate_sat_per_kvb: Some(0),
+            ..context()
+        };
         assert_eq!(
-            pool.entry(result.id).map(|entry| entry.sigop_cost),
-            Some(4),
-            "the count must be carried onto the entry, not only reported"
+            verdict_with(&pool(), &chain, capped_at_zero, &one_sat).reject_reason,
+            Some(AcceptanceRejectReason::MinRelayFeeNotMet),
+            "below the floor and above the ceiling quotes the floor"
         );
+        let pool_at_zero_floor = Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        });
+        assert_eq!(
+            verdict_with(&pool_at_zero_floor, &chain, capped_at_zero, &one_sat).reject_reason,
+            Some(AcceptanceRejectReason::MaxFeeExceeded),
+            "with no floor the same transaction is admission-valid and only the ceiling refuses it"
+        );
+
+        let signed_prevout = chain_paying(&[(outpoint(1, 0), 100_000)], &p2wpkh(0x11));
+        assert!(
+            matches!(
+                verdict_with(&pool(), &signed_prevout, capped, &tx).reject_reason,
+                Some(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Script { .. }
+                ))
+            ),
+            "a broken transaction quotes its defect, not the submitter's ceiling"
+        );
+    }
+
+    /// The reported bug: an unsigned spend of a signature-guarded output
+    /// must never be `allowed`, on any outlet that reads this verdict.
+    #[test]
+    fn rejects_a_spend_whose_input_script_does_not_verify() {
+        let chain = chain_paying(&[(outpoint(1, 0), 100_000)], &p2wpkh(0x11));
+        let tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
+
+        let fact = verdict(&pool(), &chain, &tx);
+
+        assert_eq!(fact.allowed, Some(false));
+        assert!(
+            matches!(
+                fact.reject_reason,
+                Some(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Script { .. }
+                ))
+            ),
+            "expected a script rejection, got {:?}",
+            fact.reject_reason
+        );
+    }
+
+    #[test]
+    fn rejects_a_non_final_locktime_and_accepts_one_final_at_the_next_height() {
+        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
+        let mut tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
+        tx.inputs[0].sequence = 0xffff_fffe;
+        // A height locktime is final once the block height exceeds it. The
+        // transaction is a candidate for block `height + 1`, so a locktime of
+        // `height + 1` is one past final while `height` is exactly final.
+        tx.lock_time = context().height.saturating_add(1);
+
+        let one_past = verdict(&pool(), &chain, &tx);
+        assert!(
+            matches!(
+                one_past.reject_reason,
+                Some(AcceptanceRejectReason::Consensus(
+                    ConsensusError::Bip { .. }
+                ))
+            ),
+            "locktime one past the next block is non-final, got {:?}",
+            one_past.reject_reason
+        );
+
+        tx.lock_time = context().height;
+        assert_eq!(verdict(&pool(), &chain, &tx).reject_reason, None);
+    }
+
+    #[test]
+    fn rejects_duplicate_inputs_before_looking_at_the_fee() {
+        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
+        // Two spends of the same output would double-count the fee.
+        let tx = spending_tx(&[outpoint(1, 0), outpoint(1, 0)], 150_000, 7);
+
+        let fact = verdict(&pool(), &chain, &tx);
+
+        assert!(
+            matches!(
+                fact.reject_reason,
+                Some(AcceptanceRejectReason::Consensus(
+                    ConsensusError::DuplicateInput { .. }
+                ))
+            ),
+            "got {:?}",
+            fact.reject_reason
+        );
+        assert_eq!(fact.base_fee, None);
     }
 
     /// The sigop cost must be counted against the resolved prevouts.
     ///
-    /// This is the whole reason the count lives at acceptance. Each input here
-    /// spends a **P2SH** output whose redeem script is a bare
-    /// `OP_CHECKMULTISIG`, worth twenty sigops — and that contribution is
-    /// invisible to anyone holding only the transaction, because it is
-    /// attributed by way of the spent `scriptPubKey`.
-    ///
-    /// The assertion is the policy limit rather than the number: with the
-    /// prevouts consulted the transaction is over `MAX_STANDARD_TX_SIGOPS_COST`
-    /// and is rejected; counting blind gives four, which is nowhere near the
-    /// limit. So a mutation that stops consulting the prevouts turns a
-    /// rejection into an acceptance, and the test cannot pass by accident.
-    ///
-    /// Testing it this way also keeps the fixture off the script interpreter:
-    /// the rejection lands before verification, so no input needs a signature
-    /// and the test runs on both script backends.
+    /// Each input spends a **P2SH** output whose redeem script is a bare
+    /// `OP_CHECKMULTISIG`, worth twenty sigops — a contribution invisible to
+    /// anyone holding only the transaction, because it is attributed by way
+    /// of the spent `scriptPubKey`. The assertion is the policy limit rather
+    /// than the number: counting blind gives four, nowhere near the limit,
+    /// so a mutation that stops consulting the prevouts turns this rejection
+    /// into an acceptance. The rejection lands before script verification,
+    /// so no input needs a signature and the test runs on both backends.
     #[test]
     fn sigop_cost_is_counted_against_the_resolved_prevouts() {
         // Twenty sigops: `GetSigOpCount` charges the maximum for a
         // `CHECKMULTISIG` that is not preceded by a literal key count.
         let redeem = vec![opcode::OP_CHECKMULTISIG];
         let script_sig = push_data(&redeem);
-
-        // P2SH scriptPubKey: OP_HASH160 <20 bytes> OP_EQUAL.
         // The hash need not be the actual HASH160 of the redeem script —
         // `is_p2sh` only checks the 23-byte shape, and the sigop counter
         // reads the redeem script from the scriptSig, not from this hash.
@@ -822,26 +972,14 @@ mod tests {
         let inputs = (0..200_u32)
             .map(|vout| outpoint(3, vout))
             .collect::<Vec<_>>();
-        let chain = ChainView(
-            inputs
-                .iter()
-                .map(|outpoint| {
-                    (
-                        outpoint_key(outpoint),
-                        TxOut {
-                            value: 1_000,
-                            script_pubkey: script_pubkey.clone(),
-                        },
-                    )
-                })
-                .collect(),
+        let chain = chain_paying(
+            &inputs.iter().map(|op| (*op, 1_000)).collect::<Vec<_>>(),
+            &script_pubkey,
         );
-
         let mut tx = spending_tx(&inputs, 190_000, 7);
         for input in &mut tx.inputs {
             input.script_sig = script_sig.clone();
         }
-
         let blind = count_tx_legacy(&tx).saturating_mul(4);
         assert!(
             blind <= MAX_STANDARD_TX_SIGOPS_COST,
@@ -849,13 +987,72 @@ mod tests {
              rejection would not prove the prevouts were read"
         );
 
-        let mut pool = pool();
-        let outcome = accept_to_mempool(&mut pool, tx, &chain, &context());
+        let fact = verdict(&pool(), &chain, &tx);
 
-        assert!(
-            matches!(outcome, Err(AcceptError::TooManySigops { .. })),
-            "expected a sigop-limit rejection derived from the prevouts, got {outcome:?}"
+        assert_eq!(
+            fact.reject_reason,
+            Some(AcceptanceRejectReason::TooManySigops)
         );
-        assert!(pool.is_empty());
+        assert!(fact.sigop_cost > MAX_STANDARD_TX_SIGOPS_COST);
+    }
+
+    #[test]
+    fn a_single_p2pkh_output_costs_four_sigops() {
+        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
+        let tx = spending_tx(&[outpoint(1, 0)], 90_000, 7);
+
+        assert_eq!(
+            verdict(&pool(), &chain, &tx).sigop_cost,
+            4,
+            "one P2PKH output is one legacy sigop, scaled by four"
+        );
+    }
+
+    #[test]
+    fn package_acceptance_rejects_empty_and_oversized_packages() {
+        let chain = chain_with(&[]);
+        let empty = evaluate_package_acceptance(&pool(), &chain, context(), &[]);
+        assert_eq!(
+            empty.package_error,
+            Some(AcceptanceRejectReason::PackageTooLarge)
+        );
+
+        let txs: Vec<Tx> = (0..=MAX_PACKAGE_COUNT)
+            .map(|i| {
+                let value = 90_000_u64.saturating_add(u64::try_from(i).expect("small index"));
+                spending_tx(&[outpoint(1, 0)], value, 7)
+            })
+            .collect();
+        let oversized = evaluate_package_acceptance(&pool(), &chain, context(), &txs);
+        assert_eq!(
+            oversized.package_error,
+            Some(AcceptanceRejectReason::PackageTooLarge)
+        );
+        assert!(oversized.results.is_empty());
+    }
+
+    #[test]
+    fn package_acceptance_stops_after_a_rejection_and_the_all_form_does_not() {
+        let chain = chain_with(&[(outpoint(1, 0), 100_000)]);
+        let missing = spending_tx(&[outpoint(9, 0)], 90_000, 7);
+        let fine = spending_tx(&[outpoint(1, 0)], 90_000, 8);
+        let package = [missing, fine.clone()];
+
+        let stopped = evaluate_package_acceptance(&pool(), &chain, context(), &package);
+        assert_eq!(
+            stopped.results[0].reject_reason,
+            Some(AcceptanceRejectReason::MissingInputs)
+        );
+        assert_eq!(stopped.results[1].allowed, None);
+        assert_eq!(stopped.results[1].reject_reason, None);
+        assert_eq!(stopped.results[1].base_fee, None);
+        assert_eq!(stopped.results[1].txid, fine.txid());
+
+        let all = evaluate_package_acceptance_all(&pool(), &chain, context(), &package);
+        assert_eq!(
+            all.results[1].allowed,
+            Some(true),
+            "evaluate-all must still evaluate the second row after the first rejects"
+        );
     }
 }

@@ -90,16 +90,16 @@ fn open_node() -> anyhow::Result<(NodeState, tempfile::TempDir)> {
     Ok((state, dir))
 }
 
-/// Funds one spendable output directly in the node's real `UtxoSet` (the same
-/// seam the apply path writes through), so the spend below passes the
-/// missing-inputs check.
+/// Funds one `OP_TRUE` output directly in the node's real `UtxoSet` (the same
+/// seam the apply path writes through), so the empty-scriptSig spend below
+/// resolves its input and verifies.
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> {
     let mut changes = BlockChanges::with_capacity(1, 0);
     changes.add(UtxoAdd::new(
         OutPoint::new(parent, 0),
         TxOut {
             value,
-            script_pubkey: Vec::new(),
+            script_pubkey: vec![0x51],
         },
         false,
         100,
@@ -110,20 +110,22 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> 
         .map_err(|error| anyhow!("utxo commit failed: {error}"))
 }
 
-/// One-input spend of the funded output; `output_value` sets the fee
-/// (`50_000 - output_value` sats).
+/// One-input spend of the funded output paying a standard P2WPKH output;
+/// `output_value` sets the fee (`50_000 - output_value` sats).
 fn spending_tx(parent: Txid, output_value: u64) -> Tx {
+    let mut p2wpkh = vec![0x00, 0x14];
+    p2wpkh.extend([0x11_u8; 20]);
     Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: vec![0x52, 0x02, 0xAA, 0xBB],
+            script_sig: Vec::new(),
             sequence: 0xffff_ffff,
             witness: Vec::new(),
         }],
         outputs: vec![TxOut {
             value: output_value,
-            script_pubkey: vec![0x6A],
+            script_pubkey: p2wpkh,
         }],
         lock_time: 0,
     }

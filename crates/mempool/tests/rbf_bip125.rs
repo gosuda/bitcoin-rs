@@ -8,12 +8,10 @@ extern crate alloc;
 use alloc::sync::Arc;
 use std::error::Error;
 
-use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext, StandardnessPolicy, evaluate_package_acceptance,
-};
+use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_mempool::{
-    Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolStats, PolicyError, RbfError,
-    ReplacementCandidate,
+    AcceptanceContext, AcceptanceRejectReason, Mempool, MempoolEntry, MempoolError, MempoolLimits,
+    MempoolStats, PolicyError, RbfError, ReplacementCandidate, evaluate_package_acceptance,
 };
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
 
@@ -258,25 +256,40 @@ fn package_acceptance_surfaces_bip125_replacement_boundaries() -> Result<(), Box
         script
     };
 
-    let policy = StandardnessPolicy {
-        dust_relay_fee: 3_000,
-        max_datacarrier_bytes: Some(83),
-    };
-    let context = PackageTxContext {
-        fee: 1_200,
-        vsize: 100,
-        sigop_cost: 4,
-        missing_inputs: false,
-    };
-    let facts =
-        evaluate_package_acceptance(&pool, &policy, &[replacement_tx], &[context], None, 1_000);
+    // The confirmed input funds a 1 200 sat fee over the 1 000 sat output.
+    let chain = OneCoin(
+        replacement_tx.inputs[0].previous_output,
+        TxOut {
+            value: 2_200,
+            script_pubkey: vec![0x51],
+        },
+    );
+    let facts = evaluate_package_acceptance(
+        &pool,
+        &chain,
+        AcceptanceContext::default(),
+        &[replacement_tx],
+    );
     assert_eq!(
         facts.results[0].reject_reason,
         Some(AcceptanceRejectReason::Replacement(RbfError::Rule1NoOptIn))
     );
     assert_eq!(facts.results[0].allowed, Some(false));
-    assert_eq!(facts.results[0].sigop_cost, 4);
+    assert_eq!(
+        facts.results[0].base_fee,
+        Some(1_200),
+        "the fee is derived from the confirmed prevout"
+    );
     Ok(())
+}
+
+/// A chain view holding exactly one confirmed output.
+struct OneCoin(OutPoint, TxOut);
+
+impl UtxoView for OneCoin {
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        (*outpoint == self.0).then(|| self.1.clone())
+    }
 }
 
 fn pool_with_conflict(
