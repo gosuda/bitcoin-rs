@@ -345,7 +345,9 @@ mod tests {
         let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
         let result = compare_block_parse(&raw, &txids);
         if kernel_compiled() {
-            result.expect("Core parse must match native txids");
+            if let Err(error) = result {
+                panic!("Core parse must match native txids: {error}");
+            }
         } else {
             match result {
                 Err(crate::ConsensusError::Kernel(reason)) => {
