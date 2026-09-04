@@ -17,9 +17,6 @@ impl Amount {
     pub const SAT: Self = Self(1);
     /// One bitcoin in satoshis.
     pub const COIN: Self = Self(100_000_000);
-    /// Consensus maximum money (21 million bitcoin).
-    pub const MAX_MONEY: Self = Self(21_000_000 * 100_000_000);
-
     /// Constructs an amount from satoshis.
     #[must_use]
     pub const fn from_sat(sat: u64) -> Self {
