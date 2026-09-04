@@ -413,7 +413,7 @@ mod tests {
         }
     }
 
-    /// Streaming fake mirroring `NodeP2pChainQuery`: block-typed items that
+    /// Streaming fake mirroring `ActiveChainQuery`: block-typed items that
     /// resolve to a stored body are served behind `headroom`; everything
     /// else lands in `not_found` without a load.
     fn inv_hash(item: &Inventory) -> Option<[u8; 32]> {
@@ -601,7 +601,7 @@ mod tests {
         Ok(())
     }
 
-    /// Streaming chain fake mirroring `NodeP2pChainQuery`: block-typed items
+    /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
     /// that resolve to a stored body are served behind `headroom`; all other
     /// items land in `not_found` without a load. Counters and the tripwire
     /// back the hostile-preload gates.

@@ -3,12 +3,15 @@
 
 /// Coinbase transaction assembly.
 pub mod coinbase;
+/// Candidate chain context and proposal header checks.
+pub mod context;
 /// Transaction selection policy.
 pub mod policy;
 /// Transport-neutral candidate assembly.
 pub mod template;
 
 pub use coinbase::{MiningError, WITNESS_RESERVED_VALUE, witness_commitment_script};
+pub use context::{MiningChainContext, check_candidate_header};
 pub use template::{
     Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,
 };
