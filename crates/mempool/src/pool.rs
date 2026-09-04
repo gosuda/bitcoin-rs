@@ -97,6 +97,8 @@ pub struct PrioritisedTransaction {
     pub txid: Txid,
     /// Accumulated signed satoshi overlay.
     pub fee_delta: i64,
+    /// The actual fee plus the prioritisation delta, when pooled.
+    pub modified_fee: Option<i64>,
     /// Whether `txid` is currently in the pool.
     pub in_mempool: bool,
 }
@@ -965,7 +967,11 @@ impl Mempool {
             .unwrap_or(0)
             .checked_add(fee_delta)
             .ok_or(PrioritiseError::FeeDeltaOverflow)?;
-        self.fee_deltas.insert(txid, accumulated);
+        if accumulated == 0 {
+            self.fee_deltas.remove(&txid);
+        } else {
+            self.fee_deltas.insert(txid, accumulated);
+        }
 
         let Some(&id) = self.by_txid.get(&txid) else {
             return Ok(());
@@ -995,6 +1001,7 @@ impl Mempool {
             .map(|(&txid, &fee_delta)| PrioritisedTransaction {
                 txid,
                 fee_delta,
+                modified_fee: self.entry_by_txid(&txid).map(MempoolEntry::modified_fee),
                 in_mempool: self.by_txid.contains_key(&txid),
             })
             .collect()
