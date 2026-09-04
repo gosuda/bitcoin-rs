@@ -21,6 +21,9 @@ Long-poll waiting, generate assemble-solve-submit, block submission, and
 header-only admission (`submitheader` via `accept_headers`) live in the
 node-owned coordinator that implements `MiningControl`.
 
+`cargo bench -p bitcoin-rs-mining --bench candidate` times `assemble_candidate`
+against pre-captured snapshots. It is a measurement seam, not a budget.
+
 ## Features
 - `rocksdb`: forwarding marker for the rocksdb storage backend; gates no code in
   this crate.

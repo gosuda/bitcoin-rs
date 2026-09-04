@@ -126,6 +126,8 @@ jobs:
       # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
       # the production-allocator benchmark so bench breakage is visible to CI.
       - run: cargo bench -p bitcoin-rs-utxo --no-run
+      # Candidate assembly is crate-level, same as the UTXO commit bench.
+      - run: cargo bench -p bitcoin-rs-mining --no-run --bench candidate
       # The chainstate replay gate is an explicit harness: compile it on every
       # PR, while measured executions remain release/PR evidence.
       - run: |

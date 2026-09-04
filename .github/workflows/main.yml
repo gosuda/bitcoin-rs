@@ -85,6 +85,7 @@ jobs:
       - run: |
           cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
           cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+          cargo bench -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate
           cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
           cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
 
