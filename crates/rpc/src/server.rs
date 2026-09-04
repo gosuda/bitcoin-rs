@@ -97,7 +97,11 @@ impl RpcServer {
     }
 
     fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
-        stream.set_nodelay(true)?;
+        // Connection-local: a nodelay failure must not stop the accept loop.
+        if let Err(error) = stream.set_nodelay(true) {
+            debug!(%error, "rpc connection dropped: nodelay");
+            return Ok(());
+        }
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
