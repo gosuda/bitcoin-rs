@@ -9,11 +9,11 @@ through `spawn_outbound_connection`, while the `listener` module accepts inbound
 connections with graceful shutdown. A connection negotiates version/verack in
 `handshake`, then runs the peer finite-state machine in `fsm`; `wire` is the protocol
 codec, decoding `Message` values and reporting `PeerError`. Inbound traffic reaches
-the host through `dispatch_inbound_with_chain`, which streams getdata responses
-block by block behind the outbound budget's pre-load production headroom gate
-and reads the active chain through the `ChainQuery` trait, a read-only view for
-server-side responders; `inbound` hands over `InboundBlock` and
-`InboundHeaders` with their wire bytes preserved. Misbehaving peers accumulate score
+the host through `dispatch_inbound_full`, which streams getdata responses
+block by block behind the outbound budget's pre-load production headroom gate,
+filters transaction inventory through the `TxInventory` trait, and reads the
+active chain through the `ChainQuery` trait; `inbound` hands over `InboundBlock`,
+`InboundHeaders`, and `InboundTx` with their delivering peer stamped. Misbehaving peers accumulate score
 on the file-persisted `BanList` of the `banlist` module (`PeerInfo` publishes the
 post-handshake metadata), whole subnets are excluded as a `BannedSubnet` built from an
 `IpSubnet`, and BIP155 addrv2 and BIP339 wtxid-relay state live in `addrv2` and

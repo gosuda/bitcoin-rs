@@ -21,7 +21,27 @@ const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
+type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
+
+/// Optional production handles layered onto a listener or outbound session.
+///
+/// The headers and blocks channels stay positional (every call site has them).
+/// Everything the node wires later — active-chain serving, transaction
+/// inventory, inbound `tx` forwarding, sync wake — lives here so the entry
+/// points do not grow another suffix each time a handle is added.
+#[derive(Clone, Default)]
+pub struct ListenerExtras {
+    /// Active-chain view for `getheaders` / block `getdata`.
+    pub chain_query: ChainQueryHandle,
+    /// Mempool / orphan / recent-rejects view for the `inv` filter and
+    /// transaction `getdata` serving.
+    pub tx_inventory: TxInventoryHandle,
+    /// Bounded ingress for decoded `tx` bodies from Ready peers.
+    pub inbound_tx: Option<Sender<crate::InboundTx>>,
+    /// Wakes the node's block-sync tick after a headers or block hand-off.
+    pub sync_wake: SyncWakeHandle,
+}
 
 /// State shared by the listener and every connection thread it spawns.
 ///
@@ -36,33 +56,33 @@ struct ConnectionShared {
     activity: Option<Arc<crate::NetworkActivity>>,
     totals: Option<Arc<crate::TrafficTotals>>,
     chain_query: ChainQueryHandle,
+    tx_inventory: TxInventoryHandle,
 }
 
 impl ConnectionShared {
     fn from_parts(
         peer_table: Arc<crate::PeerTable>,
         banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
-        chain_query: ChainQueryHandle,
+        extras: &ListenerExtras,
     ) -> Self {
         Self {
             peer_table,
             banned,
             activity: None,
             totals: None,
-            chain_query,
+            chain_query: extras.chain_query.clone(),
+            tx_inventory: extras.tx_inventory.clone(),
         }
     }
 
-    fn from_controls(
-        controls: &Arc<crate::NetworkControls>,
-        chain_query: ChainQueryHandle,
-    ) -> Self {
+    fn from_controls(controls: &Arc<crate::NetworkControls>, extras: &ListenerExtras) -> Self {
         Self {
             peer_table: Arc::clone(controls.peer_table()),
             banned: Arc::clone(controls.banned()),
             activity: Some(Arc::clone(controls.activity())),
             totals: Some(Arc::clone(controls.totals())),
-            chain_query,
+            chain_query: extras.chain_query.clone(),
+            tx_inventory: extras.tx_inventory.clone(),
         }
     }
 }
@@ -71,10 +91,24 @@ impl ConnectionShared {
 struct InboundSyncSinks {
     headers_tx: Sender<crate::InboundHeaders>,
     blocks_tx: Sender<crate::InboundBlock>,
+    tx_tx: Option<Sender<crate::InboundTx>>,
     wake_tx: SyncWakeHandle,
 }
 
 impl InboundSyncSinks {
+    fn from_channels(
+        headers_tx: Sender<crate::InboundHeaders>,
+        blocks_tx: Sender<crate::InboundBlock>,
+        extras: &ListenerExtras,
+    ) -> Self {
+        Self {
+            headers_tx,
+            blocks_tx,
+            tx_tx: extras.inbound_tx.clone(),
+            wake_tx: extras.sync_wake.clone(),
+        }
+    }
+
     fn send_headers(&self, source: crate::PeerSource, headers: Vec<bitcoin_rs_primitives::Header>) {
         if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
             headers,
@@ -100,6 +134,21 @@ impl InboundSyncSinks {
             tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound blocks channel disconnected");
         } else {
             wake_sync(self.wake_tx.as_ref());
+        }
+    }
+
+    /// Forwards a decoded transaction into the node's ingress channel.
+    ///
+    /// The send is blocking on the bounded channel: a full queue applies
+    /// backpressure to this peer's read loop (and therefore its TCP window)
+    /// rather than dropping the body. A disconnected channel is the node's
+    /// shutdown path; the body is then dropped with a warning.
+    fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
+        let Some(tx_tx) = self.tx_tx.as_ref() else {
+            return;
+        };
+        if let Err(error) = tx_tx.send(crate::InboundTx::new(tx, source)) {
+            tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound tx channel disconnected");
         }
     }
 }
@@ -145,7 +194,7 @@ pub fn serve_with_shutdown(
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
 ) -> Result<(), ListenerError> {
-    serve_with_shutdown_with_chain_and_sync_wake(
+    serve_with_extras(
         addr,
         shutdown,
         network_active,
@@ -154,8 +203,7 @@ pub fn serve_with_shutdown(
         inbound_headers_tx,
         inbound_blocks_tx,
         banned,
-        None,
-        None,
+        ListenerExtras::default(),
     )
 }
 
@@ -173,15 +221,42 @@ pub fn serve_with_shutdown_with_chain_and_sync_wake(
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
 ) -> Result<(), ListenerError> {
-    let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query);
+    serve_with_extras(
+        addr,
+        shutdown,
+        network_active,
+        magic,
+        peer_table,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        banned,
+        ListenerExtras {
+            chain_query,
+            sync_wake: sync_wake_tx,
+            ..ListenerExtras::default()
+        },
+    )
+}
+
+/// Binds `addr` and runs an accept loop with the full production handle set.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn serve_with_extras(
+    addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    network_active: Arc<AtomicBool>,
+    magic: Magic,
+    peer_table: Arc<crate::PeerTable>,
+    inbound_headers_tx: Sender<crate::InboundHeaders>,
+    inbound_blocks_tx: Sender<crate::InboundBlock>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    extras: ListenerExtras,
+) -> Result<(), ListenerError> {
+    let mut shared = ConnectionShared::from_parts(peer_table, banned, &extras);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
-    let inbound_sync_sinks = InboundSyncSinks {
-        headers_tx: inbound_headers_tx,
-        blocks_tx: inbound_blocks_tx,
-        wake_tx: sync_wake_tx,
-    };
+    let inbound_sync_sinks =
+        InboundSyncSinks::from_channels(inbound_headers_tx, inbound_blocks_tx, &extras);
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
 }
 
@@ -277,12 +352,14 @@ pub fn serve_with_controls(
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
 ) -> Result<(), ListenerError> {
-    let shared = ConnectionShared::from_controls(&controls, chain_query);
-    let inbound_sync_sinks = InboundSyncSinks {
-        headers_tx: inbound_headers_tx,
-        blocks_tx: inbound_blocks_tx,
-        wake_tx: sync_wake_tx,
+    let extras = ListenerExtras {
+        chain_query,
+        sync_wake: sync_wake_tx,
+        ..ListenerExtras::default()
     };
+    let shared = ConnectionShared::from_controls(&controls, &extras);
+    let inbound_sync_sinks =
+        InboundSyncSinks::from_channels(inbound_headers_tx, inbound_blocks_tx, &extras);
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
 }
 
@@ -301,7 +378,7 @@ pub fn spawn_outbound_connection(
     inbound_blocks_tx: Sender<crate::InboundBlock>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    spawn_outbound_connection_with_chain_and_sync_wake(
+    spawn_outbound_with_extras(
         addr,
         magic,
         peer_table,
@@ -309,8 +386,7 @@ pub fn spawn_outbound_connection(
         inbound_blocks_tx,
         banned,
         network_active,
-        None,
-        None,
+        ListenerExtras::default(),
     )
 }
 
@@ -327,7 +403,35 @@ pub fn spawn_outbound_connection_with_chain_and_sync_wake(
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query);
+    spawn_outbound_with_extras(
+        addr,
+        magic,
+        peer_table,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        banned,
+        network_active,
+        ListenerExtras {
+            chain_query,
+            sync_wake: sync_wake_tx,
+            ..ListenerExtras::default()
+        },
+    )
+}
+
+/// Spawns an outbound connection with the full production handle set.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn spawn_outbound_with_extras(
+    addr: SocketAddr,
+    magic: Magic,
+    peer_table: Arc<crate::PeerTable>,
+    inbound_headers_tx: Sender<crate::InboundHeaders>,
+    inbound_blocks_tx: Sender<crate::InboundBlock>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    network_active: Arc<AtomicBool>,
+    extras: ListenerExtras,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    let mut shared = ConnectionShared::from_parts(peer_table, banned, &extras);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -335,11 +439,7 @@ pub fn spawn_outbound_connection_with_chain_and_sync_wake(
         addr,
         magic,
         shared,
-        InboundSyncSinks {
-            headers_tx: inbound_headers_tx,
-            blocks_tx: inbound_blocks_tx,
-            wake_tx: sync_wake_tx,
-        },
+        InboundSyncSinks::from_channels(inbound_headers_tx, inbound_blocks_tx, &extras),
     )
 }
 
@@ -358,16 +458,17 @@ pub fn spawn_outbound_connection_with_controls(
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    let shared = ConnectionShared::from_controls(&controls, chain_query);
+    let extras = ListenerExtras {
+        chain_query,
+        sync_wake: sync_wake_tx,
+        ..ListenerExtras::default()
+    };
+    let shared = ConnectionShared::from_controls(&controls, &extras);
     spawn_outbound(
         addr,
         magic,
         shared,
-        InboundSyncSinks {
-            headers_tx: inbound_headers_tx,
-            blocks_tx: inbound_blocks_tx,
-            wake_tx: sync_wake_tx,
-        },
+        InboundSyncSinks::from_channels(inbound_headers_tx, inbound_blocks_tx, &extras),
     )
 }
 
@@ -699,6 +800,7 @@ fn run_connected_session(
             &lease,
             inbound_sync_sinks,
             shared.chain_query.as_deref(),
+            shared.tx_inventory.as_deref(),
             shared.totals.as_ref(),
         )
     })();
@@ -722,6 +824,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     lease: &crate::PeerLease,
     inbound_sync_sinks: &InboundSyncSinks,
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
+    tx_inventory: Option<&dyn crate::dispatch::TxInventory>,
     totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
@@ -768,10 +871,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     command = ?std::mem::discriminant(&message),
                     "p2p message received",
                 );
-                crate::dispatch::dispatch_inbound_with_chain(
+                crate::dispatch::dispatch_inbound_full(
                     peer,
                     &message,
                     chain_query,
+                    tx_inventory,
                     &|| budget.has_block_production_headroom(),
                     &mut |response| {
                         lease.send(response).map_err(|_| {
@@ -785,6 +889,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     }
                     crate::Message::Block(block) => {
                         inbound_sync_sinks.send_block(lease.source(peer_addr), block, raw);
+                    }
+                    crate::Message::Tx(tx) => {
+                        inbound_sync_sinks.send_tx(lease.source(peer_addr), tx);
                     }
                     crate::Message::Pong(nonce) => {
                         lease.stats().complete_ping(nonce, unix_micros());
@@ -1005,12 +1112,14 @@ mod resilient_accept_tests {
     use bitcoin::p2p::Magic;
     use parking_lot::RwLock;
 
-    use super::{ACCEPT_ERROR_INJECT, ConnectionShared, InboundSyncSinks, serve_connections};
+    use super::{
+        ACCEPT_ERROR_INJECT, ConnectionShared, InboundSyncSinks, ListenerExtras, serve_connections,
+    };
 
     fn shared_state() -> ConnectionShared {
         let peer_table = Arc::new(crate::PeerTable::new());
         let banned = Arc::new(RwLock::new(Vec::new()));
-        ConnectionShared::from_parts(peer_table, banned, None)
+        ConnectionShared::from_parts(peer_table, banned, &ListenerExtras::default())
     }
 
     fn sinks() -> InboundSyncSinks {
@@ -1019,6 +1128,7 @@ mod resilient_accept_tests {
         InboundSyncSinks {
             headers_tx,
             blocks_tx,
+            tx_tx: None,
             wake_tx: None,
         }
     }
@@ -1078,7 +1188,10 @@ mod writer_setup_cleanup_tests {
     use bitcoin::p2p::Magic;
     use parking_lot::RwLock;
 
-    use super::{ConnectionShared, InboundSyncSinks, WRITER_SETUP_FAIL, run_connected_session};
+    use super::{
+        ConnectionShared, InboundSyncSinks, ListenerExtras, WRITER_SETUP_FAIL,
+        run_connected_session,
+    };
     use crate::peer::Peer;
 
     fn peer_info(addr: SocketAddr, conn_time: u64) -> crate::PeerInfo {
@@ -1102,6 +1215,7 @@ mod writer_setup_cleanup_tests {
         InboundSyncSinks {
             headers_tx,
             blocks_tx,
+            tx_tx: None,
             wake_tx: None,
         }
     }
@@ -1118,7 +1232,7 @@ mod writer_setup_cleanup_tests {
 
         let peer_table = Arc::new(crate::PeerTable::new());
         let banned = Arc::new(RwLock::new(Vec::new()));
-        let shared = ConnectionShared::from_parts(peer_table, banned, None);
+        let shared = ConnectionShared::from_parts(peer_table, banned, &ListenerExtras::default());
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
@@ -1177,8 +1291,8 @@ mod writer_shutdown_tests {
     use parking_lot::RwLock;
 
     use super::{
-        ConnectionShared, InboundSyncSinks, run_connected_session, run_message_loop,
-        run_writer_loop, spawn_connection_writer,
+        ConnectionShared, InboundSyncSinks, ListenerExtras, run_connected_session,
+        run_message_loop, run_writer_loop, spawn_connection_writer,
     };
     use crate::connection::OutboundBudget;
     use crate::peer::{Peer, PeerState};
@@ -1219,6 +1333,7 @@ mod writer_shutdown_tests {
         let sinks = InboundSyncSinks {
             headers_tx,
             blocks_tx,
+            tx_tx: None,
             wake_tx: None,
         };
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_443));
@@ -1242,6 +1357,42 @@ mod writer_shutdown_tests {
     }
 
     #[test]
+    fn message_loop_forwards_tx_with_lease_stamped_source() {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
+        let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let expected = lease.source(addr);
+
+        let tx = bitcoin_rs_primitives::Network::Regtest
+            .genesis_block()
+            .txs
+            .into_iter()
+            .next()
+            .expect("genesis has a coinbase");
+        let mut wire = Vec::new();
+        crate::wire::write_message(&mut wire, Magic::BITCOIN, &crate::Message::Tx(tx.clone()))
+            .expect("tx encodes");
+
+        let (tx_tx, tx_rx) = crossbeam_channel::bounded(1);
+        let sinks = InboundSyncSinks {
+            headers_tx: crossbeam_channel::unbounded().0,
+            blocks_tx: crossbeam_channel::unbounded().0,
+            tx_tx: Some(tx_tx),
+            wake_tx: None,
+        };
+        let mut peer = Peer::new(EofAfterScript(io::Cursor::new(wire)), Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+
+        // EOF after the one frame ends the loop; the tx was already forwarded.
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_err());
+        let inbound = tx_rx
+            .try_recv()
+            .expect("decoded tx must reach the ingress channel");
+        assert_eq!(inbound.source, expected);
+        assert_eq!(inbound.tx.txid(), tx.txid());
+    }
+
+    #[test]
     fn message_loop_exits_before_read_when_cancelled() {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_444));
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -1258,9 +1409,10 @@ mod writer_shutdown_tests {
         let sinks = InboundSyncSinks {
             headers_tx: crossbeam_channel::unbounded().0,
             blocks_tx: crossbeam_channel::unbounded().0,
+            tx_tx: None,
             wake_tx: None,
         };
-        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None).is_ok());
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_ok());
     }
 
     #[test]
@@ -1285,6 +1437,7 @@ mod writer_shutdown_tests {
         let sinks = InboundSyncSinks {
             headers_tx,
             blocks_tx: crossbeam_channel::unbounded().0,
+            tx_tx: None,
             wake_tx: None,
         };
         let mut peer = Peer::new(
@@ -1295,7 +1448,7 @@ mod writer_shutdown_tests {
         );
         peer.state = PeerState::Ready;
 
-        assert!(run_message_loop(&mut peer, addr, &old, &sinks, None, None).is_ok());
+        assert!(run_message_loop(&mut peer, addr, &old, &sinks, None, None, None).is_ok());
         assert!(headers_rx.try_recv().is_err());
         assert!(old.is_cancelled());
         assert!(table.is_current(replacement.source(addr)));
@@ -1334,10 +1487,11 @@ mod writer_shutdown_tests {
         let sinks = InboundSyncSinks {
             headers_tx: crossbeam_channel::unbounded().0,
             blocks_tx: crossbeam_channel::unbounded().0,
+            tx_tx: None,
             wake_tx: None,
         };
 
-        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None).is_err());
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_err());
         assert_eq!(reads.load(Ordering::Relaxed), 2);
     }
 
@@ -1430,6 +1584,10 @@ mod writer_shutdown_tests {
         script: io::Cursor<Vec<u8>>,
     }
 
+    /// Like [`ScriptedStream`], but the next read after the script is EOF so
+    /// the message loop exits instead of idling until the 60s timeout.
+    struct EofAfterScript(io::Cursor<Vec<u8>>);
+
     impl io::Read for ScriptedStream {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             match io::Read::read(&mut self.script, buf)? {
@@ -1440,6 +1598,25 @@ mod writer_shutdown_tests {
     }
 
     impl io::Write for ScriptedStream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl io::Read for EofAfterScript {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match io::Read::read(&mut self.0, buf)? {
+                0 => Err(io::ErrorKind::UnexpectedEof.into()),
+                read => Ok(read),
+            }
+        }
+    }
+
+    impl io::Write for EofAfterScript {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             Ok(buf.len())
         }
@@ -1646,7 +1823,7 @@ mod writer_shutdown_tests {
 
         let peer_table = Arc::new(crate::PeerTable::new());
         let banned = Arc::new(RwLock::new(Vec::new()));
-        let shared = ConnectionShared::from_parts(peer_table, banned, None);
+        let shared = ConnectionShared::from_parts(peer_table, banned, &ListenerExtras::default());
 
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(outbound_tx);
@@ -1668,6 +1845,7 @@ mod writer_shutdown_tests {
         let sinks = InboundSyncSinks {
             headers_tx: crossbeam_channel::unbounded().0,
             blocks_tx: crossbeam_channel::unbounded().0,
+            tx_tx: None,
             wake_tx: None,
         };
 
@@ -1724,13 +1902,14 @@ mod writer_shutdown_tests {
         let sinks = InboundSyncSinks {
             headers_tx: crossbeam_channel::unbounded().0,
             blocks_tx: crossbeam_channel::unbounded().0,
+            tx_tx: None,
             wake_tx: None,
         };
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_447));
 
         // The Pong response cannot be admitted onto the zero budget, so the
         // saturation policy cancels the lease and ends the loop.
-        let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None);
+        let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
     }

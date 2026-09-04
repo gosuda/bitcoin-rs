@@ -99,8 +99,9 @@ pub fn dispatch_inbound<S>(
 ///
 /// Equivalent to [`dispatch_inbound_full`] with `tx_inventory: None`: every
 /// announced tx is requested, and tx-typed `getdata` items are reported
-/// missing. Kept for call sites (the listener) that have not yet been wired
-/// with a [`TxInventory`] handle.
+/// missing. Production listeners pass a [`TxInventory`] through
+/// [`dispatch_inbound_full`]; this wrapper remains for call sites that only
+/// have a chain view.
 pub fn dispatch_inbound_with_chain<S>(
     peer: &mut Peer<S>,
     message: &Message,

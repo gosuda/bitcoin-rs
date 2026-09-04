@@ -59,6 +59,9 @@ struct AdmissionInner {
     orphan_by_wtxid: hashbrown::HashMap<Wtxid, Txid>,
     /// Insertion order for FIFO eviction; the front is the oldest orphan.
     orphan_order: VecDeque<Txid>,
+    /// Parent txid → orphan txids that spend an output of that parent.
+    /// Used to re-evaluate held children when a parent is admitted.
+    orphans_waiting: hashbrown::HashMap<Txid, hashbrown::HashSet<Txid>>,
     /// Recent-rejects cache: both wtxid and txid of each rejected
     /// transaction, stored as raw [`Hash256`] so a single lookup answers
     /// both BIP339 and legacy inventory vectors.
@@ -106,15 +109,19 @@ impl TxAdmission {
             if old_wtxid != wtxid {
                 inner.orphan_by_wtxid.remove(&old_wtxid);
             }
+            unindex_orphan_parents(&mut inner, &txid, &old);
+            index_orphan_parents(&mut inner, tx);
         } else {
             // New entry: append and evict the oldest over the quota.
             inner.orphan_order.push_back(txid);
+            index_orphan_parents(&mut inner, tx);
             while inner.orphan_order.len() > self.quota {
                 let Some(evicted) = inner.orphan_order.pop_front() else {
                     break;
                 };
                 if let Some(evicted_tx) = inner.orphans.remove(&evicted) {
                     inner.orphan_by_wtxid.remove(&evicted_tx.wtxid());
+                    unindex_orphan_parents(&mut inner, &evicted, &evicted_tx);
                 }
             }
         }
@@ -134,7 +141,24 @@ impl TxAdmission {
         let tx = inner.orphans.remove(txid)?;
         inner.orphan_by_wtxid.remove(&tx.wtxid());
         inner.orphan_order.retain(|id| id != txid);
+        unindex_orphan_parents(&mut inner, txid, &tx);
         Some(tx)
+    }
+
+    /// Removes and returns every orphan that spends an output of `parent`.
+    ///
+    /// Called when `parent` is admitted so the children can be re-evaluated
+    /// through the gateway. Missing children (already evicted or taken) are
+    /// skipped.
+    pub fn take_orphans_waiting_on(&self, parent: Txid) -> Vec<Arc<Tx>> {
+        let waiting = {
+            let mut inner = self.inner.lock();
+            inner.orphans_waiting.remove(&parent).unwrap_or_default()
+        };
+        waiting
+            .into_iter()
+            .filter_map(|txid| self.take_orphan(&txid))
+            .collect()
     }
 
     /// Records a rejected transaction in the recent-rejects cache by both
@@ -169,10 +193,9 @@ impl TxAdmission {
     /// tx_admission.invalidate_recent_rejects();
     /// ```
     ///
-    /// Wire it into `crates/node/src/apply.rs` immediately after a
-    /// successful block connect, before the next `inv` round trips. This
-    /// module deliberately does not edit `apply.rs` (it is outside the
-    /// admission leaf's ownership); the parent connects the call.
+    /// Wired through the node-owned gateway observer: block-connect and
+    /// reorg mutations already publish there, so apply.rs does not own
+    /// admission state.
     pub fn invalidate_recent_rejects(&self) {
         let mut inner = self.inner.lock();
         inner.recent_rejects.clear();
@@ -234,18 +257,19 @@ impl TxAdmission {
     }
 
     fn have_tx(&self, hash: Hash256, wtxid_relay: bool) -> bool {
-        let inner = self.inner.lock();
-        if inner.recent_rejects.contains(&hash) {
-            return true;
-        }
-        if wtxid_relay {
-            let wtxid = Wtxid::from(hash);
-            if inner.orphan_by_wtxid.contains_key(&wtxid) {
+        // Release the admission lock before touching the gateway. Observer
+        // legs (reject invalidation) take this lock after a commit, and
+        // holding it across `gateway.read()` inverts that order.
+        {
+            let inner = self.inner.lock();
+            if inner.recent_rejects.contains(&hash) {
                 return true;
             }
-        } else {
-            let txid = Txid::from(hash);
-            if inner.orphans.contains_key(&txid) {
+            if wtxid_relay {
+                if inner.orphan_by_wtxid.contains_key(&Wtxid::from(hash)) {
+                    return true;
+                }
+            } else if inner.orphans.contains_key(&Txid::from(hash)) {
                 return true;
             }
         }
@@ -254,11 +278,13 @@ impl TxAdmission {
         // wtxid index.
         if wtxid_relay {
             let wtxid = Wtxid::from(hash);
-            let pool = self.gateway.read();
-            pool.entries.iter().any(|(_, entry)| entry.wtxid == wtxid)
+            self.gateway
+                .read()
+                .entries
+                .iter()
+                .any(|(_, entry)| entry.wtxid == wtxid)
         } else {
-            let txid = Txid::from(hash);
-            self.gateway.read().contains_txid(&txid)
+            self.gateway.read().contains_txid(&Txid::from(hash))
         }
     }
 
@@ -268,6 +294,32 @@ impl TxAdmission {
 
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
         self.lookup_tx_by_wtxid(&wtxid)
+    }
+}
+
+fn index_orphan_parents(inner: &mut AdmissionInner, tx: &Tx) {
+    let txid = tx.txid();
+    for input in &tx.inputs {
+        if input.previous_output == bitcoin_rs_primitives::OutPoint::default() {
+            continue;
+        }
+        inner
+            .orphans_waiting
+            .entry(input.previous_output.txid)
+            .or_default()
+            .insert(txid);
+    }
+}
+
+fn unindex_orphan_parents(inner: &mut AdmissionInner, txid: &Txid, tx: &Tx) {
+    for input in &tx.inputs {
+        let parent = input.previous_output.txid;
+        if let Some(waiting) = inner.orphans_waiting.get_mut(&parent) {
+            waiting.remove(txid);
+            if waiting.is_empty() {
+                inner.orphans_waiting.remove(&parent);
+            }
+        }
     }
 }
 
@@ -440,6 +492,24 @@ mod tests {
     }
 
     #[test]
+    fn take_orphans_waiting_on_returns_children() {
+        let gateway = empty_gateway();
+        let admission = TxAdmission::new(gateway);
+        let tx = Arc::new(tx_with_marker(6));
+        let parent = Txid::from(Hash256::from_le_bytes(&[6; 32]));
+        admission.record_orphan(&tx);
+
+        let waiting = admission.take_orphans_waiting_on(parent);
+        assert_eq!(waiting.len(), 1, "the child must be waiting on its parent");
+        assert_eq!(waiting[0].txid(), tx.txid());
+        assert_eq!(
+            admission.orphan_count(),
+            0,
+            "take_orphans_waiting_on must remove the child"
+        );
+    }
+
+    #[test]
     fn take_orphan_removes_entry() {
         let gateway = empty_gateway();
         let admission = TxAdmission::new(gateway);
@@ -451,6 +521,12 @@ mod tests {
 
         let taken = admission.take_orphan(&txid);
         assert!(taken.is_some(), "take_orphan must return the body");
+        assert!(
+            admission
+                .take_orphans_waiting_on(Txid::from(Hash256::from_le_bytes(&[5; 32])))
+                .is_empty(),
+            "taking the orphan must drop its parent index"
+        );
         assert_eq!(
             admission.orphan_count(),
             0,

@@ -62,6 +62,12 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 256;
 // inbound-block bound so both channels share the same flood posture; a full
 // channel drops the hint and never blocks the commit path.
 pub(crate) const CHAIN_HINT_CHANNEL_LIMIT: usize = INBOUND_BLOCK_CHANNEL_LIMIT;
+// Bounds inbound peer transactions between the per-peer listener threads and
+// the single ingress consumer. A full channel applies TCP backpressure to
+// that peer's read loop; other peers keep their own threads. Sized to absorb
+// a burst of honest `tx` deliveries without stalling header/block traffic on
+// the same connection under normal load.
+pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
 /// A coherent, non-torn view of the applied chain tip.
 ///
@@ -1466,6 +1472,10 @@ pub struct NodeState {
     inbound_headers_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundHeaders>>>,
     inbound_blocks_tx: Sender<bitcoin_rs_p2p::InboundBlock>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
+    inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    /// Process-wide P2P admission policy (orphan map + recent-rejects).
+    tx_admission: Arc<crate::tx_admission::TxAdmission>,
     chain_events: Arc<ChainEventPublisher>,
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
     apply_handles: crate::apply::ApplyHandles,
@@ -1769,6 +1779,9 @@ impl NodeState {
         let (inbound_blocks_tx, inbound_blocks_rx_raw) =
             crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundBlock>(INBOUND_BLOCK_CHANNEL_LIMIT);
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let (inbound_tx_tx, inbound_tx_rx_raw) =
+            crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundTx>(INBOUND_TX_CHANNEL_LIMIT);
+        let inbound_tx_rx = Arc::new(Mutex::new(inbound_tx_rx_raw));
         let chain_event_hints_rx = Arc::new(Mutex::new(chain_event_hints_rx_raw));
         // The template-coordinator wake exists from node birth so the apply
         // path and the gateway can fire it before `run` builds the
@@ -1803,6 +1816,21 @@ impl NodeState {
                 Arc::new(observer),
             )
         };
+        let tx_admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::clone(
+            &mempool_gateway,
+        )));
+        // Chain movement (block connect / reorg) must drop stale recent-rejects
+        // so a previously-invalid tx can be requested again once its inputs
+        // confirm. The apply path already publishes those mutations through
+        // this gateway; the observer is the one place that sees them all.
+        if let Err(error) = mempool_gateway.attach_observer_leg(
+            "tx-admission",
+            Arc::new(crate::mempool_observer::RejectInvalidationObserver::new(
+                Arc::clone(&tx_admission),
+            )),
+        ) {
+            tracing::error!(error, "failed to attach tx-admission observer");
+        }
         let mut apply_handles = crate::apply::ApplyHandles {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
@@ -1922,6 +1950,9 @@ impl NodeState {
             inbound_headers_rx,
             inbound_blocks_tx,
             inbound_blocks_rx,
+            inbound_tx_tx,
+            inbound_tx_rx,
+            tx_admission,
             chain_events: Arc::clone(&chain_events),
             chain_event_hints_rx,
             apply_handles,
@@ -2303,6 +2334,25 @@ impl NodeState {
     #[must_use]
     pub fn inbound_blocks_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>> {
         Arc::clone(&self.inbound_blocks_rx)
+    }
+
+    /// Returns a cloned `Sender` that the P2P listener pushes inbound
+    /// transactions into for mempool admission.
+    pub fn inbound_tx_sender(&self) -> Sender<bitcoin_rs_p2p::InboundTx> {
+        self.inbound_tx_tx.clone()
+    }
+
+    /// Returns the shared receiver handle drained by the tx-ingress consumer.
+    #[must_use]
+    pub fn inbound_tx_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>> {
+        Arc::clone(&self.inbound_tx_rx)
+    }
+
+    /// Returns the process-wide P2P admission policy (orphan map, recent-rejects,
+    /// and the [`bitcoin_rs_p2p::TxInventory`] implementation).
+    #[must_use]
+    pub fn tx_admission(&self) -> Arc<crate::tx_admission::TxAdmission> {
+        Arc::clone(&self.tx_admission)
     }
 
     /// Returns the current coherent chain snapshot: the applied tip stamped
@@ -2911,6 +2961,36 @@ mod tests {
         assert!(
             matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
             "channel must reject blocks past INBOUND_BLOCK_CHANNEL_LIMIT, got {overflow:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_tx_channel_is_bounded_against_flood() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p.listen.clear();
+        let state = NodeState::open(config, None)?;
+        let sender = state.inbound_tx_sender();
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        let lease = bitcoin_rs_p2p::PeerLease::new(lease_tx);
+        let source = lease.source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        let tx = bitcoin_rs_primitives::Tx {
+            version: 1,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: 0,
+        };
+        for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
+            sender
+                .try_send(bitcoin_rs_p2p::InboundTx::new(tx.clone(), source))
+                .unwrap_or_else(|error| panic!("send within the bound must succeed: {error}"));
+        }
+        let overflow = sender.try_send(bitcoin_rs_p2p::InboundTx::new(tx, source));
+        assert!(
+            matches!(overflow, Err(crossbeam_channel::TrySendError::Full(_))),
+            "channel must reject txs past INBOUND_TX_CHANNEL_LIMIT, got {overflow:?}",
         );
         Ok(())
     }

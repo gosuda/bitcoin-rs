@@ -40,7 +40,7 @@ pub use connection::{ConnectionId, PeerLease, PeerSource, PeerStats};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
-pub use listener::spawn_outbound_connection;
+pub use listener::{ListenerExtras, spawn_outbound_connection, spawn_outbound_with_extras};
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
     MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, NetworkControls,
