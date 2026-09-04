@@ -1,41 +1,41 @@
 //! Consensus encoding and hashing helpers for the native protocol types.
 //!
-//! `ConsensusEncode`/`ConsensusDecode` are the native consensus serialization:
-//! segwit marker/flag handling and witness serialization follow BIP144, and
-//! malformed input always yields a typed [`DecodeError`].
-
-use std::io::{self, Write};
+//! Encoding writes into an infallible [`Sink`] — no `io::Write`, no encode-time
+//! `Result`. Decoding still yields a typed [`DecodeError`]. Segwit marker/flag
+//! handling and witness serialization follow BIP144.
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
+use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
 
-/// `io::Write` sink that only accumulates the byte count.
-pub(crate) struct CountWriter<'a>(pub(crate) &'a mut usize);
+/// Byte sink used by consensus encoding. Writes cannot fail.
+pub trait Sink {
+    /// Appends `bytes` to the sink.
+    fn write_all(&mut self, bytes: &[u8]);
+}
 
-impl Write for CountWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        *self.0 = self.0.saturating_add(buf.len());
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+impl Sink for Vec<u8> {
+    fn write_all(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
     }
 }
 
-/// `io::Write` adapter that streams bytes into a SHA-256 engine without allocating.
-pub(crate) struct Sha256Writer<'a>(pub(crate) &'a mut Sha256);
+/// Sink that only accumulates the byte count.
+pub(crate) struct CountSink<'a>(pub(crate) &'a mut usize);
 
-impl Write for Sha256Writer<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        Digest::update(self.0, buf);
-        Ok(buf.len())
+impl Sink for CountSink<'_> {
+    fn write_all(&mut self, bytes: &[u8]) {
+        *self.0 = self.0.saturating_add(bytes.len());
     }
+}
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+/// Sink that streams bytes into a SHA-256 engine without allocating.
+pub(crate) struct Sha256Sink<'a>(pub(crate) &'a mut Sha256);
+
+impl Sink for Sha256Sink<'_> {
+    fn write_all(&mut self, bytes: &[u8]) {
+        Digest::update(self.0, bytes);
     }
 }
 
@@ -94,8 +94,18 @@ pub enum DecodeError {
 
 /// Bitcoin consensus encoding for native protocol types.
 pub trait ConsensusEncode {
-    /// Writes the consensus serialization of `self` to the writer.
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()>;
+    /// Writes the consensus serialization of `self` to the sink.
+    fn consensus_encode(&self, sink: &mut impl Sink);
+
+    /// Consensus serialization length without allocating the encoded bytes.
+    ///
+    /// The default walks [`Self::consensus_encode`] into a counting sink.
+    /// Fixed-layout types override this with an analytic size.
+    fn consensus_size(&self) -> usize {
+        let mut total = 0_usize;
+        self.consensus_encode(&mut CountSink(&mut total));
+        total
+    }
 }
 
 /// Bitcoin consensus decoding for native protocol types.
@@ -107,21 +117,15 @@ pub trait ConsensusDecode: Sized {
 /// Serializes a consensus-encodable value into a byte vector.
 #[must_use]
 pub fn consensus_bytes<T: ConsensusEncode + ?Sized>(value: &T) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    if let Err(error) = value.consensus_encode(&mut bytes) {
-        panic!("consensus encoding into Vec failed: {error}");
-    }
+    let mut bytes = Vec::with_capacity(value.consensus_size());
+    value.consensus_encode(&mut bytes);
     bytes
 }
 
 /// Consensus serialization length without allocating the encoded bytes.
 #[must_use]
 pub fn consensus_len<T: ConsensusEncode + ?Sized>(value: &T) -> usize {
-    let mut total = 0_usize;
-    if let Err(error) = value.consensus_encode(&mut CountWriter(&mut total)) {
-        panic!("consensus encoding into count writer failed: {error}");
-    }
-    total
+    value.consensus_size()
 }
 
 /// Decodes a complete value from `bytes`, rejecting any trailing bytes.
@@ -181,8 +185,8 @@ pub(crate) fn read_script(reader: &mut &[u8]) -> Result<Vec<u8>, DecodeError> {
     Ok(take(reader, needed)?.to_vec())
 }
 
-pub(crate) fn write_compact(writer: &mut impl Write, value: u64) -> io::Result<()> {
-    writer.write_all(varint::encode(value).as_slice())
+pub(crate) fn write_compact(sink: &mut impl Sink, value: u64) {
+    sink.write_all(varint::encode(value).as_slice());
 }
 
 /// Compact-size length of a `Vec` slice: a `Vec` is always shorter than
@@ -191,15 +195,32 @@ pub(crate) fn compact_len(len: usize) -> u64 {
     u64::try_from(len).unwrap_or_else(|_| unreachable!("vec length fits u64"))
 }
 
-pub(crate) fn write_script(writer: &mut impl Write, script: &[u8]) -> io::Result<()> {
-    write_compact(writer, compact_len(script.len()))?;
-    writer.write_all(script)
+pub(crate) fn write_script(sink: &mut impl Sink, script: &[u8]) {
+    write_compact(sink, compact_len(script.len()));
+    sink.write_all(script);
+}
+
+fn script_size(script: &[u8]) -> usize {
+    varint::encoded_len(compact_len(script.len())).saturating_add(script.len())
+}
+
+/// Bounded `Vec` capacity from a compact-size count and remaining input.
+fn bounded_capacity(count: u64, remaining: usize, min_item: usize) -> usize {
+    let count = usize::try_from(count).unwrap_or(usize::MAX);
+    if min_item == 0 {
+        return count;
+    }
+    count.min(remaining / min_item)
 }
 
 impl ConsensusEncode for OutPoint {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(self.txid.as_bytes())?;
-        writer.write_all(&self.vout.to_le_bytes())
+    fn consensus_encode(&self, sink: &mut impl Sink) {
+        sink.write_all(self.txid.as_bytes());
+        sink.write_all(&self.vout.to_le_bytes());
+    }
+
+    fn consensus_size(&self) -> usize {
+        36
     }
 }
 
@@ -213,33 +234,29 @@ impl ConsensusDecode for OutPoint {
 }
 
 impl ConsensusEncode for Header {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(&self.version.to_le_bytes())?;
-        writer.write_all(self.prev_blockhash.as_bytes())?;
-        writer.write_all(self.merkle_root.as_byte_array())?;
-        writer.write_all(&self.time.to_le_bytes())?;
-        writer.write_all(&self.bits.to_le_bytes())?;
-        writer.write_all(&self.nonce.to_le_bytes())
+    fn consensus_encode(&self, sink: &mut impl Sink) {
+        sink.write_all(&self.to_bytes());
+    }
+
+    fn consensus_size(&self) -> usize {
+        Self::LEN
     }
 }
 
 impl ConsensusDecode for Header {
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
-        Ok(Self {
-            version: read_i32_le(reader)?,
-            prev_blockhash: BlockHash(Hash256::from_le_bytes(&read_array::<32>(reader)?)),
-            merkle_root: Hash256::from_le_bytes(&read_array::<32>(reader)?),
-            time: read_u32_le(reader)?,
-            bits: read_u32_le(reader)?,
-            nonce: read_u32_le(reader)?,
-        })
+        Ok(Self::from_bytes(&read_array::<{ Self::LEN }>(reader)?))
     }
 }
 
 impl ConsensusEncode for TxOut {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(&self.value.to_le_bytes())?;
-        write_script(writer, &self.script_pubkey)
+    fn consensus_encode(&self, sink: &mut impl Sink) {
+        sink.write_all(&self.value.to_le_bytes());
+        write_script(sink, &self.script_pubkey);
+    }
+
+    fn consensus_size(&self) -> usize {
+        8_usize.saturating_add(script_size(&self.script_pubkey))
     }
 }
 
@@ -253,10 +270,16 @@ impl ConsensusDecode for TxOut {
 }
 
 impl ConsensusEncode for TxIn {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        self.previous_output.consensus_encode(writer)?;
-        write_script(writer, &self.script_sig)?;
-        writer.write_all(&self.sequence.to_le_bytes())
+    fn consensus_encode(&self, sink: &mut impl Sink) {
+        self.previous_output.consensus_encode(sink);
+        write_script(sink, &self.script_sig);
+        sink.write_all(&self.sequence.to_le_bytes());
+    }
+
+    fn consensus_size(&self) -> usize {
+        36_usize
+            .saturating_add(script_size(&self.script_sig))
+            .saturating_add(4)
     }
 }
 
@@ -271,32 +294,76 @@ impl ConsensusDecode for TxIn {
     }
 }
 
+fn tx_has_witness(tx: &Tx) -> bool {
+    tx.inputs.iter().any(|input| !input.witness.is_empty())
+}
+
+fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
+    varint::encoded_len(compact_len(witness.len())).saturating_add(
+        witness
+            .iter()
+            .map(|item| script_size(item))
+            .fold(0_usize, usize::saturating_add),
+    )
+}
+
 /// Serializes a transaction; `with_witness` controls the BIP144 marker/flag and witness
 /// sections (emitted only when some input carries witness data).
-pub(crate) fn encode_tx(tx: &Tx, writer: &mut impl Write, with_witness: bool) -> io::Result<()> {
-    writer.write_all(&tx.version.to_le_bytes())?;
-    let has_witness = with_witness && tx.inputs.iter().any(|input| !input.witness.is_empty());
+pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
+    sink.write_all(&tx.version.to_le_bytes());
+    let has_witness = with_witness && tx_has_witness(tx);
     if has_witness {
-        writer.write_all(&[0x00, 0x01])?;
+        sink.write_all(&[0x00, 0x01]);
     }
-    write_compact(writer, compact_len(tx.inputs.len()))?;
+    write_compact(sink, compact_len(tx.inputs.len()));
     for input in &tx.inputs {
-        input.consensus_encode(writer)?;
+        input.consensus_encode(sink);
     }
-    write_compact(writer, compact_len(tx.outputs.len()))?;
+    write_compact(sink, compact_len(tx.outputs.len()));
     for output in &tx.outputs {
-        output.consensus_encode(writer)?;
+        output.consensus_encode(sink);
     }
     if has_witness {
         for input in &tx.inputs {
-            write_compact(writer, compact_len(input.witness.len()))?;
+            write_compact(sink, compact_len(input.witness.len()));
             for item in &input.witness {
-                write_compact(writer, compact_len(item.len()))?;
-                writer.write_all(item)?;
+                write_compact(sink, compact_len(item.len()));
+                sink.write_all(item);
             }
         }
     }
-    writer.write_all(&tx.lock_time.to_le_bytes())
+    sink.write_all(&tx.lock_time.to_le_bytes());
+}
+
+pub(crate) fn tx_base_size(tx: &Tx) -> usize {
+    4_usize
+        .saturating_add(varint::encoded_len(compact_len(tx.inputs.len())))
+        .saturating_add(
+            tx.inputs
+                .iter()
+                .map(ConsensusEncode::consensus_size)
+                .fold(0_usize, usize::saturating_add),
+        )
+        .saturating_add(varint::encoded_len(compact_len(tx.outputs.len())))
+        .saturating_add(
+            tx.outputs
+                .iter()
+                .map(ConsensusEncode::consensus_size)
+                .fold(0_usize, usize::saturating_add),
+        )
+        .saturating_add(4)
+}
+
+fn tx_witness_size(tx: &Tx) -> usize {
+    if !tx_has_witness(tx) {
+        return 0;
+    }
+    2_usize.saturating_add(
+        tx.inputs
+            .iter()
+            .map(|input| witness_stack_size(&input.witness))
+            .fold(0_usize, usize::saturating_add),
+    )
 }
 
 /// Decodes a transaction, accepting the BIP144 marker/flag/witness layout.
@@ -314,19 +381,21 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
         input_count = read_compact(reader)?;
     }
 
-    let mut inputs = Vec::new();
+    // OutPoint (36) + empty script compact-size (1) + sequence (4).
+    let mut inputs = Vec::with_capacity(bounded_capacity(input_count, reader.len(), 41));
     for _ in 0..input_count {
         inputs.push(TxIn::consensus_decode(reader)?);
     }
-    let mut outputs = Vec::new();
     let output_count = read_compact(reader)?;
+    // value (8) + empty script compact-size (1).
+    let mut outputs = Vec::with_capacity(bounded_capacity(output_count, reader.len(), 9));
     for _ in 0..output_count {
         outputs.push(TxOut::consensus_decode(reader)?);
     }
     if segwit {
         for input in &mut inputs {
             let item_count = read_compact(reader)?;
-            let mut witness = Vec::new();
+            let mut witness = Vec::with_capacity(bounded_capacity(item_count, reader.len(), 1));
             for _ in 0..item_count {
                 let len = read_compact(reader)?;
                 let needed = usize::try_from(len).unwrap_or(usize::MAX);
@@ -354,8 +423,12 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
 }
 
 impl ConsensusEncode for Tx {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        encode_tx(self, writer, true)
+    fn consensus_encode(&self, sink: &mut impl Sink) {
+        encode_tx(self, sink, true);
+    }
+
+    fn consensus_size(&self) -> usize {
+        tx_base_size(self).saturating_add(tx_witness_size(self))
     }
 }
 
@@ -366,13 +439,23 @@ impl ConsensusDecode for Tx {
 }
 
 impl ConsensusEncode for Block {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        self.header.consensus_encode(writer)?;
-        write_compact(writer, compact_len(self.txs.len()))?;
+    fn consensus_encode(&self, sink: &mut impl Sink) {
+        self.header.consensus_encode(sink);
+        write_compact(sink, compact_len(self.txs.len()));
         for tx in &self.txs {
-            tx.consensus_encode(writer)?;
+            tx.consensus_encode(sink);
         }
-        Ok(())
+    }
+
+    fn consensus_size(&self) -> usize {
+        Header::LEN
+            .saturating_add(varint::encoded_len(compact_len(self.txs.len())))
+            .saturating_add(
+                self.txs
+                    .iter()
+                    .map(ConsensusEncode::consensus_size)
+                    .fold(0_usize, usize::saturating_add),
+            )
     }
 }
 
@@ -380,7 +463,7 @@ impl ConsensusDecode for Block {
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
         let header = <Header as ConsensusDecode>::consensus_decode(reader)?;
         let tx_count = read_compact(reader)?;
-        let mut txs = Vec::new();
+        let mut txs = Vec::with_capacity(bounded_capacity(tx_count, reader.len(), 10));
         for _ in 0..tx_count {
             txs.push(<Tx as ConsensusDecode>::consensus_decode(reader)?);
         }
@@ -391,7 +474,7 @@ impl ConsensusDecode for Block {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use super::{DecodeError, deserialize, varint};
+    use super::{ConsensusEncode, DecodeError, deserialize, varint};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -414,6 +497,8 @@ mod tests {
         assert_eq!(header.prev_blockhash.as_bytes(), &[0x11_u8; 32]);
         assert_eq!(header.merkle_root.as_byte_array(), &[0x22_u8; 32]);
         assert_eq!(crate::encode::consensus_bytes(&header), bytes);
+        assert_eq!(header.to_bytes().as_slice(), bytes.as_slice());
+        assert_eq!(header.consensus_size(), crate::Header::LEN);
         Ok(())
     }
 
@@ -490,6 +575,8 @@ mod tests {
         // No witness data: no marker/flag is emitted.
         assert_eq!(&bytes[4], &0x01);
         assert_eq!(deserialize::<Tx>(&bytes)?, tx);
+        assert_eq!(tx.consensus_size(), bytes.len());
+        assert_eq!(tx.base_size(), bytes.len());
         Ok(())
     }
     #[test]
@@ -541,5 +628,29 @@ mod tests {
             Err(DecodeError::SuperfluousWitness)
         );
         Ok(())
+    }
+
+    #[test]
+    fn analytic_tx_size_matches_encoded_length_with_witness() {
+        use crate::{OutPoint, Tx, TxIn, TxOut, Txid};
+
+        let tx = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), 0),
+                script_sig: Vec::new(),
+                sequence: 0xffff_ffff,
+                witness: vec![vec![0x21_u8; 64], vec![0x03_u8; 33]],
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 0,
+        };
+        let bytes = crate::encode::consensus_bytes(&tx);
+        assert_eq!(tx.consensus_size(), bytes.len());
+        assert!(tx.base_size() < bytes.len());
+        assert_eq!(tx.total_size(), bytes.len());
     }
 }

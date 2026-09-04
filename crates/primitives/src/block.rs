@@ -46,8 +46,10 @@ impl Block {
     /// (txid-layout) size.
     #[must_use]
     pub fn stripped_size(&self) -> usize {
-        consensus_len(&self.header)
-            .saturating_add(crate::varint::encode(crate::encode::compact_len(self.txs.len())).len())
+        Header::LEN
+            .saturating_add(crate::varint::encoded_len(crate::encode::compact_len(
+                self.txs.len(),
+            )))
             .saturating_add(self.txs.iter().map(Tx::base_size).sum())
     }
 

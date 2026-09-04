@@ -241,7 +241,7 @@ fn decode_payload(payload: &[u8]) -> Result<JournalRecord, JournalRecordError> {
 fn put_coin(out: &mut Vec<u8>, coin: &Coin) {
     out.extend_from_slice(coin.outpoint.txid.as_bytes());
     put_u32(out, coin.outpoint.vout);
-    let _ = coin.txout.consensus_encode(out);
+    coin.txout.consensus_encode(out);
     put_u32(out, coin.height);
     out.push(u8::from(coin.coinbase));
 }

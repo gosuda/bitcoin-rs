@@ -2,8 +2,8 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot, accept_headers};
-use bitcoin_rs_primitives::{ConsensusEncode, Header, deserialize};
 use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::{Header, deserialize};
 use bitcoin_rs_utxo::stats::{
     CoinStats, CoinStatsAccumulator, CoinStatsListener, coin_stats::COIN_STATS_ENCODED_LEN,
 };
@@ -414,17 +414,7 @@ fn tip_from_node(
 }
 
 fn encode_header(header: &Header) -> Result<[u8; HEADER_LEN], HeaderCheckpointError> {
-    let mut encoded = [0_u8; HEADER_LEN];
-    let mut cursor = &mut encoded[..];
-    header
-        .consensus_encode(&mut cursor)
-        .map_err(|error| HeaderCheckpointError::Codec(error.to_string()))?;
-    if !cursor.is_empty() {
-        return Err(HeaderCheckpointError::Codec(
-            "Bitcoin header did not encode to 80 bytes".to_owned(),
-        ));
-    }
-    Ok(encoded)
+    Ok(header.to_bytes())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
