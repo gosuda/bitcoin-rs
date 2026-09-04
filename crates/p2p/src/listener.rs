@@ -2009,15 +2009,15 @@ mod ready_notify_tests {
         }
     }
 
-    fn shared_with_notify_counter(
-        notified: &Arc<AtomicUsize>,
-    ) -> ConnectionShared {
+    fn shared_with_notify_counter(notified: &Arc<AtomicUsize>) -> ConnectionShared {
         let peer_table = Arc::new(crate::PeerTable::new());
         let banned = Arc::new(RwLock::new(Vec::new()));
         let notified = Arc::clone(notified);
-        ConnectionShared::from_parts(peer_table, banned, None).with_peer_ready(Arc::new(move |_| {
-            notified.fetch_add(1, Ordering::Relaxed);
-        }))
+        ConnectionShared::from_parts(peer_table, banned, None).with_peer_ready(Arc::new(
+            move |_| {
+                notified.fetch_add(1, Ordering::Relaxed);
+            },
+        ))
     }
 
     #[test]
