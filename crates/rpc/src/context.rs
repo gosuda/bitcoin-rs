@@ -283,77 +283,19 @@ impl FromIterator<BlockRecord> for BlockLog {
     }
 }
 
-/// `getchaintxstats`'s figures, read from the log without walking all of it.
+/// Cumulative transactions through `height`, when the log can still say.
 ///
-/// The log is appended in height order and only ever popped from the tail
-/// (`apply::disconnect_block` checks the tail's hash before popping), so it is
-/// non-decreasing by height. `Context::block_at_height` already relies on that
-/// and binary-searches it; this reads the same three boundaries out of it:
-///
-/// - `end`: one past the last record at or below the applied tip.
-/// - `tip_start`: the *first* record at the applied height. Duplicate heights
-///   are possible across a reorg, and the fold this replaces took the first one.
-/// - `window_start`: the first record inside the requested window.
-///
-/// Both transaction counts are differences of prefix sums across those
-/// boundaries, so neither depends on where the applied tip sits in the log.
-///
-/// Only the window is then walked, and only for `earliest_window_time`: it is a
-/// minimum over block timestamps, which are not monotonic, so no prefix sum can
-/// answer it. The window is the caller's `nblocks` (~4,320 by default), not the
-/// chain.
-///
-/// The equivalence oracle this was checked against has since been deleted;
-/// direct expected-value tests in `handlers::chain::tests` pin every figure
-/// against hand-computed values instead.
+/// The log is appended in height order from wherever this process began
+/// applying, and is rebuilt empty on every open. A prefix that does not start
+/// at genesis sums to a number that is not a chain total, so the answer is
+/// `None` rather than an under-count.
 #[must_use]
-pub fn chain_stats(log: &BlockLog, applied_height: u32, lowest_window_height: u64) -> ChainStats {
+pub fn cumulative_tx_count_through(log: &BlockLog, height: u32) -> Option<u64> {
     let blocks: &[BlockRecord] = log;
-    debug_assert!(
-        blocks
-            .windows(2)
-            .all(|pair| pair[0].height <= pair[1].height),
-        "the block log must be non-decreasing by height for these searches"
-    );
-
-    let end = blocks.partition_point(|record| record.height <= applied_height);
-    let applied = &blocks[..end];
-
-    let tip_start = applied.partition_point(|record| record.height < applied_height);
-    let tip_time = applied
-        .get(tip_start)
-        .filter(|record| record.height == applied_height)
-        .map(|record| record.time);
-
-    let window_start =
-        applied.partition_point(|record| u64::from(record.height) < lowest_window_height);
-    let mut earliest_window_time: Option<u32> = None;
-    for record in &applied[window_start..] {
-        earliest_window_time =
-            Some(earliest_window_time.map_or(record.time, |earliest| earliest.min(record.time)));
+    if blocks.first()?.height != 0 || blocks.last()?.height < height {
+        return None;
     }
-    let total_tx_count = log.tx_count_before(end);
-    let window_tx_count = total_tx_count.saturating_sub(log.tx_count_before(window_start));
-
-    ChainStats {
-        total_tx_count,
-        window_tx_count,
-        tip_time,
-        earliest_window_time,
-    }
-}
-
-/// The figures `getchaintxstats` reports, read from a [`BlockLog`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChainStats {
-    /// Sum of `tx_count` over records at or below the applied tip.
-    pub total_tx_count: u64,
-    /// Sum of `tx_count` over records inside the requested window.
-    pub window_tx_count: u64,
-    /// Timestamp of the first record at the applied height.
-    pub tip_time: Option<u32>,
-    /// Lowest timestamp inside the requested window.
-    pub earliest_window_time: Option<u32>,
+    Some(log.tx_count_before(blocks.partition_point(|record| record.height <= height)))
 }
 
 /// Finds the record at `height`, or `None` when the log holds no such height.
@@ -1577,9 +1519,10 @@ impl Context {
     /// interval, so no concurrent admission can invalidate the verdict
     /// before it lands.
     ///
-    /// The pool and transaction-cache fast paths here remain best-effort
-    /// pre-checks for the "already known" no-op; the authoritative
-    /// already-known re-check runs inside the locked evaluation.
+    /// Membership follows `POL-01` Duplicate submission in
+    /// `docs/policies/mempool-policy.md`. The pool read is a best-effort
+    /// pre-check; the locked evaluation is authoritative. The RPC lookup
+    /// cache is not membership.
     ///
     /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap,
     /// matching `sendrawtransaction`'s `maxfeerate=0` behavior.
@@ -1588,12 +1531,16 @@ impl Context {
     ///
     /// Returns the policy rejection verbatim (Core rejection strings) or
     /// the failure verbatim; nothing is inserted when this fails.
+    // Owned `Tx` is the public call form (`admit_transaction(tx, None)`).
+    // Admission only borrows; the value parameter is the compatibility contract.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(
         &self,
         tx: Tx,
         max_feerate_sat_per_kvb: Option<u64>,
     ) -> Result<MutationResult, String> {
-        crate::handlers::tx::admit_transaction(self, tx, max_feerate_sat_per_kvb)
+        crate::handlers::tx::admit_transaction(self, &tx, max_feerate_sat_per_kvb)
+            .map_err(crate::handlers::tx::AdmissionFailure::into_string)
     }
 
     /// Returns the current tip height, or zero before initial sync publishes one.

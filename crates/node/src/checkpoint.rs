@@ -514,6 +514,8 @@ pub(crate) enum CheckpointLoad {
 }
 
 pub(crate) struct RestoredChainstate {
+    /// Authenticated immutable checkpoint generation from `CURRENT`/manifest.
+    pub(crate) generation: u64,
     pub(crate) tree: BlockTree,
     pub(crate) utxo: UtxoSet,
     pub(crate) coin_stats: CoinStats,
@@ -565,6 +567,11 @@ pub(crate) enum CheckpointError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error("checkpoint refused while disconnect of block {hash} at height {height} is in flight")]
     DisconnectInFlight { hash: Hash256, height: u32 },
+    /// The replacement checkpoint's `CURRENT` is already durable; retiring the
+    /// sticky full-revalidation marker failed. Retryable I/O owned by the
+    /// checkpoint worker, not checkpoint corruption.
+    #[error("failed to retire full-revalidation marker: {0}")]
+    FullRevalidationMarker(std::io::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -722,6 +729,7 @@ pub(crate) fn load_checkpoint_from_dir(
 fn classify_checkpoint_error(error: CheckpointError) -> CheckpointLoadError {
     match error {
         CheckpointError::Io(error)
+        | CheckpointError::FullRevalidationMarker(error)
         | CheckpointError::Utxo(bitcoin_rs_utxo::UtxoError::Io(error))
         | CheckpointError::Storage(bitcoin_rs_storage::StorageError::Io(error)) => {
             classify_checkpoint_io(error)
@@ -1274,10 +1282,13 @@ fn load_headers(
 fn load_payloads(
     generation_dir: &Dir,
     manifest: &CheckpointManifestV1,
-    headers: RestoredHeaders,
+    mut headers: RestoredHeaders,
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = manifest.applied_tip.chain_tx_count;
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
+    headers
+        .tree
+        .restore_chain_tx_count(headers.applied_tip_id, chain_tx_count)?;
     let applied_node = headers
         .tree
         .node(headers.applied_tip_id)
@@ -1289,6 +1300,7 @@ fn load_payloads(
         hash: applied_node.hash,
     };
     Ok(RestoredChainstate {
+        generation: manifest.generation,
         tree: headers.tree,
         utxo,
         coin_stats,

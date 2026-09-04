@@ -750,8 +750,24 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
         ApplyError::BlockOutputsExceedInputs | ApplyError::BlockValueOverflow => {
             BlockValidationResult::Rejected(CompactString::from("bad-cb-amount"))
         }
-        ApplyError::Shutdown => BlockValidationResult::Inconclusive,
+        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+            BlockValidationResult::Inconclusive
+        }
         other => BlockValidationResult::Rejected(CompactString::from(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod apply_error_tests {
+    use super::{BlockValidationResult, map_apply_error};
+    use crate::state::ApplyError;
+
+    #[test]
+    fn journal_backpressure_is_operational() {
+        assert!(matches!(
+            map_apply_error(ApplyError::JournalBackpressure("test pressure".to_owned())),
+            BlockValidationResult::Inconclusive
+        ));
     }
 }
 

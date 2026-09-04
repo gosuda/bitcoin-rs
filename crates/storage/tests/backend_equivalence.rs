@@ -14,6 +14,27 @@ const DELETE_ROWS: u32 = 1_000;
 const RANGE_START_INDEX: usize = 1_000;
 const RANGE_END_INDEX: usize = 1_500;
 const PREFIX: &[u8] = &[0];
+const SCRIPT_LIVE_KEY_LEN: usize = 44;
+
+/// `ScriptLive` rows are a 44-byte empty-value locator. Other families stay
+/// generic byte stores in this suite.
+fn cf_key(cf: ColumnFamily, counter: u32) -> Vec<u8> {
+    if cf == ColumnFamily::ScriptLive {
+        let mut key = vec![0_u8; SCRIPT_LIVE_KEY_LEN];
+        key[..4].copy_from_slice(&counter.to_le_bytes());
+        key
+    } else {
+        counter.to_le_bytes().to_vec()
+    }
+}
+
+fn cf_value(cf: ColumnFamily, label: impl AsRef<[u8]>) -> Vec<u8> {
+    if cf == ColumnFamily::ScriptLive {
+        Vec::new()
+    } else {
+        label.as_ref().to_vec()
+    }
+}
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -107,8 +128,8 @@ fn insert_rows(store: &impl KvStore) -> Result<(), StorageError> {
     let mut batch = store.new_batch();
     for cf in ColumnFamily::ALL.iter().copied() {
         for counter in 0_u32..ROWS {
-            let key = counter.to_le_bytes();
-            let value = format!("{cf:?}-{counter}").into_bytes();
+            let key = cf_key(cf, counter);
+            let value = cf_value(cf, format!("{cf:?}-{counter}"));
             batch.put(cf, &key, &value);
         }
     }
@@ -117,11 +138,7 @@ fn insert_rows(store: &impl KvStore) -> Result<(), StorageError> {
 
 fn overwrite_one_row_with_direct_put(store: &impl KvStore) -> Result<(), StorageError> {
     for cf in ColumnFamily::ALL.iter().copied() {
-        store.put(
-            cf,
-            &0_u32.to_le_bytes(),
-            format!("{cf:?}-direct").as_bytes(),
-        )?;
+        store.put(cf, &cf_key(cf, 0), &cf_value(cf, format!("{cf:?}-direct")))?;
     }
     Ok(())
 }
@@ -129,8 +146,8 @@ fn overwrite_one_row_with_direct_put(store: &impl KvStore) -> Result<(), Storage
 fn verify_direct_put_overwrite(store: &impl KvStore) -> Result<(), StorageError> {
     for cf in ColumnFamily::ALL.iter().copied() {
         assert_eq!(
-            store.get(cf, &0_u32.to_le_bytes())?,
-            Some(format!("{cf:?}-direct").into_bytes())
+            store.get(cf, &cf_key(cf, 0))?,
+            Some(cf_value(cf, format!("{cf:?}-direct")))
         );
     }
     Ok(())
@@ -139,8 +156,8 @@ fn verify_direct_put_overwrite(store: &impl KvStore) -> Result<(), StorageError>
 fn verify_rows(store: &impl KvStore) -> Result<(), StorageError> {
     for cf in ColumnFamily::ALL.iter().copied() {
         for counter in 0_u32..ROWS {
-            let key = counter.to_le_bytes();
-            let expected = format!("{cf:?}-{counter}").into_bytes();
+            let key = cf_key(cf, counter);
+            let expected = cf_value(cf, format!("{cf:?}-{counter}"));
             assert_eq!(store.get(cf, &key)?, Some(expected));
         }
     }
@@ -151,9 +168,9 @@ fn verify_prefix_iteration(store: &impl KvStore) -> Result<(), StorageError> {
     for cf in ColumnFamily::ALL.iter().copied() {
         let mut expected = (0_u32..ROWS)
             .filter_map(|counter| {
-                let key = counter.to_le_bytes();
+                let key = cf_key(cf, counter);
                 key.starts_with(PREFIX)
-                    .then(|| (key.to_vec(), format!("{cf:?}-{counter}").into_bytes()))
+                    .then(|| (key, cf_value(cf, format!("{cf:?}-{counter}"))))
             })
             .collect::<Vec<_>>();
         expected.sort_by(|left, right| left.0.cmp(&right.0));
@@ -195,7 +212,7 @@ fn delete_first_rows(store: &impl KvStore) -> Result<(), StorageError> {
     let mut batch = store.new_batch();
     for cf in ColumnFamily::ALL.iter().copied() {
         for counter in 0_u32..DELETE_ROWS {
-            batch.delete(cf, &counter.to_le_bytes());
+            batch.delete(cf, &cf_key(cf, counter));
         }
     }
     store.write(batch)
@@ -204,7 +221,7 @@ fn delete_first_rows(store: &impl KvStore) -> Result<(), StorageError> {
 fn verify_first_rows_deleted(store: &impl KvStore) -> Result<(), StorageError> {
     for cf in ColumnFamily::ALL.iter().copied() {
         for counter in 0_u32..DELETE_ROWS {
-            assert_eq!(store.get(cf, &counter.to_le_bytes())?, None);
+            assert_eq!(store.get(cf, &cf_key(cf, counter))?, None);
         }
     }
     Ok(())

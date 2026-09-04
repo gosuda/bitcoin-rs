@@ -5,4 +5,7 @@
 //! handlers use to emit `corepc_types::v31` responses. Wire shapes are pinned
 //! by the upstream types, never re-declared here.
 
+/// Comparing results against Core's own declared result schemas.
+pub mod schema;
+
 pub(crate) mod convert;

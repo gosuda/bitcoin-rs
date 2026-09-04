@@ -5,7 +5,8 @@
 //! small trait so notification failures cannot affect block connection.
 
 #[cfg(feature = "zmq")]
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, Result, bail, ensure};
+#[cfg(not(feature = "zmq"))]
 use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
 #[cfg(feature = "zmq")]

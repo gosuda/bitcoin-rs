@@ -246,7 +246,10 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             inbound: peer.inbound,
             bip152_hb_to: false,
             bip152_hb_from: false,
-            starting_height: Some(i64::from(peer.start_height)),
+            // Core 31 does not emit `startingheight` at all -- the name does
+            // not appear anywhere in its source. corepc keeps the field
+            // `Option` for older versions, so `None` is what v31 looks like.
+            starting_height: None,
             presynced_headers: Some(-1),
             synced_headers: Some(-1),
             synced_blocks: Some(-1),

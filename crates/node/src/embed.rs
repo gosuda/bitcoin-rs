@@ -294,8 +294,8 @@ impl Node {
     /// mempool `sequence` events and the mining generation wake; there is
     /// no second admission path and no per-call gateway.
     ///
-    /// An already-known transaction succeeds with an empty result, matching
-    /// RPC admission's already-known success.
+    /// Membership follows `POL-01` Duplicate submission in
+    /// `docs/policies/mempool-policy.md`.
     ///
     /// # Errors
     ///

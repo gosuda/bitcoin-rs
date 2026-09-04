@@ -32,8 +32,13 @@ kernel_crate = "bitcoinkernel"
 kernel_crate_version = "0.2.1"
 kernel_sys_crate = "libbitcoinkernel-sys"
 kernel_sys_crate_version = "0.3.0"
-# Set when a differential harness exists (#78 scope item 2). Until then no entry
-# in this file may claim `supported`, and the test suite enforces that too.
+# Set when a differential harness compares *values* against a running reference
+# (#78 scope item 2). Still false, and deliberately so: the shape comparison in
+# `crates/rpc/src/compat/schema.rs` checks field names, types and optionality
+# against Core's own declarations, which is real verification but not this one.
+# A method whose shape matches can still answer a different number.
+#
+# No entry may claim `supported` while this is false, and the suite enforces it.
 differential_harness = false
 
 # Status vocabulary, in the order of decreasing confidence:
@@ -62,6 +67,26 @@ differential_harness = false
 #                          methods this node does not expose are simply absent
 #                          from this file and answer -32601.
 #   not_implemented        not dispatched; answers -32601.
+#
+# Entries may also carry a field-level record of how the result shape differs
+# from the one Core declares for the same method:
+#
+#   schema_missing     Core declares these and this node does not emit them.
+#   schema_extra       This node emits these and Core does not declare them.
+#   schema_mismatched  Both emit them, with disagreeing JSON types.
+#
+# These are checked, not written down: `crates/rpc/src/compat/schema.rs`
+# dispatches the method, compares the answer against Core's own declared result
+# schema, and requires the difference it finds to be exactly the difference
+# recorded here. A field that starts differing fails; so does one recorded here
+# that stops differing, because a stale deviation is a lie in the other
+# direction.
+#
+# The schemas come from Core's `RPCResult` declarations, extracted by
+# `tools/core-rpc-schema/extract.py` into `docs/api/core-rpc-schema.json`. That
+# is a check of *shape* -- names, types, optionality -- and not of values.
+# Values need a live Core, which #78 keeps as a separate documented lane, and
+# is why a clean shape comparison still does not earn `supported`.
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +96,15 @@ differential_harness = false
 [[rpc]]
 method = "getblockchaininfo"
 group = "blockchain"
-status = "implemented_unverified"
+status = "deviation"
+deviation = "Core declares `warnings` as a string; this node emits an array. Optional prune and signet fields are serialized as JSON null rather than omitted. The earlier `bits`/`target` gap is closed. Tracked in #160."
+schema_mismatched = [
+    "automatic_pruning: Null vs BOOL",
+    "prune_target_size: Null vs NUM",
+    "pruneheight: Null vs NUM",
+    "signet_challenge: Null vs STR_HEX",
+    "warnings: Array vs STR",
+]
 
 [[rpc]]
 method = "getdifficulty"
@@ -86,7 +119,13 @@ status = "implemented_unverified"
 [[rpc]]
 method = "getchaintxstats"
 group = "blockchain"
-status = "implemented_unverified"
+status = "deviation"
+deviation = "Optional window statistics (`txrate`, `window_interval`, `window_tx_count`) are serialized as JSON null; Core omits them when unknown. Tracked in #160."
+schema_mismatched = [
+    "txrate: Null vs NUM",
+    "window_interval: Null vs NUM",
+    "window_tx_count: Null vs NUM",
+]
 
 [[rpc]]
 method = "getblockcount"
@@ -182,7 +221,7 @@ status = "implemented_unverified"
 method = "getmempoolinfo"
 group = "mempool"
 status = "deviation"
-deviation = "`usage` is an estimate of this node's own structures, as Core's is of boost's; the two are not the same number for the same mempool. `maxmempool` bounds the virtual-size sum rather than `usage`, so unlike Core the two fields are not in the same currency and `usage` may exceed `maxmempool`."
+deviation = "`usage` is an estimate of this node's own structures, as Core's is of boost's; the two are not the same number for the same mempool. `maxmempool` bounds the virtual-size sum rather than `usage`, so unlike Core the two fields are not in the same currency and `usage` may exceed `maxmempool`. The earlier shape gaps (five missing policy fields and extra `mempool_sequence`) are closed. Tracked in #160."
 
 [[rpc]]
 method = "getmempoolentry"
@@ -247,7 +286,9 @@ status = "implemented_unverified"
 [[rpc]]
 method = "getnetworkinfo"
 group = "network"
-status = "implemented_unverified"
+status = "deviation"
+deviation = "Core declares `warnings` as a string; this node emits an array. Tracked in #160."
+schema_mismatched = ["warnings: Array vs STR"]
 
 [[rpc]]
 method = "getpeerinfo"
@@ -312,7 +353,14 @@ status = "implemented_unverified"
 [[rpc]]
 method = "getmininginfo"
 group = "mining"
-status = "implemented_unverified"
+status = "deviation"
+deviation = "Optional `currentblocktx`, `currentblockweight`, and `signet_challenge` are serialized as JSON null; Core omits them. `warnings` is an array here and a string in Core's declaration. The earlier missing `bits`/`target`/`blockmintxfee`/`next` gap is closed. Tracked in #160."
+schema_mismatched = [
+    "currentblocktx: Null vs NUM",
+    "currentblockweight: Null vs NUM",
+    "signet_challenge: Null vs STR_HEX",
+    "warnings: Array vs STR",
+]
 
 [[rpc]]
 method = "submitblock"

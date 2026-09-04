@@ -147,7 +147,6 @@ pub enum AdmitError {
 /// pool alive. Handoff note for ING-R34: once `ApplyHandles` gains a
 /// `mempool_gateway` field, the reorg caller can read the handle instead
 /// and `shared` shrinks to run-time composition plus tests.
-use crate::EntryId;
 use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::pool::{Mempool, MempoolError, PrioritiseError};
@@ -739,20 +738,6 @@ impl MempoolGateway {
         Ok(AdmitOutcome::Committed(result))
     }
 
-    /// Commits `pool.remove_entry_and_descendants` and publishes its result.
-    pub fn remove_entry_and_descendants(
-        &self,
-        origin: AdmissionOrigin,
-        id: EntryId,
-    ) -> MutationResult {
-        self.commit_infallible(origin, |pool| pool.remove_entry_and_descendants(id))
-    }
-
-    /// Commits `pool.remove_by_txid` and publishes its result.
-    pub fn remove_by_txid(&self, origin: AdmissionOrigin, txid: &Txid) -> MutationResult {
-        self.commit_infallible(origin, |pool| pool.remove_by_txid(txid))
-    }
-
     /// Commits `pool.remove_for_block` and publishes its result.
     pub fn remove_for_block(
         &self,
@@ -1164,7 +1149,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_and_removed_events_arrive_in_commit_order() {
+    fn accepted_and_block_inclusion_events_arrive_in_commit_order() {
         let observer = Arc::new(RecordingObserver::default());
         let gateway = gateway_with(Some(dyn_observer(&observer)));
 
@@ -1178,7 +1163,7 @@ mod tests {
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&child))
             .expect("child in");
-        gateway.remove_by_txid(AdmissionOrigin::Rpc, &parent_txid);
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8);
 
         let seen = observer.seen.lock();
         assert_eq!(
@@ -1186,9 +1171,7 @@ mod tests {
             vec![
                 (hash(&parent_txid), MutationOutcome::Accepted),
                 (hash(&child.txid()), MutationOutcome::Accepted),
-                (hash(&parent_txid), removed(RemovalReason::Explicit)),
-                // The child sweeps with its parent, after it.
-                (hash(&child.txid()), removed(RemovalReason::Explicit)),
+                (hash(&parent_txid), removed(RemovalReason::BlockInclusion)),
             ],
             "one event per change, in commit order"
         );
@@ -1225,6 +1208,35 @@ mod tests {
     }
 
     #[test]
+    fn remove_for_block_leaves_unmined_child_and_publishes_only_the_parent() {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = gateway_with(Some(dyn_observer(&observer)));
+
+        let parent = tx(15);
+        let parent_txid = parent.txid();
+        let mut child = tx(16);
+        child.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
+        let child_txid = child.txid();
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&parent))
+            .expect("parent in");
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&child))
+            .expect("child in");
+        observer.seen.lock().clear();
+
+        let result = gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8);
+
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(
+            *observer.seen.lock(),
+            vec![(hash(&parent_txid), removed(RemovalReason::BlockInclusion))]
+        );
+        assert!(gateway.read().contains_txid(&child_txid));
+        assert_eq!(gateway.read().len(), 1);
+    }
+
+    #[test]
     fn failed_insert_and_noop_remove_publish_nothing() {
         let observer = Arc::new(RecordingObserver::default());
         let gateway = gateway_with(Some(dyn_observer(&observer)));
@@ -1235,7 +1247,8 @@ mod tests {
         let poor = MempoolEntry::new(Arc::new(tx(4)), 100, 50, 1, 7);
         assert!(gateway.insert_entry(AdmissionOrigin::Rpc, poor).is_err());
         let stranger = tx(5);
-        gateway.remove_by_txid(AdmissionOrigin::Rpc, &stranger.txid());
+        let stranger_txid = stranger.txid();
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&stranger], &[stranger_txid], 8);
         gateway.clear(AdmissionOrigin::Rpc);
 
         assert!(observer.seen.lock().is_empty());
@@ -1352,13 +1365,12 @@ mod tests {
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&child))
             .expect("in");
-        let removed = gateway.remove_by_txid(AdmissionOrigin::Rpc, &parent_txid);
+        let removed = gateway.remove_for_block(AdmissionOrigin::Rpc, &[&parent], &[parent_txid], 8);
 
-        assert_eq!(removed.changes.len(), 2);
+        assert_eq!(removed.changes.len(), 1);
         assert_eq!(removed.sequence_base, 3);
         assert_eq!(removed.sequence_of(0), Some(3));
-        assert_eq!(removed.sequence_of(1), Some(4));
-        assert_eq!(gateway.read().sequence_number(), 4);
+        assert_eq!(gateway.read().sequence_number(), 3);
     }
 
     #[test]
@@ -1787,7 +1799,12 @@ mod tests {
                         gateway
                             .insert_entry(AdmissionOrigin::Rpc, entry(&member))
                             .expect("admitted");
-                        gateway.remove_by_txid(AdmissionOrigin::Rpc, &member_txid);
+                        gateway.remove_for_block(
+                            AdmissionOrigin::Rpc,
+                            &[&member],
+                            &[member_txid],
+                            8,
+                        );
                     }
                 })
             })
@@ -2271,7 +2288,8 @@ mod tests {
         let captured_sequence = request.expected_sequence;
 
         // Bump the sequence by removing the other tx.
-        gateway.remove_by_txid(AdmissionOrigin::Rpc, &other.txid());
+        let other_txid = other.txid();
+        gateway.remove_for_block(AdmissionOrigin::Rpc, &[&other], &[other_txid], 8);
 
         // The request still carries the old sequence.
         request.expected_sequence = captured_sequence;
@@ -2285,12 +2303,13 @@ mod tests {
             !gateway.read().contains_txid(&candidate.txid()),
             "no added transaction on stale sequence"
         );
-        // The observer saw the remove_by_txid but no admission publication.
+        // The observer saw the block-inclusion removal but no admission
+        // publication.
         let seen = observer.seen.lock();
         assert_eq!(
             seen.len(),
             1,
-            "only the remove_by_txid publication, no extra observer call from admission"
+            "only the removal publication, no extra observer call from admission"
         );
     }
 

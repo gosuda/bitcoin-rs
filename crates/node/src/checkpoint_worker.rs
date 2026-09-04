@@ -9,14 +9,18 @@
 //! ## Cadence
 //!
 //! [`CHECKPOINT_INTERVAL_BLOCKS`] = 10 000. At 30–75 blocks/s during IBD this
-//! fires every ~2–5 min. The worst-case replay window when the node is killed
-//! between publications is 10 000 blocks: the recovery sidecar (written after
-//! every block apply) records the true tip, and [`crash_recovery::recover_if_needed`]
-//! replays the gap from stored block bodies.
+//! fires every ~2–5 min. [`CHECKPOINT_INTERVAL_SECS`] = 1800 (30 min) is the
+//! fallback for a slow-syncing node that has not reached the block count but
+//! still wants progress anchored.
 //!
-//! [`CHECKPOINT_INTERVAL_SECS`] = 1800 (30 min) is the fallback for a
-//! slow-syncing node that has not reached the block count but still wants
-//! progress anchored.
+//! ## Recovery story
+//!
+//! The published checkpoint is the base recovery anchor. When the chainstate
+//! journal is enabled, boot replays its committed suffix from that checkpoint;
+//! otherwise the node re-validates blocks mined after the checkpoint. Periodic
+//! publication also bounds journal retention by providing a new compaction
+//! base. The former V1 recovery sidecar / body-replay path was retired (issue
+//! #230, task 0); a stale sidecar file on disk is simply ignored.
 //!
 //! ## Cost when it fires
 //!
@@ -26,25 +30,6 @@
 //! atomic swap). Snapshot size scales with tip (22.8 MB at height 130k;
 //! plausibly several GB near modern tips). At a 10k-block cadence the pause is
 //! seconds-to-tens-of-seconds — well under 1 % of wall time during IBD.
-//!
-//! ## Precedence: checkpoint vs sidecar
-//!
-//! The recovery sidecar (`recovery_meta.json`) is written after every
-//! successful block apply and records `(height, last_committed_height,
-//! tip_hash)`. The checkpoint is a durable snapshot at a specific tip.
-//!
-//! **The checkpoint is authoritative for durable state; the sidecar is
-//! authoritative for progress.** On boot, the checkpoint restores the UTXO
-//! set and block tree to its height, then the sidecar's gap is replayed from
-//! stored block bodies. The checkpoint can never name a tip the sidecar has
-//! not already recorded, because the apply path writes the sidecar before the
-//! checkpoint publisher can observe the tip (admission is closed during
-//! publication, so no apply can race).
-//!
-//! To enforce this invariant, after each periodic publication the worker
-//! rewrites the sidecar to match the published tip. If the sidecar was already
-//! at the same height (the normal case) this is a no-op rewrite; if it was
-//! behind (a bug or a lost write) the rewrite corrects it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -63,9 +48,19 @@ use bitcoin_rs_utxo::stats::CoinStatsListener;
 
 use crate::apply::{ApplyAdmission, PruneBodyStore, UndoStore};
 use crate::checkpoint::{self, CheckpointError, CheckpointWrite};
-use crate::crash_recovery;
 use crate::recovery_evidence;
 use crate::state::ChainEventPublisher;
+
+fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), CheckpointError> {
+    crate::chainstate_journal::clear_full_revalidation_marker_at(data_dir).map_err(|error| {
+        match error {
+            crate::chainstate_journal::JournalWriterError::Io(io) => {
+                CheckpointError::FullRevalidationMarker(io)
+            }
+            other => CheckpointError::Invalid(other.to_string()),
+        }
+    })
+}
 
 /// Block count between periodic checkpoint publications during sync.
 ///
@@ -82,7 +77,7 @@ pub(crate) const CHECKPOINT_INTERVAL_SECS: u64 = 1800;
 
 /// Poll interval for the worker loop. Short enough to publish soon after a
 /// trigger fires; long enough to avoid busy-waiting.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// All the shared handles needed to publish a checkpoint from a background
 /// thread, without holding a reference to [`crate::state::NodeState`].
@@ -102,6 +97,7 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<CoinStatsListener>,
     pub(crate) chain_tx_count: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) journal: Option<crate::chainstate_journal::SharedJournalWriter>,
 
     pub(crate) data_dir: PathBuf,
     pub(crate) chain_events: Arc<ChainEventPublisher>,
@@ -109,14 +105,95 @@ pub(crate) struct CheckpointPublisher {
 }
 
 impl CheckpointPublisher {
+    fn maintain_journal(&self) -> bool {
+        let Some(journal) = &self.journal else {
+            return false;
+        };
+        let mut journal = journal.lock();
+        if let Err(error) = journal.flush_due() {
+            metrics::counter!("node.chainstate_journal.flush_failures").increment(1);
+            tracing::warn!(%error, "idle chainstate journal flush failed; apply backpressure remains armed");
+        }
+        match journal.requires_compaction() {
+            Ok(required) => required,
+            Err(error) => {
+                metrics::counter!("node.chainstate_journal.maintenance_failures").increment(1);
+                tracing::warn!(%error, "failed to inspect chainstate journal retention");
+                false
+            }
+        }
+    }
+
     /// Publishes a durable checkpoint, mirroring
     /// [`crate::state::NodeState::write_clean_checkpoint`].
     ///
-    /// After a successful publication, rewrites the recovery sidecar to match
-    /// the published tip so the checkpoint and sidecar never disagree about
-    /// what is durable.
+    /// Both clean and periodic callers use this exact freeze → publish →
+    /// compact → resume sequence.
     pub(crate) fn publish(&self) -> core::result::Result<CheckpointWrite, CheckpointError> {
-        let _exclusive_apply = self.admission.close();
+        let _exclusive_apply = self.admission.pause();
+        let mut journal = self.journal.as_ref().map(|journal| journal.lock());
+        if let Some(writer) = journal.as_mut() {
+            writer
+                .freeze()
+                .map_err(|error| CheckpointError::Invalid(error.to_string()))?;
+        }
+        let applied_tip = self.applied_tip.load_full();
+        let chain_tx_count = self
+            .chain_tx_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut result = self.publish_frozen(applied_tip.as_deref(), chain_tx_count);
+
+        if let (Ok(CheckpointWrite::Published { generation }), Some(tip), Some(writer)) =
+            (&result, applied_tip.as_ref(), journal.as_mut())
+        {
+            let compact_result = self.tip_prev_hash(tip).and_then(|tip_prev_hash| {
+                writer
+                    .compact_to_checkpoint(
+                        *generation,
+                        tip.height,
+                        tip.hash.to_le_bytes(),
+                        tip_prev_hash.to_le_bytes(),
+                        chain_tx_count,
+                    )
+                    .map_err(|error| CheckpointError::Invalid(error.to_string()))
+            });
+            if let Err(error) = compact_result {
+                result = Err(error);
+            }
+        }
+        if let Some(writer) = journal.as_mut()
+            && let Err(error) = writer.resume()
+        {
+            let resume_error = CheckpointError::Invalid(error.to_string());
+            if result.is_ok() {
+                result = Err(resume_error);
+            } else {
+                tracing::error!(%error, "failed to resume chainstate journal after publication error");
+            }
+        }
+        result
+    }
+
+    fn tip_prev_hash(&self, tip: &TipSnapshot) -> core::result::Result<Hash256, CheckpointError> {
+        let tree = self.block_tree.read();
+        let node = tree.node(tip.tip_id).map_err(|error| {
+            CheckpointError::Invalid(format!("checkpoint tip is absent from block tree: {error}"))
+        })?;
+        let Some(parent_id) = node.parent else {
+            return Ok(Hash256::default());
+        };
+        tree.node(parent_id)
+            .map(|parent| parent.hash)
+            .map_err(|error| {
+                CheckpointError::Invalid(format!("checkpoint tip parent is absent: {error}"))
+            })
+    }
+
+    fn publish_frozen(
+        &self,
+        applied_tip: Option<&TipSnapshot>,
+        chain_tx_count: u64,
+    ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         if let Some(marker) = self.undo_store.load_disconnect_marker()?
             && marker.phase == crate::apply::DisconnectPhase::InFlight
         {
@@ -127,7 +204,6 @@ impl CheckpointPublisher {
         }
         // A checkpoint may name this tip only after body files then index rows sync.
         self.block_body_store.sync()?;
-        let applied_tip = self.applied_tip.load_full();
         let written = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
             checkpoint::HeaderCheckpointConfig {
@@ -137,14 +213,13 @@ impl CheckpointPublisher {
             &self.block_tree,
             &self.utxo,
             &self.coin_stats,
-            applied_tip.as_deref(),
-            self.chain_tx_count
-                .load(std::sync::atomic::Ordering::Relaxed),
+            applied_tip,
+            chain_tx_count,
         )?;
         // A2: Only after `CheckpointWrite::Published` and root fsync, write
         // the applied-tip witness for the same captured tip.
         if let CheckpointWrite::Published { .. } = written
-            && let Some(tip) = applied_tip.as_ref()
+            && let Some(tip) = applied_tip
         {
             let genesis_hex = self.genesis_hash.to_string_be();
             let witness = recovery_evidence::AppliedTipWitness::new(
@@ -158,39 +233,22 @@ impl CheckpointPublisher {
             );
             recovery_evidence::write_witness(&self.data_dir, &witness)
                 .map_err(|e| CheckpointError::Invalid(e.to_string()))?;
-
-            // Enforce checkpoint/sidecar agreement: rewrite the sidecar to
-            // match the published tip. The sidecar is authoritative for
-            // progress; the checkpoint is authoritative for durable state.
-            // After publication they must agree at the checkpoint height.
-            let meta = crash_recovery::Meta {
-                height: tip.height,
-                last_committed_height: tip.height,
-                tip_hash_hex: Some(tip.hash.to_string_be()),
-            };
-            if let Err(error) = crash_recovery::write_meta_to_path(
-                &self.data_dir.join(crash_recovery::META_FILENAME),
-                &meta,
-            ) {
-                tracing::warn!(
-                    %error,
-                    height = tip.height,
-                    "failed to rewrite recovery sidecar after periodic checkpoint; \
-                     the checkpoint is durable but the sidecar may lag",
-                );
-            }
         }
         // Remove the disconnect marker only after this checkpoint publishes the
         // matching UTXO set and applied tip.
         self.undo_store
             .disarm_disconnect()
             .map_err(CheckpointError::from)?;
+        // Marker retirement is a second durability step after `CURRENT`.
+        // Propagate failure so the worker retries next tick; the published
+        // checkpoint stays, and the marker stays until unlink+dirsync commits.
+        if matches!(written, CheckpointWrite::Published { .. }) {
+            retire_full_revalidation_marker(&self.data_dir)?;
+        }
         // Everything up to this tip is now recoverable, so undo records below
         // it may be pruned.
-        self.durable_tip_height.store(
-            applied_tip.as_ref().map_or(0, |tip| tip.height),
-            Ordering::Release,
-        );
+        self.durable_tip_height
+            .store(applied_tip.map_or(0, |tip| tip.height), Ordering::Release);
         Ok(written)
     }
 }
@@ -224,6 +282,7 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                     break;
                 }
 
+                let retention_pressure = publisher.maintain_journal();
                 let current_tip = publisher.applied_tip.load();
                 let Some(tip) = current_tip.as_ref() else {
                     // No applied tip yet; nothing to checkpoint.
@@ -233,7 +292,10 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                 let blocks_advanced = tip.height.saturating_sub(last_published_height);
                 let elapsed = last_published_at.elapsed();
 
-                if blocks_advanced < interval_blocks && elapsed < interval_secs {
+                if !retention_pressure
+                    && blocks_advanced < interval_blocks
+                    && elapsed < interval_secs
+                {
                     continue;
                 }
 
@@ -246,6 +308,7 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                             height = tip.height,
                             blocks_advanced,
                             elapsed_secs = elapsed.as_secs(),
+                            retention_pressure,
                             "published periodic chainstate checkpoint during sync",
                         );
                     }
@@ -284,4 +347,45 @@ fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(200).min(remaining));
     }
     shutdown.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retire_full_revalidation_marker;
+    use crate::chainstate_journal::JOURNAL_DIR_NAME;
+    use crate::checkpoint::CheckpointError;
+
+    #[test]
+    fn full_revalidation_marker_clears_after_checkpoint_publication() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let journal_dir = dir.path().join(JOURNAL_DIR_NAME);
+        let marker = journal_dir.join(crate::chainstate_journal::FULL_REVALIDATION_MARKER);
+        std::fs::create_dir_all(&journal_dir)?;
+        std::fs::write(&marker, b"force full validation\n")?;
+
+        retire_full_revalidation_marker(dir.path())?;
+
+        assert!(!marker.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_full_revalidation_marker_is_success() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        retire_full_revalidation_marker(dir.path())?;
+        Ok(())
+    }
+
+    #[test]
+    fn marker_clear_io_is_classified_as_retryable_marker_error() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join(JOURNAL_DIR_NAME), b"not a directory")?;
+
+        let error = match retire_full_revalidation_marker(dir.path()) {
+            Err(error) => error,
+            Ok(()) => anyhow::bail!("opening a file as the journal directory must fail"),
+        };
+        assert!(matches!(error, CheckpointError::FullRevalidationMarker(_)));
+        Ok(())
+    }
 }

@@ -570,6 +570,18 @@ impl<'a> BorrowedBlockChanges<'a> {
     pub const fn remove_count(&self) -> usize {
         self.removes.len()
     }
+
+    /// Iterates the borrowed add operations in commit order.
+    #[must_use]
+    pub fn adds(&self) -> &[BorrowedUtxoAdd<'a>] {
+        &self.adds
+    }
+
+    /// Iterates the spent outpoints in commit order (one per non-netted spend).
+    #[must_use]
+    pub fn spent_outpoints(&self) -> &[OutPoint] {
+        &self.removes
+    }
 }
 
 /// Inverse mutations needed to disconnect one block.

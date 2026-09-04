@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use crate::config::{NodeConfig, RuntimeInputs};
 use crate::event_loop::EventLoop;
 use crate::state::NodeState;
-use crate::{crash_recovery, logging, shutdown};
+use crate::{logging, shutdown};
 
 // Test-only observation seam: records that `run` reached the
 // bootstrap-worker join. Lets a regression that propagates a checkpoint
@@ -735,14 +735,8 @@ pub(crate) fn start_node(
         services: NodeServices::default(),
     };
     {
-        let Some(state) = guard.state.as_ref() else {
-            // The guard was just built with `state: Some(state)` above.
-            panic!("state recorded above");
-        };
-        crash_recovery::recover_if_needed(state)?;
-    }
-    {
         let Some(state) = guard.state.as_mut() else {
+            // The guard was just built with `state: Some(state)` above.
             panic!("state recorded above");
         };
         state.start_index_workers()?;
@@ -750,6 +744,9 @@ pub(crate) fn start_node(
     let Some(state) = guard.state.as_ref() else {
         panic!("state recorded above");
     };
+    // No V1 recovery-sidecar consultation happens here. `NodeState::open`
+    // already restored the checkpoint and, when enabled, replayed the
+    // journal's committed suffix before derived-index workers were started.
 
     tracing::info!(
         network = ?state.config().network,

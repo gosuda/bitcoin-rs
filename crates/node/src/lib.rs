@@ -20,14 +20,13 @@ pub mod bitcoin_conf_compat;
 pub mod block_source;
 /// RPC status for concrete node-owned capabilities.
 mod capabilities;
+mod chainstate_journal;
 mod checkpoint;
 mod checkpoint_fs;
 /// Periodic chainstate checkpoint publication during sync.
 mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
-/// Startup crash recovery.
-pub mod crash_recovery;
 /// Typed in-process node lifecycle: the embedding surface over the same
 /// service graph the daemon wires.
 pub mod embed;

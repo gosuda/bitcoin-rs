@@ -1,0 +1,100 @@
+# Chainstate crash recovery
+
+The node keeps an authenticated checkpoint and a bounded chainstate journal. A restart restores the checkpoint and replays only the journal's durable committed range instead of validating every block applied since the last clean shutdown.
+
+## Safety contract
+
+`head.json` is the journal commit point. It identifies the checkpoint generation and base tip, the durable journal cursor and tip, cumulative transaction count, and committed record count. A record contains the validated header plus exact UTXO mutations needed to reconstruct UTXO state and CoinStats.
+
+A durability boundary runs in this order:
+
+1. flush the storage backend so previously written block bodies and undo rows are durable;
+2. fsync the journal segment;
+3. atomically replace and directory-sync `head.json`.
+
+The writer appends segment bytes between boundaries without per-block fsync. A crash may lose the current uncommitted batch, but startup never treats bytes beyond `head.json` as committed.
+
+Checkpoint publication is one serialized operation: pause chain transitions, freeze and flush the journal, publish the checkpoint, rebase and compact the journal, then resume appends. A crash during publication may select either the previous or new durable frontier; it must not combine identities from both.
+
+## Restore outcomes
+
+| Observed state | Startup action |
+|---|---|
+| Checkpoint and matching journal head | Stream committed records, verify CRC/contiguity/header identity plus the final `(height, hash)` against `head.json`, and publish the journal tip |
+| Checkpoint with no journal | Use the checkpoint and initialize an empty journal |
+| Unreadable journal head, committed-range corruption, base mismatch, or rejected header | Discard that journal generation and use the checkpoint |
+| No complete checkpoint | Start cold and initialize a journal |
+| Reorg below the checkpoint base | Persist `chainstate-journal/full-revalidation` and start cold on every restart until a replacement checkpoint publishes |
+| Journal disabled | Use checkpoint-only recovery. A persisted full-revalidation marker still forces cold validation until marker retirement commits |
+
+Replay mutates an owned checkpoint state. Any error discards the partially reconstructed state before it can become runtime state. Segment contents are read one frame at a time; memory use is bounded by checkpoint state plus one decoded journal record rather than the complete replay gap.
+
+## Reorg behavior
+
+A reorg whose fork is at or above the checkpoint base rewrites `head.json` to the fork before truncating and deleting old-branch segment tails. The disconnect marker is released only after the new journal frontier is durable. A replacement block can then append to the rewritten frontier and survives another restart.
+
+A fork below the checkpoint base cannot be represented as a suffix of that checkpoint. The writer invalidates the journal generation and publishes the full-revalidation marker. The marker is independent of whether journaling is currently enabled: startup must not restore the invalidated checkpoint. Operators should not delete this marker while the old checkpoint remains.
+
+Marker retirement is a second durability step after checkpoint `CURRENT` publishes. The commit point is `unlink(chainstate-journal/full-revalidation)` plus an `fsync` of that directory. A crash before that directory sync, or an I/O error while unlinking or syncing, leaves the marker in place so the next boot stays on cold validation. Those errors are retryable I/O owned by the checkpoint worker: publication reports failure after `CURRENT` is already durable, and the next tick retries until unlink and directory sync succeed. Journal compaction uses the same unlink-and-directory-sync sequence when a writer is open.
+
+## Degraded mode
+
+Journal append, extraction, or durability errors are logged and counted, but do not roll back an already committed block. If the current block cannot be represented in the journal, the writer records that exact append-gap height, truncates any partial segment tail to the known-good cursor, and refuses the next block before mutation. Restart recovery discards uncommitted tail bytes and resumes from the last authenticated frontier. This can increase restart work; it does not authorize replay of an unauthenticated or partial journal or allow an untracked hole to grow.
+
+Investigate repeated `append_failures`, `storage_flush_seconds` spikes, increasing lag, or fallback counters. Preserve the datadir before manually removing files when corruption evidence is needed.
+
+## Disk and cadence policy
+
+The `[chainstate_journal]` configuration controls the independent durability and retention bounds:
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `enabled` | `true` | Enable journal write and replay |
+| `blocks` | 500 | Maximum block batch before a durability boundary |
+| `seconds` | 5 | Maximum time batch before a boundary |
+| `rotate_mib` | 256 | Active segment rotation threshold |
+| `max_journal_mib` | 2048 | Retention/disk bound |
+| `max_lag_blocks` | 500 | Apply backpressure threshold in blocks |
+| `max_lag_seconds` | 30 | Apply backpressure threshold in time |
+
+Durability lag and replay length are different properties. `blocks`/`seconds` bound new progress that a crash can lose; the periodic checkpoint worker flushes the time boundary even when no new block arrives. Before each block mutation, `max_lag_blocks` and `max_lag_seconds` force a synchronous durability retry. Persistent failure stops that block before mutation. Reaching `max_journal_mib` likewise stops apply and asks the checkpoint worker to publish and compact immediately.
+
+## Metrics and logs
+
+Prometheus names use the `node.chainstate_journal` prefix:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `lag_blocks` | gauge | Latest appended height minus durable head height |
+| `head_height` | gauge | Durable journal head height |
+| `size_mib` | gauge | Bytes in journal segment files, reported in MiB at head publication |
+| `replay_seconds` | histogram | Journal validation and replay duration |
+| `fallback_total{reason}` | counter | Checkpoint/cold fallback classified by a bounded reason label |
+| `checksum_failures_total` | counter | Head or committed-record checksum rejection |
+| `append_failures` | counter | Journal extraction or append failure after block commit |
+| `append_gap` | gauge | Writer is fail-closed after an untracked append failure (0/1) |
+| `flush_failures` | counter | Idle-timer durability failure |
+| `backpressure_total` | counter | Block applies refused by a journal lag/retention gate |
+| `maintenance_failures` | counter | Journal retention inspection failure in the worker |
+| `storage_flush_seconds` | histogram | Storage-side flush latency at a durability boundary |
+
+Restore logs include `restore_source`, checkpoint generation/height, selected height/hash, transaction count, replayed record count, duration, and fallback reason where applicable.
+
+## Upgrade behavior
+
+The current binary accepts an existing checkpoint-only datadir and initializes a journal. Partial journal initialization, a retired V1 `recovery_meta.json` sidecar, an incompatible journal version, or a checkpoint-generation mismatch never becomes an integrity error for the checkpoint itself: the journal is rejected and checkpoint recovery continues. Current checkpoint corruption still follows the strict datadir format policy in [policies/db-migration.md](policies/db-migration.md).
+
+The retired V1 sidecar is not read or migrated. It did not contain enough state to provide bounded replay and is intentionally outside the authoritative recovery path.
+
+## Verification
+
+Process-level tests kill child processes after journal, reorg, and publication transitions and verify the next process restores the expected frontier. The upgrade matrix covers no journal, partial initialization, stale V1 sidecar, version mismatch, and checkpoint generation change.
+
+The opt-in Linux/Docker performance gate is:
+
+```bash
+cargo bench -p bitcoin-rs-node --no-default-features --features fjall \
+  --bench chainstate_journal
+```
+
+The test enforces 60-second and 256-MiB RSS-delta ceilings and prints its observed values for CI artifacts. Keep machine-specific measurements in CI or pull-request evidence rather than treating one developer host as a permanent performance baseline. This is a bounded regression gate, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.

@@ -32,7 +32,7 @@ The Core-compatible `pubsequence` ZMQ stream: each event carries the block hash,
 one label (`C` connect, `D` disconnect), and a topic-local little-endian `u32`
 counter. Reorg disconnects are emitted tip-first before connects on the
 replacement branch. Mempool `A`/`R` events are deliberately omitted until the
-mempool has per-transaction sequence assignment and explicit removal reasons.
+mempool has per-transaction sequence assignment and reason-carrying removals.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same

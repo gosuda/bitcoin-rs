@@ -22,6 +22,11 @@ pub enum ColumnFamily {
     BlockBodies = 8,
     /// Per-block UTXO undo records, needed to disconnect a block during a reorg.
     UndoData = 9,
+    /// Live script-index rows: `script-prefix || outpoint` for currently
+    /// unspent outputs (#225). Appended after every existing discriminant so
+    /// the addition is additive -- renumbering these is a breaking change
+    /// (`docs/policies/db-migration.md` 3.1).
+    ScriptLive = 10,
 }
 
 impl ColumnFamily {
@@ -37,6 +42,7 @@ impl ColumnFamily {
         Self::UtxoMeta,
         Self::BlockBodies,
         Self::UndoData,
+        Self::ScriptLive,
     ];
 
     /// Stable backend column-family/table name.
@@ -52,6 +58,7 @@ impl ColumnFamily {
             Self::UtxoMeta => "utxo_meta",
             Self::BlockBodies => "block_bodies",
             Self::UndoData => "undo_data",
+            Self::ScriptLive => "script_live",
         }
     }
 
@@ -73,6 +80,7 @@ impl ColumnFamily {
             7 => Some(Self::UtxoMeta),
             8 => Some(Self::BlockBodies),
             9 => Some(Self::UndoData),
+            10 => Some(Self::ScriptLive),
             _ => None,
         }
     }
@@ -90,6 +98,7 @@ impl ColumnFamily {
             Self::UtxoMeta => 7,
             Self::BlockBodies => 8,
             Self::UndoData => 9,
+            Self::ScriptLive => 10,
         }
     }
 }
