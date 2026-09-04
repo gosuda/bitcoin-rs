@@ -12,6 +12,20 @@ use thiserror::Error;
 
 use crate::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
 
+/// `io::Write` sink that only accumulates the byte count.
+pub(crate) struct CountWriter<'a>(pub(crate) &'a mut usize);
+
+impl Write for CountWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        *self.0 = self.0.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// `io::Write` adapter that streams bytes into a SHA-256 engine without allocating.
 pub(crate) struct Sha256Writer<'a>(pub(crate) &'a mut Sha256);
 
@@ -99,6 +113,16 @@ pub fn consensus_bytes<T: ConsensusEncode + ?Sized>(value: &T) -> Vec<u8> {
         panic!("consensus encoding into Vec failed: {error}");
     }
     bytes
+}
+
+/// Consensus serialization length without allocating the encoded bytes.
+#[must_use]
+pub fn consensus_len<T: ConsensusEncode + ?Sized>(value: &T) -> usize {
+    let mut total = 0_usize;
+    if let Err(error) = value.consensus_encode(&mut CountWriter(&mut total)) {
+        panic!("consensus encoding into count writer failed: {error}");
+    }
+    total
 }
 
 /// Decodes a complete value from `bytes`, rejecting any trailing bytes.

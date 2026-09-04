@@ -1,6 +1,5 @@
 //! Consistent chain, transaction, and script-activity projections for Esplora.
 
-use core::ops::Bound;
 use core::str::FromStr as _;
 use std::sync::Arc;
 
@@ -353,7 +352,7 @@ impl<'a> Projection<'a> {
             timestamp: header.time,
             tx_count: u32::try_from(block.txs.len()).unwrap_or(u32::MAX),
             size: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
-            weight: block_weight(&block, bytes.len()),
+            weight: block.weight(),
             merkle_root: header.merkle_root.to_string(),
             previousblockhash: (header.prev_blockhash != BlockHash::default())
                 .then(|| header.prev_blockhash.to_string()),
@@ -458,13 +457,7 @@ impl<'a> Projection<'a> {
             })
             .collect::<Result<Vec<_>, Response>>()?;
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
-        for (_, entry_id) in pool.funding.range((
-            Bound::Included((mempool_hash, 0)),
-            Bound::Included((mempool_hash, u32::MAX)),
-        )) {
-            let Some(entry) = pool.entry(*entry_id) else {
-                continue;
-            };
+        for entry in pool.entries_funding_script(mempool_hash) {
             for (vout, output) in entry.tx.outputs.iter().enumerate() {
                 let Ok(vout) = u32::try_from(vout) else {
                     continue;
@@ -522,26 +515,22 @@ impl<'a> Projection<'a> {
             .iter()
             .map(|record| (record.txid, record.vout))
             .collect::<std::collections::BTreeSet<_>>();
-        for (_, entry_id) in pool.funding.range((
-            Bound::Included((mempool_hash, 0)),
-            Bound::Included((mempool_hash, u32::MAX)),
-        )) {
-            if let Some(entry) = pool.entry(*entry_id) {
-                selected.insert(entry.txid, (entry.time, Arc::clone(&entry.tx)));
-                for (vout, output) in entry.tx.outputs.iter().enumerate() {
-                    if MempoolScriptHash::from_script(&output.script_pubkey) == mempool_hash
-                        && let Ok(vout) = u32::try_from(vout)
-                    {
-                        outputs.insert((entry.txid, vout));
-                    }
+        for entry in pool.entries_funding_script(mempool_hash) {
+            selected.insert(entry.txid, (entry.time, Arc::clone(&entry.tx)));
+            for (vout, output) in entry.tx.outputs.iter().enumerate() {
+                if MempoolScriptHash::from_script(&output.script_pubkey) == mempool_hash
+                    && let Ok(vout) = u32::try_from(vout)
+                {
+                    outputs.insert((entry.txid, vout));
                 }
             }
         }
-        for (_, entry) in &pool.entries {
-            if entry.tx.inputs.iter().any(|input| {
-                outputs.contains(&(input.previous_output.txid, input.previous_output.vout))
-            }) {
-                selected.insert(entry.txid, (entry.time, Arc::clone(&entry.tx)));
+        for (txid, vout) in &outputs {
+            if let Ok(Some(spender)) = pool.outpoint_spender(OutPoint::new(*txid, *vout)) {
+                selected.insert(
+                    spender.entry.txid,
+                    (spender.entry.time, Arc::clone(&spender.entry.tx)),
+                );
             }
         }
         drop(pool);
@@ -581,28 +570,6 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn script_asm(script: &[u8]) -> String {
     Script::from_bytes(script).to_asm_string()
-}
-
-fn block_weight(block: &Block, total_size: usize) -> u64 {
-    let stripped_size = 80_usize
-        .saturating_add(compact_size_len(block.txs.len()))
-        .saturating_add(block.txs.iter().map(Tx::base_size).sum());
-    u64::try_from(stripped_size)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(3)
-        .saturating_add(u64::try_from(total_size).unwrap_or(u64::MAX))
-}
-
-const fn compact_size_len(value: usize) -> usize {
-    if value < 0xfd {
-        1
-    } else if value <= 0xffff {
-        3
-    } else if value <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 fn script_type(script: &[u8]) -> &'static str {

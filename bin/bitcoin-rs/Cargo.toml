@@ -47,3 +47,7 @@ zmq = ["bitcoin-rs-node/zmq"]
 [[test]]
 name = "g17_dependency_direction"
 path = "tests/gates/g17_dependency_direction.rs"
+
+[[test]]
+name = "g18_hot_path_ledger"
+path = "tests/gates/g18_hot_path_ledger.rs"
