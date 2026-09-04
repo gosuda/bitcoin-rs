@@ -55,21 +55,21 @@ Rules, each enforced by the FSM (`crates/p2p/src/fsm.rs`) and identical to Core'
 
 ## 5. Message Surface
 
-The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**36**). That table is the authority for names and status; this section is the Core-comparison commentary and is checked for set equality of command names. Statuses: *negotiated* (sent and processed in the handshake), *served* (answered with protocol data), *sink* (decoded and forwarded into the node), *ignored* (decoded, FSM-accepted, no response), *legacy* (decoded for corpus/legacy tolerance only).
+The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**36**). That table is the authority for names and status; this section is the Core-comparison commentary and is checked for set equality of command names. The status for each command is defined only by `COMMANDS`; the table below records behavior and Core comparison.
 
-| Command | Status | Behavior and Core 31.1 comparison |
+| Command | Behavior and Core 31.1 comparison |
 | :--- | :--- | :--- |
 | `version` | negotiated | §4. |
 | `verack` | negotiated | §4. |
 | `wtxidrelay` | negotiated | BIP339. Sent in handshake; inbound marks the peer wtxid-relay capable. |
 | `sendaddrv2` | negotiated | BIP155. Sent in handshake; inbound tracked. |
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
-| `ping` | served | Answered with `pong` echoing the nonce, ready peers only; pongs feed peer RTT stats. |
+| `ping` | Answered with `pong` echoing the nonce, ready peers only; pongs feed peer RTT stats. |
 | `pong` | ignored | Completes outstanding ping RTT accounting. |
-| `inv` | served | Answered with `getdata` for announced vectors the node does not already hold. Transaction inventory is filtered through the node's admission view (mempool, orphan map, recent-rejects); a wtxid-relay peer announcing `MSG_WTX` is asked for `MSG_WTX`. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
-| `getdata` | served | Blocks stream from the active chain; transaction inventory is served from the mempool / orphan map. Misses resolve to one trailing `notfound`. Bound: 50 000 vectors. |
+| `inv` | Answered with `getdata` for announced vectors the node does not already hold. Transaction inventory is filtered through the node's admission view (mempool, orphan map, recent-rejects); a wtxid-relay peer announcing `MSG_WTX` is asked for `MSG_WTX`. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
+| `getdata` | Blocks stream from the active chain; transaction inventory is served from the mempool / orphan map. Misses resolve to one trailing `notfound`. Bound: 50 000 vectors. |
 | `notfound` | ignored | Decoded with the same inventory bound. |
-| `getheaders` | served | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
+| `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
 | `headers` | sink | Forwarded to the node's header-sync pipeline. Bound: ≤ 2 000 headers per message. |
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. |
@@ -82,8 +82,8 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `cmpctblock` / `getblocktxn` / `blocktxn` | ignored | BIP152 receive path unused because we never opt in. |
 | `merkleblock` / `filterload` / `filteradd` / `filterclear` | ignored | BIP37. We do not advertise `NODE_BLOOM`, so a default Core peer never sends them; if one does, they are ignored. |
 | `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | ignored | BIP157/158 compact-filter P2P is unsupported. We do not advertise `NODE_COMPACT_FILTERS` and do not serve compact filters. |
-| `reject` | legacy | Decoded, never sent. Core 31 no longer emits `reject` for transaction acceptance results. |
-| `alert` | legacy | Decoded as opaque bytes, ignored. The command is dead in Core. |
+| `reject` | Decoded, never sent. Core 31 no longer emits `reject` for transaction acceptance results. |
+| `alert` | Decoded as opaque bytes, ignored. The command is dead in Core. |
 
 Any command outside this table decodes as `Unknown` and follows §6 — which is also how the one Core 31 command absent above, `sendtxrcncl` (BIP330), is handled.
 
