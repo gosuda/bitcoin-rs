@@ -31,14 +31,18 @@ precedence rule and the index of contract pages live in
   [db-migration.md](policies/db-migration.md) covers on-disk schema changes.
 - [benchmarks/](benchmarks/) holds the retained benchmark notes:
   [end-to-end-sync.md](benchmarks/end-to-end-sync.md),
-  [native-validation-default.md](benchmarks/native-validation-default.md),
+  [offline-full-validation.md](benchmarks/offline-full-validation.md),
+  [p2p-loopback.md](benchmarks/p2p-loopback.md),
+  [muhash-rpc.md](benchmarks/muhash-rpc.md),
   [index-read-path.md](benchmarks/index-read-path.md),
-  [utxo-memory.md](benchmarks/utxo-memory.md), and the product hot-path
+  [utxo-memory.md](benchmarks/utxo-memory.md), the product hot-path
   [ledger](benchmarks/hot-path-ledger.toml) owned by
-  [hot-path-attribution.md](contracts/hot-path-attribution.md). Read the
-  methodology before quoting any number: the results depend on CPU pinning
-  and on whether the harness competes with the node. Raw run evidence lives
-  in the corresponding PR discussions, not in the tree.
+  [hot-path-attribution.md](contracts/hot-path-attribution.md), and the
+  #213 decision
+  [native-validation-default.md](benchmarks/native-validation-default.md).
+  Read the methodology before quoting any number: the results depend on CPU
+  pinning and on whether the harness competes with the node. Raw run
+  evidence lives in the corresponding PR discussions, not in the tree.
 
 ## Explanation
 

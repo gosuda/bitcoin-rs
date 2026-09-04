@@ -61,8 +61,10 @@ Owners:
     `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
     `bitcoin-rs-mining`. Domain services and capability runtimes.
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
-    block index records, undo storage, and UTXO snapshots. `mining` sits in
-    Layer 2 because it depends on `mempool` for candidate selection.
+    block index records, undo storage, and UTXO snapshots. `chain` also
+    depends on `consensus` for BIP9 parameters and the BIP113 locktime
+    cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
+    candidate selection and `chain` for candidate header/work/time context.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
     handlers.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
@@ -117,7 +119,8 @@ Owners:
   resolution and validation (`UserConfig` layers → `NodeConfig`), and
   process-level cache budgeting (`dbcache` distribution across chainstate and
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
-  TOML parsing.
+  TOML parsing. Applied-tip mutation is owned by the chainstate facade
+  (`ARCH-07`), not by a public field bag of subsystem handles.
 
 ### `ARCH-06`: Hierarchy change and exception process
 
@@ -131,17 +134,41 @@ Owners:
 - Speculative or circular dependency edges that violate the one-way flow are
   rejected by automated gate enforcement in CI.
 
+### `ARCH-07`: Chainstate facade owns transition admission
+
+- `bitcoin_rs_node::Chainstate` is the in-process owner of applied-tip
+  mutation. `NodeState`, `BlockSync`, mining, and RPC chain-control hold or
+  clone that facade; they do not assemble a transition from independent locks.
+- `Chainstate::begin_transition` is the only public constructor of a
+  `ChainTransition`. Reorg planning that must abort without mutating takes
+  `lock_transition` first and promotes it with `begin_transition_locked` only
+  after the authoritative plan matches the preloaded plan.
+- Snapshot reads (`Chainstate::snapshot`) copy the independently published
+  header tip and a coherent applied-tip / chain-tx-count pair. They do not
+  take the transition lock and cannot mutate chainstate. `ChainEventPublisher`
+  cells remain a separate coherent snapshot of the applied tip for index
+  consumers (`EVT-01`).
+- Authoritative apply still lives in `crates/node` because it composes chain,
+  consensus, utxo, and storage. Optional consumers (RPC `BlockLog`, ZMQ,
+  TxIndex wake) remain wired here until #77's committed-event consumers own
+  them. Do not push cross-store ordering into `utxo` or `storage`.
+
 ## Live gaps
 
 - **Node slimming and extraction (#217)**: Peer connection session and lease
-  ownership has moved to `PeerTable` in `crates/p2p` (#215, #217), and orphaned
-  node corpus tooling (`corpus.rs`) was dropped. `crates/node` still carries
-  legacy domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
-  the P2P download scheduler (`sync.rs`), and direct backend construction and
-  cache share dispatch (`state.rs`). Relocating these domain-owned mechanics into
-  `crates/utxo`, `crates/storage`, `crates/p2p`, and dedicated tooling crates
-  remains tracked under #217 (open). `crates/node` is the composition layer, but
-  is not yet fully slim.
+- **Node slimming and extraction (#217)**: Peer connection session and lease
+  ownership has moved to `PeerTable` / `P2pService` in `crates/p2p` (#215,
+  #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
+  projection, mempool mutation consumers, and block-body access live with their
+  owner crates (#272). Applied-tip mutation now goes through the `Chainstate`
+  / `ChainTransition` facade (`ARCH-07`). `crates/node` still carries leftover
+  domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
+  the P2P download scheduler (`sync.rs`), direct backend construction and cache
+  share dispatch (`state.rs`), and post-commit RPC/ZMQ/index wiring inside
+  apply. Relocating those into `crates/utxo`, `crates/storage`, and `crates/p2p`
+  remains tracked under #217 (open). A dedicated `crates/chainstate` waits
+  until the facade is dependency-acyclic. `crates/node` is the composition
+  layer, but is not yet fully slim.
 
 ## Proven by
 
@@ -158,3 +185,7 @@ Owners:
   - `crates/rpc/Cargo.toml`: zero storage backend dependencies or features.
   - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
     operator-tier backend feature flags.
+- `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
+  `chain_transition_connect_and_finish_publish_the_new_tip`: the facade
+  copies published tips without reserving generation, and connect/finish
+  through `ChainTransition` is the mutation path.

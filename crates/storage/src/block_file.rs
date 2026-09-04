@@ -17,7 +17,8 @@ pub const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
 /// Maximum size of a normal block-body file: 128 MiB.
 pub const BLOCK_FILE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
-const BLOCK_FILE_DIRECTORY: &str = "blocks";
+/// Directory name for append-only block-body files under a data directory.
+pub const BLOCK_FILE_DIRECTORY: &str = "blocks";
 const BLOCK_FILE_PREFIX: &str = "blk";
 const BLOCK_FILE_SUFFIX: &str = ".dat";
 const FILE_MAX_HEIGHT_PREFIX: &[u8; 7] = b"blkfile";
@@ -709,8 +710,30 @@ fn record_end(position: BlockFilePosition) -> Option<u64> {
     body_offset(position.offset)?.checked_add(u64::from(position.len))
 }
 
+/// Complete framed record bytes in an already-open block file.
+///
+/// Walks headers without truncating an incomplete tail. The returned length is
+/// the logical payload of this file: every complete `BRSB` frame, and none of
+/// the slack or torn suffix.
+pub fn complete_framed_bytes(file: &mut File) -> Result<u64, StorageError> {
+    Ok(complete_framed_stats(file)?.1)
+}
+
+/// Complete framed record count and byte length in an already-open block file.
+///
+/// Does not truncate an incomplete tail.
+pub fn complete_framed_stats(file: &mut File) -> Result<(u64, u64), StorageError> {
+    let file_len = file.metadata()?.len();
+    framed_stats_up_to(file, file_len)
+}
+
 fn recover_append_offset(file: &mut File, file_len: u64) -> Result<u64, StorageError> {
+    Ok(framed_stats_up_to(file, file_len)?.1)
+}
+
+fn framed_stats_up_to(file: &mut File, file_len: u64) -> Result<(u64, u64), StorageError> {
     let mut offset = 0_u64;
+    let mut rows = 0_u64;
     while offset < file_len {
         let remaining = file_len
             .checked_sub(offset)
@@ -734,8 +757,9 @@ fn recover_append_offset(file: &mut File, file_len: u64) -> Result<u64, StorageE
             _ => break,
         };
         offset = next;
+        rows = rows.saturating_add(1);
     }
-    Ok(offset)
+    Ok((rows, offset))
 }
 
 fn read_exact_or_none(reader: &mut impl io::Read, bytes: &mut [u8]) -> Result<bool, StorageError> {
@@ -781,6 +805,12 @@ fn highest_block_file_number(blocks_dir: &Path) -> Result<Option<u32>, StorageEr
         highest = Some(highest.map_or(file_no, |current: u32| current.max(file_no)));
     }
     Ok(highest)
+}
+
+/// Returns whether `name` is a `blkNNNNN.dat` block-body file.
+#[must_use]
+pub fn is_block_file_name(name: &str) -> bool {
+    parse_block_file_name(name).is_some()
 }
 
 fn parse_block_file_name(name: &str) -> Option<u32> {

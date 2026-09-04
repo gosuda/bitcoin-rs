@@ -39,6 +39,16 @@ MDBX its reserved dirty-page pool. Clamping bounds: budgets land in
 `[16 MiB, 1 TiB]`, and the node logs the effective per-namespace capacities at
 startup.
 
+## Storage footprint
+
+`crates/storage/src/footprint.rs` owns the two measurement ledgers used by
+`bitcoin-rs --measure-storage`. The logical ledger sums serialized key and
+value bytes per column family. The physical ledger walks an opened
+data-directory descriptor, counts allocated blocks, rejects symlinks and
+mount crossings, and deduplicates hard links. The ledgers are independent
+and must not be summed; the physical total is the data-directory budget.
+See [`docs/contracts/storage-footprint.md`](../../docs/contracts/storage-footprint.md).
+
 ## Features
 
 - `fjall` (default): enables the fjall-backed `FjallStore`.

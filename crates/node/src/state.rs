@@ -6,12 +6,12 @@
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
-    BlockBodyMetadata, BlockBodySource, BlockLog, NetworkState, PruneResult, PruneService,
-    PruneServiceError, PruneStatus, ZmqNotification,
+    BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
+    ZmqNotification,
 };
 #[cfg(any(
     not(feature = "rocksdb"),
@@ -127,7 +127,7 @@ pub struct ChainEventHint {
 ///
 /// A consumer woken by a hint therefore always reads a snapshot at least as
 /// fresh as the hint. Production wiring goes through `NodeState::open`;
-/// [`Self::detached`] exists for `ApplyHandles` composition in tests.
+/// [`Self::detached`] exists for `Chainstate` composition in tests.
 pub struct ChainEventPublisher {
     epoch: u64,
     sequence: AtomicU64,
@@ -1454,7 +1454,7 @@ pub struct NodeState {
     tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
     tx_index_adapter: Option<Arc<crate::txindex_worker::TxIndexQueryAdapter>>,
-    /// Live txindex status for the RPC `getcapabilities` projection.
+    /// Live txindex facts for the RPC `getcapabilities` projection.
     txindex_status: Arc<crate::txindex_worker::TxIndexCapability>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
@@ -1467,7 +1467,7 @@ pub struct NodeState {
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Cumulative transaction count through `applied_tip`, `0` when unknown.
-    /// Shared with `ApplyHandles`, which maintains it, and with the RPC context.
+    /// Shared with `Chainstate`, which maintains it, and with the RPC context.
     chain_tx_count: Arc<AtomicU64>,
     block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
     blocks: Arc<RwLock<BlockLog>>,
@@ -1491,7 +1491,7 @@ pub struct NodeState {
     tx_admission: Arc<crate::tx_admission::TxAdmission>,
     chain_events: Arc<ChainEventPublisher>,
     chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
-    apply_handles: crate::apply::ApplyHandles,
+    apply_handles: crate::apply::Chainstate,
     sync: Arc<crate::BlockSync>,
     /// Process-wide rollback-evidence warning snapshot (`ArcSwap`).
     warning_store: Arc<crate::recovery_evidence::WarningStore>,
@@ -1746,7 +1746,7 @@ impl NodeState {
                     spec.chain_transition = Some(Arc::clone(&chain_transition));
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                     let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
-                    let body_source: Arc<dyn bitcoin_rs_rpc::context::BlockBodySource> =
+                    let body_source: Arc<dyn BlockBodySource> =
                         Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
                     let block_source =
                         crate::txindex_worker::IndexBlockSource::new(Arc::clone(&blocks))
@@ -1820,32 +1820,30 @@ impl NodeState {
         // path and the gateway can fire it before `run` builds the
         // coordinator; the coordinator attaches itself once constructed.
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        // One node-owned gateway: every admission (RPC sendrawtransaction,
-        // embedded broadcast, reorg re-admission, block-connect eviction)
-        // mutates through this instance, so publication order equals commit
-        // order process-wide. The sequence observer rides along only when a
-        // `--zmq-pub-sequence` endpoint is configured; the mining
-        // generation wake always does.
+        // One gateway per pool. Mempool owns fan-out: mining occupies the
+        // observer slot, and ZMQ sequence (or a test observer) attaches as an
+        // extra named leg. Admission/relay legs attach after construction.
         let mempool_gateway = {
-            let composite = bitcoin_rs_mempool::CompositeObserver::new();
             let publisher = Arc::clone(&zmq_publisher);
-            if publisher.wants_notifications() {
-                composite.add_leg(
-                    "sequence",
-                    Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
-                        publisher,
-                    )),
-                );
-            } else if let Some(observer) = mempool_observer.cloned() {
-                composite.add_leg("test", observer);
-            }
             let cloned_mining = Arc::clone(&mining_generation);
             let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
-            composite.add_leg("mining", mining_leg);
-            bitcoin_rs_mempool::MempoolGateway::shared_with(
-                Arc::clone(&mempool),
-                Arc::new(composite),
-            )
+            let gateway =
+                bitcoin_rs_mempool::MempoolGateway::shared_with(Arc::clone(&mempool), mining_leg);
+            if publisher.wants_notifications() {
+                gateway
+                    .attach_observer_leg(
+                        "sequence",
+                        Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
+                            publisher,
+                        )),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+            } else if let Some(observer) = mempool_observer.cloned() {
+                gateway
+                    .attach_observer_leg("test", observer)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            gateway
         };
         let tx_admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::clone(
             &mempool_gateway,
@@ -1859,11 +1857,12 @@ impl NodeState {
         ) {
             tracing::error!(error, "failed to attach orphan-wake observer");
         }
-        let mut apply_handles = crate::apply::ApplyHandles {
+        let mut apply_handles = crate::apply::Chainstate {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
             chain_tx_count: Arc::clone(&chain_tx_count),
+            applied_seq: Arc::new(AtomicU64::new(0)),
             block_tree: Arc::clone(&block_tree),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
@@ -2479,17 +2478,23 @@ impl NodeState {
         let _ = tx_joined;
     }
 
-    /// Snapshot of the handle set needed by `crate::apply::apply_block`.
+    /// Clone of the chainstate facade used by apply, reorg, and sync.
     #[must_use]
-    pub fn apply_handles(&self) -> crate::apply::ApplyHandles {
+    pub fn chainstate(&self) -> crate::apply::Chainstate {
         self.apply_handles.clone()
+    }
+
+    /// Clone of the chainstate facade.
+    #[must_use]
+    pub fn apply_handles(&self) -> crate::apply::Chainstate {
+        self.chainstate()
     }
 
     /// Synthetically applies `block` as the next tip after consensus checks.
     ///
     /// Delegates to `crate::apply::apply_block` over the shared handles.
     pub fn apply_block(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
-        crate::apply::apply_block(&self.apply_handles, block)
+        self.apply_handles.apply_block(block)
     }
 
     #[cfg(test)]

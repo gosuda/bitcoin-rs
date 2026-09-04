@@ -16,7 +16,7 @@ use bitcoin_rs_primitives::{Block, DecodeError, Hash256, Tx, Txid};
 use bitcoin_rs_storage::StorageError;
 use hashbrown::{HashMap, HashSet};
 
-use crate::apply::ApplyHandles;
+use crate::apply::{ChainTransition, Chainstate};
 use crate::{ApplyError, DisconnectError};
 
 /// Settles a rolled-back disconnect marker once the reorg owner has released
@@ -24,11 +24,8 @@ use crate::{ApplyError, DisconnectError};
 ///
 /// A successful chainstate-journal rewind already disarms the marker, in which
 /// case this is a no-op. Publication runs only when `RolledBack` debt remains.
-fn settle_disconnect_debt(handles: &ApplyHandles) -> core::result::Result<(), ReorgError> {
-    let Some(publisher) = &handles.checkpoint_publisher else {
-        return Ok(());
-    };
-    match publisher.settle_disconnect_debt() {
+fn settle_disconnect_debt(handles: &Chainstate) -> core::result::Result<(), ReorgError> {
+    match handles.checkpoint() {
         Ok(true) => {
             tracing::info!("published checkpoint after branch switch");
             Ok(())
@@ -52,7 +49,7 @@ pub(crate) const DISCONNECT_STREAM_WINDOW: usize = 8;
 /// Invalidates `hash` and its descendants, then moves applied chainstate to the
 /// best remaining valid tip.
 pub fn invalidate_block(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     hash: Hash256,
 ) -> core::result::Result<(), ReorgError> {
     // Validate the block exists and is not genesis before beginning a chain
@@ -66,13 +63,8 @@ pub fn invalidate_block(
     }
 
     let transition = handles
-        .begin_chain_transition()
+        .begin_transition()
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
-    let guard = handles
-        .mempool_gateway
-        .begin_chain_change()
-        .map_err(|_| ReorgError::Unavailable(Box::new(ApplyError::Shutdown)))?;
-    let proof = crate::apply::ChainChangeProof::new(transition, guard);
     loop {
         let (root, target) = {
             let tree = handles.block_tree.read();
@@ -120,10 +112,9 @@ pub fn invalidate_block(
         debug_assert_eq!(published_target, target);
 
         let (progress, outcome) = execute_streamed_plan(
-            handles,
+            &transition,
             &disconnect_nodes,
             &connect,
-            &proof,
             &mut no_staged_body,
         );
         match &outcome {
@@ -151,9 +142,9 @@ pub fn invalidate_block(
             ),
         }
         if matches!(&outcome, Ok(())) {
-            let _ = proof.finish();
+            let _ = transition.finish();
         } else {
-            drop(proof);
+            drop(transition);
         }
         let settle_debt = !matches!(&outcome, Err(ReorgError::Fatal(_)));
         if settle_debt {
@@ -350,7 +341,7 @@ pub enum ReorgError {
 /// naming how far the chain moved, because "it failed" does not tell a caller
 /// whether the node is fine, degraded, or unusable.
 pub fn switch_to_branch<F, G>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     target: NodeId,
     mut staged_body: F,
     mut connected_body: G,
@@ -376,8 +367,8 @@ where
         let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
         preflight_disconnect_bodies(handles, &disconnect_nodes, &mut staged_body)?;
 
-        let transition = handles
-            .begin_chain_transition()
+        let lock = handles
+            .lock_transition()
             .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
 
         // Preloading is optimistic. Only an identical plan recomputed while the
@@ -386,27 +377,20 @@ where
             return Ok(());
         };
         if plan != authoritative {
-            drop(transition);
+            drop(lock);
             continue;
         }
 
         // G5: start the guard after fallible read-only planning and before the
-        // first chain mutation. A replan above drops the transition without
+        // first chain mutation. A replan above drops the lock without
         // beginning a generation, so the gateway stays even and the loop
         // retries. An error during execution leaves the generation odd by
         // design — admission stays closed.
-        let guard = handles
-            .mempool_gateway
-            .begin_chain_change()
+        let transition = handles
+            .begin_transition_locked(lock)
             .map_err(|_| ReorgError::Unavailable(Box::new(ApplyError::Shutdown)))?;
-        let proof = crate::apply::ChainChangeProof::new(transition, guard);
-        let (progress, outcome) = execute_streamed_plan(
-            handles,
-            &disconnect_nodes,
-            &connect,
-            &proof,
-            &mut staged_body,
-        );
+        let (progress, outcome) =
+            execute_streamed_plan(&transition, &disconnect_nodes, &connect, &mut staged_body);
         match &outcome {
             // A fatal disconnect marker left the chainstate torn: abort
             // without reconsidering anything.
@@ -427,9 +411,9 @@ where
             connected_body(body.hash);
         }
         if matches!(&outcome, Ok(())) {
-            let _ = proof.finish();
+            let _ = transition.finish();
         } else {
-            drop(proof);
+            drop(transition);
         }
         if !matches!(&outcome, Err(ReorgError::Fatal(_))) {
             if let Err(settlement) = settle_disconnect_debt(handles) {
@@ -467,7 +451,7 @@ struct LoadedPlanProgress {
 /// storage can fail between the two passes, and that mid-rollback failure is
 /// reported as [`ReorgError::DisconnectBodyLost`].
 fn preflight_disconnect_bodies<F>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     nodes: &[(Hash256, u32)],
     staged_body: &mut F,
 ) -> core::result::Result<(), ReorgError>
@@ -481,20 +465,20 @@ where
 }
 
 /// Returns the current applied-tip height, or 0 when no tip is set.
-fn applied_tip_height(handles: &ApplyHandles) -> u32 {
+fn applied_tip_height(handles: &Chainstate) -> u32 {
     handles.applied_tip.load_full().map_or(0, |tip| tip.height)
 }
 
 fn execute_streamed_plan<F>(
-    handles: &ApplyHandles,
+    transition: &ChainTransition<'_>,
     disconnect_nodes: &[(Hash256, u32)],
     connect: &[LoadedBranchBody],
-    proof: &crate::apply::ChainChangeProof<'_>,
     staged_body: &mut F,
 ) -> (LoadedPlanProgress, core::result::Result<(), ReorgError>)
 where
     F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
 {
+    let handles = transition.chainstate();
     let mut progress = LoadedPlanProgress {
         disconnected: 0,
         connected: 0,
@@ -522,7 +506,7 @@ where
             }
         }
         for body in bodies {
-            match crate::apply::disconnect_block_admitted(handles, &body.block, proof) {
+            match transition.disconnect(&body.block) {
                 Ok(_) => progress.disconnected += 1,
                 Err(
                     error @ (DisconnectError::Fatal { .. } | DisconnectError::MarkerStuck { .. }),
@@ -546,12 +530,7 @@ where
 
     // Connect: from the loaded prefix (bounded by staging).
     for body in connect {
-        match crate::apply::apply_block_with_serialized_admitted(
-            handles,
-            &body.block,
-            body.serialized.clone(),
-            proof,
-        ) {
+        match transition.connect_serialized(&body.block, body.serialized.clone()) {
             Ok(_) => progress.connected += 1,
             Err(source) => {
                 let invalidated = if crate::apply::is_permanent_apply_error(&source) {
@@ -609,7 +588,7 @@ where
 /// [`DISCONNECT_STREAM_WINDOW`] across the entire reorg. A body that cannot
 /// be re-read is skipped, matching Core's best-effort re-add contract.
 fn reconsider_disconnected_transactions<F>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     disconnect_nodes: &[(Hash256, u32)],
     disconnected_count: usize,
     reconnected: &[LoadedBranchBody],
@@ -688,7 +667,7 @@ fn reconsider_entry(
 }
 
 fn current_reorg_plan(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     target: NodeId,
 ) -> core::result::Result<Option<ReorgPlan>, ReorgError> {
     let tree = handles.block_tree.read();
@@ -716,7 +695,7 @@ type LoadedBranchPrefix = (Vec<LoadedBranchBody>, Option<(Hash256, u32)>);
 
 /// Loads every block named by a branch, in the order given.
 fn load_branch_bodies<F>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     ids: &[NodeId],
     staged_body: &mut F,
 ) -> core::result::Result<Vec<LoadedBranchBody>, ReorgError>
@@ -731,7 +710,7 @@ where
 
 /// Loads the contiguous available prefix and names the first missing body.
 fn load_available_branch_prefix<F>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     ids: &[NodeId],
     staged_body: &mut F,
 ) -> core::result::Result<LoadedBranchPrefix, ReorgError>
@@ -753,7 +732,7 @@ where
 }
 
 fn branch_nodes(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     ids: &[NodeId],
 ) -> core::result::Result<Vec<(Hash256, u32)>, ReorgError> {
     let tree = handles.block_tree.read();
@@ -766,7 +745,7 @@ fn branch_nodes(
 }
 
 fn load_branch_body<F>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     hash: Hash256,
     height: u32,
     staged_body: &mut F,

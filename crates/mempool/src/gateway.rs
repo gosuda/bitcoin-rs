@@ -140,11 +140,11 @@ pub enum AdmitError {
 /// Interns one [`MempoolGateway`] per pool `Arc` identity.
 ///
 /// This is the crate's one piece of process-global state, and it exists
-/// because the apply path (`ApplyHandles`) is frozen in this batch and
+/// because the apply path (`Chainstate`) is frozen in this batch and
 /// cannot carry a gateway handle: reorg and run-time composition reach the
 /// run-composed instance through the pool `Arc` they already hold. The
 /// registry holds weak references only, so it never keeps a gateway or a
-/// pool alive. Handoff note for ING-R34: once `ApplyHandles` gains a
+/// pool alive. Handoff note for ING-R34: once `Chainstate` gains a
 /// `mempool_gateway` field, the reorg caller can read the handle instead
 /// and `shared` shrinks to run-time composition plus tests.
 use crate::entry::MempoolEntry;

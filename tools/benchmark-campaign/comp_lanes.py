@@ -3,9 +3,9 @@
 """Campaign lane runner for comparator issues #34, #35, #41.
 
 Runs each comparator in its offline-reachable mode and produces a combined
-lane report.  The P2P loopback lane (#35) is fully reachable offline using
-deterministic fixture nodes.  The offline full-validation lane (#34) and
-the MuHash RPC lane (#41) require a ``bitcoind`` binary; when it is absent
+lane report.  The P2P loopback lane (#35) and the offline full-validation lane (#34)
+are fully reachable offline using deterministic fixture nodes.  The
+MuHash RPC lane (#41) requires a ``bitcoind`` binary; when it is absent
 the lane records the blocking fact and the exact command that failed.
 
 This is a thin orchestrator over the existing comparators — it does not
@@ -26,7 +26,17 @@ from typing import Sequence
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import offline_full_validation  # noqa: E402
 import p2p_loopback  # noqa: E402
+from offline_full_validation import (  # noqa: E402
+    CONFIG_SCHEMA as OFFLINE_CONFIG_SCHEMA,
+    MANIFEST_SCHEMA as OFFLINE_MANIFEST_SCHEMA,
+    CertifiedState as OfflineState,
+    canonical_bytes as offline_canonical_bytes,
+    header_hash as offline_header_hash,
+    main as offline_main,
+    state_json as offline_state_json,
+)
 from p2p_loopback import (  # noqa: E402
     CONFIG_SCHEMA as P2P_CONFIG_SCHEMA,
     canonical_bytes as p2p_canonical_bytes,
@@ -207,35 +217,183 @@ def run_p2p_lane(workspace: Path) -> dict[str, object]:
     }
 
 
-def _find_bitcoind() -> str | None:
-    """Return the path to bitcoind if found on PATH, else None."""
-    return shutil.which("bitcoind")
+def _offline_payload(marker: int) -> bytes:
+    return bytes([marker]) * 80 + bytes([marker])
+
+
+def _offline_record(payload: bytes) -> bytes:
+    return bytes.fromhex(MAGIC) + len(payload).to_bytes(4, "little") + payload
+
+
+def _offline_node_source(expected: OfflineState) -> str:
+    payload = json.dumps(offline_state_json(expected), sort_keys=True)
+    return f"""#!{sys.executable}
+import argparse
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument('--data-dir', required=True)
+parser.add_argument('--corpus', required=True)
+parser.add_argument('--manifest', required=True)
+parser.add_argument('--state', required=True)
+parser.add_argument('--assume-valid-height', default='0')
+args = parser.parse_args()
+corpus = Path(args.corpus).read_bytes()
+if not corpus:
+    raise SystemExit(3)
+Path(args.data_dir, 'imported').write_bytes(corpus)
+Path(args.state).write_text({payload!r} + '\\n', encoding='utf-8')
+raise SystemExit(0)
+"""
+
+
+def _build_offline_fixture(workspace: Path) -> Path:
+    """Create a two-block Core-framed archive and fixture importer nodes."""
+    payloads = (_offline_payload(1), _offline_payload(2))
+    records = [_offline_record(payload) for payload in payloads]
+    archive_bytes = b"".join(records)
+    archive_path = workspace / "blocks.dat"
+    archive_path.write_bytes(archive_bytes)
+    hashes = [offline_header_hash(payload) for payload in payloads]
+    offset = 0
+    entries: list[dict[str, object]] = []
+    for height, (payload, digest, record) in enumerate(
+        zip(payloads, hashes, records, strict=True)
+    ):
+        entries.append(
+            {
+                "height": height,
+                "hash": digest,
+                "offset": offset,
+                "payload_length": len(payload),
+            }
+        )
+        offset += len(record)
+    manifest = {
+        "schema": OFFLINE_MANIFEST_SCHEMA,
+        "network": "mainnet",
+        "network_magic": MAGIC,
+        "start_height": 0,
+        "stop_height": 1,
+        "archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+        "archive_bytes": len(archive_bytes),
+        "blocks": entries,
+    }
+    manifest_path = workspace / "offline-manifest.json"
+    manifest_bytes = offline_canonical_bytes(manifest) + b"\n"
+    manifest_path.write_bytes(manifest_bytes)
+    expected = OfflineState(
+        1,
+        hashes[-1],
+        2,
+        5_000_000_000,
+        "cd" * 32,
+        "ef" * 32,
+        True,
+        True,
+    )
+    node = _write_executable(
+        workspace / "offline-node.py", _offline_node_source(expected)
+    )
+    digest = _sha256_file(node)
+    command = [
+        "{binary}",
+        "--data-dir",
+        "{data_dir}",
+        "--corpus",
+        "{corpus_path}",
+        "--manifest",
+        "{manifest_path}",
+        "--state",
+        "{state_path}",
+        "--assume-valid-height=0",
+    ]
+
+    def _program() -> dict[str, object]:
+        return {
+            "binary": str(node),
+            "binary_sha256": digest,
+            "command": command,
+            "reopen_command": None,
+        }
+
+    config = {
+        "schema": OFFLINE_CONFIG_SCHEMA,
+        "network_magic": MAGIC,
+        "arm_timeout_ns": 10_000_000_000,
+        "posture": {
+            "assume_valid": False,
+            "txindex": False,
+            "blockfilterindex": False,
+            "coinstatsindex": False,
+            "cache_policy": "process-cold/page-cache-unspecified",
+        },
+        "corpus": {
+            "archive": {
+                "path": str(archive_path),
+                "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+                "bytes": len(archive_bytes),
+            },
+            "manifest": {
+                "path": str(manifest_path),
+                "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                "bytes": len(manifest_bytes),
+            },
+        },
+        "expected_state": offline_state_json(expected),
+        "core": _program(),
+        "candidate": _program(),
+        "lifecycle": {"mode": "fresh", "expected_reopen_state": None},
+    }
+    config_path = workspace / "offline-config.json"
+    config_path.write_bytes(offline_canonical_bytes(config) + b"\n")
+    return config_path
 
 
 def run_offline_lane(workspace: Path) -> dict[str, object]:
-    """Report whether an offline full-validation run (#34) is reachable.
-
-    The strict comparator that consumed this signal was retired in commit
-    5487803, so this lane reports host readiness only: a ``bitcoind`` binary
-    on PATH, without which no offline comparison can start.
-    """
-    bitcoind = _find_bitcoind()
-    if bitcoind is None:
+    """Run the offline full-validation comparator (#34) with fixture nodes."""
+    config_path = _build_offline_fixture(workspace)
+    output_path = workspace / "offline-result.json"
+    started = time.monotonic_ns()
+    try:
+        code = offline_main(["--config", str(config_path), "--output", str(output_path)])
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 2
+    except offline_full_validation.ContractError as exc:
         return {
             "issue": "#34",
             "lane": "offline-full-validation",
             "status": "blocked",
-            "reason": "bitcoind binary not found on PATH",
-            "command_run": "shutil.which('bitcoind')",
-            "command_result": None,
+            "reason": str(exc),
+            "elapsed_ns": time.monotonic_ns() - started,
         }
+    elapsed_ns = time.monotonic_ns() - started
+    if code != 0 or not output_path.is_file():
+        return {
+            "issue": "#34",
+            "lane": "offline-full-validation",
+            "status": "blocked",
+            "reason": f"offline_full_validation exited with code {code}",
+            "elapsed_ns": elapsed_ns,
+        }
+    result = json.loads(output_path.read_bytes())
     return {
         "issue": "#34",
         "lane": "offline-full-validation",
-        "status": "reachable",
-        "reason": None,
-        "bitcoind_path": bitcoind,
+        "status": "passed",
+        "result_path": str(output_path),
+        "result_schema": result.get("schema"),
+        "pair_count": result.get("pair_count"),
+        "arm_count": len(result.get("arms", [])),
+        "correctness": result.get("correctness"),
+        "ratio": result.get("candidate_over_core_p50_ratio"),
+        "result_sha256": result.get("result_sha256"),
+        "elapsed_ns": elapsed_ns,
     }
+
+
+def _find_bitcoind() -> str | None:
+    """Return the path to bitcoind if found on PATH, else None."""
+    return shutil.which("bitcoind")
 
 
 def run_rpc_lane(workspace: Path) -> dict[str, object]:

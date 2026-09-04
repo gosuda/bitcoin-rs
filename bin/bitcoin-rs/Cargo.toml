@@ -50,3 +50,7 @@ path = "tests/gates/g17_dependency_direction.rs"
 [[test]]
 name = "g18_hot_path_ledger"
 path = "tests/gates/g18_hot_path_ledger.rs"
+
+[[test]]
+name = "g19_validation_default"
+path = "tests/gates/g19_validation_default.rs"

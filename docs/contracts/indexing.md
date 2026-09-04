@@ -7,9 +7,8 @@ rebuilds.
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
-- Capability status in `crates/node/src/txindex_worker.rs` (`TxIndexCapability`)
-  and the RPC projection in `crates/rpc/src/capabilities.rs` and
-  `crates/rpc/src/context.rs`
+- Capability status: worker-owned facts in `crates/node/src/txindex_worker.rs`
+  (`TxIndexCapability`) and RPC projection in `crates/rpc/src/capabilities.rs`
 
 ## Clauses
 
@@ -112,7 +111,7 @@ remove another script's output.
 ### `IDX-06`: Reorganization rollback and forward reconciliation
 
 - Reorganizations reconcile asynchronously across the chain-event seam
-  (`docs/contracts/chain-events.md`). `ApplyHandles` invokes
+  (`docs/contracts/chain-events.md`). `Chainstate` invokes
   `TxIndexRuntime::wake()` after each committed `applied_tip.store`.
 - **Disconnect walk**:
   - Height-keyed rows (transaction position rows) are removed using per-block
@@ -174,5 +173,7 @@ remove another script's output.
   publication, open failure/timeout, and shutdown abandonment.
 - `crates/node/src/txindex_worker_query_tests.rs`: query gating, snapshot
   consistency, and revision ABA detection tests.
+- `crates/node/src/txindex_worker_block_source_tests.rs`: confirmed-body
+  serving by height/hash (`IDX-03`, `RCV-01`).
 - `crates/node/src/apply.rs`:
   `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.

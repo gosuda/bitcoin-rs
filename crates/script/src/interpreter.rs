@@ -411,14 +411,6 @@ pub enum ScriptError {
     /// Taproot key-path verification requires all prevouts for multi-input transactions.
     #[error("taproot key-path verification requires all prevouts for multi-input transactions")]
     TaprootPrevoutsUnavailable,
-    /// This portable path only validates one-element Taproot key-path witnesses.
-    #[error(
-        "taproot witness stack with {elements} elements requires unsupported annex or script-path validation"
-    )]
-    TaprootUnsupportedWitness {
-        /// Number of witness elements supplied for the P2TR spend.
-        elements: usize,
-    },
     /// The script evaluated to a Core-named failure.
     #[error("script failed: {code}")]
     Invalid {

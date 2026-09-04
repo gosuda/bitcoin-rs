@@ -86,25 +86,25 @@ class P2PLaneTests(unittest.TestCase):
 class OfflineLaneTests(unittest.TestCase):
     """Tests for the offline full-validation lane (#34)."""
 
-    def test_offline_lane_blocked_without_bitcoind(self) -> None:
-        workspace = Path(tempfile.mkdtemp(prefix="offline-lane-test-"))
-        try:
-            report = run_all_lanes(workspace)
-            lanes = report["lanes"]
-            assert isinstance(lanes, list)
-            offline = lanes[0]
-            assert isinstance(offline, dict)
-            self.assertEqual(offline["issue"], "#34")
-            if shutil.which("bitcoind") is None:
-                self.assertEqual(offline["status"], "blocked")
-                self.assertEqual(
-                    offline["reason"], "bitcoind binary not found on PATH"
-                )
-                self.assertEqual(offline["command_run"], "shutil.which('bitcoind')")
-            else:
-                self.assertEqual(offline["status"], "reachable")
-        finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+    def setUp(self) -> None:
+        self.workspace = Path(tempfile.mkdtemp(prefix="offline-lane-test-"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+    def test_offline_lane_produces_valid_result(self) -> None:
+        result = comp_lanes.run_offline_lane(self.workspace)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(
+            result["result_schema"], "offline-full-validation-result-v1"
+        )
+        self.assertEqual(result["pair_count"], 7)
+        self.assertEqual(result["arm_count"], 14)
+        correctness = result["correctness"]
+        assert isinstance(correctness, dict)
+        self.assertTrue(all(correctness.values()))
+        self.assertIsNotNone(result["result_sha256"])
+        self.assertIsNotNone(result["ratio"])
 
 
 class RPCLaneTests(unittest.TestCase):
@@ -153,6 +153,18 @@ class CombinedReportTests(unittest.TestCase):
             )
             expected = hashlib.sha256(canonical).hexdigest()
             self.assertEqual(report["report_sha256"], expected)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_offline_lane_in_report_has_passed_status(self) -> None:
+        workspace, report = _run_in_workspace()
+        try:
+            lanes = report["lanes"]
+            assert isinstance(lanes, list)
+            offline = lanes[0]
+            assert isinstance(offline, dict)
+            self.assertEqual(offline["lane"], "offline-full-validation")
+            self.assertEqual(offline["status"], "passed")
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
 

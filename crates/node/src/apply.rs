@@ -1,4 +1,7 @@
-//! Block-apply pipeline over shared node handles.
+//! Authoritative chainstate mutation: connect, disconnect, and window apply.
+//!
+//! Ownership, admission, and the `Chainstate` / `ChainTransition` boundary
+//! are specified by `ARCH-07` in `docs/contracts/architecture.md`.
 
 mod scratch;
 
@@ -6,7 +9,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot};
-use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, rust_path::UtxoView};
+use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::UtxoView};
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 use bitcoin_rs_primitives::{
     Block, BlockHash, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid,
@@ -635,8 +638,9 @@ impl ApplyAdmission {
 /// Proof that admission and the chain-transition lock are both held.
 ///
 /// [`begin_chain_transition`] is the only constructor. Field order releases
-/// the transition lock before the permit.
-pub(crate) struct ChainTransition<'a> {
+/// the transition lock before the permit. This is the lock token only; the
+/// caller-facing mutation capability is [`ChainTransition`].
+pub(crate) struct TransitionLock<'a> {
     _transition: MutexGuard<'a, ()>,
     _admission: RwLockReadGuard<'a, ()>,
 }
@@ -644,22 +648,22 @@ pub(crate) struct ChainTransition<'a> {
 fn begin_chain_transition<'a>(
     admission: &'a ApplyAdmission,
     chain_transition: &'a Mutex<()>,
-) -> core::result::Result<ChainTransition<'a>, ApplyError> {
+) -> core::result::Result<TransitionLock<'a>, ApplyError> {
     let admission_guard = admission.enter()?;
     let transition = chain_transition.lock();
     admission.ensure_open()?;
-    Ok(ChainTransition {
+    Ok(TransitionLock {
         _transition: transition,
         _admission: admission_guard,
     })
 }
 
 /// Unforgeable proof that a chain change is active: holds both the
-/// admission/transition authority ([`ChainTransition`]) and the gateway's
+/// admission/transition lock ([`TransitionLock`]) and the gateway's
 /// [`ChainChangeGuard`] (odd generation).
 ///
 /// Fields and constructor are private to this module. The admitted helpers
-/// accept `&ChainChangeProof`, not independent `&ChainTransition` and
+/// accept `&ChainChangeProof`, not independent `&TransitionLock` and
 /// `&ChainChangeGuard` arguments, so a call without an active odd generation
 /// fails to compile. Build one proof per single operation, whole window, or
 /// whole reorg. Finish only at the outer success boundary.
@@ -668,7 +672,7 @@ pub(crate) struct ChainChangeProof<'a> {
         dead_code,
         reason = "carried for unforgeability: holding the proof proves both tokens were acquired"
     )]
-    transition: ChainTransition<'a>,
+    transition: TransitionLock<'a>,
     guard: ChainChangeGuard,
 }
 
@@ -677,7 +681,7 @@ impl<'a> ChainChangeProof<'a> {
     ///
     /// Private to this module: only the entry-point functions that begin a
     /// chain change call this.
-    pub(crate) fn new(transition: ChainTransition<'a>, guard: ChainChangeGuard) -> Self {
+    pub(crate) fn new(transition: TransitionLock<'a>, guard: ChainChangeGuard) -> Self {
         Self { transition, guard }
     }
 
@@ -720,7 +724,7 @@ impl PruneAuthority {
 
 /// Proof that pruning owns chain mutation and may read the authoritative tip.
 pub(crate) struct PruneGuard<'a> {
-    _transition: ChainTransition<'a>,
+    _transition: TransitionLock<'a>,
     applied_tip: &'a ArcSwapOption<TipSnapshot>,
 }
 
@@ -826,15 +830,32 @@ pub enum BlockProvenance {
     LocalReplay,
 }
 
-/// Owned shared handle set needed by `apply_block` to perform a block apply.
+/// Coherent read of header tip, applied tip, and chain-tx count.
+///
+/// Produced by [`Chainstate::snapshot`]. Applied tip and `chain_tx_count` are
+/// one publication. Header tip is a separate cell and may legitimately be
+/// ahead of the applied chain. The snapshot cannot mutate chainstate.
+#[derive(Clone, Debug)]
+pub struct ChainstateSnapshot {
+    /// Best-work header tip, if the tree has one.
+    pub header: Option<TipSnapshot>,
+    /// Authoritative applied tip, if any block has committed.
+    pub applied: Option<TipSnapshot>,
+    /// Cumulative transaction count of the applied chain, or `0` when unknown.
+    ///
+    /// Published with `applied`, never independently of it.
+    pub chain_tx_count: u64,
+}
+
+/// In-process facade for authoritative applied-chain mutation.
+///
+/// See `ARCH-07` in `docs/contracts/architecture.md`. Construction and
+/// lifecycle stay in `node`. Mutation goes through [`Self::begin_transition`].
 #[derive(Clone)]
-pub struct ApplyHandles {
-    /// Network consensus parameters.
-    pub network: Network,
-    /// Shared best-chain tip handle.
-    pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Shared best-applied-block tip handle.
-    pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+pub struct Chainstate {
+    pub(crate) network: Network,
+    pub(crate) chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Cumulative transaction count of the applied chain, or `0` when unknown.
     ///
     /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
@@ -843,39 +864,44 @@ pub struct ApplyHandles {
     /// it; a cold start before genesis or an arithmetic inconsistency leaves it
     /// unknown until the chain is applied again.
     ///
-    /// Kept beside `applied_tip` and moved with it, so the pair is always
-    /// consistent: a count that lagged its tip would be worse than no count.
-    pub chain_tx_count: Arc<AtomicU64>,
-    /// Shared in-memory block tree.
-    pub block_tree: Arc<RwLock<BlockTree>>,
-    /// Shared UTXO set.
-    pub utxo: Arc<UtxoSet>,
-    /// Shared coinstats listener.
-    pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-    /// Shared transaction index runtime, when enabled.
-    pub tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
-    /// Shared mempool.
-    pub mempool: Arc<RwLock<Mempool>>,
+    /// Kept beside `applied_tip`. Connect and disconnect publish the pair
+    /// under `applied_seq` so [`Chainstate::snapshot`] copies one view.
+    pub(crate) chain_tx_count: Arc<AtomicU64>,
+    /// Seqlock for the applied-tip / chain-tx-count pair.
+    ///
+    /// Odd means a writer is between the two stores; even is a stable pair.
+    /// Snapshot readers retry instead of taking the transition lock.
+    pub(crate) applied_seq: Arc<AtomicU64>,
+    pub(crate) block_tree: Arc<RwLock<BlockTree>>,
+    pub(crate) utxo: Arc<UtxoSet>,
+    pub(crate) coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
+    pub(crate) tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
+    /// Read-only pool handle shared with `NodeState`. Apply mutates through
+    /// `mempool_gateway`. Tests inspect this cell; production apply does not.
+    #[allow(
+        dead_code,
+        reason = "shared with NodeState and tests; apply uses mempool_gateway"
+    )]
+    pub(crate) mempool: Arc<RwLock<Mempool>>,
     /// Strong gateway handle for production mempool mutation. Apply and reorg
     /// call this directly; they never call `MempoolGateway::shared` or recover
     /// from the weak registry. The raw `mempool` field stays for read-only
     /// node code that still needs the pool.
-    pub mempool_gateway: Arc<MempoolGateway>,
-    /// Template-coordinator wake; fired on authoritative tip moves.
+    pub(crate) mempool_gateway: Arc<MempoolGateway>,
     pub(crate) mining_generation: Arc<crate::mining::MiningGenerationSignal>,
-    /// Shared block records exposed to RPC handlers.
-    pub blocks: Arc<RwLock<BlockLog>>,
-    /// Shared transaction map exposed to RPC handlers.
-    pub transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-    /// Shared ZMQ-event publisher (default: `NoOpZmqPublisher`).
-    pub zmq_publisher: Arc<dyn crate::ZmqPublisher>,
-    /// Chain-event publisher for coherent snapshots and reconciliation hints.
-    pub chain_events: Arc<crate::state::ChainEventPublisher>,
+    pub(crate) blocks: Arc<RwLock<BlockLog>>,
+    /// Confirmed-tx cache shared with `NodeState` / RPC. Apply does not
+    /// populate it on the hot path.
+    #[allow(
+        dead_code,
+        reason = "shared with NodeState and tests; apply does not read it"
+    )]
+    pub(crate) transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
+    pub(crate) zmq_publisher: Arc<dyn crate::ZmqPublisher>,
+    pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
-    /// Undo storage. Mandatory: see [`UndoStore`].
     pub(crate) undo_store: Arc<dyn UndoStore>,
     pub(crate) admission: Arc<ApplyAdmission>,
-    /// Process-wide shutdown signal shared by all runtime workers.
     pub(crate) shutdown: Arc<AtomicBool>,
     /// Serializes whole chain transitions against each other.
     ///
@@ -887,11 +913,8 @@ pub struct ApplyHandles {
     /// same tip and then invalidate each other's retention or publication
     /// decisions. This lock spans connects, windows, disconnects, and pruning.
     pub(crate) chain_transition: Arc<parking_lot::Mutex<()>>,
-    /// Block height at or below which kernel / portable script execution is skipped during block apply.
-    /// Non-script transaction checks still run. Zero disables the shortcut (full script checks on every block).
-    pub assume_valid_height: u32,
-    /// Hash-pinned assume-valid trust gate; the height shortcut above applies only while this is trusted.
-    pub assume_valid_gate: Arc<AssumeValidGate>,
+    pub(crate) assume_valid_height: u32,
+    pub(crate) assume_valid_gate: Arc<AssumeValidGate>,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
     ///
     /// `None` = journal off: the apply path emits nothing and behaves exactly
@@ -906,7 +929,135 @@ pub struct ApplyHandles {
     pub(crate) tx_admission: Option<Arc<crate::tx_admission::TxAdmission>>,
 }
 
-impl ApplyHandles {
+/// One admitted chain mutation.
+///
+/// Owns admission, the exclusive transition lock, and mempool generation.
+/// Connect, window-connect, and disconnect run only through this type.
+/// Dropping without [`Self::finish`] leaves generation odd by design.
+///
+/// # Persistence
+///
+/// Connect and replay write the block body and commit the UTXO set before
+/// publishing `applied_tip`. A successful return means the new tip is visible
+/// in memory. Store durability follows the journal batch cadence and the next
+/// clean checkpoint (`docs/chainstate-recovery.md`). A crash before that
+/// checkpoint recovers from the last authenticated checkpoint plus any
+/// committed journal suffix. Permanent consensus failures must not be retried
+/// with the same block; operational failures (storage, UTXO commit, shutdown)
+/// stay with the caller to retry.
+///
+/// Disconnect arms a durable `DisconnectMarker` before the UTXO undo. The
+/// commit point is the `applied_tip` rollback after a successful undo
+/// (`EVT-05` in `docs/contracts/chain-events.md`). `DisconnectError::Refused`
+/// means nothing was mutated. `DisconnectError::Fatal` means a partial undo:
+/// do not retry, poison admission, and shut down. A crash during rollback is
+/// recovered from the marker, not by retrying the disconnect. The
+/// `RolledBack` marker stays until the checkpoint that publishes the
+/// rolled-back state.
+///
+/// Window apply commits one block at a time. A failure leaves the committed
+/// prefix in place. Permanent failures invalidate the failed subtree;
+/// operational failures leave that block retryable.
+///
+/// [`Self::finish`] stores the reserved even mempool generation. It does not
+/// persist chainstate. Call it only after a successful mutation. A crash or
+/// drop after a successful connect but before finish leaves generation odd
+/// until an external recovery path resets it.
+pub struct ChainTransition<'a> {
+    chainstate: &'a Chainstate,
+    proof: ChainChangeProof<'a>,
+}
+
+impl<'a> ChainTransition<'a> {
+    /// Connects `block` as the next applied tip.
+    ///
+    /// Consensus refusal happens before the first write. See the type-level
+    /// persistence notes for the commit point and retry rules.
+    pub fn connect(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
+        apply_block_admitted(
+            self.chainstate,
+            block,
+            None,
+            None,
+            BlockProvenance::Network,
+            &self.proof,
+        )
+    }
+
+    /// Connects `block` reusing preserved wire-format bytes.
+    ///
+    /// Same commit point and retry rules as [`Self::connect`].
+    pub fn connect_serialized(
+        &self,
+        block: &Block,
+        serialized: bytes::Bytes,
+    ) -> core::result::Result<TipSnapshot, ApplyError> {
+        apply_block_with_serialized_admitted(self.chainstate, block, serialized, &self.proof)
+    }
+
+    /// Re-applies a body this node already validated and persisted before a crash.
+    ///
+    /// Scripts do not run again (`BlockProvenance::LocalReplay`). Persistence
+    /// otherwise matches [`Self::connect`].
+    pub fn replay_local(
+        &self,
+        block: &Block,
+        serialized: bytes::Bytes,
+    ) -> core::result::Result<TipSnapshot, ApplyError> {
+        apply_block_admitted(
+            self.chainstate,
+            block,
+            Some(serialized),
+            None,
+            BlockProvenance::LocalReplay,
+            &self.proof,
+        )
+    }
+
+    /// Disconnects `block`, which must be the current applied tip.
+    ///
+    /// See the type-level persistence notes for marker arming, the commit
+    /// point, and `Refused` versus `Fatal`.
+    pub fn disconnect(
+        &self,
+        block: &Block,
+    ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+        disconnect_block_admitted(self.chainstate, block, &self.proof)
+    }
+
+    /// Applies consecutive blocks under this one transition.
+    ///
+    /// Commits one at a time and in order. A failure leaves the committed
+    /// prefix in place, matching per-block apply. See the type-level
+    /// persistence notes for permanent versus operational retry.
+    #[allow(clippy::result_large_err)]
+    pub fn connect_window(
+        &self,
+        blocks: &[&Block],
+        serialized: &[bytes::Bytes],
+    ) -> core::result::Result<(), WindowApplyError> {
+        apply_window_admitted(self.chainstate, blocks, serialized, &self.proof)
+    }
+
+    pub(crate) fn proof(&self) -> &ChainChangeProof<'a> {
+        &self.proof
+    }
+
+    pub(crate) fn chainstate(&self) -> &'a Chainstate {
+        self.chainstate
+    }
+
+    /// Finishes the chain change, storing the reserved even generation.
+    ///
+    /// Consumes the capability so it cannot be used after finish. Does not
+    /// persist chainstate. Call only on the success path; drop on error so
+    /// generation stays odd.
+    pub fn finish(self) -> core::result::Result<(), ApplyError> {
+        self.proof.finish()
+    }
+}
+
+impl Chainstate {
     pub(crate) fn scripts_verified_upstream(
         &self,
         provenance: BlockProvenance,
@@ -930,10 +1081,82 @@ impl ApplyHandles {
         }
     }
 
-    pub(crate) fn begin_chain_transition(
-        &self,
-    ) -> core::result::Result<ChainTransition<'_>, ApplyError> {
+    /// Admission plus the exclusive transition lock, without mempool generation.
+    ///
+    /// Used for read-consistent planning that may abort without mutating
+    /// (reorg replans, `validate_block`, pruning). Mutation requires
+    /// [`Self::begin_transition`] or [`Self::begin_transition_locked`].
+    pub(crate) fn lock_transition(&self) -> core::result::Result<TransitionLock<'_>, ApplyError> {
         begin_chain_transition(&self.admission, &self.chain_transition)
+    }
+
+    /// Completes a held lock into a mutation capability by reserving mempool generation.
+    pub(crate) fn begin_transition_locked<'a>(
+        &'a self,
+        lock: TransitionLock<'a>,
+    ) -> core::result::Result<ChainTransition<'a>, ApplyError> {
+        let guard = self
+            .mempool_gateway
+            .begin_chain_change()
+            .map_err(|_| ApplyError::Shutdown)?;
+        Ok(ChainTransition {
+            chainstate: self,
+            proof: ChainChangeProof::new(lock, guard),
+        })
+    }
+
+    /// Begins an admitted chain mutation: admission, transition lock, and
+    /// mempool generation.
+    ///
+    /// The returned capability is the only way to connect or disconnect.
+    /// Finish it on success; drop it on failure so generation stays odd.
+    pub fn begin_transition(&self) -> core::result::Result<ChainTransition<'_>, ApplyError> {
+        let lock = self.lock_transition()?;
+        self.begin_transition_locked(lock)
+    }
+
+    /// Copies the published header tip and a coherent applied-tip / chain-tx
+    /// count pair.
+    ///
+    /// Does not take the transition lock. Header tip is a separate cell and
+    /// may be ahead of the applied chain. Applied tip and `chain_tx_count`
+    /// are published together under `applied_seq`; this method retries until
+    /// it observes a stable pair.
+    #[must_use]
+    pub fn snapshot(&self) -> ChainstateSnapshot {
+        loop {
+            let seq1 = self.applied_seq.load(Ordering::Acquire);
+            if seq1 & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let header = self.chain_tip.load_full().as_deref().cloned();
+            let applied = self.applied_tip.load_full().as_deref().cloned();
+            let chain_tx_count = self.chain_tx_count.load(Ordering::Acquire);
+            let seq2 = self.applied_seq.load(Ordering::Acquire);
+            if seq1 == seq2 {
+                return ChainstateSnapshot {
+                    header,
+                    applied,
+                    chain_tx_count,
+                };
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Publishes a checkpoint to settle rolled-back disconnect debt.
+    ///
+    /// Returns `Ok(true)` when a checkpoint was written, `Ok(false)` when
+    /// there was no debt or no publisher. A publication failure leaves the
+    /// `RolledBack` marker in place.
+    pub(crate) fn checkpoint(
+        &self,
+    ) -> core::result::Result<bool, crate::checkpoint::CheckpointError> {
+        match &self.checkpoint_publisher {
+            Some(publisher) => publisher.settle_disconnect_debt(),
+            None => Ok(false),
+        }
     }
 
     /// Notifies the transaction index runtime that the applied tip changed.
@@ -943,7 +1166,103 @@ impl ApplyHandles {
         }
     }
 
-    /// Builds the full shared handle set used by `apply_block`.
+    /// Admits a transition, connects `block`, and finishes on success.
+    ///
+    /// Persistence matches [`ChainTransition::connect`].
+    pub fn apply_block(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
+        apply_block_inner(self, block, None, BlockProvenance::Network)
+    }
+
+    /// Admits a transition, connects `block` from preserved bytes, and finishes
+    /// on success.
+    ///
+    /// Persistence matches [`ChainTransition::connect`].
+    pub fn apply_block_with_serialized(
+        &self,
+        block: &Block,
+        serialized: bytes::Bytes,
+    ) -> core::result::Result<TipSnapshot, ApplyError> {
+        apply_block_inner(self, block, Some(serialized), BlockProvenance::Network)
+    }
+
+    /// Admits a transition, replays a locally persisted body, and finishes on
+    /// success.
+    ///
+    /// Persistence matches [`ChainTransition::replay_local`].
+    pub fn replay_local_block(
+        &self,
+        block: &Block,
+        serialized: bytes::Bytes,
+    ) -> core::result::Result<TipSnapshot, ApplyError> {
+        apply_block_inner(self, block, Some(serialized), BlockProvenance::LocalReplay)
+    }
+
+    /// Admits a transition, disconnects `block`, and finishes on success.
+    ///
+    /// Persistence matches [`ChainTransition::disconnect`]. An admission
+    /// failure is `DisconnectError::Refused`.
+    pub fn disconnect_block(
+        &self,
+        block: &Block,
+    ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+        let transition = self
+            .begin_transition()
+            .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
+        let result = transition.disconnect(block);
+        if result.is_ok() {
+            let _ = transition.finish();
+        }
+        result
+    }
+
+    /// Admits a transition, applies consecutive blocks, and finishes on success.
+    ///
+    /// Persistence matches [`ChainTransition::connect_window`].
+    #[allow(clippy::result_large_err)]
+    pub fn apply_window(
+        &self,
+        blocks: &[&Block],
+        serialized: &[bytes::Bytes],
+    ) -> core::result::Result<(), WindowApplyError> {
+        if blocks.len() != serialized.len() {
+            return Err(WindowApplyError {
+                applied: 0,
+                source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
+                    format!(
+                        "window has {} blocks but {} serialized bodies",
+                        blocks.len(),
+                        serialized.len()
+                    ),
+                )),
+                disposition: WindowApplyDisposition::Operational,
+                invalidated: Box::default(),
+            });
+        }
+        let transition = self.begin_transition().map_err(|source| WindowApplyError {
+            applied: 0,
+            source,
+            disposition: WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        })?;
+        let result = transition.connect_window(blocks, serialized);
+        if result.is_ok() {
+            let _ = transition.finish();
+        }
+        result
+    }
+
+    /// Returns after consensus gates that precede the first write, without
+    /// persisting the block. BIP22 proposal mode omits proof-of-work.
+    pub fn validate_block(&self, block: &Block) -> core::result::Result<(), ApplyError> {
+        let _lock = self.lock_transition()?;
+        let block_hash = block.block_hash().0;
+        let prev_hash = block.header.prev_blockhash.0;
+        let _ = applied_predecessor(self, block_hash, prev_hash)?;
+        Ok(())
+    }
+
+    /// Builds a chainstate facade for tests and composition that do not go
+    /// through `NodeState::open`.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -967,6 +1286,7 @@ impl ApplyHandles {
             chain_tip,
             applied_tip,
             chain_tx_count: Arc::new(AtomicU64::new(0)),
+            applied_seq: Arc::new(AtomicU64::new(0)),
             block_tree,
             utxo,
             coin_stats,
@@ -1020,7 +1340,7 @@ struct DisconnectPlan {
 }
 
 fn plan_disconnect(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     block_hash: Hash256,
 ) -> core::result::Result<DisconnectPlan, ApplyError> {
@@ -1186,26 +1506,11 @@ fn plan_disconnect(
 /// to get wrong.
 // Keep the marker, UTXO, and tip ordering visible in one operation.
 // Splitting the sequence would hide the fatal boundary this function enforces.
-#[allow(clippy::too_many_lines)]
 pub fn disconnect_block(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
 ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
-    let transition = handles
-        .begin_chain_transition()
-        .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
-    let guard = handles
-        .mempool_gateway
-        .begin_chain_change()
-        .map_err(|_| crate::DisconnectError::Refused(Box::new(ApplyError::Shutdown)))?;
-    let proof = ChainChangeProof::new(transition, guard);
-    let result = disconnect_block_admitted(handles, block, &proof);
-    if result.is_ok() {
-        // Finish the chain change only on full success. An error leaves the
-        // generation odd by design — admission stays closed.
-        let _ = proof.finish();
-    }
-    result
+    handles.disconnect_block(block)
 }
 
 /// Disconnects one block while the caller holds admission and `chain_transition`.
@@ -1213,7 +1518,7 @@ pub fn disconnect_block(
 /// The caller MUST hold both guards in admission-then-transition order.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn disconnect_block_admitted(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     _proof: &ChainChangeProof<'_>,
 ) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
@@ -1311,15 +1616,18 @@ pub(crate) fn disconnect_block_admitted(
             })
         })?;
 
-    handles
-        .applied_tip
-        .store(Some(Arc::new(parent_tip.clone())));
-    handles.chain_events.record(
-        crate::state::HintKind::Disconnected,
-        parent_tip.height,
-        parent_tip.hash,
-    );
-    rewind_chain_tx_count(handles, tx_count_delta);
+    {
+        let _publication = begin_applied_publication(handles);
+        handles
+            .applied_tip
+            .store(Some(Arc::new(parent_tip.clone())));
+        handles.chain_events.record(
+            crate::state::HintKind::Disconnected,
+            parent_tip.height,
+            parent_tip.hash,
+        );
+        rewind_chain_tx_count(handles, tx_count_delta);
+    }
     let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
         let rewind_result = {
             let mut journal = journal.lock();
@@ -1405,6 +1713,34 @@ pub(crate) fn disconnect_block_admitted(
     Ok(parent_tip)
 }
 
+/// Seqlock guard for the applied-tip / chain-tx-count pair.
+///
+/// [`Chainstate::snapshot`] retries while the sequence is odd. Dropping the
+/// guard stores the matching even value, including on panic, so readers do
+/// not spin forever. A panic between the two stores can still expose a mixed
+/// pair; the transition lock already treats that as fatal process state.
+struct AppliedPublication<'a> {
+    seq: &'a AtomicU64,
+}
+
+impl Drop for AppliedPublication<'_> {
+    fn drop(&mut self) {
+        self.seq.fetch_add(1, Ordering::Release);
+    }
+}
+
+fn begin_applied_publication(handles: &Chainstate) -> AppliedPublication<'_> {
+    let previous = handles.applied_seq.fetch_add(1, Ordering::AcqRel);
+    debug_assert_eq!(
+        previous & 1,
+        0,
+        "applied-pair publication is exclusive under the transition lock"
+    );
+    AppliedPublication {
+        seq: &handles.applied_seq,
+    }
+}
+
 /// The `tx_count` delta one block contributes to coinstats.
 ///
 /// One function, used by connect and by disconnect. Two copies of this
@@ -1420,7 +1756,7 @@ fn tx_count_delta_for(block: &Block) -> u64 {
 /// rather than restarting from this block and pretending to be a chain total.
 /// Genesis is the one block that can establish the count from nothing: there is
 /// no chain below it.
-fn advance_chain_tx_count(handles: &ApplyHandles, height: u32, tx_count_delta: u64) {
+fn advance_chain_tx_count(handles: &Chainstate, height: u32, tx_count_delta: u64) {
     let known = handles.chain_tx_count.load(Ordering::Relaxed);
     if known == 0 && height != 0 {
         return;
@@ -1441,7 +1777,7 @@ fn advance_chain_tx_count(handles: &ApplyHandles, height: u32, tx_count_delta: u
 /// An unknown count stays unknown. A subtraction that would go below zero means
 /// the count and the chain have diverged, and a silently clamped total is worse
 /// than an admitted absence, so that case resets to unknown.
-fn rewind_chain_tx_count(handles: &ApplyHandles, tx_count_delta: u64) {
+fn rewind_chain_tx_count(handles: &Chainstate, tx_count_delta: u64) {
     let known = handles.chain_tx_count.load(Ordering::Relaxed);
     if known == 0 {
         return;
@@ -1459,39 +1795,32 @@ fn rewind_chain_tx_count(handles: &ApplyHandles, tx_count_delta: u64) {
 
 /// Synthetically applies `block` as the next tip after consensus checks.
 pub fn apply_block(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    apply_block_inner(handles, block, None, BlockProvenance::Network)
+    handles.apply_block(block)
 }
 
 /// Returns after consensus gates that precede the first write, without
 /// persisting the block. BIP22 proposal mode omits proof-of-work.
-pub fn validate_block(
-    handles: &ApplyHandles,
-    block: &Block,
-) -> core::result::Result<(), ApplyError> {
-    let _transition = handles.begin_chain_transition()?;
-    let block_hash = block.block_hash().0;
-    let prev_hash = block.header.prev_blockhash.0;
-    let _ = applied_predecessor(handles, block_hash, prev_hash)?;
-    Ok(())
+pub fn validate_block(handles: &Chainstate, block: &Block) -> core::result::Result<(), ApplyError> {
+    handles.validate_block(block)
 }
 
 /// Applies `block` reusing preserved wire-format bytes for body persistence and indexing.
 pub fn apply_block_with_serialized(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     serialized: bytes::Bytes,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    apply_block_inner(handles, block, Some(serialized), BlockProvenance::Network)
+    handles.apply_block_with_serialized(block, serialized)
 }
 
 /// Applies one serialized block while the caller holds admission and `chain_transition`.
 ///
 /// The caller MUST hold both guards in admission-then-transition order.
 pub(crate) fn apply_block_with_serialized_admitted(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     serialized: bytes::Bytes,
     proof: &ChainChangeProof<'_>,
@@ -1508,16 +1837,11 @@ pub(crate) fn apply_block_with_serialized_admitted(
 
 /// Re-applies a body this node already validated and persisted before a crash.
 pub fn replay_local_block(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     serialized: bytes::Bytes,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    apply_block_inner(
-        handles,
-        block,
-        Some(serialized),
-        BlockProvenance::LocalReplay,
-    )
+    handles.replay_local_block(block, serialized)
 }
 
 /// How many consecutive blocks share one script-verification dispatch.
@@ -1604,53 +1928,20 @@ pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
 /// what applying them one at a time would also do.
 #[allow(clippy::result_large_err)]
 pub fn apply_window(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     blocks: &[&Block],
     serialized: &[bytes::Bytes],
 ) -> core::result::Result<(), WindowApplyError> {
-    if blocks.len() != serialized.len() {
-        return Err(WindowApplyError {
-            applied: 0,
-            source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(format!(
-                "window has {} blocks but {} serialized bodies",
-                blocks.len(),
-                serialized.len()
-            ))),
-            disposition: WindowApplyDisposition::Operational,
-            invalidated: Box::default(),
-        });
-    }
-    // One admission permit and one transition lock for the whole window.
-    //
-    // The permit alone would not do it: `enter` takes a read guard, so two
-    // windows, or a window and a single connect, hold it at the same time. The
-    // transition lock is what actually excludes them. Preparation reads the
-    // applied tip and the UTXO set and the commits mutate both, so a concurrent
-    // applier moving the chain in between would invalidate the proof this window
-    // is about to rely on, and matching the tip hash would not detect a same-tip
-    // partial change.
-    //
-    // Both taken once for the window rather than per block: re-entering the
-    // permit is two read guards that deadlock against a shutdown waiting on the
-    // write side, and re-locking the transition would leave gaps between commits.
-    let transition = handles
-        .begin_chain_transition()
-        .map_err(|source| WindowApplyError {
-            applied: 0,
-            source,
-            disposition: WindowApplyDisposition::Operational,
-            invalidated: Box::default(),
-        })?;
-    let guard = handles
-        .mempool_gateway
-        .begin_chain_change()
-        .map_err(|_| WindowApplyError {
-            applied: 0,
-            source: ApplyError::Shutdown,
-            disposition: WindowApplyDisposition::Operational,
-            invalidated: Box::default(),
-        })?;
-    let proof = ChainChangeProof::new(transition, guard);
+    handles.apply_window(blocks, serialized)
+}
+
+#[allow(clippy::result_large_err)]
+fn apply_window_admitted(
+    handles: &Chainstate,
+    blocks: &[&Block],
+    serialized: &[bytes::Bytes],
+    proof: &ChainChangeProof<'_>,
+) -> core::result::Result<(), WindowApplyError> {
     let mut proven = prove_window(handles, blocks, serialized).into_iter();
     let mut applied = 0_usize;
     for (block, raw) in blocks.iter().zip(serialized) {
@@ -1660,7 +1951,7 @@ pub fn apply_window(
             Some(raw.clone()),
             proven.next(),
             BlockProvenance::Network,
-            &proof,
+            proof,
         )
         .map_err(|source| {
             let disposition = if is_permanent_apply_error(&source) {
@@ -1678,10 +1969,6 @@ pub fn apply_window(
         })?;
         applied = applied.saturating_add(1);
     }
-    // G5: finish only on success. An error after begin leaves the generation
-    // odd by design — admission stays closed until an external recovery path
-    // resets it.
-    let _ = proof.finish();
     Ok(())
 }
 
@@ -1695,7 +1982,7 @@ pub fn apply_window(
 /// insertion, e.g. prev-hash mismatch or `PoW` failure) has no subtree to
 /// invalidate, which leaves the list empty and the classification untouched.
 fn invalidate_failed_subtree(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     source: &ApplyError,
 ) -> Box<[Hash256]> {
@@ -1816,7 +2103,7 @@ pub enum WindowApplyDisposition {
 /// return nothing.
 #[allow(clippy::too_many_lines)]
 fn prove_window<'a>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     blocks: &[&'a Block],
     serialized: &[bytes::Bytes],
 ) -> Vec<ProvenApply<'a>> {
@@ -1853,7 +2140,8 @@ fn prove_window<'a>(
                 bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
             let cutoff = bitcoin_rs_consensus::locktime_cutoff(
                 softfork.csv_active,
-                tree.median_time_past_at(parent_id, 11).unwrap_or(0),
+                tree.median_time_past_at(parent_id, MEDIAN_TIME_PAST_WINDOW)
+                    .unwrap_or(0),
                 block.header.time,
             );
             // The next block's context needs this one in the tree. Header-first
@@ -2255,27 +2543,22 @@ fn prepare_apply<'b, S: crate::window_overlay::OutputSource + ?Sized>(
 }
 
 fn apply_block_inner(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
     provenance: BlockProvenance,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
-    let transition = handles.begin_chain_transition()?;
-    let guard = handles
-        .mempool_gateway
-        .begin_chain_change()
-        .map_err(|_| ApplyError::Shutdown)?;
-    let proof = ChainChangeProof::new(transition, guard);
+    let transition = handles.begin_transition()?;
     let result = apply_block_admitted(
         handles,
         block,
         provided_serialized,
         None,
         provenance,
-        &proof,
+        transition.proof(),
     );
     if result.is_ok() {
-        let _ = proof.finish();
+        let _ = transition.finish();
     }
     result
 }
@@ -2293,7 +2576,7 @@ fn apply_block_inner(
 /// the chain out from under prepared state.
 #[allow(clippy::too_many_lines)]
 fn apply_block_admitted<'b>(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &'b Block,
     provided_serialized: Option<bytes::Bytes>,
     proven: Option<ProvenApply<'b>>,
@@ -2336,7 +2619,9 @@ fn apply_block_admitted<'b>(
 
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
         let tree = handles.block_tree.read();
-        let mtp = tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0);
+        let mtp = tree
+            .median_time_past_at(tip.tip_id, MEDIAN_TIME_PAST_WINDOW)
+            .unwrap_or(0);
         let softfork_state =
             bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(tip.tip_id), height);
         (mtp, softfork_state)
@@ -2801,11 +3086,14 @@ fn apply_block_admitted<'b>(
             }
         }
     }
-    handles.applied_tip.store(Some(Arc::new(tip.clone())));
-    handles
-        .chain_events
-        .record(crate::state::HintKind::Connected, tip.height, tip.hash);
-    advance_chain_tx_count(handles, height, tx_count_delta_for(block));
+    {
+        let _publication = begin_applied_publication(handles);
+        handles.applied_tip.store(Some(Arc::new(tip.clone())));
+        handles
+            .chain_events
+            .record(crate::state::HintKind::Connected, tip.height, tip.hash);
+        advance_chain_tx_count(handles, height, tx_count_delta_for(block));
+    }
     handles.wake_tx_index();
     // The applied tip moved: every template long-poll waiter must observe it.
     handles.mining_generation.publish_generation();
@@ -2851,7 +3139,7 @@ fn compact_is_met_by(bits: u32, hash: Hash256) -> bool {
 }
 
 fn applied_predecessor(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block_hash: bitcoin_rs_primitives::Hash256,
     prev_hash: bitcoin_rs_primitives::Hash256,
 ) -> core::result::Result<(Option<Arc<TipSnapshot>>, u32), ApplyError> {
@@ -2885,7 +3173,7 @@ fn applied_predecessor(
 /// with an invalid median-time-past or an absurd future timestamp the applied
 /// consensus tip.
 fn check_unseen_header_timestamp(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     block_hash: Hash256,
 ) -> core::result::Result<(), ApplyError> {
@@ -2903,7 +3191,7 @@ fn check_unseen_header_timestamp(
 }
 
 fn applied_header_tip(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block_hash: Hash256,
     block: &Block,
     height: u32,
@@ -3285,7 +3573,7 @@ fn run_non_script_checks_only(
     clippy::cast_possible_truncation
 )]
 fn verify_block_transactions(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     view: &mut bitcoin_rs_consensus::BlockView<'_>,
     tx_plan: &BlockTxPlan,
@@ -3425,7 +3713,7 @@ impl UtxoView for BlockLocalUtxoView<'_> {
 
 #[cfg(test)]
 pub(crate) fn check_coinbase_maturity(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
@@ -3440,7 +3728,7 @@ pub(crate) fn check_coinbase_maturity(
 }
 
 fn check_coinbase_maturity_with_tx_plan(
-    _handles: &ApplyHandles,
+    _handles: &Chainstate,
     block: &Block,
     tx_plan: &BlockTxPlan,
     txids: &[Txid],
@@ -3499,7 +3787,7 @@ fn check_coinbase_input_maturity(entry: LiveOutputMeta, height: u32) -> Result<(
 }
 
 fn check_bip68_sequence_locks(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     tx_plan: &BlockTxPlan,
     txids: &[Txid],
@@ -3599,7 +3887,7 @@ fn check_bip68_sequence_locks(
 }
 
 fn bip68_prevout_mtp(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     previous_tip_id: Option<bitcoin_rs_chain::node::NodeId>,
     prevout_height: u32,
 ) -> core::result::Result<u32, ApplyError> {
@@ -3623,7 +3911,8 @@ fn bip68_prevout_mtp(
             },
         ));
     };
-    let Some(prevout_mtp) = tree.median_time_past_at(prev_block_node, 11) else {
+    let Some(prevout_mtp) = tree.median_time_past_at(prev_block_node, MEDIAN_TIME_PAST_WINDOW)
+    else {
         return Err(ApplyError::Consensus(
             bitcoin_rs_consensus::ConsensusError::Bip {
                 bip: "BIP68",
@@ -3635,7 +3924,7 @@ fn bip68_prevout_mtp(
 }
 
 fn check_bip30_and_bip34(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     height: u32,
     txids: &[Txid],
@@ -3678,7 +3967,7 @@ fn check_bip30_and_bip34(
 }
 
 fn should_scan_bip30_duplicates(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     height: u32,
     previous_tip_id: Option<NodeId>,
 ) -> bool {
@@ -3707,7 +3996,7 @@ fn should_scan_bip30_duplicates(
 }
 
 fn check_pow_limit_and_continuity(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     prior: Option<&TipSnapshot>,
     block: &Block,
     height: u32,
@@ -6230,7 +6519,7 @@ mod consensus_rule_tests {
         utxo: Arc<UtxoSet>,
         txdata: Vec<Tx>,
         assume_valid_height: u32,
-    ) -> Result<(ApplyHandles, Block, bytes::Bytes), Box<dyn std::error::Error>> {
+    ) -> Result<(Chainstate, Block, bytes::Bytes), Box<dyn std::error::Error>> {
         let genesis = Network::Regtest.genesis_block();
         let mut handles = apply_handles_for_network(Network::Regtest, utxo);
         handles.assume_valid_height = assume_valid_height;
@@ -6298,7 +6587,7 @@ mod consensus_rule_tests {
             remove.remove(prevout);
             utxo.commit_block(&remove, &Hash256::from_le_bytes(&[0x83; 32]))?;
 
-            let transition = handles.begin_chain_transition()?;
+            let transition = handles.lock_transition()?;
             let guard = handles.mempool_gateway.begin_chain_change()?;
             let chain_proof = ChainChangeProof::new(transition, guard);
             let Err(error) = apply_block_admitted(
@@ -6475,7 +6764,7 @@ mod consensus_rule_tests {
             Hash256::from_le_bytes(&[0xff; 32]),
         ))));
         assert!(!handles.assume_valid_gate.trusted());
-        let transition = handles.begin_chain_transition()?;
+        let transition = handles.lock_transition()?;
         let guard = handles.mempool_gateway.begin_chain_change()?;
         let proof = ChainChangeProof::new(transition, guard);
         let outcome = apply_block_admitted(
@@ -7913,7 +8202,7 @@ mod consensus_rule_tests {
     }
 
     fn seed_pow_chain(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         bits: u32,
         anchor_time: u32,
         tip_time: u32,
@@ -7931,7 +8220,7 @@ mod consensus_rule_tests {
     }
 
     fn seed_pow_period_with_tip_bits(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         period_bits: u32,
         tip_bits: u32,
         anchor_time: u32,
@@ -7955,7 +8244,7 @@ mod consensus_rule_tests {
     }
 
     fn seed_pow_chain_with_headers(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         headers: &[(u32, u32)],
     ) -> Result<BlockHash, Box<dyn std::error::Error>> {
         let mut tree = handles.block_tree.write();
@@ -7972,7 +8261,7 @@ mod consensus_rule_tests {
     }
 
     fn seed_known_bip34_activation_chain(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         network: Network,
     ) -> Result<NodeId, Box<dyn std::error::Error>> {
         let activation_height = network.bip34_activation_height();
@@ -8047,16 +8336,16 @@ mod consensus_rule_tests {
         compact | (u32::try_from(size).unwrap_or(0) << 24)
     }
 
-    fn scaled_pow_limit_bits(handles: &ApplyHandles, divisor: u64) -> u32 {
+    fn scaled_pow_limit_bits(handles: &Chainstate, divisor: u64) -> u32 {
         target_to_compact_lossy(handles.network.max_target() / ChainWork::from(divisor))
     }
 
-    fn pow_limit_bits(handles: &ApplyHandles) -> u32 {
+    fn pow_limit_bits(handles: &Chainstate) -> u32 {
         target_to_compact_lossy(handles.network.max_target())
     }
 
     fn retarget_bits_for_test(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         previous_bits: u32,
         actual_timespan: u32,
         expected_timespan: u32,
@@ -8131,13 +8420,13 @@ mod consensus_rule_tests {
     }
 
     fn seed_block_tree_for_bip68_time(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
     ) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
         seed_block_tree_for_bip68_time_at_height(handles, BIP68_TEST_PREVOUT_HEIGHT)
     }
 
     fn seed_block_tree_for_bip68_time_at_height(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         tip_height: u32,
     ) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
         let mut tree = handles.block_tree.write();
@@ -8165,7 +8454,7 @@ mod consensus_rule_tests {
     }
 
     fn seed_block_tree_with_times(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         times: &[u32],
     ) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
         let mut tree = handles.block_tree.write();
@@ -8208,7 +8497,7 @@ mod consensus_rule_tests {
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    pub(super) fn empty_apply_handles() -> ApplyHandles {
+    pub(super) fn empty_apply_handles() -> Chainstate {
         empty_apply_handles_for_network(Network::Mainnet)
     }
 
@@ -8330,20 +8619,17 @@ mod consensus_rule_tests {
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn empty_apply_handles_for_network(network: Network) -> ApplyHandles {
+    fn empty_apply_handles_for_network(network: Network) -> Chainstate {
         apply_handles_for_network(network, Arc::new(UtxoSet::new()))
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn apply_handles(utxo: Arc<UtxoSet>) -> ApplyHandles {
+    fn apply_handles(utxo: Arc<UtxoSet>) -> Chainstate {
         apply_handles_for_network(Network::Mainnet, utxo)
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn apply_handles_with_assume_valid(
-        utxo: Arc<UtxoSet>,
-        assume_valid_height: u32,
-    ) -> ApplyHandles {
+    fn apply_handles_with_assume_valid(utxo: Arc<UtxoSet>, assume_valid_height: u32) -> Chainstate {
         let mut handles = apply_handles(utxo);
         handles.assume_valid_height = assume_valid_height;
         handles
@@ -8583,7 +8869,7 @@ mod consensus_rule_tests {
     }
 
     struct ReorgBodyLoadingFixture {
-        handles: ApplyHandles,
+        handles: Chainstate,
         utxo: Arc<UtxoSet>,
         bodies: Arc<MapBodyStore>,
         target: bitcoin_rs_chain::NodeId,
@@ -8687,7 +8973,7 @@ mod consensus_rule_tests {
     }
 
     fn assert_reorg_load_failure_preserved_state(
-        handles: &ApplyHandles,
+        handles: &Chainstate,
         utxo: &UtxoSet,
         losing: &Block,
         applied: &TipSnapshot,
@@ -9112,7 +9398,7 @@ mod consensus_rule_tests {
 
             let contender = scope.spawn(move || {
                 let _ = started_tx.send(());
-                let transition = contender_handles.begin_chain_transition();
+                let transition = contender_handles.lock_transition();
                 let acquired = transition.is_ok();
                 let _ = acquired_tx.send(acquired);
                 drop(transition);
@@ -9718,7 +10004,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    fn apply_handles_for_network(network: Network, utxo: Arc<UtxoSet>) -> ApplyHandles {
+    fn apply_handles_for_network(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
         apply_handles_without_tx_index(network, utxo)
     }
 
@@ -9726,13 +10012,13 @@ mod consensus_rule_tests {
     pub(super) fn apply_handles_without_tx_index(
         network: Network,
         utxo: Arc<UtxoSet>,
-    ) -> ApplyHandles {
+    ) -> Chainstate {
         let mempool: Arc<RwLock<bitcoin_rs_mempool::Mempool>> = Arc::new(RwLock::new(
             bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits::default()),
         ));
         let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        ApplyHandles::new(
+        Chainstate::new(
             network,
             Arc::new(ArcSwapOption::empty()),
             Arc::new(ArcSwapOption::empty()),
@@ -10160,7 +10446,7 @@ mod consensus_rule_tests {
 
 #[cfg(test)]
 fn check_pow_limit_and_continuity_for_seeded_tip(
-    handles: &ApplyHandles,
+    handles: &Chainstate,
     block: &Block,
     height: u32,
 ) -> core::result::Result<(), ApplyError> {
@@ -10309,7 +10595,7 @@ mod with_zmq_publisher_tests {
     #[test]
     fn with_zmq_publisher_swaps_handle() {
         let publisher = Arc::new(TaggedPublisher::default());
-        // Building ApplyHandles directly here is awkward without a full NodeState.
+        // Building Chainstate directly here is awkward without a full NodeState.
         // Instead, verify the trait-object swap behavior by constructing the
         // publisher and exercising the publish path. The builder semantics are
         // a simple field swap; this test just covers the publisher capture.
@@ -10352,7 +10638,7 @@ mod admission_tests {
 mod chain_tx_count_tests {
     use super::*;
 
-    fn handles() -> ApplyHandles {
+    fn handles() -> Chainstate {
         super::consensus_rule_tests::empty_apply_handles()
     }
 
@@ -10421,9 +10707,10 @@ mod chain_tx_count_tests {
 #[cfg(test)]
 mod chain_generation_tests {
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope};
-    use bitcoin_rs_primitives::{BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
     use bitcoin_rs_utxo::UtxoSet;
     use parking_lot::Mutex;
 
@@ -10431,7 +10718,7 @@ mod chain_generation_tests {
         apply_handles_without_tx_index, coinbase_transaction,
         mined_block_with_prev_hash_and_transactions,
     };
-    use super::{ApplyHandles, applied_header_tip};
+    use super::{Chainstate, applied_header_tip};
 
     /// An observer that captures the gateway's `stable_generation` when a
     /// mutation fires. We pass the gateway in via an Arc.
@@ -10460,7 +10747,7 @@ mod chain_generation_tests {
         }
     }
 
-    fn setup_regtest_with_genesis() -> (ApplyHandles, bitcoin_rs_primitives::Block, BlockHash) {
+    fn setup_regtest_with_genesis() -> (Chainstate, bitcoin_rs_primitives::Block, BlockHash) {
         let genesis = Network::Regtest.genesis_block();
         let genesis_hash = genesis.block_hash();
         let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
@@ -10468,6 +10755,78 @@ mod chain_generation_tests {
             .unwrap_or_else(|error| panic!("genesis tip must apply: {error}"));
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
         (handles, genesis, genesis_hash)
+    }
+
+    /// `ARCH-07`: snapshot copies published cells without reserving generation.
+    #[test]
+    fn snapshot_reads_applied_tip_without_taking_a_transition() {
+        let (handles, _genesis, genesis_hash) = setup_regtest_with_genesis();
+        let snapshot = handles.snapshot();
+        assert_eq!(
+            snapshot.applied.as_ref().map(|tip| tip.hash),
+            Some(Hash256::from(genesis_hash)),
+            "snapshot copies the published applied tip"
+        );
+        assert_eq!(
+            snapshot.applied.as_ref().map(|tip| tip.height),
+            Some(0),
+            "genesis is height zero"
+        );
+        assert_eq!(
+            snapshot.chain_tx_count,
+            handles.chain_tx_count.load(Ordering::Relaxed),
+            "snapshot copies the applied tip with its published chain-tx count"
+        );
+        assert_eq!(
+            handles.mempool_gateway.stable_generation(),
+            Some(0),
+            "reading a snapshot must not reserve mempool generation"
+        );
+    }
+
+    /// `ARCH-07`: mutation is admitted only through `Chainstate` / `ChainTransition`.
+    #[test]
+    fn chain_transition_connect_and_finish_publish_the_new_tip() {
+        let (handles, genesis, genesis_hash) = setup_regtest_with_genesis();
+        let block = mined_block_with_prev_hash_and_transactions(
+            genesis.block_hash(),
+            vec![coinbase_transaction(1)],
+        )
+        .unwrap_or_else(|error| panic!("mine block: {error}"));
+        let block_hash = Hash256::from(block.block_hash());
+
+        let transition = handles
+            .begin_transition()
+            .unwrap_or_else(|error| panic!("begin transition: {error}"));
+        let tip = transition
+            .connect(&block)
+            .unwrap_or_else(|error| panic!("connect through transition: {error}"));
+        assert_eq!(tip.hash, block_hash);
+        assert_eq!(tip.height, 1);
+        transition
+            .finish()
+            .unwrap_or_else(|error| panic!("finish transition: {error}"));
+
+        let snapshot = handles.snapshot();
+        assert_eq!(
+            snapshot.applied.as_ref().map(|tip| (tip.height, tip.hash)),
+            Some((1, block_hash)),
+            "committed connect is visible on the next snapshot"
+        );
+        assert_eq!(
+            snapshot.chain_tx_count,
+            handles.chain_tx_count.load(Ordering::Relaxed),
+            "snapshot applied tip and chain-tx count are one publication"
+        );
+        assert_ne!(
+            snapshot.applied.as_ref().map(|tip| tip.hash),
+            Some(Hash256::from(genesis_hash))
+        );
+        assert_eq!(
+            handles.mempool_gateway.stable_generation(),
+            Some(2),
+            "successful finish restores an even generation"
+        );
     }
 
     #[test]
@@ -10560,7 +10919,7 @@ mod chain_generation_tests {
         let (handles, _genesis, _genesis_hash) = setup_regtest_with_genesis();
 
         let transition = handles
-            .begin_chain_transition()
+            .lock_transition()
             .unwrap_or_else(|error| panic!("transition: {error}"));
         let guard = handles
             .mempool_gateway

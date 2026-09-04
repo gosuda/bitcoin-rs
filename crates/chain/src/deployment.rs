@@ -16,7 +16,7 @@ use crate::{BlockTree, CachedState, NodeId};
 const KNOWN_DEPLOYMENT_IDS: [u32; 2] = [CSV_DEPLOYMENT_ID, SEGWIT_DEPLOYMENT_ID];
 
 /// Read-only [`DeploymentContext`] over a [`BlockTree`] rooted at `tip_id`.
-pub struct DeploymentView<'a> {
+struct DeploymentView<'a> {
     tree: &'a BlockTree,
     tip_id: NodeId,
 }
@@ -24,7 +24,7 @@ pub struct DeploymentView<'a> {
 impl<'a> DeploymentView<'a> {
     /// Anchors lookups at `tip_id` within `tree`.
     #[must_use]
-    pub const fn new(tree: &'a BlockTree, tip_id: NodeId) -> Self {
+    const fn new(tree: &'a BlockTree, tip_id: NodeId) -> Self {
         Self { tree, tip_id }
     }
 }

@@ -40,9 +40,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_script::script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
@@ -55,11 +53,11 @@ use bitcoin::{
     absolute, opcodes, script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-use bitcoin_rs_index::BlockSource as _;
+use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
     BlockSync, Network, NoOpZmqPublisher, NodeConfig, TxIndexRuntime,
-    apply::ApplyHandles,
+    apply::Chainstate,
     state::NodeState,
     sync::{SyncBudget, default_sync_budget},
 };
@@ -461,7 +459,7 @@ struct BenchBlockSource {
     block: Block,
 }
 
-impl bitcoin_rs_index::BlockSource for BenchBlockSource {
+impl BlockSource for BenchBlockSource {
     fn block_at_height(&self, height: u32) -> Option<Block> {
         (height <= self.max_height).then(|| self.block.clone())
     }
@@ -1109,14 +1107,14 @@ fn apply_handles(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
     tx_index_runtime: Option<Arc<TxIndexRuntime>>,
-) -> ApplyHandles {
+) -> Chainstate {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
     utxo.set_listener(Box::new((*coin_stats).clone()));
     let utxo = Arc::new(utxo);
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
     let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
-    ApplyHandles::new(
+    Chainstate::new(
         Network::Regtest,
         chain_tip,
         applied_tip,

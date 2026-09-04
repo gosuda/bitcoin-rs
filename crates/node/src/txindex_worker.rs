@@ -4,7 +4,7 @@
 //! `ScriptIndex` enables an index capability.
 //!
 //! The runtime holds a process-local revision counter and a bounded
-//! nonblocking wake channel; `ApplyHandles` clones it and wakes the worker
+//! nonblocking wake channel; `Chainstate` clones it and wakes the worker
 //! after every committed `applied_tip.store`. The worker is a process-local
 //! reconciliation loop; storage-level CAS conditions on exact reset state,
 //! optional revision, and all capability watermarks linearize every ordinary mutation
@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptLiveScan, TxIndexScan, TxIndexScanRow,
     TxIndexSnapshot,
@@ -32,9 +32,10 @@ use bitcoin_rs_index::{
 };
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
+use bitcoin_rs_rpc::capabilities::{TxIndexStatus, TxIndexStatusSource};
 use bitcoin_rs_rpc::context::{
-    BlockBodySource, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
-    SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError,
+    BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+    SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
 };
 use bitcoin_rs_storage::PrefixScanLimit;
 use compact_str::CompactString;
@@ -43,9 +44,6 @@ use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 
 use crate::apply::{PruneBodyReader, PruneBodyStore};
-use bitcoin_rs_index::BlockSource;
-use bitcoin_rs_rpc::capabilities::{TxIndexStatus, TxIndexStatusSource};
-use bitcoin_rs_rpc::context::{BlockLog, record_at_height};
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -216,7 +214,7 @@ impl ReconcilePhase {
 }
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
-/// `ApplyHandles`, the worker thread, and the query engine.
+/// `Chainstate`, the worker thread, and the query engine.
 #[derive(Debug)]
 pub struct TxIndexRuntime {
     revision: AtomicU64,

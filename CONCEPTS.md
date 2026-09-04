@@ -107,10 +107,10 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Whether the native path also becomes the library and image default is the #213 measurement gate.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Issue #213 keeps this library default until native wins the signed-spend and full-replay gates (`docs/contracts/validation-default.md`).
 
 ### Native Rust interpreter
-The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context.
+The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context. It is the C++-free quickstart engine, not the library production default.
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.
@@ -189,14 +189,22 @@ observer receives the origin alongside the committed `MutationResult` so
 downstream consumers (ZMQ publisher, metrics) can distinguish relay from
 reorg re-admission without inspecting call sites.
 
+### Chainstate facade
+The in-process owner of applied-tip mutation (`bitcoin_rs_node::Chainstate`).
+Callers copy a `ChainstateSnapshot` or obtain a `ChainTransition`; they do
+not hold the raw UTXO, tip, and lock cells and reproduce a partial
+transition. `chain` still plans the branch. Node-level reorg still sequences
+disconnect then connect. UTXO, storage, and index still own their operations.
+
 ### Chain-change proof
-The type-level binding of a `ChainTransition` to the `ChainChangeGuard` that
-reserved the active odd generation (`crates/node/src/apply.rs`). Apply-path
-functions accept `&ChainChangeProof`, not independent `&ChainTransition` and
-`&ChainChangeGuard` arguments, so a call without an active odd generation
-cannot compile. The proof's `odd_generation` returns the exact reserved
-value, letting admission checks compare against a specific generation rather
-than a snapshot that may have moved.
+The type-level binding of a `TransitionLock` to the `ChainChangeGuard` that
+reserved the active odd generation (`crates/node/src/apply.rs`). The
+caller-facing mutation capability is `ChainTransition`, which holds that
+proof. Apply-path helpers accept `&ChainChangeProof`, not independent lock
+and guard arguments, so a call without an active odd generation cannot
+compile. The proof's `odd_generation` returns the exact reserved value,
+letting admission checks compare against a specific generation rather than a
+snapshot that may have moved.
 
 ### Count-and-byte bound
 A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window uses it; the sync staging budget owes the same shape. One item larger than the whole byte cap still goes through alone.
@@ -216,7 +224,7 @@ The durable record that an authoritative disconnect started and how far it got. 
 The per-block inverse of a UTXO commit, queued before later apply mutations and made durable by the clean checkpoint rather than a per-block fsync. Keyed by height **and** block hash so an abandoned-branch record cannot replay against another block at the same height. Retained after a disconnect because branch flip-flop is normal.
 
 ### Owed derived state
-State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` witness requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
+State that connection writes and disconnection must account for. `coin_stats` needs an explicit inverse for its block-level fields (the default node recomputes them at checkpoint and stable reads). `TxIndex` is durable derived state outside the authoritative transaction (see *TxIndex capability watermarks*). `switch_to_branch` (`crates/node/src/reorg.rs`) is the production disconnect caller: it preloads all disconnect bodies and the available contiguous connect prefix, and a `ChainTransition` requires the authoritative plan to equal the preloaded plan before mutation. A permanent connect failure invalidates the failed header and descendants; an operational failure leaves the branch eligible for retry.
 
 ## Derived indexes
 
@@ -273,6 +281,18 @@ script before returning a result. Its watermark is independent of historical
 script rows, so live queries can become ready while history is still catching
 up.
 
+### Logical owner ledger
+Exact serialized key and value bytes for each column family or owning
+subsystem. Explains data-model growth. It is not filesystem allocation and
+must not be added to the physical ledger.
+
+### Physical namespace ledger
+Allocated filesystem blocks (`st_blocks * 512`) for each top-level
+data-directory namespace. The source of the data-directory budget. A snapshot
+is a lower bound on peak allocation; a passing sub-1-TB default-node result
+requires a conservative high-water from an isolated filesystem or project
+quota. See [docs/contracts/storage-footprint.md](docs/contracts/storage-footprint.md).
+
 ### Consumer cursor
 The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/node/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.
 
@@ -313,6 +333,14 @@ The modern product corpus: mainnet genesis through height 709,635, the first hei
 
 ### Matched-harness comparison
 A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians. See `docs/solutions/performance/allocator-parity-changes-wall-not-cpu.md`.
+
+### Offline full-validation comparator
+The processing-bound cross-node oracle: Bitcoin Core 31.1 and bitcoin-rs both
+build chainstate from one hash-pinned Core-framed archive under full
+validation, matched index posture, and production durability. Wall time is
+process start through durable clean exit. The harness lives in
+`tools/benchmark-campaign/offline_full_validation.py`; see
+`docs/benchmarks/offline-full-validation.md`.
 
 ### CPU-seconds as a first-class metric
 A throughput change is measured against CPU time as well as wall time, because an idle many-core host lets wall-clock tuning spend cores for free. Sampling `utime+stime` from `/proc/<pid>/stat` while polling height is enough; per-thread attribution comes from `/proc/<pid>/task/*/stat`.

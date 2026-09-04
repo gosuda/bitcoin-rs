@@ -69,7 +69,7 @@ type OutboundConnectionHandle =
 
 #[derive(Clone)]
 struct RpcChainControl {
-    handles: crate::apply::ApplyHandles,
+    handles: crate::apply::Chainstate,
 }
 
 impl bitcoin_rs_rpc::context::ChainControl for RpcChainControl {
@@ -1089,8 +1089,7 @@ mod tests {
     fn disabled_zmq_still_seals_the_observer_slot() {
         // The state constructs the gateway with its observer at
         // `NodeState::open` time. Even without a ZMQ endpoint the
-        // observer slot is occupied by a `CompositeObserver`
-        // (mining-generation leg only). Verify the API contract:
+        // observer slot is occupied by the mining-generation wake.
         // `shared_with` produces a gateway whose observer is present.
         let pool = Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(
             bitcoin_rs_mempool::MempoolLimits::default(),

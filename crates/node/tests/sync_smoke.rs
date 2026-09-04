@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
-use bitcoin_rs_node::{BlockSync, Network, apply::ApplyHandles};
+use bitcoin_rs_node::{BlockSync, Network, apply::Chainstate};
 use bitcoin_rs_primitives::{
     Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, encode::double_sha256,
 };
@@ -238,7 +238,7 @@ fn apply_handles_with_coin_stats(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-) -> (ApplyHandles, Arc<CoinStatsListener>) {
+) -> (Chainstate, Arc<CoinStatsListener>) {
     let (handles, coin_stats, _utxo) =
         apply_handles_with_coin_stats_and_utxo(network, chain_tip, applied_tip, block_tree);
     (handles, coin_stats)
@@ -250,7 +250,7 @@ fn apply_handles_with_coin_stats_and_utxo(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-) -> (ApplyHandles, Arc<CoinStatsListener>, Arc<UtxoSet>) {
+) -> (Chainstate, Arc<CoinStatsListener>, Arc<UtxoSet>) {
     let coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
     utxo.set_listener(Box::new((*coin_stats).clone()));
@@ -259,7 +259,7 @@ fn apply_handles_with_coin_stats_and_utxo(
     let mempool_gateway = MempoolGateway::shared(Arc::clone(&mempool));
     let mining_generation = Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new());
     let (chain_events, _chain_events_rx) = bitcoin_rs_node::state::ChainEventPublisher::detached(0);
-    let handles = ApplyHandles::new(
+    let handles = Chainstate::new(
         network,
         chain_tip,
         applied_tip,

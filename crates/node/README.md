@@ -7,9 +7,11 @@ subsystem crates.
 
 `run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`), and
 drives `event_loop`, the central synchronous loop.
-`NodeState` holds the shared state and the `apply` block-apply pipeline;
-`BlockSync` orchestrates block download; `reorg` switches the applied chain from one
-branch to another. Owning crates expose the domain surfaces `node` wires:
+`NodeState` holds the shared state and the `Chainstate` facade for
+authoritative apply; `BlockSync` orchestrates block download; `reorg`
+switches the applied chain from one branch to another. The chainstate
+facade serializes connect, disconnect, and window apply behind
+`ChainTransition`. Owning crates expose the domain surfaces `node` wires:
 chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
 and the txindex worker's private block-source bridge. Notifications leave
 through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPublisher`
@@ -19,6 +21,10 @@ through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPubli
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
 See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
 ordering, fallback and reorg behavior, configuration, metrics, and verification.
+
+Data-directory storage evidence is an explicit command, not a node service:
+`bitcoin-rs --measure-storage` emits the logical and physical ledgers defined
+in [storage-footprint.md](../../docs/contracts/storage-footprint.md).
 
 The node crate registers only `benches/sync_pipeline.rs` as a Criterion benchmark.
 Large corpus/replay/evidence harnesses are intentionally not shipped by this
