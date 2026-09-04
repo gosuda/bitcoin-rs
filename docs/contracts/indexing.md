@@ -102,6 +102,12 @@ remove another script's output.
   `ConsumerCursor`).
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
+  Store format 5 stores hash-prefix heights big-endian. Opening format 3 or 4
+  (little-endian heights) resets only `TxLookup` and `ScriptHistory` and leaves
+  `ScriptLive`; proof:
+  `crates/index/tests/index_roundtrip.rs`
+  `format_3_open_resets_historical_keys_and_keeps_live`,
+  `format_4_open_resets_historical_keys_and_keeps_live`.
 - On node startup, index workers read their persisted watermarks and reconcile
   against `NodeState::active_chain_snapshot()`:
   - If the watermark is an ancestor of the restored tip, the worker connects

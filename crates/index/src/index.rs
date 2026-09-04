@@ -157,11 +157,11 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
-/// Format 3 stores Spending keys without positions. This build still
-/// understands those rows (resolvers fall back to a full block) and upgrades
-/// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
-const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+/// Store format 5: hash-prefix heights are big-endian. Predecessor and foreign
+/// versions follow `IDX-05`; selective capability reset follows `IDX-04`.
+const FORMAT_VERSION_VALUE: [u8; 4] = 5_u32.to_le_bytes();
+const FORMAT_VERSION_V3: [u8; 4] = 3_u32.to_le_bytes();
+const FORMAT_VERSION_V4: [u8; 4] = 4_u32.to_le_bytes();
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
@@ -191,6 +191,10 @@ const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
 const RESET_IDLE_TAG: u8 = 0xFF;
 const RESET_IDLE_LEN: usize = 1 + size_of::<u64>();
 const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
+
+fn is_predecessor_height_format(value: &[u8]) -> bool {
+    value == FORMAT_VERSION_V3 || value == FORMAT_VERSION_V4
+}
 
 /// Decoded durable capability-reset state.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -708,9 +712,9 @@ fn acquire_capability_reset<S: KvStore>(
         }
         if capabilities.script_history {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY);
-            // Same durable batch as FORMAT_VERSION_VALUE so a format-3
-            // upgrade cannot publish version 4 while leaving the row-value
-            // marker at 1.
+            // Same durable batch as FORMAT_VERSION_VALUE so a predecessor
+            // height-format reset cannot publish version 5 while leaving the
+            // row-value marker behind.
             batch.put(
                 ColumnFamily::UtxoMeta,
                 INDEX_FORMAT_VERSION_KEY,
@@ -1294,12 +1298,12 @@ impl<S: KvStore> Indexer<S> {
     /// Returns every `HashPrefixRow` whose 8-byte prefix matches the scripthash's
     /// scan prefix, decoded from `ColumnFamily::Funding`. Rows are returned in
     /// the iteration order of the underlying store (lexicographic by key bytes).
+    /// Because the height suffix is big-endian, that order is numeric height
+    /// order within one prefix: height 1 precedes height 256.
     ///
-    /// **Height ordering caveat:** the 4-byte height suffix is little-endian,
-    /// so lexicographic byte order does **not** match numeric height order
-    /// within one prefix. For example, height 256 (`00 01 00 00`) sorts before
-    /// height 1 (`01 00 00 00`). Callers that need chronological order must
-    /// sort the returned rows by numeric height after exact-resolving them.
+    /// High-level resolvers still sort by numeric height after exact-resolving
+    /// so API order does not depend on raw iteration, including when a lossy
+    /// prefix collision interleaves another script's rows.
     ///
     /// The 8-byte prefix is lossy: callers MUST resolve heights back to full
     /// transactions via block storage to confirm scripthash identity.
@@ -1354,13 +1358,10 @@ impl<S: KvStore> Indexer<S> {
     /// `ScriptHistoryEntry::confirmed` for every transaction in that block that has
     /// at least one output matching `scripthash` exactly.
     ///
-    /// Entries are returned sorted by numeric height (ascending). The underlying
-    /// store iterates rows in lexicographic key-byte order, and because the
-    /// 4-byte height suffix is little-endian, that order does **not** match
-    /// numeric height order within one prefix (height 256 sorts before height
-    /// 1). This method sorts the final entry list by numeric height so callers
-    /// receive chronological order regardless of the on-disk key encoding.
-    /// Heights not resolvable by `source` are skipped.
+    /// Entries are returned sorted by numeric height (ascending). Store
+    /// iteration is already chronological under big-endian heights; this method
+    /// still sorts so API order stays numeric if a prefix collision interleaves
+    /// another script's rows. Heights not resolvable by `source` are skipped.
     ///
     /// The lossy 8-byte prefix is exact-resolved here: only transactions whose
     /// output scripthash matches the full 32-byte `scripthash` are emitted.
@@ -1497,7 +1498,8 @@ impl<S: KvStore> Indexer<S> {
     /// funding height (ascending). Use this when callers need the confirmation
     /// height (e.g. `ScriptIndex` `listunspent` emits the height for each
     /// unspent output). The sort mirrors [`Self::resolve_script_history`]:
-    /// store iteration order is LE byte order, not numeric height order.
+    /// API order is numeric height even when a prefix collision interleaves
+    /// another script's rows.
     pub fn resolve_unspent_outputs_with_height<B: BlockSource>(
         &self,
         scripthash: crate::ScriptHash,
@@ -1568,11 +1570,8 @@ impl<S: KvStore> Indexer<S> {
     /// spending scan prefix, decoded from `ColumnFamily::Spending`. The 8-byte
     /// prefix is lossy as above.
     ///
-    /// **Height ordering caveat:** same as [`Self::iter_funding_rows`]: the
-    /// 4-byte height suffix is little-endian, so lexicographic byte order does
-    /// **not** match numeric height order within one prefix. Callers needing
-    /// chronological order must sort by numeric height after exact-resolving
-    /// rows.
+    /// Store iteration is chronological: the height suffix is big-endian, so
+    /// lexicographic byte order matches numeric height order within one prefix.
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,
@@ -1588,11 +1587,8 @@ impl<S: KvStore> Indexer<S> {
     /// prefix, decoded from `ColumnFamily::TxConfirmed`. The 8-byte prefix is
     /// lossy; multiple txids can share a prefix.
     ///
-    /// **Height ordering caveat:** same as [`Self::iter_funding_rows`]: the
-    /// 4-byte height suffix is little-endian, so lexicographic byte order does
-    /// **not** match numeric height order within one prefix. Callers needing
-    /// chronological order must sort by numeric height after exact-resolving
-    /// rows.
+    /// Store iteration is chronological: the height suffix is big-endian, so
+    /// lexicographic byte order matches numeric height order within one prefix.
     pub fn iter_txid_rows(&self, txid: &Txid) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = TxidRow::scan_prefix(txid);
         let iter = self.store.iter_prefix(ColumnFamily::TxConfirmed, &prefix)?;
@@ -2099,7 +2095,7 @@ fn pending_rows_for_block_with_header(
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
             header: &mut header,
-            height_bytes: height.to_le_bytes(),
+            height_bytes: crate::types::height_key(height),
             txids,
             txid_count: 0,
             invalid_header_len: None,
@@ -3098,8 +3094,12 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Opens a writer over `store`, rejecting unversioned index tables.
     ///
-    /// Format 3 (Spending keys without positions) is upgraded in place by
-    /// resetting `ScriptHistory` only. Any other version mismatch is
+    /// Predecessor formats 3 and 4 take the durable capability-reset path for
+    /// `TxLookup` and `ScriptHistory` (`IDX-05` schema refusal; `IDX-04` keeps
+    /// sibling `ScriptLive`). The commit point is the durable exact-claim
+    /// marker: a crash leaves that claim, and the next open finishes it.
+    /// `ResetInProgress` and `StaleIndexState` mean discard derived state and
+    /// retry; other storage failures belong to the caller. Any other version is
     /// [`IndexError::UnsupportedTxIndexFormatVersion`].
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
@@ -3108,14 +3108,11 @@ impl<S: KvStore> IndexWriter<S> {
             .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
         {
             Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
-            Some(value) if value.as_slice() == FORMAT_VERSION_V3 => {
-                // Only Spending's representation changed. Reset ScriptHistory
-                // so new spending rows carry positions, and leave TxLookup
-                // serving (`IDX-04`). Foreign versions still refuse start.
+            Some(value) if is_predecessor_height_format(value.as_slice()) => {
                 resume_capability_reset(
                     indexer.store.as_ref(),
                     generation,
-                    IndexCapabilities::SCRIPT_HISTORY.to_mask(),
+                    IndexCapabilities::HISTORICAL.to_mask(),
                 )?;
             }
             Some(value) => {
@@ -4033,17 +4030,16 @@ mod tests {
         Ok(())
     }
 
-    /// Proves that lexicographic key byte order does **not** match numeric
-    /// height order within one prefix, because the height suffix is
-    /// little-endian. Height 256 is `[0x00, 0x01, 0x00, 0x00]`, height 1 is
-    /// `[0x01, 0x00, 0x00, 0x00]`, so byte order puts 256 before 1.
+    /// Proves that lexicographic key byte order matches numeric height order
+    /// within one prefix, because the height suffix is big-endian. Height 1 is
+    /// `[0x00, 0x00, 0x00, 0x01]`, height 256 is `[0x00, 0x00, 0x01, 0x00]`, so
+    /// byte order puts 1 before 256.
     ///
-    /// This pins the corrected doc contract on `iter_funding_rows`: callers
-    /// needing chronological order must sort by numeric height after
-    /// exact-resolving rows, never rely on store iteration order.
+    /// This pins the `iter_funding_rows` contract: store iteration is
+    /// chronological. High-level resolvers still sort after exact-resolve so
+    /// API order does not depend on raw iteration.
     #[test]
-    fn iter_funding_rows_height_order_is_le_byte_order_not_numeric()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error::Error>> {
         let script = vec![0x51, 0x01];
         let scripthash = ScriptHash::from_script_bytes(&script);
         let (_dir, mut indexer) = indexer()?;
@@ -4056,27 +4052,12 @@ mod tests {
 
         let rows = indexer.iter_funding_rows(scripthash)?;
         assert_eq!(rows.len(), 2, "two heights funded the same script");
-
-        // Store iteration order is LE byte order, so 256 precedes 1.
         assert_eq!(
             rows[0].height(),
-            256,
-            "LE byte order puts height 256 before height 1, not numeric order"
+            1,
+            "big-endian keys iterate height 1 first"
         );
-        assert_eq!(rows[1].height(), 1);
-
-        // The corollary: numeric sort produces the opposite order, so no
-        // caller may treat raw iteration order as chronological.
-        let mut numeric = rows.clone();
-        numeric.sort_by_key(|row| row.height());
-        assert_eq!(
-            numeric.iter().map(|row| row.height()).collect::<Vec<_>>(),
-            vec![1, 256]
-        );
-        assert_ne!(
-            rows, numeric,
-            "store iteration order must differ from numeric height order"
-        );
+        assert_eq!(rows[1].height(), 256);
         Ok(())
     }
 

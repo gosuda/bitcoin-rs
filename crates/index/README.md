@@ -11,7 +11,8 @@ script-funding, previous-outpoint spending, and live-outpoint rows (counted by
 `IndexRowCounts`); `iter_funding_rows` and `iter_live_outpoints` scan a
 scripthash prefix, and `resolve_script_history` exact-resolves
 the lossy 8-byte prefix against a `BlockSource` that fetches block bytes by height and
-range. `PreparedBlock`/`PreparedBatch` under `PreparedBatchLimits` bound one atomic
+range. Hash-prefix rows store a big-endian height so a prefix scan is already
+chronological. `PreparedBlock`/`PreparedBatch` under `PreparedBatchLimits` bound one atomic
 forward write by row count and encoded bytes, and `IndexWriter` is the mutation-only
 handle for durable prepared writes. `IndexWatermark` is the durable
 `(height, full block hash)` cursor — encoded as `height || hash`, readable from a snapshot —

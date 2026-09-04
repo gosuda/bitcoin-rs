@@ -5,7 +5,12 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Number of bytes retained from hashes in electrs index rows.
 pub const HASH_PREFIX_LEN: usize = 8;
-/// Number of bytes used for little-endian block heights in index rows.
+/// Number of bytes used for big-endian block heights in index rows.
+///
+/// Big-endian so lexicographic key order matches numeric height order within
+/// one hash prefix. Derived [`Ord`] on [`HashPrefixRow`] is therefore
+/// chronological. Previous little-endian suffixes are a foreign store format
+/// and are deleted, not read (`IDX-05`).
 pub const HEIGHT_SIZE: usize = 4;
 /// Serialized byte length of a hash-prefix row.
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
@@ -15,7 +20,24 @@ pub const HEADER_ROW_SIZE: usize = 80;
 /// Prefix used as the seek key for electrs-style hash-prefix rows.
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
-/// A stable electrs hash-prefix row: eight prefix bytes followed by a little-endian height.
+/// Encodes a block height as the four-byte suffix of a hash-prefix row.
+#[must_use]
+pub const fn height_key(height: u32) -> [u8; HEIGHT_SIZE] {
+    height.to_be_bytes()
+}
+
+/// Decodes a hash-prefix row height suffix.
+#[must_use]
+pub const fn height_from_key(bytes: [u8; HEIGHT_SIZE]) -> u32 {
+    u32::from_be_bytes(bytes)
+}
+
+/// A hash-prefix row: eight prefix bytes followed by a big-endian height.
+///
+/// The 8-byte prefix is the electrs scan key. The height suffix is not: electrs
+/// stored little-endian heights, which made lexicographic iteration disagree
+/// with numeric order. This row stores a sortable height so a prefix scan is
+/// already chronological.
 #[derive(
     Copy,
     Clone,
@@ -36,7 +58,7 @@ pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 pub struct HashPrefixRow {
     /// The first eight bytes of the indexed hash-derived key.
     pub prefix: HashPrefix,
-    /// The transaction-confirming block height, encoded little-endian.
+    /// The transaction-confirming block height, encoded big-endian.
     pub height: [u8; HEIGHT_SIZE],
 }
 
@@ -45,13 +67,19 @@ impl HashPrefixRow {
     pub const fn new(prefix: HashPrefix, height: u32) -> Self {
         Self {
             prefix,
-            height: height.to_le_bytes(),
+            height: height_key(height),
         }
     }
 
     /// Returns the native-endian block height.
     pub const fn height(self) -> u32 {
-        u32::from_le_bytes(self.height)
+        height_from_key(self.height)
+    }
+
+    /// Inclusive start key for rows of `prefix` at `min_height` or later.
+    #[must_use]
+    pub fn start_at(prefix: HashPrefix, min_height: u32) -> [u8; HASH_PREFIX_ROW_SIZE] {
+        Self::new(prefix, min_height).to_db_row()
     }
 
     /// Returns the serialized database row.
@@ -423,15 +451,33 @@ mod tests {
     };
 
     #[test]
-    fn hash_prefix_row_uses_electrs_layout() {
+    fn hash_prefix_row_uses_sortable_height() {
         let row = HashPrefixRow::new([0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc], 123_456);
         assert_eq!(
             row.to_db_row(),
             [
-                0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc, 0x40, 0xe2, 0x01, 0x00
+                0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc, 0x00, 0x01, 0xe2, 0x40
             ]
         );
         assert_eq!(row.height(), 123_456);
+    }
+
+    #[test]
+    fn hash_prefix_row_ord_matches_numeric_height() {
+        let prefix = [0x11_u8; 8];
+        let low = HashPrefixRow::new(prefix, 1);
+        let mid = HashPrefixRow::new(prefix, 256);
+        let high = HashPrefixRow::new(prefix, 257);
+        assert!(low < mid);
+        assert!(mid < high);
+        assert_eq!(low.to_db_row()[8..], [0x00, 0x00, 0x00, 0x01]);
+        assert_eq!(mid.to_db_row()[8..], [0x00, 0x00, 0x01, 0x00]);
+        assert_eq!(high.to_db_row()[8..], [0x00, 0x00, 0x01, 0x01]);
+        assert_eq!(
+            HashPrefixRow::start_at(prefix, 256),
+            mid.to_db_row(),
+            "start_at is the inclusive key at that height"
+        );
     }
 
     #[test]

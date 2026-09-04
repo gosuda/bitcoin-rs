@@ -684,40 +684,65 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 6 })
     ));
     Ok(())
 }
 
+/// `IDX-05` / `IDX-04`: format 3 open resets historical keys and keeps Live.
 #[test]
-fn format_3_open_resets_only_script_history() -> Result<(), Box<dyn std::error::Error>> {
+fn format_3_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn std::error::Error>> {
+    predecessor_height_format_resets_historical(3)
+}
+
+/// `IDX-05` / `IDX-04`: format 4 open resets historical keys and keeps Live.
+#[test]
+fn format_4_open_resets_historical_keys_and_keeps_live() -> Result<(), Box<dyn std::error::Error>> {
+    predecessor_height_format_resets_historical(4)
+}
+
+fn predecessor_height_format_resets_historical(
+    version: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
     seed_populated_store(&store, 1)?;
     store.put(ColumnFamily::Spending, b"legacy-spend", &[])?;
-    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &3_u32.to_le_bytes())?;
+    let live_key = [0xab_u8; bitcoin_rs_index::SCRIPT_LIVE_ROW_SIZE];
+    store.put(ColumnFamily::ScriptLive, &live_key, &[])?;
+    let live_watermark = IndexWatermark {
+        height: 0,
+        hash: block_hash(&read_fixture(0)?),
+    };
+    store.put(
+        ColumnFamily::UtxoMeta,
+        LIVE_WATERMARK_KEY,
+        &live_watermark.to_bytes(),
+    )?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        &[0x00, b'V'],
+        &version.to_le_bytes(),
+    )?;
     store.put(
         ColumnFamily::UtxoMeta,
         b"index:format_version",
         &1_u32.to_le_bytes(),
     )?;
 
-    let Some(tx_lookup) = store.get(ColumnFamily::UtxoMeta, &[0x00, b'T'])? else {
-        return Err("tx lookup watermark".into());
-    };
-    let confirmed_before = store.count(ColumnFamily::TxConfirmed);
-    let headers_before = store.count(ColumnFamily::BlockHeaders);
+    assert!(store.count(ColumnFamily::TxConfirmed) > 0);
     assert!(store.count(ColumnFamily::Funding) > 0);
     assert!(store.count(ColumnFamily::Spending) > 0);
+    assert_eq!(store.count(ColumnFamily::ScriptLive), 1);
 
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
 
     assert_eq!(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(4_u32.to_le_bytes().as_slice())
+        Some(5_u32.to_le_bytes().as_slice())
     );
     assert_eq!(
         store
@@ -728,15 +753,15 @@ fn format_3_open_resets_only_script_history() -> Result<(), Box<dyn std::error::
     assert_eq!(
         writer.watermarks()?,
         IndexWatermarks {
-            tx_lookup: Some(IndexWatermark::from_bytes(&tx_lookup)?),
+            tx_lookup: None,
             script_history: None,
-            script_live: None,
+            script_live: Some(live_watermark),
         }
     );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), confirmed_before);
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), headers_before);
+    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
     assert_eq!(store.count(ColumnFamily::Funding), 0);
     assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(store.count(ColumnFamily::ScriptLive), 1);
     Ok(())
 }
 
@@ -788,7 +813,7 @@ fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1610,7 +1635,7 @@ const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 const LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
-const FORMAT_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1997,15 +2022,15 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
 #[test]
 fn format_version_requires_exact_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
-    // Extra trailing byte must be rejected even though the prefix is version 4.
+    // Extra trailing byte must be rejected even though the prefix is version 5.
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0, 0],
+        &[5, 0, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 })
     ));
     Ok(())
 }
@@ -2020,7 +2045,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -2060,7 +2085,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
