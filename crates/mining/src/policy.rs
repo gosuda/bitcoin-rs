@@ -58,7 +58,7 @@ pub(crate) fn select_packages(
     let mut used_size = reserved_size;
     let mut used_sigops = reserved_sigops;
     let mut fees = 0_u64;
-    let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
+    let mut pooled = None;
 
     for index in 0..snapshot.entries.len() {
         if (context.max_weight > 0 && used_weight >= context.max_weight)
@@ -71,7 +71,13 @@ pub(crate) fn select_packages(
         }
 
         let package = residual_package(snapshot, index, &selected)?;
-        if !package_is_final(context, snapshot, &pooled, &package) {
+          if context.csv_active && pooled.is_none() {
+              pooled = Some(snapshot.entries.iter().map(|entry| entry.txid).collect());
+          }
+          
+              
+          });
+        if !package_is_final(context, snapshot, pooled, &package) {
             continue;
         }
 
@@ -132,7 +138,7 @@ fn residual_package(
             return Err(MiningError::MissingAncestor {
                 entry: tip,
                 ancestor: u32::try_from(ancestor).unwrap_or(u32::MAX),
-            });
+           if !package_is_final(context, snapshot, pooled.as_ref(), &package) {
         }
         if !selected[ancestor] {
             indices.push(ancestor);
@@ -190,7 +196,7 @@ fn single_entry_package(entry: &SnapshotEntry, index: usize) -> SelectedPackage 
 fn package_is_final(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
-    pooled: &HashSet<Txid>,
+    pooled: Option<&HashSet<Txid>>,
     package: &SelectedPackage,
 ) -> bool {
     package.indices.iter().all(|&index| {
@@ -202,7 +208,7 @@ fn package_is_final(
 
 fn next_block_sequence_locks_final(
     context: &CandidateContext,
-    pooled: &HashSet<Txid>,
+    pooled: Option<&HashSet<Txid>>,
     tx: &Tx,
 ) -> bool {
     if !context.csv_active {
@@ -212,7 +218,7 @@ fn next_block_sequence_locks_final(
         return true;
     }
     tx.inputs.iter().all(|input| {
-        if !pooled.contains(&input.previous_output.txid) {
+        if !pooled.is_some_and(|pooled| pooled.contains(&input.previous_output.txid)) {
             return true;
         }
         bitcoin_rs_consensus::bip68::sequence_lock_satisfied(
