@@ -13,10 +13,7 @@ use bitcoin_rs_primitives::Network;
 
 use crate::{BlockTree, CachedState, NodeId};
 
-const NAMED_DEPLOYMENTS: [(&str, u32); 2] = [
-    ("csv", CSV_DEPLOYMENT_ID),
-    ("segwit", SEGWIT_DEPLOYMENT_ID),
-];
+
 
 /// Read-only [`DeploymentContext`] over a [`BlockTree`] rooted at `tip_id`.
 struct DeploymentView<'a> {
@@ -77,6 +74,11 @@ pub struct SignallingDeployment {
     /// Whether the deployment is `LockedIn` (bit required on the candidate).
     pub locked_in: bool,
 }
+
+const NAMED_DEPLOYMENTS: [(&str, u32); 2] = [
+    ("csv", CSV_DEPLOYMENT_ID),
+    ("segwit", SEGWIT_DEPLOYMENT_ID),
+];
 
 /// Deployments a GBT caller must see in `vbavailable` / `vbrequired`.
 ///
