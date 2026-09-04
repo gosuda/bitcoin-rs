@@ -1,5 +1,7 @@
 //! `ScriptLive` behavior over the prepared/commit path (#225).
 //!
+//! CONTRACT: IDX-01 through IDX-07 define the behavior asserted by this suite.
+//!
 //! Everything here drives the same `IndexWriter` API the node's worker uses,
 //! with a map-backed [`SpentCoinScripts`] standing in for the undo-record
 //! anchor the node supplies in production. The properties under test are the
