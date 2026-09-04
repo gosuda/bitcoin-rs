@@ -7,7 +7,12 @@
 
 use std::io::{IoSlice, Read, Result as IoResult, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Global cap for inbound read-ahead storage. Connections that cannot reserve
+/// a cache fall back to reading directly into the caller's buffer.
+const INBOUND_READ_CACHE_BUDGET: usize = 1024;
+static INBOUND_READ_CACHES: AtomicUsize = AtomicUsize::new(0);
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bytes and activity times for one peer connection.
@@ -106,6 +111,7 @@ pub struct CountingStream<S> {
     read_buf: Vec<u8>,
     read_pos: usize,
     read_end: usize,
+    read_cache_reserved: bool,
 }
 
 /// Sized to hold a max `headers` payload (~162 KiB) plus the next command
@@ -122,6 +128,7 @@ impl<S> CountingStream<S> {
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
+            read_cache_reserved: false,
         }
     }
 
@@ -148,6 +155,7 @@ impl CountingStream<std::net::TcpStream> {
             read_buf: Vec::new(),
             read_pos: 0,
             read_end: 0,
+            read_cache_reserved: false,
         })
     }
 
@@ -190,13 +198,30 @@ impl<S: Read> CountingStream<S> {
         Some(take)
     }
 
-    fn fill_read_buf(&mut self) -> IoResult<()> {
+    fn fill_read_buf(&mut self) -> IoResult<bool> {
+        if !self.read_cache_reserved {
+            let mut current = INBOUND_READ_CACHES.load(Ordering::Relaxed);
+            loop {
+                if current >= INBOUND_READ_CACHE_BUDGET {
+                    return Ok(false);
+                }
+                match INBOUND_READ_CACHES.compare_exchange_weak(
+                    current, current + 1, Ordering::Acquire, Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        self.read_cache_reserved = true;
+                        break;
+                    }
+                    Err(actual) => current = actual,
+                }
+            }
+        }
         if self.read_buf.len() < INBOUND_READ_BUFFER {
             self.read_buf.resize(INBOUND_READ_BUFFER, 0);
         }
         self.read_pos = 0;
         self.read_end = self.inner.read(&mut self.read_buf)?;
-        Ok(())
+        Ok(true)
     }
 
     fn read_buffered(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
@@ -206,8 +231,18 @@ impl<S: Read> CountingStream<S> {
         if buffer.len() >= INBOUND_READ_BUFFER {
             return self.inner.read(buffer);
         }
-        self.fill_read_buf()?;
+        if !self.fill_read_buf()? {
+            return self.inner.read(buffer);
+        }
         Ok(self.take_leftover(buffer).unwrap_or(0))
+    }
+}
+
+impl<S> Drop for CountingStream<S> {
+    fn drop(&mut self) {
+        if self.read_cache_reserved {
+            INBOUND_READ_CACHES.fetch_sub(1, Ordering::Release);
+        }
     }
 }
 
@@ -293,8 +328,8 @@ mod tests {
         assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
     }
 
-    /// One kernel delivery can contain the next message. The wrapper must
-    /// keep those leftover bytes instead of asking the socket again.
+    /// `P2P-01`: One kernel delivery can contain the next message. The
+    /// wrapper must keep those leftover bytes instead of asking the socket again.
     #[test]
     fn leftover_bytes_do_not_revisit_the_socket() {
         struct OneShot {
@@ -337,8 +372,8 @@ mod tests {
         assert_eq!(counters.bytes_recv(), 5);
     }
 
-    /// Two framed pings delivered in one inner read must both decode without
-    /// a second socket read — the IBD headers path between small messages.
+    /// `P2P-01`: Two framed pings delivered in one inner read must both decode
+    /// without a second socket read — the IBD headers path between small messages.
     #[test]
     fn two_wire_messages_decode_from_one_socket_read() {
         struct OneShot {
