@@ -240,7 +240,7 @@ impl TxIngressConsumer {
             connection_id: source.connection_id().get(),
         };
         let candidate = ReplacementCandidate::new(
-            Arc::new(tx.clone()),
+            Arc::new(tx),
             fact.vsize,
             fact.base_fee.unwrap_or(0),
             policy.incremental_relay_fee_sat_per_kvb,
@@ -266,7 +266,7 @@ impl TxIngressConsumer {
                 });
                 if accepted {
                     self.relay
-                        .announce(txid, tx.wtxid(), Some(source.connection_id().get()));
+                        .announce(txid, wtxid, Some(source.connection_id().get()));
                     self.mining_control.publish_generation();
                     tracing::trace!(%txid, "p2p tx admitted and relayed");
                     for orphan in self.tx_admission.take_orphans_waiting_on(txid) {
