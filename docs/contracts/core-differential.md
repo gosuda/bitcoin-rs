@@ -12,6 +12,8 @@ after a real P2P sync, not a replay of captured JSON.
 - The live lane downloads Bitcoin Core 31.1
   `bitcoin-31.1-x86_64-linux-gnu.tar.gz` from bitcoincore.org and checks
   the tarball SHA-256 before extracting `bitcoind`.
+- A cached prefix is reused only when its stamp matches that SHA-256 and
+  `bitcoind -version` reports `v31.1`.
 
 ### `CORE-02`: Observable chain identity matches after P2P sync
 

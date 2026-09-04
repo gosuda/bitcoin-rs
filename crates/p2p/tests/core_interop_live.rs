@@ -53,6 +53,13 @@ fn parse_core_subversion(subversion: &str) -> Option<&str> {
     Some(version)
 }
 
+/// `31.1` matches `31.1` and `31.1.0`; it does not match `31.10.0` or `31.2.0`.
+fn version_is_pinned_line(parsed: &str, pinned: &str) -> bool {
+    let parsed: Vec<&str> = parsed.split('.').collect();
+    let pinned: Vec<&str> = pinned.split('.').collect();
+    parsed.len() >= pinned.len() && parsed[..pinned.len()] == pinned[..]
+}
+
 #[test]
 #[ignore = "requires live bitcoind; run scripts/run-p2p-core-interop.sh"]
 fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,7 +81,7 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::e
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| main_error("evidence missing `core_version`"))?;
     // Core reports its user agent in BIP 14 form (`/Satoshi:31.1.0/`), not a
-    // bare version; normalize before pinning the 31.x line.
+    // bare version; normalize before pinning CORE-01's 31.1 line.
     let parsed_core_version = parse_core_subversion(core_version).ok_or_else(|| {
         main_error(format!(
             "Core subversion {core_version:?} is not Satoshi-format \
@@ -82,9 +89,13 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), Box<dyn std::e
         ))
     })?;
     assert!(
-        parsed_core_version.starts_with("31."),
-        "pinned Bitcoin Core 31.x: raw subversion {core_version:?}, parsed version \
-         {parsed_core_version:?}"
+        version_is_pinned_line(
+            parsed_core_version,
+            bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
+        ),
+        "pinned Bitcoin Core {}: raw subversion {core_version:?}, parsed version \
+         {parsed_core_version:?}",
+        bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
     );
     let magic = evidence
         .get("magic")
@@ -205,6 +216,30 @@ fn parses_satoshi_subversions() {
         Some("31.1.0")
     );
     assert_eq!(parse_core_subversion("/Satoshi:0.21.99/"), Some("0.21.99"));
+}
+
+#[test]
+fn pinned_core_line_rejects_31_10() {
+    assert!(version_is_pinned_line(
+        "31.1.0",
+        bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
+    ));
+    assert!(version_is_pinned_line(
+        "31.1",
+        bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
+    ));
+    assert!(!version_is_pinned_line(
+        "31.10.0",
+        bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
+    ));
+    assert!(!version_is_pinned_line(
+        "31.2.0",
+        bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
+    ));
+    assert!(!version_is_pinned_line(
+        "30.1.0",
+        bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
+    ));
 }
 
 #[test]

@@ -34,9 +34,21 @@ esac
 
 log() { printf '[install-bitcoind] %s\n' "$*" >&2; }
 
-if [[ -x "${BITCOIND}" ]]; then
-  log "already installed at ${BITCOIND}"
+readonly STAMP="${PREFIX}/.bitcoin-rs-core-tarball-sha256"
+cached_matches_pin() {
+  [[ -x "${BITCOIND}" && -f "${STAMP}" ]] || return 1
+  [[ "$(cat -- "${STAMP}")" == "${TARBALL_SHA256}" ]] || return 1
+  local version
+  version="$("${BITCOIND}" -version 2>/dev/null | head -n1 || true)"
+  [[ "${version}" == *"v${CORE_VERSION}"* ]]
+}
+
+if cached_matches_pin; then
+  log "already installed at ${BITCOIND} (tarball ${TARBALL_SHA256})"
 else
+  if [[ -x "${BITCOIND}" ]]; then
+    log "cached ${BITCOIND} is not the pinned Core ${CORE_VERSION} artifact; reinstalling"
+  fi
   log "downloading ${TARBALL_URL}"
   WORKDIR="$(mktemp -d /tmp/bitcoind-install.XXXXXX)"
   trap 'rm -rf -- "${WORKDIR:?}"' EXIT
@@ -46,13 +58,13 @@ else
     log "ABORT: tarball sha256 ${got} != ${TARBALL_SHA256}"
     exit 1
   fi
-  mkdir -p "${PREFIX}"
-  tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
   mkdir -p "${PREFIX}/bin"
+  tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
   install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoind" "${BITCOIND}"
   if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" ]]; then
     install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" "${PREFIX}/bin/bitcoin-cli"
   fi
+  printf '%s\n' "${TARBALL_SHA256}" > "${STAMP}"
   log "installed ${BITCOIND}"
 fi
 
