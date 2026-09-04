@@ -7,15 +7,15 @@ verify progress before moving on.
 
 - A Rust toolchain for edition 2024 (MSRV 1.95.0 or newer).
 - The default binary build is pure Rust and requires no C++ compiler or system
-  libraries. It uses the portable Rust script interpreter, which verifies
-  Taproot key-path spends only and cannot validate ordinary mainnet spends
-  (see #166). For production consensus validation, enable the `kernel` feature.
+  libraries. It uses the native Rust script interpreter, which verifies Legacy,
+  SegWit v0, and Taproot key-path and script-path spends. Core's committed
+  script and transaction vectors currently pin zero native mismatches.
 
-If you plan to compile with the `kernel` feature for production consensus
-validation via `libbitcoinkernel`, install `cmake` and `libboost-dev`:
+If you plan to compile with the `kernel` feature to run `libbitcoinkernel` as
+an independent verification oracle, install `cmake` and `libboost-dev`:
 
 ```sh
-# Required for the kernel consensus engine feature
+# Required for the kernel verification-oracle feature
 sudo apt-get install -y cmake libboost-dev
 ```
 
@@ -29,13 +29,10 @@ cargo build --release -p bitcoin-rs
 
 This produces `./target/release/bitcoin-rs`. The default configuration includes
 the `fjall` storage backend, `redb`, and `zmq` sequence publishing. The default
-binary build uses the portable Rust script interpreter, which verifies Taproot
-key-path spends only; other script classes (Legacy, SegWit v0, Taproot
-script-path) are stubbed pending a full opcode interpreter (see #166). A
-mainnet sync with this build stops at the first real spend.
+binary build uses the native Rust script interpreter for every consensus spend
+class.
 
-To compile with `libbitcoinkernel` as the consensus engine for full script
-validation across all script classes:
+To compile with `libbitcoinkernel` as an independent verification oracle:
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
@@ -84,18 +81,22 @@ Configuration defaults:
 | `--dbcache-mb` | 450 (split 80/20 across chainstate and txindex when enabled, with disabled shares going to chainstate) |
 | `--prune-target-mb` | 0 (no pruning) |
 | `--txindex` | off |
-| `--scriptindex` | off (accepts `full` or boolean; defaults to `full` when passed without a value) |
-| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` consensus engine |
+| `--scriptindex` | off (accepts `full`, `utxo`, or boolean; defaults to `full` when passed without a value) |
+| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` as a verification oracle |
 
 The node logs its startup banner, effective cache allocation, and the address
 the JSON-RPC listener bound to.
 
 `--txindex` enables Bitcoin Core-compatible transaction lookup support.
-`--scriptindex` enables address and scripthash UTXO queries and confirmed
-funding/spending history exposed via Esplora-compatible HTTP endpoints.
-Address and scripthash routes return HTTP 503 until `--scriptindex` catches up,
-or when it is disabled. `--rest` enables the unauthenticated Core REST gateway
-(`/rest/tx`, `/rest/block`, `/rest/headers`, etc.) alongside JSON-RPC.
+`--scriptindex` (`full`, or the historical boolean `true`) enables address and
+scripthash UTXO queries plus confirmed funding/spending history via
+Esplora-compatible HTTP endpoints. `--scriptindex=utxo` maintains only the
+compact live-output view: current UTXO routes work once that view is ready,
+while history, statistics, pagination, and confirmed outspend routes return
+HTTP 503 as a disabled capability rather than as a lagging backfill. Address
+and scripthash UTXO routes return HTTP 503 until the live view catches up, or
+when ScriptIndex is disabled. `--rest` enables the unauthenticated Core REST
+gateway (`/rest/tx`, `/rest/block`, `/rest/headers`, etc.) alongside JSON-RPC.
 
 The datadir schema marker covers the transaction and script indexes as well as
 chainstate. An unmarked or incompatible datadir fails before any derived index
@@ -134,6 +135,37 @@ The dispatch table in `crates/rpc/src/handlers.rs` implements supported Core
 methods. There is no internal wallet: private-key and wallet-construction
 methods are absent, while key-free PSBT utilities (`combinepsbt`, `finalizepsbt`)
 and descriptor helpers remain for external signers.
+
+## External wallet
+
+Point any Esplora client at the same listener. `--scriptindex` must be on,
+or address and scripthash routes return HTTP 503.
+
+[bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw`) is the
+named external consumer:
+
+Start the node in one terminal:
+
+```sh
+./target/release/bitcoin-rs \
+  --network regtest \
+  --scriptindex \
+  --data-dir .bitcoin-rs-regtest \
+  --rpc-bind 127.0.0.1:18443
+```
+
+Then, in a second terminal, run the wallet while the node is still running:
+
+```sh
+btcw balance -n regtest -u http://127.0.0.1:18443
+btcw balance -n regtest -u http://127.0.0.1:18443/api
+```
+
+`/api` and `/api/v1` are aliases of the Esplora surface at the listener
+root, so a mempool.space-style base URL works without a reverse proxy.
+
+The wallet stays in that repository. This node only serves the public
+surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).
 
 ## Verifying everything yourself
 

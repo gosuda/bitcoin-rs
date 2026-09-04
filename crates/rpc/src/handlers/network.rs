@@ -349,10 +349,7 @@ pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .first()
         .and_then(JsonValueTrait::as_bool)
         .ok_or(RpcError::InvalidParams("state must be a boolean"))?;
-    ctx.network_active.store(state, Ordering::SeqCst);
-    if !state {
-        ctx.peer_table.cancel_all();
-    }
+    bitcoin_rs_p2p::apply_network_active(&ctx.network_active, &ctx.peer_table, state);
     typed_to_sonic(&v31::SetNetworkActive(state))
 }
 pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {

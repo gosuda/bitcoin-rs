@@ -5,8 +5,12 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
-pub mod connection;
+/// Active-chain `getheaders` / `getdata` serving.
+pub mod chain_query;
+/// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
+pub mod compat;
 /// Per-connection identity and cancellation.
+pub mod connection;
 /// Per-connection traffic counters.
 pub mod counters;
 /// Inbound message dispatcher.
@@ -29,6 +33,8 @@ pub mod peer;
 pub mod peer_info;
 /// Single owner of live peer sessions: leases and their handshake metadata.
 pub mod peer_table;
+/// Runtime owner for P2P control state and workers.
+pub mod service;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Bitcoin P2P wire codec.
@@ -36,11 +42,13 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub mod wtxid;
 
-pub use connection::{ConnectionId, PeerLease, PeerSource, PeerStats};
+pub use chain_query::ActiveChainQuery;
+pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
+pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerStats, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
-pub use listener::spawn_outbound_connection;
+pub use listener::{ListenerExtras, spawn_outbound_connection};
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
     MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, NetworkControls,
@@ -49,6 +57,10 @@ pub use peer::{
 };
 pub use peer_info::PeerInfo;
 pub use peer_table::{PeerSession, PeerTable};
+pub use service::{
+    P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
+    apply_network_active,
+};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 

@@ -5,51 +5,10 @@ use std::io::Cursor;
 use bitcoin::hashes::{Hash as _, sha256d};
 use libfuzzer_sys::fuzz_target;
 
-/// Every command `decode_payload` dispatches on.
-///
-/// This list is the ONLY source of command names the harness produces, so a
-/// command missing here is a payload decoder no fuzz input can reach. Keep it
-/// in step with the match in `crates/p2p/src/wire.rs`.
-const COMMANDS: [&str; 36] = [
-    "version",
-    "verack",
-    "addr",
-    "inv",
-    "getdata",
-    "notfound",
-    "getblocks",
-    "getheaders",
-    "mempool",
-    "tx",
-    "block",
-    "headers",
-    "sendheaders",
-    "getaddr",
-    "ping",
-    "pong",
-    "merkleblock",
-    "filterload",
-    "filteradd",
-    "filterclear",
-    "getcfilters",
-    "cfilter",
-    "getcfheaders",
-    "cfheaders",
-    "getcfcheckpt",
-    "cfcheckpt",
-    "sendcmpct",
-    "cmpctblock",
-    "getblocktxn",
-    "blocktxn",
-    "reject",
-    "alert",
-    "feefilter",
-    "wtxidrelay",
-    "addrv2",
-    "sendaddrv2",
-];
-
 /// Fuzz the Bitcoin P2P command decoders.
+///
+/// Command names come from [`bitcoin_rs_p2p::COMMANDS`], so a decoder arm
+/// missing from the inventory is a payload no fuzz input can reach.
 ///
 /// The envelope is BUILT here rather than taken from the fuzz data. Fed raw
 /// bytes, arbitrary input has to satisfy the network magic, the command
@@ -68,9 +27,12 @@ fuzz_target!(|data: &[u8]| {
     let payload = payload
         .get(..bitcoin_rs_p2p::wire::MAX_MESSAGE_PAYLOAD)
         .unwrap_or(payload);
-    let Some(command) = COMMANDS.get(usize::from(*selector) % COMMANDS.len()) else {
+    let Some(spec) = bitcoin_rs_p2p::COMMANDS
+        .get(usize::from(*selector) % bitcoin_rs_p2p::COMMANDS.len())
+    else {
         return;
     };
+    let command = spec.name;
 
     let magic = bitcoin::p2p::Magic::REGTEST;
     let mut framed = Vec::with_capacity(24usize.saturating_add(payload.len()));

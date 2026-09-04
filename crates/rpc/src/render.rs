@@ -3,7 +3,7 @@
 //! Callers supply applied-chain facts. This module never queries node state and
 //! does not choose JSON-RPC versus REST transport policy.
 
-use bitcoin_rs_primitives::{Block, Header, Network, Tx, consensus_bytes};
+use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
 use sonic_rs::{Value, json};
 
 use crate::tx_render::transaction_json;
@@ -53,9 +53,9 @@ pub fn block_json(
 ) -> Value {
     let header = &block.header;
     let mut value = header_common_json(header, chain);
-    let size = consensus_bytes(block).len();
-    let weight = block_weight(block);
-    let stripped_size = stripped_size(block);
+    let size = block.total_size();
+    let weight = block.weight();
+    let stripped_size = block.stripped_size();
 
     let _ = value.insert("strippedsize", json!(stripped_size));
     let _ = value.insert("size", json!(size));
@@ -125,36 +125,6 @@ fn header_common_json(header: &Header, chain: &BlockChainContext) -> Value {
         let _ = value.insert("nextblockhash", json!(next.to_string()));
     }
     value
-}
-
-/// BIP141 block weight: `stripped size * 3 + total size`, matching Core's
-/// `GetBlockWeight` (both sizes include the 80-byte header and the tx-count
-/// compact size; `stripped` excludes only the segwit marker/flag/witness).
-pub(crate) fn block_weight(block: &Block) -> u64 {
-    let size = u64::try_from(consensus_bytes(block).len()).unwrap_or(u64::MAX);
-    u64::try_from(stripped_size(block))
-        .unwrap_or(u64::MAX)
-        .saturating_mul(3)
-        .saturating_add(size)
-}
-
-/// Stripped size: the full serialization without segwit witness sections.
-pub(crate) fn stripped_size(block: &Block) -> usize {
-    80_usize
-        .saturating_add(compact_size_len(block.txs.len()))
-        .saturating_add(block.txs.iter().map(Tx::base_size).sum())
-}
-
-const fn compact_size_len(value: usize) -> usize {
-    if value < 0xfd {
-        1
-    } else if value <= 0xffff {
-        3
-    } else if value <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

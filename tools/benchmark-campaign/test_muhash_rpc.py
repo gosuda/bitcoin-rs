@@ -11,6 +11,9 @@ import io
 import json
 import os
 import shutil
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1927,10 +1930,347 @@ class PureHelperTests(unittest.TestCase):
             module._parse_json(b'{"a": {"b": 1, "b": 2}}', "x")
 
     def test_trial_help_and_aggregate_help_exit_zero(self) -> None:
-        for command in ("trial", "aggregate"):
+        for command in ("trial", "aggregate", "campaign"):
             with self.assertRaises(SystemExit) as raised:
                 module.main([command, "--help"])
             self.assertEqual(raised.exception.code, 0)
+
+
+FIXTURE_DAEMON = r"""#!/usr/bin/env python3
+import argparse
+import base64
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from socketserver import ThreadingMixIn
+
+
+class ReuseHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bind", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--cookie", required=True)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--data-dir", required=True)
+    args = parser.parse_args()
+    Path(args.data_dir).mkdir(parents=True, exist_ok=True)
+    cookie = Path(args.cookie).read_bytes().rstrip(b"\r\n")
+    expected_auth = "Basic " + base64.b64encode(cookie).decode("ascii")
+    state = json.loads(Path(args.config).read_text())
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "error": None, "result": state},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            if self.headers.get("Authorization") != expected_auth:
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                return
+            try:
+                request = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                request = {}
+            params = request.get("params") if isinstance(request, dict) else None
+            ok = (
+                isinstance(request, dict)
+                and request.get("method") == "gettxoutsetinfo"
+                and params == ["muhash", None, False]
+            )
+            body = payload if ok else b'{"jsonrpc":"2.0","id":1,"error":{"code":-8,"message":"wrong query"},"result":null}'
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ReuseHTTPServer((args.bind, args.port), Handler)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+class CampaignControllerTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _sweep_base()
+
+    def _state_bytes(self, muhash: str = MUHASH) -> bytes:
+        return module.canonical_json_bytes(
+            {
+                "height": HEIGHT,
+                "bestblock": BESTBLOCK,
+                "transactions": 1,
+                "txouts": 2,
+                "bogosize": 300,
+                "disk_size": 400,
+                "total_amount": Decimal("12.5"),
+                "muhash": muhash,
+            }
+        )
+
+    def _write_daemon(self, root: Path) -> dict[str, object]:
+        path = root / "fixture-daemon.py"
+        path.write_bytes(FIXTURE_DAEMON.encode())
+        path.chmod(0o700)
+        return {
+            "path": str(path),
+            "sha256": _sha256(FIXTURE_DAEMON.encode()),
+            "bytes": len(FIXTURE_DAEMON.encode()),
+        }
+
+    def _campaign_files(
+        self,
+        *,
+        backend: str = "fjall",
+        policy: str = "warm",
+        candidate_muhash: str = MUHASH,
+        evict: bool = False,
+    ) -> tuple[Path, Path, Path]:
+        root = _make_root("muhash-campaign-")
+        daemon = self._write_daemon(root)
+        corpus = _write_file(root, "corpus.bin", b"frozen-corpus")
+        cookie = _write_file(
+            root,
+            "rpc.cookie",
+            f"bench-user:{CREDENTIAL_SECRET}".encode(),
+            private=True,
+        )
+        core_config = _write_file(root, "core-state.json", self._state_bytes())
+        rs_config = _write_file(
+            root, "rs-state.json", self._state_bytes(candidate_muhash)
+        )
+        command = [
+            "{binary}",
+            "--bind",
+            "{rpc_bind}",
+            "--port",
+            "{rpc_port}",
+            "--cookie",
+            "{cookie}",
+            "--config",
+            "{config}",
+            "--data-dir",
+            "{data_dir}",
+        ]
+        eviction = None
+        if evict:
+            script = root / "evict.sh"
+            script.write_bytes(b"#!/bin/sh\nexit 0\n")
+            script.chmod(0o700)
+            eviction = {
+                "path": str(script),
+                "sha256": _sha256(b"#!/bin/sh\nexit 0\n"),
+                "bytes": len(b"#!/bin/sh\nexit 0\n"),
+            }
+
+        def arm(
+            arm_id: str,
+            kind_backend: str,
+            config: dict[str, object],
+            datadir: Path,
+        ) -> dict[str, object]:
+            return {
+                "arm_id": arm_id,
+                "binary": daemon["path"],
+                "binary_sha256": daemon["sha256"],
+                "command": command,
+                "backend": kind_backend,
+                "config": config,
+                "datadir": str(datadir),
+            }
+
+        config = {
+            "schema": module.CAMPAIGN_CONFIG_SCHEMA,
+            "campaign_id": f"camp-{backend}",
+            "policy": policy,
+            "corpus": {
+                "identity": "frozen-tip",
+                "file": corpus,
+                "height": HEIGHT,
+                "bestblock": BESTBLOCK,
+            },
+            "expected": {"height": HEIGHT, "bestblock": BESTBLOCK},
+            "timeout_seconds": Decimal("5"),
+            "max_response_bytes": 65_536,
+            "credential_file": cookie,
+            "affinity": "0-3",
+            "core": arm("core-arm", "coinsdb", core_config, root / "core-data"),
+            "candidate": arm(
+                "rs-arm", backend, rs_config, root / "rs-data"
+            ),
+            "eviction_procedure": eviction,
+        }
+        config_path = root / "campaign.json"
+        config_path.write_bytes(module.canonical_json_bytes(config))
+        return root, config_path, root / "result.json"
+
+    def _run(
+        self,
+        backend: str = "fjall",
+        policy: str = "warm",
+        candidate_muhash: str = MUHASH,
+        evict: bool = False,
+    ) -> tuple[int, Path, Path]:
+        root, config_path, output = self._campaign_files(
+            backend=backend,
+            policy=policy,
+            candidate_muhash=candidate_muhash,
+            evict=evict,
+        )
+        workspace = root / "work"
+        workspace.mkdir()
+        code = module.main(
+            [
+                "campaign",
+                "--input",
+                str(config_path),
+                "--output",
+                str(output),
+                "--workspace",
+                str(workspace),
+            ]
+        )
+        return code, output, workspace
+
+    def test_warm_campaign_agrees_across_all_backends(self) -> None:
+        frozen: object | None = None
+        for backend in sorted(module.BITCOIN_RS_BACKENDS):
+            code, output, _workspace = self._run(backend=backend, policy="warm")
+            self.assertEqual(code, 0, backend)
+            result = json.loads(output.read_bytes(), parse_float=Decimal, parse_int=int)
+            self.assertEqual(result["schema"], module.RESULT_SCHEMA)
+            self.assertEqual(result["policy"], "warm")
+            self.assertEqual(
+                result["query"],
+                {
+                    "method": "gettxoutsetinfo",
+                    "params": ["muhash", None, False],
+                    "use_index": False,
+                },
+            )
+            backends = {arm["backend"] for arm in result["arms"]}
+            self.assertEqual(backends, {"coinsdb", backend})
+            self.assertEqual(result["frozen_state"]["muhash"], MUHASH)
+            self.assertEqual(result["frozen_state"]["height"], HEIGHT)
+            self.assertEqual(len(result["triples"]), 14)
+            if frozen is None:
+                frozen = result["frozen_state"]
+            else:
+                self.assertEqual(result["frozen_state"], frozen)
+
+    def test_process_cold_campaign_uses_fresh_identities(self) -> None:
+        code, output, workspace = self._run(
+            backend="fjall", policy="process-cold/page-cache-unspecified"
+        )
+        self.assertEqual(code, 0)
+        result = json.loads(output.read_bytes())
+        self.assertEqual(result["policy"], "process-cold/page-cache-unspecified")
+        identities: set[tuple[int, int]] = set()
+        for path in sorted(workspace.glob("*-pre.json")):
+            receipt = json.loads(path.read_bytes())
+            identities.add((receipt["attested_pid"], receipt["attested_starttime"]))
+        self.assertEqual(len(identities), 14)
+
+    def test_evicted_campaign_binds_procedure_execution(self) -> None:
+        code, output, workspace = self._run(
+            backend="redb",
+            policy="process-cold/page-cache-evicted",
+            evict=True,
+        )
+        self.assertEqual(code, 0)
+        result = json.loads(output.read_bytes())
+        self.assertEqual(result["policy"], "process-cold/page-cache-evicted")
+        for path in sorted(workspace.glob("*-post.json")):
+            receipt = json.loads(path.read_bytes())
+            execution = receipt["eviction_execution"]
+            self.assertEqual(execution["exit_status"], 0)
+            self.assertGreater(execution["monotonic_ns"], 0)
+
+    def test_diverged_backend_state_is_refused(self) -> None:
+        code, output, _workspace = self._run(
+            backend="rocksdb", candidate_muhash=OTHER_MUHASH
+        )
+        self.assertEqual(code, 2)
+        self.assertFalse(output.exists())
+
+    def test_candidate_backend_must_be_a_storage_engine(self) -> None:
+        root, config_path, _output = self._campaign_files()
+        parsed, _ = module._load_json_path(
+            config_path, module.MAX_INPUT_BYTES, "campaign config"
+        )
+        assert isinstance(parsed, dict)
+        candidate = parsed["candidate"]
+        assert isinstance(candidate, dict)
+        candidate["backend"] = "coinsdb"
+        with self.assertRaises(module.ContractError):
+            module._parse_campaign_config(parsed)
+        del root
+
+    def test_core_backend_must_be_coinsdb(self) -> None:
+        _root, config_path, _output = self._campaign_files()
+        parsed, _ = module._load_json_path(
+            config_path, module.MAX_INPUT_BYTES, "campaign config"
+        )
+        assert isinstance(parsed, dict)
+        core = parsed["core"]
+        assert isinstance(core, dict)
+        core["backend"] = "fjall"
+        with self.assertRaises(module.ContractError):
+            module._parse_campaign_config(parsed)
+
+    def test_command_must_include_config_placeholder(self) -> None:
+        _root, config_path, _output = self._campaign_files()
+        parsed, _ = module._load_json_path(
+            config_path, module.MAX_INPUT_BYTES, "campaign config"
+        )
+        assert isinstance(parsed, dict)
+        candidate = parsed["candidate"]
+        assert isinstance(candidate, dict)
+        command = list(candidate["command"])  # type: ignore[arg-type]
+        command[command.index("{config}")] = str(_root / "other.json")
+        candidate["command"] = command
+        with self.assertRaises(module.ContractError):
+            module._parse_campaign_config(parsed)
+
+    def test_readiness_rejects_a_listener_the_child_does_not_own(self) -> None:
+        decoy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        decoy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        decoy.bind(("127.0.0.1", 0))
+        decoy.listen()
+        port = int(decoy.getsockname()[1])
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            with self.assertRaises(module.ContractError) as raised:
+                module._wait_owned_endpoint(
+                    child, port, time.perf_counter_ns() + 2_000_000_000
+                )
+            self.assertIn("not owned", str(raised.exception))
+        finally:
+            child.kill()
+            child.wait(timeout=2)
+            decoy.close()
 
 
 if __name__ == "__main__":

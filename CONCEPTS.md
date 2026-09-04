@@ -10,6 +10,13 @@ signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
 `scantxoutset`, `combinepsbt`, and `finalizepsbt` remain node RPCs so an external
 signer can drive a PSBT workflow without giving key custody to the node.
 
+### Wallet-facing public surface
+What an external wallet is allowed to call: native Esplora HTTP (tip, fees,
+block-height checkpoints, address/script history and UTXOs, `POST /tx`) and
+the key-free node RPCs above. The consumer is a separate process — or the
+embeddable `Node` API — and does not receive `NodeState`, `UtxoSet`, or index
+types. See `docs/contracts/wallet-facing.md`.
+
 ### Stable chainstate RPC read
 A whole-UTXO RPC read that shares the node's chain-transition mutex. The mutex
 spans both UTXO mutation and applied-tip publication, so `scantxoutset` cannot
@@ -67,6 +74,14 @@ The bounded set of blocks in flight — requested but not yet received. Capped j
 ### Staller
 A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block. See `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
 
+### Peer lifecycle ownership
+`P2pService` owns P2P control state and workers. Live sessions live in one
+`PeerTable`; `PeerLifecycle` wraps that table for service send and disconnect
+helpers. Ready snapshots carry `PeerSource`, and identity-checked table
+methods are what authorize a mutation. Address equality alone never does.
+`BlockSync` owns the production download window and may call those table
+methods directly. See `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
+
 ### assumevalid
 Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `--assume-valid-height 0` requests full verification; a custom nonzero height skips without hash gating.
 
@@ -74,7 +89,7 @@ Skipping script-signature verification for blocks at or below a trusted height w
 The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`). Script verification is skipped at or below it only after the active header chain is shown to contain this exact hash; sub-anchor header tips and diverged chains verify fully.
 
 ### Optimized default posture
-The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles only `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
+The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 128, 16 in-flight per peer), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
 `BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. See `docs/solutions/architecture-patterns/network-selection-keeps-p2p-identity-atomic.md`.
@@ -88,15 +103,20 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 `bitcoin-rs-storage --bench kvstore_backends`, `bitcoin-rs-utxo --bench record_codec`,
 `bitcoin-rs-utxo --bench utxo_commit`, `bitcoin-rs-mining --bench candidate`,
 `bitcoin-rs-node --bench sync_pipeline`).
+
 ## Consensus validation
 
 ### bitcoinkernel
-Bitcoin Core's C++ consensus engine (`libbitcoinkernel`), the production consensus default. It is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. Default builds need `cmake` and `libboost-dev`.
-### Rust interpreter (portable posture)
-The pure-Rust script path under `--no-default-features`. It fully verifies the Taproot key path; its non-Taproot path is a stub accepting only a bare `OP_TRUE` spend, and it has no Taproot script-path support. Retained for differential testing and lightweight non-production environments; a mainnet sync stops at the first real spend.
+Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Whether the native path also becomes the library and image default is the #213 measurement gate.
+
+### Native Rust interpreter
+The pure-Rust script path used when `kernel` is off (`crates/script`). It executes legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends through the opcode evaluator. Core's `script_tests`, `tx_valid`, and `tx_invalid` vectors currently pin zero native mismatches. Signature checks reuse the process-wide `secp256k1::SECP256K1` context.
 
 ### One-shot kernel block parse
 Parsing each block exactly once with `bitcoinkernel::Block::new` (`KernelBlock`, `crates/consensus/src/kernel.rs`) and reusing that parse downstream for txids and the transaction objects script preparation borrows via `TransactionRef`. Price a replacement by everything it subsumes, not by the line item that motivated it.
+
+### Runtime-dispatched AVX2 Merkle
+Parent hashing of Merkle pairs uses Bitcoin Core's 8-way AVX2 SHA-256d kernel on x86-64 hosts that advertise AVX2, selected at runtime. Hosts without AVX2, and trees too small to fill one 8-pair batch, use the allocation-free scalar spine. Both paths implement Bitcoin's odd-leaf duplication and mutated-tree rule.
 
 ### Script-flag exceptions (BIP16Exception)
 Blocks Core hardcodes in `consensus.script_flag_exceptions` to validate under a reduced flag set. As of Core v29: mainnet 170060 (P2SH) and 692261 (Taproot); testnet3 394. The P2SH waivers are reproduced by `Network::is_bip16_p2sh_exception` (by block hash); missing them wedges full-validation sync. The Taproot override needs no exception because `is_taproot_active` already height-gates TAPROOT. Compare *effective* flag sets, not raw overrides.
@@ -209,13 +229,13 @@ State that connection writes and disconnection must account for. `coin_stats` ne
 ## Derived indexes
 
 ### TxIndex capability watermarks
-Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`); `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement); `BlockHeaders` is shared rollback-integrity metadata whose row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch; a lagging cursor moves independently. Height alone cannot prove identity across a reorg. Older or unversioned index formats are deleted and rebuilt on startup; a crash-resumable reset marker makes restart finish deletion before the writer is exposed.
+Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`); `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement); `ScriptLive` owns compact live-output locators (`--scriptindex=utxo` or `full`) and is rebuilt from the authoritative UTXO set rather than block history. `BlockHeaders` is shared rollback-integrity metadata whose row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch; a lagging cursor moves independently. Height alone cannot prove identity across a reorg. Older or unversioned index formats are deleted and rebuilt on startup; a crash-resumable reset marker makes restart finish deletion before the writer is exposed.
 
 ### Coalesced TxIndex wake
 The nonblocking hint published after a committed `applied_tip.store`: an atomic revision incremented with `Release` plus `try_send` on a capacity-one channel. Tokens may coalesce or drop; the worker checks the authoritative revision before sleeping and also wakes on a bounded timeout.
 
 ### Complete derived-index query
-A query returns a result only when one snapshot proves every capability it consumes covers the exact applied tip: capture tip and revision, open one typed snapshot, check the required watermark(s) by height and hash, recheck tip and revision before returning. Capability lag, worker failure, missing body, truncated scan, budget exhaustion, tip change, or ABA revision change return `Retry` or `Unavailable`; none can become a false absence.
+A query returns a result only when one snapshot proves every capability it consumes covers the exact applied tip: capture tip and revision, open one typed snapshot, check the required watermark(s) by height and hash, recheck tip and revision before returning. Live UTXO answers also hold chain-transition authority across that check and the authoritative UTXO lookup, because apply commits coins before publishing the tip. Capability lag, worker failure, missing body, truncated scan, budget exhaustion, tip change, or ABA revision change return `Retry` or `Unavailable`; a configured-off capability returns `Unavailable` with a distinct disabled reason. None of these can become a false absence.
 
 ### Identity-bearing key
 A key that says which producer wrote a row, not merely where it is. Funding, spending, and txid keys are an 8-byte prefix plus height, so two same-height blocks sharing a script collide and a second rollback of the first would delete the second's rows. The block-header row (keyed by the 80-byte header whose hash is the block hash) is identity-bearing; checking it before deleting stands in for rekeying the other families, which would break the electrs-compatible layout.
@@ -276,8 +296,28 @@ Recording a statistic when its outcome is known rather than when the subject arr
 
 ## Measurement
 
+### Product performance cell
+One coordinate of the frozen 36-cell denominator: one product domain
+(`offline`, `p2p`, `muhash`), one corpus (`c150` or `cmodern`), one native
+architecture (`x86_64` or `arm64`), and one backend (`fjall`, `rocksdb`,
+or `redb`). Diagnostics are not cells. See
+`docs/contracts/hot-path-attribution.md`.
+
+### Hot-path attribution ledger
+The single inventory of product hot paths, overlap groups, and
+dispositions. Nested stage histograms are diagnostics. A cell residual
+stays `unmeasured` until seven valid bitcoin-rs walls exist and the
+exclusive union is subtracted from whole-run wall. Owner:
+`docs/benchmarks/hot-path-ledger.toml`.
+
 ### Retained benchmark contract
 Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained set: node sync/apply, reduced UTXO commit, end-to-end mempool admission, Merkle dispatch, and the real-file index resolver.
+
+### C150
+The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
+
+### Cmodern
+The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identities, census, and oracle are owned by `docs/contracts/campaign-corpora.md`.
 
 ### Matched-harness comparison
 A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians. See `docs/solutions/performance/allocator-parity-changes-wall-not-cpu.md`.

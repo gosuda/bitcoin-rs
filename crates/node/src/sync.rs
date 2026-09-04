@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 use smallvec::SmallVec;
 
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
+#[cfg(test)]
 pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
 pub use bitcoin_rs_p2p::download_window::SyncBudget;
 pub use bitcoin_rs_p2p::download_window::default_sync_budget;
@@ -47,6 +48,10 @@ const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
+///
+/// Owns the production [`DownloadWindow`]. Session identity stays on the
+/// shared [`PeerTable`]; this orchestrator calls identity-checked table
+/// methods and does not schedule through `P2pService::select_download_peers`.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     peer_table: Arc<PeerTable>,
@@ -148,6 +153,25 @@ impl BlockSync {
     pub fn install_budget(&self, budget: SyncBudget) {
         *self.download_window.lock() = DownloadWindow::new(budget);
         *self.block_stager.lock() = BlockStager::new(budget);
+    }
+
+    /// Clears leftover address-scoped scheduler state for a newly ready
+    /// connection. Stale sources are ignored; see
+    /// `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
+    pub fn on_peer_ready(&self, source: bitcoin_rs_p2p::PeerSource) {
+        // Window before table, matching `tick` / `send_getdata_for_pending_blocks`.
+        let mut window = self.download_window.lock();
+        if !self.peer_table.is_current(source) {
+            return;
+        }
+        window.forget_peer(source.addr);
+        drop(window);
+        let mut pending = self.pending_getheaders.lock();
+        if pending.is_some_and(|request| request.peer_addr == source.addr)
+            && self.peer_table.is_current(source)
+        {
+            *pending = None;
+        }
     }
 
     fn reconcile_peer_sessions(&self) {
@@ -1191,7 +1215,19 @@ impl BlockSync {
             );
             return GetdataRequestOutcome::default();
         };
-        if tx.send(msg).is_err() {
+        let source = tx.source(request.peer_addr());
+        let mut send_ok = false;
+        let mut has_request_capacity = false;
+        let still_current = self.peer_table.with_current(source, || {
+            send_ok = tx.send(msg).is_ok();
+            if send_ok {
+                has_request_capacity = window.mark_requested(&request, now);
+            }
+        });
+        if !still_current {
+            return GetdataRequestOutcome::default();
+        }
+        if !send_ok {
             tracing::warn!(
                 peer_addr = %request.peer_addr(),
                 "block sync: outbound channel disconnected (getdata)"
@@ -1207,7 +1243,6 @@ impl BlockSync {
                 hashes: expected_hashes,
             });
         }
-        let has_request_capacity = window.mark_requested(&request, now);
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
         tracing::debug!(
             peer_addr = %request.peer_addr(),
@@ -6553,6 +6588,49 @@ mod tests {
             inbound_headers_tx,
             peers,
         })
+    }
+
+    #[test]
+    fn on_peer_ready_clears_same_address_header_state_for_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        *sync.pending_getheaders.lock() = Some(super::PendingHeaderRequest {
+            peer_addr,
+            locator_tip_hash: Hash256::default(),
+            target_height: 1,
+            requested_at: Instant::now(),
+        });
+        register_info(&sync.peer_table, synthetic_peer(peer_addr, 1));
+        let source = current_source(&sync.peer_table, peer_addr);
+        sync.on_peer_ready(source);
+        assert!(
+            sync.pending_getheaders.lock().is_none(),
+            "replacement readiness must drop address-scoped header state"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn on_peer_ready_ignores_stale_predecessor_source() -> Result<(), Box<dyn std::error::Error>> {
+        let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
+        let (stale_tx, _stale_rx) = unbounded::<Message>();
+        let stale = PeerLease::new(stale_tx);
+        sync.peer_table.register(peer_addr, stale.clone());
+        register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
+        *sync.pending_getheaders.lock() = Some(super::PendingHeaderRequest {
+            peer_addr,
+            locator_tip_hash: Hash256::default(),
+            target_height: 1,
+            requested_at: Instant::now(),
+        });
+        sync.on_peer_ready(stale.source(peer_addr));
+        assert!(
+            sync.pending_getheaders.lock().is_some(),
+            "stale predecessor must not clear the replacement's header state"
+        );
+        Ok(())
     }
 
     fn genesis_header() -> Header {

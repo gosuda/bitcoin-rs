@@ -11,10 +11,9 @@ drives `event_loop`, the central synchronous loop.
 authoritative apply; `BlockSync` orchestrates block download; `reorg`
 switches the applied chain from one branch to another. The chainstate
 facade serializes connect, disconnect, and window apply behind
-`ChainTransition`. Adapters expose node state to the rest of the system —
-`UtxoSetView` for consensus transaction checks, `NodeBlockSource` bridging in-memory
-block records to the index crate's block source, `NodeP2pChainQuery` for server-side
-P2P responders, and `BlockTreeContext` for BIP9 deployment state. Notifications leave
+`ChainTransition`. Owning crates expose the domain surfaces `node` wires:
+chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
+and the txindex worker's private block-source bridge. Notifications leave
 through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPublisher`
 / `NoOpZmqPublisher` implementations and the `TxIndexRuntime` worker; `signal` and
 `shutdown` bridge process signals into graceful shutdown.
@@ -31,7 +30,8 @@ runtime crate.
 - `default` (enables `fjall`, `kernel`, and `zmq`): the performance-oriented fjall
   storage backend plus the bitcoinkernel consensus verifier and ZMQ notifications,
   so per-crate `cargo check` works out of the box. The `bitcoin-rs` binary's own
-  defaults are the pure-Rust `fjall,redb,zmq`; `kernel` stays opt-in there.
+  defaults are the pure-Rust `fjall,redb,zmq`; `kernel` stays opt-in there. Issue
+  #213 is the measurement gate for dropping `kernel` from this crate's defaults.
 - `rocksdb`, `fjall`, `redb`: forward the named storage backend to every subsystem
   crate.
 - `mdbx`: forward the mdbx backend to the crates that provide one.

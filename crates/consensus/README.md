@@ -1,9 +1,12 @@
 # bitcoin-rs-consensus
 
-Owns consensus validation: transaction and block rule checks for every active soft fork,
-with the `kernel` feature (the production default) routing script verification through
-bitcoinkernel — Bitcoin Core's native consensus engine — and a portable Rust path
-retained for differential tests and builds without a native backend.
+Owns consensus validation: transaction and block rule checks for every active soft fork.
+Script verification has two backends. The native Rust interpreter executes every
+consensus spend class. The `kernel` feature (the production default in this crate
+and in `bitcoin-rs-node`) routes the same checks through bitcoinkernel — Bitcoin
+Core's C++ consensus engine. The `bin/bitcoin-rs` binary does not enable `kernel`
+by default, so `cargo build -p bitcoin-rs` uses the native interpreter. Issue #213
+is the measurement gate for making that native path the library default as well.
 
 Rule checks live in small per-subject modules (`bip9`, `bip30`, `bip34`, `bip65`,
 `bip66`, `bip68`, `bip112`, `bip113`, `bip141`, `bip143`, `bip341`, `bip342`), surfaced

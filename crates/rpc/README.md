@@ -54,8 +54,8 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 
 ## Features
 
-- `rocksdb`, `fjall`, `redb`: forward the storage-backend selection into the `utxo`, `storage`, and `p2p` crates.
-- `mdbx`: forwards the MDBX storage-backend selection into the `storage` crate.
+- `zmq`: gates ZMQ notification methods in the JSON-RPC registry. The crate
+  defines and forwards no storage-backend features (`ARCH-04`).
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

@@ -10,7 +10,7 @@
 //! `CheckLockTime`, `CheckSequence`).
 
 use bitcoin_rs_primitives::{Hash256, Sighash, SighashCache, SighashError, Tx, TxOut};
-use secp256k1::{Message, PublicKey, Secp256k1, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
+use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
 
@@ -218,9 +218,9 @@ impl<'a> TxSignatureChecker<'a> {
         };
 
         let message = Message::from_digest(*sighash.as_byte_array());
-        let secp = Secp256k1::verification_only();
-
-        let verified = secp
+        // One process-wide context: constructing `verification_only()` per
+        // signature rebuilds secp256k1's verification tables on every CHECKSIG.
+        let verified = secp256k1::SECP256K1
             .verify_ecdsa(&message, &ecdsa_sig, &secp_pubkey)
             .is_ok();
 
@@ -325,9 +325,8 @@ impl<'a> TxSignatureChecker<'a> {
             .map_err(|e| sighash_to_script_error(&e))?;
 
         let message = Message::from_digest(*sighash.as_byte_array());
-        let secp = Secp256k1::verification_only();
-
-        secp.verify_schnorr(&schnorr_sig, &message, &xonly_pubkey)
+        secp256k1::SECP256K1
+            .verify_schnorr(&schnorr_sig, &message, &xonly_pubkey)
             .map(|()| true)
             .map_err(|_| ScriptError::Invalid {
                 code: ScriptErrCode::SchnorrSig,
