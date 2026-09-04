@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 use core::{fmt, fmt::Write as _};
 
-use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
@@ -16,58 +16,13 @@ use crate::compat::convert::{
     self, compact_target_hex, i32_saturated, i64_saturated, i64_saturated_len, sat_to_btc,
     typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::{BlockRecord, ChainControlError, Context, TxQueryError};
+use crate::context::{BlockRecord, ChainControlError, Context, TxQueryError, difficulty_for_bits};
 use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str, required_u64};
 
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let applied_tip = ctx.applied_tip.load_full();
-    let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
-    let headers = ctx.height();
-    let (difficulty, time, mediantime, tip_bits) =
-        applied_tip
-            .as_ref()
-            .map_or((0.0, 0_u64, 0_u64, 0_u32), |tip| {
-                let tree = ctx.block_tree.read();
-                tree.node(tip.tip_id).map_or((0.0, 0, 0, 0), |node| {
-                    (
-                        ctx.difficulty_for_bits(node.header.bits),
-                        u64::from(node.header.time),
-                        u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
-                        node.header.bits,
-                    )
-                })
-            });
-    // Core's estimate when this node knows how many transactions it has
-    // verified, and the old height ratio when it does not.
-    //
-    // The count is unknown only for a datadir written before the node tracked
-    // it: nothing short of re-reading every block body could recover it, so
-    // those chains keep the answer they have always had rather than being told
-    // a confident 0.0. A node that syncs, or resyncs, after that change always
-    // takes the first branch.
-    let now = unix_now();
-    let verification_progress = ctx.chain_tx_count().map_or_else(
-        || {
-            if headers > 0 {
-                (f64::from(applied) / f64::from(headers)).min(1.0)
-            } else {
-                0.0
-            }
-        },
-        |chain_tx_count| {
-            verification_progress(
-                ctx.chain_network,
-                chain_tx_count,
-                applied,
-                headers,
-                time,
-                now,
-            )
-        },
-    );
-    let initialblockdownload = ctx.is_initial_block_download(now);
+    let status = ctx.sync_status(unix_now());
     let chain = match ctx.chain_network {
         Network::Mainnet => "main",
         Network::Testnet3 => "test",
@@ -79,26 +34,19 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .block_storage_disk_usage()
         .unwrap_or_else(|| ctx.blocks.read().size_on_disk());
     let prune_status = ctx.prune_status();
-    let bestblockhash = applied_tip
-        .as_ref()
-        .map_or_else(Hash256::default, |tip| tip.hash)
-        .to_string_be();
-    let chainwork = applied_tip
-        .as_deref()
-        .map_or_else(|| ctx.chainwork_hex(), chainwork_hex);
     let response = v31::GetBlockchainInfo {
         chain: chain.to_owned(),
-        blocks: i64::from(applied),
-        headers: i64::from(headers),
-        best_block_hash: bestblockhash,
-        bits: format!("{tip_bits:08x}"),
-        target: compact_target_hex(tip_bits),
-        difficulty,
-        time: i64_saturated(time),
-        median_time: i64_saturated(mediantime),
-        verification_progress,
-        initial_block_download: initialblockdownload,
-        chain_work: chainwork,
+        blocks: i64::from(status.applied_height),
+        headers: i64::from(status.header_height),
+        best_block_hash: status.best_block_hash.to_string_be(),
+        bits: format!("{:08x}", status.tip_bits),
+        target: compact_target_hex(status.tip_bits),
+        difficulty: status.difficulty,
+        time: i64_saturated(status.tip_time),
+        median_time: i64_saturated(status.median_time_past),
+        verification_progress: status.verification_progress,
+        initial_block_download: status.initial_block_download,
+        chain_work: status.chainwork_hex(),
         size_on_disk,
         pruned: prune_status.pruned,
         prune_height: prune_status.pruneheight.map(i64::from),
@@ -121,91 +69,6 @@ fn unix_now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Bitcoin Core's `GuessVerificationProgress`, as a fraction in `[0, 1]`.
-///
-/// The quantity is **transactions verified over transactions believed to
-/// exist** — not a ratio of heights. Early blocks are nearly empty, so a height
-/// ratio reports the chain as most of the way done while most of the work is
-/// still ahead; Core moved off height for that reason.
-///
-/// The denominator cannot be known, so it is extrapolated from the network's
-/// pinned [`ChainTxData`] observation at `tx_rate` transactions per second. When
-/// the node is already past that observation its own count is used as the
-/// baseline instead, which keeps the fraction from sticking at 1.0 forever.
-///
-/// `tip_time` is the applied tip's block timestamp. When the tip is within two
-/// hours of `now`, Core stops trusting that miner-set timestamp and estimates
-/// the tip's age from how many blocks the header chain is ahead instead — which
-/// also quantizes the answer near 1.0, where people expect to see it settle.
-fn verification_progress(
-    network: bitcoin_rs_primitives::Network,
-    chain_tx_count: u64,
-    applied_height: u32,
-    header_height: u32,
-    tip_time: u64,
-    now: u64,
-) -> f64 {
-    const RECENT_TIP_WINDOW_SECONDS: i64 = 2 * 60 * 60;
-
-    if chain_tx_count == 0 {
-        return 0.0;
-    }
-    let data = network.chain_tx_data();
-
-    let now_signed = i64::try_from(now).unwrap_or(i64::MAX);
-    let tip_time_signed = i64::try_from(tip_time).unwrap_or(i64::MAX);
-    let block_time = if (now_signed - tip_time_signed).abs() <= RECENT_TIP_WINDOW_SECONDS
-        && header_height >= applied_height
-    {
-        let behind = i64::from(header_height - applied_height);
-        let spacing = i64::from(network.target_spacing_seconds());
-        now_signed.saturating_sub(behind.saturating_mul(spacing))
-    } else {
-        tip_time_signed
-    };
-
-    let total = if chain_tx_count <= data.tx_count {
-        // Still behind the pinned observation: extrapolate forward from it.
-        let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
-        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
-    } else {
-        // Past it, so this node's own count is the better baseline. Without
-        // this the fraction would pin at 1.0 and stay there.
-        let elapsed = now_signed.saturating_sub(block_time);
-        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(chain_tx_count))
-    };
-    if total <= 0.0 {
-        return 0.0;
-    }
-    (u64_to_f64(chain_tx_count) / total).clamp(0.0, 1.0)
-}
-
-/// `u64` to `f64` without a silent `as` cast, which this crate forbids.
-///
-/// Exact for every input up to `2^53`; above that the low half rounds, which is
-/// inherent to `f64` and is what Bitcoin Core accepts here too.
-fn u64_to_f64(value: u64) -> f64 {
-    const TWO_POW_32: f64 = 4_294_967_296.0;
-
-    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
-    let low = u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX);
-    f64::from(high).mul_add(TWO_POW_32, f64::from(low))
-}
-
-/// [`u64_to_f64`] with a sign; the elapsed times here can run either way.
-fn i64_to_f64(value: i64) -> f64 {
-    let magnitude = u64_to_f64(value.unsigned_abs());
-    if value < 0 { -magnitude } else { magnitude }
-}
-
-fn chainwork_hex(tip: &TipSnapshot) -> String {
-    let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _: fmt::Result = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
 /// Lowercase hex encoding for arbitrary byte slices.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -221,7 +84,7 @@ pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         ctx.applied_tip
             .load_full()
             .and_then(|tip| tree.node(tip.tip_id).ok().map(|node| node.header.bits))
-            .map_or(0.0, |bits| ctx.difficulty_for_bits(bits))
+            .map_or(0.0, difficulty_for_bits)
     };
     typed_to_sonic(&v31::GetDifficulty(difficulty))
 }
@@ -1343,7 +1206,7 @@ fn block_verbose_typed(
             nonce: i64::from(header.nonce),
             bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
-            difficulty: ctx.difficulty_for_bits(header.bits),
+            difficulty: difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
             n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
@@ -1376,7 +1239,7 @@ fn block_verbose_typed(
             nonce: i64::from(header.nonce),
             bits,
             target: compact_target_hex(header.bits),
-            difficulty: ctx.difficulty_for_bits(header.bits),
+            difficulty: difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
             n_tx: i64_saturated_len(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
@@ -1409,7 +1272,7 @@ fn block_verbose_typed(
         nonce: i64::from(header.nonce),
         bits,
         target: compact_target_hex(header.bits),
-        difficulty: ctx.difficulty_for_bits(header.bits),
+        difficulty: difficulty_for_bits(header.bits),
         chain_work: chainwork_hex,
         n_tx: i64_saturated_len(record.tx_count),
         previous_block_hash: Some(header.prev_blockhash.to_string()),
@@ -2268,139 +2131,6 @@ mod tests {
         );
     }
 
-    /// Regtest's pinned observation is `{time: 0, tx_count: 0, tx_rate: 0.001}`,
-    /// so the estimate reduces to arithmetic that can be done by hand:
-    /// `total = verified + elapsed * 0.001`.
-    #[test]
-    fn verification_progress_is_transactions_verified_over_transactions_estimated() {
-        let now = 1_800_000_000_u64;
-        // Ten thousand seconds behind, which is outside the two-hour window, so
-        // the tip's own timestamp is the one used.
-        let tip_time = now - 10_000;
-
-        // 100 / (100 + 10_000 * 0.001) = 100 / 110
-        let progress = verification_progress(
-            bitcoin_rs_primitives::Network::Regtest,
-            100,
-            9,
-            9,
-            tip_time,
-            now,
-        );
-        assert!(
-            (progress - (100.0 / 110.0)).abs() < 1e-12,
-            "expected 100/110, got {progress}"
-        );
-    }
-
-    #[test]
-    fn verification_progress_is_not_the_height_ratio_it_replaced() {
-        let now = 1_800_000_000_u64;
-        // Half the headers applied, on a mainnet whose pinned observation counts
-        // more than a billion transactions. The old field said 0.5 here.
-        let progress = verification_progress(
-            bitcoin_rs_primitives::Network::Mainnet,
-            5_000,
-            50,
-            100,
-            now - 10_000,
-            now,
-        );
-        assert!(
-            progress < 0.001,
-            "50 blocks of a 1.3-billion-transaction chain is not half of it, got {progress}"
-        );
-    }
-
-    #[test]
-    fn verification_progress_ignores_the_tip_timestamp_when_the_tip_is_recent() {
-        let now = 1_800_000_000_u64;
-        // Both inside the two-hour window: Core stops trusting the miner-set
-        // timestamp there and derives the tip's age from the header chain, so
-        // these must agree despite an hour between them.
-        let a = verification_progress(
-            bitcoin_rs_primitives::Network::Regtest,
-            100,
-            9,
-            10,
-            now - 60,
-            now,
-        );
-        let b = verification_progress(
-            bitcoin_rs_primitives::Network::Regtest,
-            100,
-            9,
-            10,
-            now - 3_600,
-            now,
-        );
-        let boundary = verification_progress(
-            bitcoin_rs_primitives::Network::Regtest,
-            100,
-            9,
-            10,
-            now - 2 * 60 * 60,
-            now,
-        );
-        assert!((a - b).abs() < 1e-12, "{a} != {b}");
-        assert!(
-            (a - boundary).abs() < 1e-12,
-            "Core includes the exact two-hour boundary: {a} != {boundary}"
-        );
-
-        // Outside the window the timestamp is used again, so this one differs.
-        let outside = verification_progress(
-            bitcoin_rs_primitives::Network::Regtest,
-            100,
-            9,
-            10,
-            now - 100_000,
-            now,
-        );
-        assert!(outside < a, "{outside} should trail {a}");
-    }
-
-    #[test]
-    fn verification_progress_is_zero_before_anything_is_verified() {
-        assert!(
-            (verification_progress(
-                bitcoin_rs_primitives::Network::Mainnet,
-                0,
-                0,
-                0,
-                0,
-                1_800_000_000
-            ) - 0.0)
-                .abs()
-                < f64::EPSILON
-        );
-    }
-
-    #[test]
-    fn verification_progress_never_exceeds_one_for_a_future_dated_tip() {
-        let now = 1_800_000_000_u64;
-        // A miner-set timestamp ahead of our clock by more than the two-hour
-        // window, so the tip's own time is used and the elapsed term goes
-        // negative — the estimated total lands *below* what this node has
-        // already verified. Unclamped that is a progress above 1.0.
-        let tip_time = now + 10_000;
-        let unclamped_total = 10_000.0_f64.mul_add(-0.001, 100.0_f64);
-        assert!(
-            100.0 / unclamped_total > 1.0,
-            "the fixture must actually overshoot, or the clamp is untested"
-        );
-
-        let progress = verification_progress(
-            bitcoin_rs_primitives::Network::Regtest,
-            100,
-            9,
-            10,
-            tip_time,
-            now,
-        );
-        assert!((progress - 1.0).abs() < f64::EPSILON, "got {progress}");
-    }
-
     #[test]
     fn verificationprogress_reports_zero_when_headers_unset() {
         let ctx = Arc::new(Context::new());
@@ -2467,16 +2197,6 @@ mod tests {
             result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
             Some(0)
         );
-    }
-
-    #[test]
-    fn difficulty_matches_core_for_mainnet_and_regtest_targets() {
-        let ctx = Context::new();
-        let mainnet = ctx.difficulty_for_bits(0x1d00_ffff);
-        assert_eq!(mainnet.to_bits(), 1.0_f64.to_bits());
-        let regtest = ctx.difficulty_for_bits(0x207f_ffff);
-        let expected = 4.656_542_373_906_924_7e-10_f64;
-        assert_eq!(regtest.to_bits(), expected.to_bits());
     }
 
     #[test]
@@ -4353,188 +4073,6 @@ mod verification_progress_wiring_tests {
             (progress - 0.5).abs() < 1e-9,
             "expected the height ratio, got {progress}"
         );
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod float_conversion_tests {
-    use super::{i64_to_f64, u64_to_f64};
-
-    #[test]
-    fn u64_to_f64_is_exact_below_two_to_the_fifty_third() {
-        for value in [
-            0_u64,
-            1,
-            4_294_967_295,
-            4_294_967_296,
-            1_315_805_869,
-            1 << 52,
-        ] {
-            // Independently derived: the halves recombined by hand.
-            let expected = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX))
-                * 4_294_967_296.0_f64
-                + f64::from(u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX));
-            assert!(
-                (u64_to_f64(value) - expected).abs() < f64::EPSILON,
-                "{value}"
-            );
-        }
-    }
-
-    #[test]
-    fn i64_to_f64_carries_the_sign() {
-        assert!((i64_to_f64(-3_600) + 3_600.0).abs() < f64::EPSILON);
-        assert!((i64_to_f64(3_600) - 3_600.0).abs() < f64::EPSILON);
-        assert!((i64_to_f64(0) - 0.0).abs() < f64::EPSILON);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod initial_block_download_tests {
-    use alloc::sync::Arc;
-
-    use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Network;
-
-    use super::*;
-
-    const DAY: u64 = 24 * 60 * 60;
-
-    /// A context whose applied tip is a real tree node stamped `tip_time`, so
-    /// the tip has an age to be judged on. Chain work comes from the tree's own
-    /// accounting, which for a two-block regtest chain is far below any
-    /// production `nMinimumChainWork` — hence the network parameter: regtest
-    /// pins that floor at zero, mainnet does not.
-    fn ctx_with_tip_at(network: Network, tip_time: u32) -> Arc<Context> {
-        let mut ctx = Context::new();
-        ctx.chain_network = network;
-        let tip = {
-            let mut tree = ctx.block_tree.write();
-            let genesis = Header {
-                version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 1_000_000,
-                bits: 0x207f_ffff,
-                nonce: 0,
-            };
-            let Ok(genesis_id) = tree.insert_node(None, genesis, NodeStatus::Active) else {
-                panic!("genesis insert failed");
-            };
-            let child = Header {
-                version: 1,
-                prev_blockhash: genesis.compute_hash(),
-                merkle_root: Hash256::default(),
-                time: tip_time,
-                bits: 0x207f_ffff,
-                nonce: 1,
-            };
-            let Ok(_child_id) = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)
-            else {
-                panic!("child insert failed");
-            };
-            let Some(tip) = tree.tip() else {
-                panic!("no tip published");
-            };
-            (*tip).clone()
-        };
-        ctx.set_applied_tip(tip);
-        Arc::new(ctx)
-    }
-
-    #[test]
-    fn a_node_that_has_applied_nothing_is_in_initial_block_download() {
-        let ctx = Arc::new(Context::new());
-        assert!(ctx.is_initial_block_download(1_800_000_000));
-    }
-
-    #[test]
-    fn a_recent_tip_without_the_networks_minimum_work_is_still_initial_block_download() {
-        let now = 1_800_000_000_u64;
-        // Timestamped one minute ago, so recency is satisfied and only the work
-        // floor can be what decides. A two-block regtest-difficulty chain has
-        // nowhere near mainnet's `nMinimumChainWork`.
-        let ctx = ctx_with_tip_at(
-            Network::Mainnet,
-            u32::try_from(now - 60).unwrap_or(u32::MAX),
-        );
-        assert!(
-            ctx.is_initial_block_download(now),
-            "a chain this cheap must not count as synced merely for being recent"
-        );
-    }
-
-    #[test]
-    fn a_stale_tip_with_enough_work_is_still_initial_block_download() {
-        let now = 1_800_000_000_u64;
-        // Regtest's work floor is zero, so only the tip's age is left to decide.
-        let ctx = ctx_with_tip_at(
-            Network::Regtest,
-            u32::try_from(now - DAY - 60).unwrap_or(u32::MAX),
-        );
-        assert!(ctx.is_initial_block_download(now));
-    }
-
-    #[test]
-    fn a_recent_tip_with_enough_work_has_left_initial_block_download() {
-        let now = 1_800_000_000_u64;
-        let ctx = ctx_with_tip_at(
-            Network::Regtest,
-            u32::try_from(now - 60).unwrap_or(u32::MAX),
-        );
-        assert!(!ctx.is_initial_block_download(now));
-    }
-
-    #[test]
-    fn the_tip_age_boundary_is_twenty_four_hours() {
-        let now = 1_800_000_000_u64;
-        let at_the_edge = ctx_with_tip_at(
-            Network::Regtest,
-            u32::try_from(now - DAY).unwrap_or(u32::MAX),
-        );
-        assert!(
-            !at_the_edge.is_initial_block_download(now),
-            "exactly `max_tip_age` old is still recent enough"
-        );
-
-        let past_the_edge = ctx_with_tip_at(
-            Network::Regtest,
-            u32::try_from(now - DAY - 1).unwrap_or(u32::MAX),
-        );
-        assert!(past_the_edge.is_initial_block_download(now));
-    }
-
-    #[test]
-    fn leaving_initial_block_download_latches() {
-        let now = 1_800_000_000_u64;
-        let ctx = ctx_with_tip_at(
-            Network::Regtest,
-            u32::try_from(now - 60).unwrap_or(u32::MAX),
-        );
-        assert!(!ctx.is_initial_block_download(now));
-
-        // Two days later, with no new block. Judged afresh the tip is stale and
-        // the answer would flip back to `true`; latched, it does not. This is
-        // the defect the field had — it went true again every time the node went
-        // quiet, and callers read that as "resyncing, do not trust me".
-        assert!(
-            !ctx.is_initial_block_download(now + 2 * DAY),
-            "the answer must not flip back once the node has left initial sync"
-        );
-    }
-
-    #[test]
-    fn the_latch_does_not_fire_before_the_conditions_are_met() {
-        let now = 1_800_000_000_u64;
-        let ctx = ctx_with_tip_at(
-            Network::Regtest,
-            u32::try_from(now - DAY - 60).unwrap_or(u32::MAX),
-        );
-        assert!(ctx.is_initial_block_download(now));
-        // Same tip, asked later at a time when it *is* within the window.
-        assert!(!ctx.is_initial_block_download(now - DAY));
     }
 }
 

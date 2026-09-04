@@ -814,6 +814,10 @@ pub struct ApplyHandles {
     /// Kept beside `applied_tip` and moved with it, so the pair is always
     /// consistent: a count that lagged its tip would be worse than no count.
     pub chain_tx_count: Arc<AtomicU64>,
+    /// The chainstate's initial-block-download latch, shared with the RPC
+    /// context so the operator log and `getblockchaininfo` answer IBD from
+    /// one [`bitcoin_rs_chain::SyncStatus`] observation.
+    pub ibd_latch: Arc<bitcoin_rs_chain::IbdLatch>,
     /// Shared in-memory block tree.
     pub block_tree: Arc<RwLock<BlockTree>>,
     /// Shared UTXO set.
@@ -927,6 +931,7 @@ impl ApplyHandles {
             chain_tip,
             applied_tip,
             chain_tx_count: Arc::new(AtomicU64::new(0)),
+            ibd_latch: Arc::new(bitcoin_rs_chain::IbdLatch::new()),
             block_tree,
             utxo,
             coin_stats,

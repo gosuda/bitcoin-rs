@@ -960,16 +960,7 @@ pub(crate) fn start_node(
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc_auth)?);
     let mut rpc_context =
         bitcoin_rs_rpc::context::Context::from_handles(bitcoin_rs_rpc::context::ContextHandles {
-            chain: bitcoin_rs_rpc::context::ChainHandles {
-                chain_tip: state.chain_tip(),
-                applied_tip: state.applied_tip(),
-                blocks: state.blocks(),
-                transactions: state.transactions(),
-                utxo: state.utxo(),
-                coin_stats: state.coin_stats(),
-                block_tree: state.block_tree(),
-                chain_network: state.config().network,
-            },
+            chain: state.chain_handles(),
             mempool: bitcoin_rs_rpc::context::MempoolHandles {
                 mempool: state.mempool_gateway(),
             },

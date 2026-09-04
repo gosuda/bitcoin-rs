@@ -23,8 +23,8 @@ use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
 use bitcoin_rs_rpc::context::{
-    ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
-    MempoolHandles, MiningHandles, NetworkHandles,
+    ChainControl, ChainControlError, Context, ContextHandles, IndexHandles, MempoolHandles,
+    MiningHandles, NetworkHandles,
 };
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
@@ -1837,16 +1837,7 @@ fn applied_tip_pair(state: &NodeState) -> Result<(Hash256, u32), Box<dyn Error>>
 fn invalidation_handler(state: &NodeState) -> Handler {
     Handler::new(Arc::new(
         Context::from_handles(ContextHandles {
-            chain: ChainHandles {
-                chain_tip: state.chain_tip(),
-                applied_tip: state.applied_tip(),
-                blocks: state.blocks(),
-                transactions: state.transactions(),
-                utxo: state.utxo(),
-                coin_stats: state.coin_stats(),
-                block_tree: state.block_tree(),
-                chain_network: Network::Regtest,
-            },
+            chain: state.chain_handles(),
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(state.mempool()),
             },

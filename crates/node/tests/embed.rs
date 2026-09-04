@@ -116,9 +116,14 @@ fn assert_embedded_node_readiness(
     assert_eq!(progress.blocks, SEED_BLOCKS);
     assert_eq!(progress.headers, SEED_BLOCKS);
     assert_eq!(progress.best_block_hash, seed_tip_hash);
+    // Core's transaction-count estimate over the daemon's real wiring: 101
+    // verified transactions against ~15 years of regtest `tx_rate`
+    // extrapolation is far below 1.0. A context whose counter was never
+    // shared with the apply path falls back to the height ratio, which for
+    // a fully applied header chain reads exactly 1.0.
     assert!(
-        progress.verification_progress > 0.0 && progress.verification_progress <= 1.0,
-        "progress must be a fraction in (0, 1], got {}",
+        progress.verification_progress > 0.0 && progress.verification_progress < 0.01,
+        "progress must be Core's transaction estimate, not the height ratio, got {}",
         progress.verification_progress
     );
     assert!(

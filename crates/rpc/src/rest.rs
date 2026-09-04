@@ -14,7 +14,7 @@ use bitcoin_rs_primitives::{
 };
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
-use crate::context::{BlockRecord, Context};
+use crate::context::{BlockRecord, Context, difficulty_for_bits};
 use crate::error::RpcError;
 use crate::handlers::chain::getblockchaininfo;
 use crate::handlers::mempool::{getmempoolinfo, getrawmempool};
@@ -714,7 +714,7 @@ fn build_chain_context(ctx: &Context, record: &BlockRecord, header: &Header) -> 
         mediantime: ctx
             .median_time_past_for_hash(Hash256::from(record.hash))
             .unwrap_or(0),
-        difficulty: ctx.difficulty_for_bits(header.bits),
+        difficulty: difficulty_for_bits(header.bits),
         chainwork_hex: ctx
             .chain_work_hex_for_hash(Hash256::from(record.hash))
             .unwrap_or_else(|| "00".to_owned()),

@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::TipSnapshot;
+pub use bitcoin_rs_chain::difficulty_for_bits;
+use bitcoin_rs_chain::{IbdLatch, SyncInputs, SyncStatus, TipSnapshot};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
 use bitcoin_rs_primitives::{
@@ -15,12 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
-
-/// How stale the applied tip may be while the node still counts as synced.
-///
-/// Bitcoin Core's `DEFAULT_MAX_TIP_AGE`, 24 hours. Core exposes it as
-/// `-maxtipage`; this node has no such option yet, so the default stands.
-const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 /// Core `sendrawtransaction` default `maxfeerate`: 0.1 BTC/kvB in sat/kvB.
 ///
@@ -851,26 +846,6 @@ pub trait MiningControl: Send + Sync {
     fn publish_generation(&self);
 }
 
-/// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
-#[must_use]
-pub fn difficulty_for_bits(consensus_bits: u32) -> f64 {
-    let mantissa = consensus_bits & 0x00ff_ffff;
-    if mantissa == 0 {
-        return 0.0;
-    }
-    let mut shift = (consensus_bits >> 24) & 0xff;
-    let mut difficulty = f64::from(0x0000_ffff_u32) / f64::from(mantissa);
-    while shift < 29 {
-        difficulty *= 256.0;
-        shift += 1;
-    }
-    while shift > 29 {
-        difficulty /= 256.0;
-        shift -= 1;
-    }
-    difficulty
-}
-
 /// Actual progress reported by the node-owned transaction index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TxIndexInfo {
@@ -1096,6 +1071,12 @@ pub struct ChainHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best fully-applied block tip.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Cumulative transaction count through `applied_tip`, `0` when unknown.
+    /// Maintained by the node's apply path; the RPC surface only reads it.
+    pub chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
+    /// The chainstate's initial-block-download latch, shared with the
+    /// node's sync orchestrator so every surface answers IBD identically.
+    pub ibd_latch: Arc<IbdLatch>,
     /// Applied block metadata log.
     pub blocks: Arc<RwLock<BlockLog>>,
     /// Transactions retained for direct RPC lookup.
@@ -1165,16 +1146,8 @@ pub struct Context {
     /// [`Self::chain_tx_count`], which turns Bitcoin Core's zero-means-unset
     /// encoding into an `Option`.
     chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
-    /// Whether this node has ever observed itself to be out of initial block
-    /// download. Once set it is never cleared.
-    ///
-    /// Bitcoin Core latches the same way (`m_cached_is_ibd`, cleared once by
-    /// `UpdateIBDStatus` and never set again) and logs "Leaving
-    /// `InitialBlockDownload (latching to false)`" when it happens. Without the
-    /// latch the answer oscillates: a synced node that has not seen a block for
-    /// longer than the tip-age window would announce that it is back in initial
-    /// sync, and callers treat that as "do not trust this node's data yet".
-    left_initial_block_download: Arc<core::sync::atomic::AtomicBool>,
+    /// The chainstate's initial-block-download latch (see [`IbdLatch`]).
+    ibd_latch: Arc<IbdLatch>,
     /// Mempool mutation gateway: the only production route that takes the
     /// pool write lock, publishing ordered mutation events to observers.
     pub mempool: Arc<MempoolGateway>,
@@ -1278,7 +1251,7 @@ impl Context {
             applied_tip: Arc::new(ArcSwapOption::empty()),
             chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
-            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            ibd_latch: Arc::new(IbdLatch::new()),
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -1330,7 +1303,7 @@ impl Context {
             applied_tip: Arc::new(ArcSwapOption::empty()),
             chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
-            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            ibd_latch: Arc::new(IbdLatch::new()),
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -1366,6 +1339,8 @@ impl Context {
                 ChainHandles {
                     chain_tip,
                     applied_tip,
+                    chain_tx_count,
+                    ibd_latch,
                     blocks,
                     transactions,
                     utxo,
@@ -1395,8 +1370,8 @@ impl Context {
             chain_tip,
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
-            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            chain_tx_count,
+            ibd_latch,
             mempool,
             blocks,
             transactions,
@@ -1516,30 +1491,6 @@ impl Context {
             .map_or_else(PruneStatus::default, |service| service.status())
     }
 
-    /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
-    ///
-    /// Keep the operation order here in sync with Core's `GetDifficulty`;
-    /// changing the repeated 256 scaling into an equivalent exponentiation can
-    /// change the final floating-point bit.
-    #[must_use]
-    pub fn difficulty_for_bits(&self, bits: u32) -> f64 {
-        let mantissa = bits & 0x00ff_ffff;
-        if mantissa == 0 {
-            return 0.0;
-        }
-        let mut shift = (bits >> 24) & 0xff;
-        let mut difficulty = f64::from(0x0000_ffff_u32) / f64::from(mantissa);
-        while shift < 29 {
-            difficulty *= 256.0;
-            shift += 1;
-        }
-        while shift > 29 {
-            difficulty /= 256.0;
-            shift -= 1;
-        }
-        difficulty
-    }
-
     /// Publishes a new best-chain tip.
     pub fn set_chain_tip(&self, tip: TipSnapshot) {
         self.chain_tip.store(Some(Arc::new(tip)));
@@ -1637,53 +1588,30 @@ impl Context {
         }
     }
 
-    /// Answers Bitcoin Core's `IsInitialBlockDownload()` for the applied tip.
+    /// Observes the chain-synchronization status `getblockchaininfo` reports.
     ///
-    /// A node has left initial block download once its applied tip has at least
-    /// the network's `nMinimumChainWork` **and** carries a timestamp no older
-    /// than `max_tip_age` (Core's 24-hour default). Both are required: work
-    /// alone would trust a stale chain, and recency alone would trust a cheap
-    /// one that simply claims a recent timestamp.
-    ///
-    /// The answer latches. Once this returns `false` it returns `false` for the
-    /// life of the process, exactly as Core's `m_cached_is_ibd` does, so a
-    /// synced node that goes an hour without a block does not announce that it
-    /// is resyncing.
-    ///
-    /// `now` is UNIX seconds, taken by the caller so the decision itself stays a
-    /// pure function of observable state.
+    /// One coherent read of both tips, the block tree, and the cumulative
+    /// transaction count, decided by [`bitcoin_rs_chain::sync_status`] — the
+    /// same owner the node's operator log and embedded API consult, so no
+    /// surface defines initial block download or verification progress on
+    /// its own. `now` is UNIX seconds, taken by the caller so the decision
+    /// stays a pure function of observable state.
     #[must_use]
-    pub fn is_initial_block_download(&self, now: u64) -> bool {
-        use core::sync::atomic::Ordering;
-
-        if self.left_initial_block_download.load(Ordering::Relaxed) {
-            return false;
-        }
-        let Some(tip) = self.applied_tip.load_full() else {
-            return true;
-        };
-        // Big-endian, fixed width: byte order is numeric order.
-        let work: [u8; 32] = tip.chainwork.to_be_bytes();
-        if work < self.chain_network.minimum_chain_work() {
-            return true;
-        }
-        // `TipSnapshot` carries no timestamp, so the tip's header supplies it —
-        // the same route `getdifficulty` takes to the tip's `bits`.
-        let Some(tip_time) = self
-            .block_tree
-            .read()
-            .node(tip.tip_id)
-            .ok()
-            .map(|node| node.header.time)
-        else {
-            return true;
-        };
-        if u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS) {
-            return true;
-        }
-        self.left_initial_block_download
-            .store(true, Ordering::Relaxed);
-        false
+    pub fn sync_status(&self, now: u64) -> SyncStatus {
+        let chain_tip = self.chain_tip.load_full();
+        let applied_tip = self.applied_tip.load_full();
+        let tree = self.block_tree.read();
+        SyncStatus::observe(SyncInputs {
+            network: self.chain_network,
+            chain_tip: chain_tip.as_deref(),
+            applied_tip: applied_tip.as_deref(),
+            tree: &tree,
+            chain_tx_count: self
+                .chain_tx_count
+                .load(core::sync::atomic::Ordering::Relaxed),
+            ibd_latch: &self.ibd_latch,
+            now,
+        })
     }
 
     /// Returns the current best-applied-block hash.
@@ -1700,24 +1628,6 @@ impl Context {
         self.chain_tip
             .load_full()
             .map_or_else(Hash256::default, |tip| tip.hash)
-    }
-
-    /// Returns the current best-chain chainwork as a 64-character lowercase
-    /// big-endian hex string. Returns "00" when no tip is published yet (a
-    /// 2-char placeholder matching `bitcoind`'s pre-genesis behavior).
-    #[must_use]
-    pub fn chainwork_hex(&self) -> String {
-        let Some(tip) = self.chain_tip.load_full() else {
-            return "00".to_owned();
-        };
-        let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use core::fmt::Write as _;
-
-            let _: fmt::Result = write!(&mut out, "{byte:02x}");
-        }
-        out
     }
 
     fn hash_at_height_from_tip(&self, tip: &TipSnapshot, height: u32) -> Option<Hash256> {
@@ -2072,6 +1982,8 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: Arc::clone(&chain_tip),
                 applied_tip: Arc::clone(&applied_tip),
+                chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
+                ibd_latch: Arc::new(IbdLatch::new()),
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 transactions: Arc::new(RwLock::new(HashMap::new())),
                 utxo: Arc::clone(&utxo),

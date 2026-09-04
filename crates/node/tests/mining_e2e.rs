@@ -384,14 +384,8 @@ fn mining_handler(state: &NodeState) -> Handler {
     let mining_control: Arc<dyn MiningControl> = Arc::new(coordinator);
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
-            chain_tip: state.chain_tip(),
-            applied_tip: state.applied_tip(),
-            blocks: state.blocks(),
-            transactions: state.transactions(),
             utxo: Arc::new(UtxoSet::new()),
-            coin_stats: state.coin_stats(),
-            block_tree: state.block_tree(),
-            chain_network: state.config().network,
+            ..state.chain_handles()
         },
         mempool: MempoolHandles {
             mempool: MempoolGateway::shared(state.mempool()),

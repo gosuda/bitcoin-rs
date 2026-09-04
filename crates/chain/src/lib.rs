@@ -9,6 +9,8 @@ pub mod header_sync;
 pub mod node;
 /// Reorganization planning.
 pub mod reorg;
+/// Chain-synchronization status: the one owner of IBD and verification progress.
+pub mod sync_status;
 /// Best-tip snapshot type.
 pub mod tip;
 /// In-memory block tree.
@@ -22,6 +24,7 @@ pub use bitcoin_rs_primitives::Network;
 pub use header_sync::{accept_headers, current_unix_seconds, validate_header_timestamp};
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use reorg::{ReorgPlan, plan_reorg};
+pub use sync_status::{IbdLatch, SyncInputs, SyncStatus, difficulty_for_bits};
 pub use tip::TipSnapshot;
 pub use tree::BlockTree;
 

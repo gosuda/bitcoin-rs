@@ -217,40 +217,48 @@ impl BlockSync {
             self.record_pending_sync_metrics();
         }
     }
+    /// Observes the chainstate's synchronization status.
+    ///
+    /// The same [`bitcoin_rs_chain::SyncStatus`] owner `getblockchaininfo`
+    /// and the embedded API consult, over the same shared latch, so the
+    /// operator log cannot define "initial block download" differently from
+    /// the RPC surface.
+    fn sync_status(&self, now: u64) -> bitcoin_rs_chain::SyncStatus {
+        let chain_tip = self.handles.chain_tip.load_full();
+        let applied_tip = self.handles.applied_tip.load_full();
+        let tree = self.handles.block_tree.read();
+        bitcoin_rs_chain::SyncStatus::observe(bitcoin_rs_chain::SyncInputs {
+            network: self.handles.network,
+            chain_tip: chain_tip.as_deref(),
+            applied_tip: applied_tip.as_deref(),
+            tree: &tree,
+            chain_tx_count: self
+                .handles
+                .chain_tx_count
+                .load(core::sync::atomic::Ordering::Relaxed),
+            ibd_latch: &self.handles.ibd_latch,
+            now,
+        })
+    }
+
     /// Emits a one-line sync-progress summary at INFO level.
     ///
-    /// Reports applied height, header (chain) height, the gap, live peer
-    /// count, and whether the node is still in initial block download. This
-    /// is the operator-facing progress signal that #223 identified as
-    /// missing during IBD — without it, `docker logs` shows no indication
-    /// that the node is alive and applying blocks.
+    /// Reports applied height, header (chain) height, the gap, verification
+    /// progress, live peer count, and whether the node is still in initial
+    /// block download. This is the operator-facing progress signal that #223
+    /// identified as missing during IBD — without it, `docker logs` shows no
+    /// indication that the node is alive and applying blocks.
     pub fn emit_sync_progress(&self) {
-        let applied_tip = self.handles.applied_tip.load_full();
-        let chain_tip = self.handles.chain_tip.load_full();
-        let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let live_peers = self.peer_table.len();
-        let in_ibd = header_height > 0 && applied_height < header_height;
-        let gap = header_height.saturating_sub(applied_height);
-
-        if in_ibd {
-            tracing::info!(
-                applied_height,
-                header_height,
-                gap,
-                peers = live_peers,
-                ibd = true,
-                "sync progress"
-            );
-        } else {
-            tracing::info!(
-                applied_height,
-                header_height,
-                peers = live_peers,
-                ibd = false,
-                "sync progress"
-            );
-        }
+        let status = self.sync_status(bitcoin_rs_chain::current_unix_seconds().into());
+        tracing::info!(
+            applied_height = status.applied_height,
+            header_height = status.header_height,
+            gap = status.gap(),
+            progress = %format_args!("{:.4}", status.verification_progress),
+            peers = self.peer_table.len(),
+            ibd = status.initial_block_download,
+            "sync progress"
+        );
     }
     #[allow(clippy::too_many_lines)]
     fn drain_inbound_headers(&self) {

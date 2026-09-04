@@ -138,51 +138,26 @@ impl Node {
     }
 
     /// Returns typed synchronization progress without touching RPC JSON.
+    ///
+    /// The chain facts come from the same [`bitcoin_rs_chain::SyncStatus`]
+    /// observation `getblockchaininfo` serializes; only the projection into
+    /// this struct is local.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
         let ctx = &self.context;
-        let applied_tip = ctx.applied_tip.load_full();
-        let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let headers = ctx.height();
-        let (difficulty, time, median_time) =
-            applied_tip.as_ref().map_or((0.0, 0_u64, 0_u64), |tip| {
-                let tree = ctx.block_tree.read();
-                tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
-                    (
-                        ctx.difficulty_for_bits(node.header.bits),
-                        u64::from(node.header.time),
-                        u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
-                    )
-                })
-            });
-        let now = unix_time_secs();
-        let verification_progress = ctx.chain_tx_count().map_or_else(
-            || height_ratio_progress(applied, headers),
-            |chain_tx_count| {
-                verification_progress(
-                    ctx.chain_network,
-                    chain_tx_count,
-                    applied,
-                    headers,
-                    time,
-                    now,
-                )
-            },
-        );
+        let status = ctx.sync_status(unix_time_secs());
         let prune_status = ctx.prune_status();
         SyncProgress {
             network: ctx.chain_network,
-            blocks: applied,
-            headers,
-            best_block_hash: applied_tip
-                .as_ref()
-                .map_or_else(Hash256::default, |tip| tip.hash),
-            difficulty,
-            time,
-            median_time,
-            verification_progress,
-            initial_block_download: ctx.is_initial_block_download(now),
-            chain_work: ctx.chainwork_hex(),
+            blocks: status.applied_height,
+            headers: status.header_height,
+            best_block_hash: status.best_block_hash,
+            difficulty: status.difficulty,
+            time: status.tip_time,
+            median_time: status.median_time_past,
+            verification_progress: status.verification_progress,
+            initial_block_download: status.initial_block_download,
+            chain_work: status.chainwork_hex(),
             size_on_disk: ctx
                 .block_storage_disk_usage()
                 .unwrap_or_else(|| ctx.blocks.read().size_on_disk()),
@@ -385,84 +360,6 @@ fn unix_time_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
-}
-
-/// The pre-count fallback the RPC surface uses when chain tx count is
-/// unknown: a height ratio clamped into `[0, 1]`.
-fn height_ratio_progress(applied: u32, headers: u32) -> f64 {
-    if headers == 0 {
-        0.0
-    } else {
-        (f64::from(applied) / f64::from(headers)).min(1.0)
-    }
-}
-
-/// `u64` → `f64` without an `as` cast (this crate forbids them). Exact up
-/// to 2^53.
-fn u64_to_f64(value: u64) -> f64 {
-    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
-    let low = u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX);
-    f64::from(high).mul_add(4_294_967_296.0, f64::from(low))
-}
-
-/// `i64` → `f64` without an `as` cast.
-fn i64_to_f64(value: i64) -> f64 {
-    if value >= 0 {
-        u64_to_f64(u64::try_from(value).unwrap_or(u64::MAX))
-    } else {
-        -u64_to_f64(value.unsigned_abs())
-    }
-}
-
-/// Bitcoin Core's `GuessVerificationProgress` for embedders.
-///
-/// Keep op-for-op identical with
-/// `crates/rpc/src/handlers/chain.rs::verification_progress` — that private
-/// function is the canonical implementation the RPC contract tests pin;
-/// this twin exists only because those tests are outside this crate's
-/// dependency direction. Changing one without the other makes
-/// [`Node::sync_progress`] disagree with `getblockchaininfo`.
-#[allow(clippy::too_many_arguments)]
-fn verification_progress(
-    network: Network,
-    chain_tx_count: u64,
-    applied_height: u32,
-    header_height: u32,
-    tip_time: u64,
-    now: u64,
-) -> f64 {
-    const RECENT_TIP_WINDOW_SECONDS: i64 = 2 * 60 * 60;
-
-    if chain_tx_count == 0 {
-        return 0.0;
-    }
-    let data = network.chain_tx_data();
-
-    let now_signed = i64::try_from(now).unwrap_or(i64::MAX);
-    let tip_time_signed = i64::try_from(tip_time).unwrap_or(i64::MAX);
-    let block_time = if (now_signed - tip_time_signed).abs() <= RECENT_TIP_WINDOW_SECONDS
-        && header_height >= applied_height
-    {
-        let behind = i64::from(header_height - applied_height);
-        let spacing = i64::from(network.target_spacing_seconds());
-        now_signed.saturating_sub(behind.saturating_mul(spacing))
-    } else {
-        tip_time_signed
-    };
-
-    let total = if chain_tx_count <= data.tx_count {
-        // Still behind the pinned observation: extrapolate forward from it.
-        let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
-        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
-    } else {
-        // Past it, so this node's own count is the better baseline.
-        let elapsed = now_signed.saturating_sub(block_time);
-        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(chain_tx_count))
-    };
-    if total <= 0.0 {
-        return 0.0;
-    }
-    (u64_to_f64(chain_tx_count) / total).clamp(0.0, 1.0)
 }
 
 /// Polls a node future to completion without an executor (test-only).

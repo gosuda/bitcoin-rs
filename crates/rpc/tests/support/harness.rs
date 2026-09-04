@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_rpc::context::{
-    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, NetworkHandles,
+    Context, ContextHandles, IndexHandles, MempoolHandles, NetworkHandles,
 };
 use bitcoin_rs_rpc::{Auth, Handler, RpcServer};
 use tempfile::TempDir;
@@ -105,16 +105,7 @@ impl ServerHarness {
     pub(crate) fn start(node: &NodeHarness) -> GateResult<Self> {
         let state = &node.state;
         let ctx = Context::from_handles(ContextHandles {
-            chain: ChainHandles {
-                chain_tip: state.chain_tip(),
-                applied_tip: state.applied_tip(),
-                blocks: state.blocks(),
-                transactions: state.transactions(),
-                utxo: state.utxo(),
-                coin_stats: state.coin_stats(),
-                block_tree: state.block_tree(),
-                chain_network: state.config().network,
-            },
+            chain: state.chain_handles(),
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(state.mempool()),
             },

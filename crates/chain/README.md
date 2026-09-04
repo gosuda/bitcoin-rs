@@ -13,7 +13,11 @@ proof of work, compact-target validation against the network's difficulty rules
 (`validate_header_nbits`), median-time-past and future-drift bounds
 (`validate_header_timestamp`, `current_unix_seconds`) — returning the new `NodeId`s.
 `plan_reorg` walks parent pointers to the common ancestor and returns a `ReorgPlan`
-naming the blocks to disconnect and connect. An internal `Bip9Cache` memoizes
+naming the blocks to disconnect and connect. `SyncStatus::observe` is the one owner of
+the node's synchronization status — applied and header heights, initial block download
+(Core's minimum-work-and-tip-age rule, latched through the shared `IbdLatch`), and
+`GuessVerificationProgress` — which RPC, the embedded API, and the operator log all
+present without re-deriving. An internal `Bip9Cache` memoizes
 versionbits deployment states per node and is invalidated on reorg. `BlockTreeNode` carries
 parent, height, and header hash with a `NodeStatus` (header-valid, active, or
 off-best-chain), and every failure surfaces as a structured `ChainError` variant.

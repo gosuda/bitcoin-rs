@@ -8,7 +8,7 @@ use crate::script_util::{
     instructions, is_op_return, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh,
 };
 use bitcoin::{Address, Network as BitcoinNetwork, Script};
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{TipSnapshot, difficulty_for_bits};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
@@ -363,7 +363,7 @@ impl<'a> Projection<'a> {
                 .unwrap_or(header.time),
             nonce: header.nonce,
             bits: header.bits,
-            difficulty: self.ctx.difficulty_for_bits(header.bits),
+            difficulty: difficulty_for_bits(header.bits),
         })
     }
 

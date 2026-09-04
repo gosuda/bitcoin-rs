@@ -1445,6 +1445,7 @@ impl NodeState {
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
             chain_tx_count: Arc::clone(&chain_tx_count),
+            ibd_latch: Arc::new(bitcoin_rs_chain::IbdLatch::new()),
             block_tree: Arc::clone(&block_tree),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
@@ -1863,6 +1864,27 @@ impl NodeState {
     #[must_use]
     pub fn chain_tx_count_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.chain_tx_count)
+    }
+
+    /// The chain capability handles the RPC context reads.
+    ///
+    /// One wiring for the daemon, the embedded node, and every test harness
+    /// that builds a `Context` over a `NodeState`: a handle the RPC layer
+    /// needs is added here once, not rediscovered per call site.
+    #[must_use]
+    pub fn chain_handles(&self) -> bitcoin_rs_rpc::context::ChainHandles {
+        bitcoin_rs_rpc::context::ChainHandles {
+            chain_tip: self.chain_tip(),
+            applied_tip: self.applied_tip(),
+            chain_tx_count: self.chain_tx_count_handle(),
+            ibd_latch: Arc::clone(&self.apply_handles.ibd_latch),
+            blocks: self.blocks(),
+            transactions: self.transactions(),
+            utxo: self.utxo(),
+            coin_stats: self.coin_stats(),
+            block_tree: self.block_tree(),
+            chain_network: self.config.network,
+        }
     }
 
     /// Returns the shared block-records handle exposed to RPC handlers.
