@@ -131,7 +131,7 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
     // CONTRACT: docs/contracts/external-api.md#API-23
     ensure_at_most_params(params, 2)?;
     let conf_target = required_u64(params, 0, "conf_target is required")?;
-    if conf_target < 1 || conf_target > ESTIMATE_SMART_FEE_MAX_TARGET {
+    if !(1..=ESTIMATE_SMART_FEE_MAX_TARGET).contains(&conf_target) {
         return Err(RpcError::InvalidParameter(
             ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned(),
         ));
