@@ -18,7 +18,7 @@ use parking_lot::{Mutex, RwLock};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexFormat, IndexReader, IndexRowCounts,
+    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexReader, IndexRowCounts,
     IndexWatermark, IndexWatermarks, IndexWriter, Indexer, PreparedBatch, PreparedBatchLimits,
 };
 use bitcoin_rs_storage::{
@@ -744,11 +744,11 @@ fn predecessor_height_format_resets_historical(
         store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
         Some(5_u32.to_le_bytes().as_slice())
     );
-    assert_eq!(
+    assert!(
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
-            .as_deref(),
-        Some(2_u32.to_le_bytes().as_slice())
+            .is_none(),
+        "the leftover ASCII row-value marker must not survive a format reset"
     );
     assert_eq!(
         writer.watermarks()?,
@@ -1271,8 +1271,9 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
         "claim value is mask(1) || process_epoch(8 LE) || base_version(8 LE)"
     );
     assert_eq!(
-        marker_puts[0].deletes, 2,
-        "the claim atomically deletes the selected watermark and global cursor"
+        marker_puts[0].deletes, 3,
+        "the claim atomically deletes the selected watermark, global cursor, \
+         and leftover ASCII format marker"
     );
     assert_eq!(
         marker_puts[1].marker_put.as_deref(),
@@ -1943,21 +1944,25 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
     writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
     drop(writer);
 
-    // The emptied index claims the current row format before rebuilding.
+    // The emptied index claims the current store format before rebuilding.
     let indexer = Indexer::new(Arc::clone(&store));
-    assert_eq!(indexer.ensure_format_version()?, IndexFormat::Current);
+    indexer.ensure_format_version()?;
     drop(indexer);
 
     seed_populated_store(&store, 1)?;
 
     let indexer = Indexer::new(Arc::clone(&store));
-    assert_eq!(indexer.ensure_format_version()?, IndexFormat::Current);
+    indexer.ensure_format_version()?;
     assert_eq!(
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
+        Some(5_u32.to_le_bytes().as_slice()),
+        "the store format marker survives reset and rebuild"
+    );
+    assert!(
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
-            .as_deref(),
-        Some(2u32.to_le_bytes().as_slice()),
-        "the row-format marker survives reset and rebuild"
+            .is_none(),
+        "the leftover ASCII row-value marker must not return after rebuild"
     );
     assert!(
         store
@@ -3106,8 +3111,8 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
         "growth changes byte zero only; width, process epoch, and base survive raw"
     );
     assert_eq!(
-        markers[0].deletes, 3,
-        "the claim deletes the union watermarks and the consumer cursor"
+        markers[0].deletes, 4,
+        "the claim deletes the union watermarks, the consumer cursor, and the leftover ASCII format marker"
     );
     assert_eq!(
         markers[1].marker_put.as_deref(),

@@ -261,62 +261,44 @@ default until one is.
 
 ## Versioning: per-capability format and reset
 
-The index tracks two independently versioned capabilities via
+The index tracks three independently versioned capabilities via
 `IndexCapability`:
 
 | Capability | Column families | Watermark key |
 |---|---|---|
 | `TxLookup` | `TxConfirmed`, `BlockHeaders` | `TX_LOOKUP_WATERMARK_KEY` |
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
+| `ScriptLive` | `ScriptLive` | `SCRIPT_LIVE_WATERMARK_KEY` |
 
-**Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 2) is a single marker in `UtxoMeta`. It
-governs whether Funding, Spending, and TxConfirmed values carry `TxPosition`
-arrays.
-A future format bump (e.g. changing `TxPosition` width) would increment this
-version. Readers already handle
-`IndexFormat::Legacy` by falling back to full block scans, so an old-format
-index remains correct, just slower.
+**One store format.** `[0x00, b'V']` in `UtxoMeta` is the only layout marker
+(currently 5: big-endian hash-prefix heights, positioned Spending values,
+full-outpoint Live locators). The leftover ASCII `index:format_version` key
+from formats 1–4 is deleted on reset and is not read.
 
 **Per-capability reset.** The `IndexCapabilities` mask allows resetting one
-capability without touching the other. `acquire_capability_reset` and
+capability without touching the others. `acquire_capability_reset` and
 `resume_capability_reset` delete only the column families belonging to the
 requested capability and clear only that capability's watermark. The reset
 state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
 prevents ABA across repeated resets.
 
-Opening a format-3 store (Spending keys without positions) is this kind of
-reset: `IndexWriter::open` rebuilds `ScriptHistory` only and leaves
-`TxLookup` ready. A foreign format version still refuses start.
+Opening a format-3 or format-4 store (little-endian heights) is this kind of
+reset: `IndexWriter::open` rebuilds `TxLookup` and `ScriptHistory` and leaves
+`ScriptLive` ready. A foreign format version still refuses start.
 
-**Adding ScriptLive later must not force a History reindex.** ScriptLive
-rows would occupy a new column family (not one of the existing four). The
-`IndexCapability` enum would gain a `ScriptLive` variant with its own
-watermark key. Because the reset mechanism is per-capability:
-
-- Adding `ScriptLive` does not touch `Funding`, `Spending`, `TxConfirmed`,
-  or `BlockHeaders` rows.
-- A `ScriptHistory` reset (clearing `Funding` + `Spending`) does not touch
-  `ScriptLive` rows.
-- A `ScriptLive` reset clears only the Live CF.
-- The `INDEX_FORMAT_VERSION` marker does not change: it governs the
-  row-value format of existing CFs, not the existence of a new CF.
+A `ScriptLive` locator change would reset only `ScriptLive`. A History or
+TxLookup key change resets those families and can leave Live in place when
+its locator did not change.
 
 The only shared state between capabilities is the `ORDINARY_STATE_REVISION`
 counter in `UtxoMeta`, which advances on every ordinary commit regardless of
 which capability wrote. This is by design: the revision fences derived
 writes against concurrent resets, and a new capability's writes must be
-fenced the same way. Adding a capability does not change the revision
-counter's semantics; it just means more writes advance it.
+fenced the same way.
 
-**No dual-read path.** The reader does not maintain a "read from old format,
-then read from new format" fallback for a capability that has not been
-reset. The `IndexFormat::Legacy` fallback is for the row-value format
-(positions vs no positions), not for the presence or absence of a column
-family. A new CF is either populated (after the first ingest) or empty
-(before it); the reader handles both without a format check.
+**No dual-read path.** A foreign or missing format marker refuses start or
+selects delete-and-rebuild. Empty or malformed *row values* still scan the
+block: that is corruption safety, not an old-format decoder.
 
-**No migration.** Adding a capability is additive: open the new keyspace,
-start ingesting, advance the new watermark. No existing row is rewritten.
-The only operator action is enabling the capability in the ingest
-configuration; the reset mechanism handles the rest.
+**No migration.** Format changes delete the affected capability rows and
+rebuild from authoritative chain or UTXO state. No existing row is rewritten.
