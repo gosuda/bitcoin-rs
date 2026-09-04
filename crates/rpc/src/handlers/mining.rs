@@ -15,8 +15,7 @@ use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
-    self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc,
-    typed_to_sonic_omitting_nulls,
+    self, compact_target_hex, i64_saturated, sat_to_btc, typed_to_sonic_omitting_nulls,
 };
 use crate::context::Context;
 use crate::error::RpcError;
@@ -287,7 +286,15 @@ pub(crate) fn getprioritisedtransactions(
         let _ = row.insert("fee_delta", json!(entry.fee_delta));
         let _ = row.insert("in_mempool", json!(entry.in_mempool));
         if let Some(modified_fee) = entry.modified_fee {
-            let _ = row.insert("modified_fee", json!(signed_sat_to_btc(modified_fee)));
+            // CONTRACT: docs/contracts/external-api.md#API-25
+            let sats = i64::try_from(modified_fee).unwrap_or_else(|_| {
+                if modified_fee.is_negative() {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }
+            });
+            let _ = row.insert("modified_fee", json!(sats));
         }
         let _ = object.insert(&txid, Value::from(row));
     }
@@ -1874,6 +1881,7 @@ mod tests {
         ));
     }
 
+    // CONTRACT: docs/contracts/external-api.md#API-25
     #[test]
     fn getprioritisedtransactions_projects_the_overlay() {
         use bitcoin_rs_mempool::MempoolEntry;
@@ -1916,13 +1924,13 @@ mod tests {
                 .and_then(JsonValueTrait::as_bool),
             Some(true)
         );
-        let modified = pooled_row
-            .get("modified_fee")
-            .and_then(JsonValueTrait::as_f64)
-            .unwrap_or_else(|| panic!("pooled overlay must carry modified_fee in BTC"));
-        assert!(
-            (modified - signed_sat_to_btc(1_500)).abs() < f64::EPSILON,
-            "modified_fee must be actual fee plus delta in BTC, got {modified}"
+        // CONTRACT: docs/contracts/external-api.md#API-25
+        assert_eq!(
+            pooled_row
+                .get("modified_fee")
+                .and_then(JsonValueTrait::as_i64),
+            Some(1_500),
+            "modified_fee is actual fee plus delta in satoshis"
         );
         let absent_row = object
             .get(&absent.to_string())
