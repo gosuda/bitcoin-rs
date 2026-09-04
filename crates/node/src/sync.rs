@@ -213,7 +213,7 @@ impl BlockSync {
             #[cfg(test)]
             window.lock().forget_peer(source.addr);
             let mut pending = pending_getheaders.lock();
-            if pending.is_some_and(|request| request.source == source) {
+            if pending.is_some_and(|request| request.peer_addr == source.addr) {
                 *pending = None;
             }
         })
