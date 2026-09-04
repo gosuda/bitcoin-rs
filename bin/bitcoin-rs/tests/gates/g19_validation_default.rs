@@ -27,9 +27,6 @@ const RECORDED_VERDICT: Verdict = Verdict::PromoteNative;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Verdict {
-    /// Library crates keep `kernel` in `default`.
-    #[allow(dead_code, reason = "retained so a revert is one coordinated flip")]
-    KeepKernel,
     /// Library crates have dropped `kernel` from `default`.
     PromoteNative,
 }
@@ -131,18 +128,6 @@ fn library_defaults_match_recorded_verdict() {
     let consensus = default_has_kernel(&features, CONSENSUS);
     let node = default_has_kernel(&features, NODE);
     match RECORDED_VERDICT {
-        Verdict::KeepKernel => {
-            assert!(
-                consensus,
-                "VAL-01: bitcoin-rs-consensus default must include kernel \
-                 while RECORDED_VERDICT is KeepKernel"
-            );
-            assert!(
-                node,
-                "VAL-01: bitcoin-rs-node default must include kernel \
-                 while RECORDED_VERDICT is KeepKernel"
-            );
-        }
         Verdict::PromoteNative => {
             assert!(
                 !consensus,
