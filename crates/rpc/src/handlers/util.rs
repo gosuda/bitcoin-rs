@@ -544,7 +544,7 @@ fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, Desc
                 has_private_keys: false,
                   })
               }
-            }),
+            
             None => Err(DescriptorError::Parse(error.to_string())),
         },
     }
