@@ -1976,8 +1976,46 @@ def _rehash_copy(path: Path, expected: str, cap: int, field: str) -> None:
         raise ContractError(f"{field} changed after its verified copy")
 
 
-def _rehash_binary(path: Path, expected: str) -> None:
-    _rehash_copy(path, expected, MAX_BINARY_BYTES, "arm binary copy")
+def _open_verified_inode(path: Path, expected: str, cap: int, field: str) -> int:
+    """Return a non-CLOEXEC fd onto the pinned inode.
+
+    The child inherits this descriptor and opens ``/proc/self/fd/<n>``, so a
+    rename of the workspace pathname after this returns cannot change the
+    bytes the child reads. The caller closes the fd after ``Popen``.
+    """
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ContractError(f"cannot open {field}") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ContractError(f"{field} must be a regular file")
+        raw = _read_fd(descriptor, before.st_size, cap, field)
+        after = os.fstat(descriptor)
+        identity_before = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        identity_after = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if identity_before != identity_after:
+            raise ContractError(f"{field} changed while being read")
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ContractError(f"{field} changed after its verified copy")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
 
 
 def _expand_command(
@@ -2036,28 +2074,39 @@ class _ArmProcess:
         if self._process is not None:
             raise ContractError(f"{self.spec.kind} process is already running")
         self.spec.datadir.mkdir(parents=True, exist_ok=True)
-        _rehash_binary(self.binary, self.spec.binary_sha256)
-        _rehash_copy(
-            self.config, self.spec.config.sha256, MAX_RECEIPT_BYTES, "arm config copy"
-        )
-        argv = _expand_command(
-            self.spec.command,
-            binary=self.binary,
-            config=self.config,
-            data_dir=self.spec.datadir,
-            port=self.port,
-            cookie=self.cookie,
+        binary_fd = _open_verified_inode(
+            self.binary, self.spec.binary_sha256, MAX_BINARY_BYTES, "arm binary copy"
         )
         try:
-            self._process = subprocess.Popen(
-                argv,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                close_fds=True,
+            config_fd = _open_verified_inode(
+                self.config,
+                self.spec.config.sha256,
+                MAX_RECEIPT_BYTES,
+                "arm config copy",
             )
+            try:
+                argv = _expand_command(
+                    self.spec.command,
+                    binary=Path(f"/proc/self/fd/{binary_fd}"),
+                    config=Path(f"/proc/self/fd/{config_fd}"),
+                    data_dir=self.spec.datadir,
+                    port=self.port,
+                    cookie=self.cookie,
+                )
+                self._process = subprocess.Popen(
+                    argv,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                    pass_fds=(binary_fd, config_fd),
+                )
+            finally:
+                os.close(config_fd)
         except OSError as error:
             raise ContractError(f"cannot spawn {self.spec.kind} process") from error
+        finally:
+            os.close(binary_fd)
         self._pid = self._process.pid
         _wait_owned_endpoint(
             self._process, self.port, time.perf_counter_ns() + ARM_READY_TIMEOUT_NS
