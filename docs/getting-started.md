@@ -90,10 +90,14 @@ The node logs its startup banner, effective cache allocation, and the address
 the JSON-RPC listener bound to.
 
 `--txindex` enables Bitcoin Core-compatible transaction lookup support.
-`--scriptindex` enables address and scripthash UTXO queries and confirmed
-funding/spending history exposed via Esplora-compatible HTTP endpoints.
-Address and scripthash routes return HTTP 503 until `--scriptindex` catches up,
-or when it is disabled.
+`--scriptindex` (`full`, or the historical boolean `true`) enables address and
+scripthash UTXO queries plus confirmed funding/spending history via
+Esplora-compatible HTTP endpoints. `--scriptindex=utxo` maintains only the
+compact live-output view: current UTXO routes work once that view is ready,
+while history, statistics, pagination, and confirmed outspend routes return
+HTTP 503 as a disabled capability rather than as a lagging backfill. Address
+and scripthash UTXO routes return HTTP 503 until the live view catches up, or
+when ScriptIndex is disabled.
 
 The datadir schema marker covers the transaction and script indexes as well as
 chainstate. An unmarked or incompatible datadir fails before any derived index

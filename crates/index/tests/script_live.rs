@@ -22,7 +22,7 @@ use bitcoin::{
     TxMerkleNode, TxOut, Txid, Witness,
 };
 use bitcoin_rs_index::{
-    IndexCapabilities, IndexCapability, IndexError, IndexWatermark, IndexWriter,
+    IndexCapabilities, IndexCapability, IndexError, IndexWatermark, IndexWatermarks, IndexWriter,
     MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, ScriptHash, ScriptLiveRow,
     SpentCoinScripts,
 };
@@ -38,7 +38,7 @@ use parking_lot::RwLock;
 #[derive(Default)]
 struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
-    fail_next_deferred: AtomicBool,
+    fail_next_durable: AtomicBool,
 }
 
 struct MemoryBatch {
@@ -85,6 +85,11 @@ impl KvStore for MemoryStore {
         conditions: &[WriteCondition<'_>],
         batch: Self::WriteBatch,
     ) -> Result<bool, StorageError> {
+        if self.fail_next_durable.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Backend(
+                "injected durable write failure".into(),
+            ));
+        }
         let mut guard = self.cfs.write();
         let matched = conditions.iter().all(|condition| {
             let (cf, key) = condition.location();
@@ -106,11 +111,6 @@ impl KvStore for MemoryStore {
         Ok(true)
     }
     fn write_deferred(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        if self.fail_next_deferred.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Backend(
-                "injected deferred write failure".into(),
-            ));
-        }
         self.write(batch)
     }
     fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
@@ -738,16 +738,14 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// CONTRACT: IDX-07. A deferred seed-batch failure must not publish the live
+/// CONTRACT: IDX-07. A fenced seed-batch failure must not publish the live
 /// watermark over an incomplete view.
 #[test]
-fn seed_stream_deferred_write_failure_does_not_publish_watermark()
+fn seed_stream_fenced_write_failure_does_not_publish_watermark()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore {
-        fail_next_deferred: AtomicBool::new(true),
-        ..MemoryStore::default()
-    });
+    let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
+    store.fail_next_durable.store(true, Ordering::SeqCst);
     let scripthash = ScriptHash::from_script_bytes(script(0x46).as_bytes());
     let coins = (0_u32..4_096)
         .map(|vout| {
@@ -765,7 +763,7 @@ fn seed_stream_deferred_write_failure_does_not_publish_watermark()
     let result = writer.seed_script_live(coins, seed_tip);
     assert!(
         matches!(result, Err(IndexError::Storage(_))),
-        "a deferred batch failure must surface: {result:?}"
+        "a fenced batch failure must surface: {result:?}"
     );
     assert!(
         writer
@@ -784,4 +782,26 @@ fn seed_stream_deferred_write_failure_does_not_publish_watermark()
 fn sorted(mut outpoints: Vec<OutPoint>) -> Vec<OutPoint> {
     outpoints.sort_unstable();
     outpoints
+}
+
+#[test]
+fn leftover_capabilities_are_persisted_families_outside_the_selection() {
+    let cursor = IndexWatermark {
+        height: 1,
+        hash: [1_u8; 32],
+    };
+    let watermarks = IndexWatermarks {
+        tx_lookup: Some(cursor),
+        script_history: Some(cursor),
+        script_live: Some(cursor),
+    };
+    assert_eq!(
+        IndexCapabilities::SCRIPT_LIVE.leftover(watermarks),
+        IndexCapabilities {
+            tx_lookup: true,
+            script_history: true,
+            script_live: false,
+        }
+    );
+    assert!(IndexCapabilities::ALL.leftover(watermarks).is_empty());
 }

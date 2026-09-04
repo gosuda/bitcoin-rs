@@ -2659,6 +2659,15 @@ mod tests {
             match query.unspent_outputs(scripthash) {
                 Ok(records) => {
                     assert!(records.is_empty(), "an unfunded script has no outputs");
+                    match query.history_snapshot(scripthash) {
+                        Err(TxQueryError::Unavailable(reason)) => {
+                            assert!(
+                                reason.contains("script history is disabled"),
+                                "utxo history must be disabled, not lagging: {reason}"
+                            );
+                        }
+                        other => panic!("utxo mode must fail history as disabled, got {other:?}"),
+                    }
                     break;
                 }
                 Err(TxQueryError::Retry | TxQueryError::Unavailable(_)) => {

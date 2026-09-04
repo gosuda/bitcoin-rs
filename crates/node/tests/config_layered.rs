@@ -243,6 +243,21 @@ fn scriptindex_cli_flag_enables_the_index() -> Result<()> {
 }
 
 #[test]
+fn scriptindex_utxo_mode_is_live_only() -> Result<()> {
+    let config = NodeConfig::from_layered_sources(
+        None,
+        None,
+        core::iter::empty::<EnvPair>(),
+        ["bitcoin-rs-node", "--scriptindex=utxo"],
+    )?;
+
+    assert_eq!(config.script_index, ScriptIndexMode::Utxo);
+    assert!(config.script_index.is_enabled());
+    assert!(!config.script_index.keeps_history());
+    Ok(())
+}
+
+#[test]
 fn scriptindex_environment_enables_the_index() -> Result<()> {
     let config = NodeConfig::from_layered_sources(
         None,
