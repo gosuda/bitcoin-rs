@@ -93,6 +93,23 @@ pub enum P2pServiceError {
     Listener(#[from] ListenerError),
 }
 
+/// Errors returned when joining P2P workers after shutdown.
+#[derive(Debug, Error)]
+pub enum P2pJoinError {
+    /// A listener worker returned a bind or accept failure.
+    #[error(transparent)]
+    Listener(#[from] ListenerError),
+    /// A listener worker panicked.
+    #[error("p2p listener panicked")]
+    ListenerPanic,
+    /// The outbound drain worker panicked.
+    #[error("p2p outbound drain panicked")]
+    OutboundPanic,
+    /// The bootstrap worker panicked.
+    #[error("p2p bootstrap worker panicked")]
+    BootstrapPanic,
+}
+
 /// Errors returned by RPC-facing P2P control operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum P2pControlError {
@@ -201,9 +218,15 @@ impl P2pService {
         *self.session_cancel.lock() = Arc::clone(&session_cancel);
         self.worker_shutdown.store(false, Ordering::Release);
 
-        let mut listeners = Vec::with_capacity(self.config.listen_addrs.len());
+        let mut bound_listeners = Vec::with_capacity(self.config.listen_addrs.len());
         for addr in &self.config.listen_addrs {
-            let listener_addr = *addr;
+            let listener = crate::listener::bind_listener(*addr)?;
+            tracing::info!(addr = %addr, "p2p listener bound");
+            bound_listeners.push((*addr, listener));
+        }
+
+        let mut listeners = Vec::with_capacity(bound_listeners.len());
+        for (listener_addr, listener) in bound_listeners {
             let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
             let peer_table = self.lifecycle.table();
@@ -214,11 +237,12 @@ impl P2pService {
             let sync_wake_tx = sync_wake_tx.clone();
             let session_cancel = Arc::clone(&session_cancel);
             let magic = self.config.magic;
-            let handle = thread::Builder::new()
+            let handle = match thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
                 .spawn(move || {
-                    crate::listener::serve_with_session_cancel(
+                    crate::listener::serve_bound_with_session_cancel(
                         listener_addr,
+                        listener,
                         shutdown,
                         network_active,
                         magic,
@@ -230,8 +254,13 @@ impl P2pService {
                         sync_wake_tx,
                         session_cancel,
                     )
-                })?;
-            tracing::info!(addr = %listener_addr, "p2p listener bound");
+                }) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    self.rollback_startup(listeners, None);
+                    return Err(error.into());
+                }
+            };
             listeners.push(handle);
         }
 
@@ -393,6 +422,7 @@ impl P2pService {
 
     /// Stops P2P workers and asks all current connection owners to tear down.
     pub fn shutdown(&self) {
+        self.session_cancel.lock().store(true, Ordering::Release);
         self.shutdown.store(true, Ordering::Release);
         self.worker_shutdown.store(true, Ordering::Release);
         self.network_active.store(false, Ordering::Release);
@@ -401,11 +431,11 @@ impl P2pService {
 
     /// Joins listener and outbound workers. Bootstrap is joined separately so
     /// node teardown can keep that drain after the bounded subsystem wait.
-    pub fn join_core_workers(&self) {
+    pub fn join_core_workers(&self) -> Result<(), P2pJoinError> {
         let (listeners, outbound) = {
             let mut slot = self.workers.lock();
             let Some(workers) = slot.as_mut() else {
-                return;
+                return Ok(());
             };
             let listeners = std::mem::take(&mut workers.listeners);
             let outbound = workers.outbound.take();
@@ -414,26 +444,44 @@ impl P2pService {
             }
             (listeners, outbound)
         };
+        let mut first_error = None;
         for handle in listeners {
             match handle.join() {
                 Ok(Ok(())) => tracing::info!("p2p listener exited cleanly"),
-                Ok(Err(error)) => tracing::warn!(%error, "p2p listener exited with error"),
-                Err(_) => tracing::error!("p2p listener panicked"),
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "p2p listener exited with error");
+                    if first_error.is_none() {
+                        first_error = Some(P2pJoinError::Listener(error));
+                    }
+                }
+                Err(_) => {
+                    tracing::error!("p2p listener panicked");
+                    if first_error.is_none() {
+                        first_error = Some(P2pJoinError::ListenerPanic);
+                    }
+                }
             }
         }
         if let Some(handle) = outbound
             && handle.join().is_err()
         {
             tracing::error!("p2p outbound drain panicked");
+            if first_error.is_none() {
+                first_error = Some(P2pJoinError::OutboundPanic);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
     /// Joins the bootstrap worker if one was started.
-    pub fn join_bootstrap_worker(&self) {
+    pub fn join_bootstrap_worker(&self) -> Result<(), P2pJoinError> {
         let bootstrap = {
             let mut slot = self.workers.lock();
             let Some(workers) = slot.as_mut() else {
-                return;
+                return Ok(());
             };
             let bootstrap = workers.bootstrap.take();
             if workers.listeners.is_empty() && workers.outbound.is_none() {
@@ -445,14 +493,17 @@ impl P2pService {
             && handle.join().is_err()
         {
             tracing::error!("p2p bootstrap worker panicked");
+            return Err(P2pJoinError::BootstrapPanic);
         }
+        Ok(())
     }
 
     /// Joins every worker owned by this service. Calling it more than once is
     /// harmless.
-    pub fn join(&self) {
-        self.join_core_workers();
-        self.join_bootstrap_worker();
+    pub fn join(&self) -> Result<(), P2pJoinError> {
+        let core = self.join_core_workers();
+        let bootstrap = self.join_bootstrap_worker();
+        core.and(bootstrap)
     }
 
     /// Returns the shared connection lifecycle view used by sync and RPC reads.
@@ -952,4 +1003,54 @@ where
         }
     }
     queued
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+
+    fn idle_ready() -> Arc<dyn Fn(PeerSource) + Send + Sync> {
+        Arc::new(|_source: PeerSource| {})
+    }
+
+    #[test]
+    fn start_fails_when_listener_cannot_bind() {
+        let occupied =
+            TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("occupy port");
+        let addr = occupied.local_addr().expect("local_addr");
+        let service = P2pService::new(
+            P2pServiceConfig {
+                listen_addrs: vec![addr],
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let error = service
+            .start(None, None, &idle_ready())
+            .expect_err("occupied listen addr must fail start");
+        assert!(
+            matches!(error, P2pServiceError::Listener(ListenerError::Bind { .. })),
+            "start must surface the bind failure, got {error:?}"
+        );
+        service.shutdown();
+        service
+            .join()
+            .expect("failed start must leave the service joinable");
+        drop(occupied);
+    }
+
+    #[test]
+    fn start_and_join_succeed_without_listeners() {
+        let service = P2pService::new(
+            P2pServiceConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        service
+            .start(None, None, &idle_ready())
+            .expect("empty listen set starts");
+        service.shutdown();
+        service.join().expect("clean join");
+    }
 }

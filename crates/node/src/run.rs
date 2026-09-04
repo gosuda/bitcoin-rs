@@ -548,7 +548,9 @@ impl NodeServices {
             }
         }
         if let Some(state) = state {
-            state.p2p().join_core_workers();
+            if let Err(error) = state.p2p().join_core_workers() {
+                set_first_error(first_error, anyhow::Error::new(error));
+            }
         }
     }
 
@@ -561,7 +563,9 @@ impl NodeServices {
         first_error: &mut Option<anyhow::Error>,
     ) {
         if let Some(state) = state {
-            state.p2p().join_bootstrap_worker();
+            if let Err(error) = state.p2p().join_bootstrap_worker() {
+                set_first_error(first_error, anyhow::Error::new(error));
+            }
             mark_bootstrap_drain_reached();
         }
         if let Some(handle) = self.bootstrap_worker.take() {

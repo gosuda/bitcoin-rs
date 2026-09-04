@@ -51,7 +51,7 @@ pub use peer::{
 };
 pub use peer_info::PeerInfo;
 pub use peer_table::{PeerSession, PeerTable};
-pub use service::{P2pControlError, P2pService, P2pServiceConfig, P2pServiceError};
+pub use service::{P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 

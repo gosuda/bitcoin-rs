@@ -38,3 +38,8 @@ operation cannot publish, send to, or cancel a replacement.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale
   disconnect attempts.
+- Listener sockets bind before `P2pService::start` reports success.
+- Worker join failures return to node teardown before clean-checkpoint
+  eligibility is evaluated.
+- Inbound block delivery observes the start-scoped cancel token so teardown
+  cannot block on a full apply queue.

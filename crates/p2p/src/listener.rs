@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::p2p::Magic;
-use crossbeam_channel::Sender;
+use crossbeam_channel::{SendTimeoutError, Sender};
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -86,9 +86,39 @@ struct InboundSyncSinks {
     headers_tx: Sender<crate::InboundHeaders>,
     blocks_tx: Sender<crate::InboundBlock>,
     wake_tx: SyncWakeHandle,
+    session_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl InboundSyncSinks {
+    fn new(
+        headers_tx: Sender<crate::InboundHeaders>,
+        blocks_tx: Sender<crate::InboundBlock>,
+        wake_tx: SyncWakeHandle,
+    ) -> Self {
+        Self {
+            headers_tx,
+            blocks_tx,
+            wake_tx,
+            session_cancel: None,
+        }
+    }
+
+    fn attach_session_cancel(&mut self, shared: &ConnectionShared) {
+        self.session_cancel.clone_from(&shared.session_cancel);
+    }
+
+    #[cfg(test)]
+    fn with_session_cancel(mut self, session_cancel: Arc<AtomicBool>) -> Self {
+        self.session_cancel = Some(session_cancel);
+        self
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.session_cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    }
+
     fn send_headers(&self, source: crate::PeerSource, headers: Vec<bitcoin_rs_primitives::Header>) {
         if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
             headers,
@@ -106,14 +136,33 @@ impl InboundSyncSinks {
         block: bitcoin_rs_primitives::Block,
         serialized: bytes::Bytes,
     ) {
-        if let Err(error) = self.blocks_tx.send(crate::InboundBlock {
+        let mut inbound = crate::InboundBlock {
             block,
             serialized,
             source: Some(source),
-        }) {
-            tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound blocks channel disconnected");
-        } else {
-            wake_sync(self.wake_tx.as_ref());
+        };
+        loop {
+            if self.is_cancelled() {
+                tracing::debug!(
+                    peer_addr = %source.addr,
+                    "dropping inbound block: session cancelled"
+                );
+                return;
+            }
+            match self.blocks_tx.send_timeout(inbound, POLL_INTERVAL) {
+                Ok(()) => {
+                    wake_sync(self.wake_tx.as_ref());
+                    return;
+                }
+                Err(SendTimeoutError::Timeout(returned)) => inbound = returned,
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    tracing::warn!(
+                        peer_addr = %source.addr,
+                        "p2p inbound blocks channel disconnected"
+                    );
+                    return;
+                }
+            }
         }
     }
 }
@@ -191,12 +240,22 @@ pub fn serve_with_shutdown_with_chain_and_sync_wake(
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
-    let inbound_sync_sinks = InboundSyncSinks {
-        headers_tx: inbound_headers_tx,
-        blocks_tx: inbound_blocks_tx,
-        wake_tx: sync_wake_tx,
-    };
+    let inbound_sync_sinks =
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
+}
+
+/// Binds `addr` and marks the socket non-blocking for the accept loop.
+///
+/// Callers that report startup success must bind here first so an occupied
+/// address fails before workers are spawned.
+pub fn bind_listener(addr: SocketAddr) -> Result<TcpListener, ListenerError> {
+    let listener =
+        TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|source| ListenerError::Bind { addr, source })?;
+    Ok(listener)
 }
 
 /// Accept-loop core shared by every listener entry point.
@@ -214,11 +273,18 @@ fn serve_connections(
     shared: &ConnectionShared,
     inbound_sync_sinks: &InboundSyncSinks,
 ) -> Result<(), ListenerError> {
-    let listener =
-        TcpListener::bind(addr).map_err(|source| ListenerError::Bind { addr, source })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|source| ListenerError::Bind { addr, source })?;
+    let listener = bind_listener(addr)?;
+    accept_connections(addr, listener, shutdown, magic, shared, inbound_sync_sinks)
+}
+
+fn accept_connections(
+    addr: SocketAddr,
+    listener: TcpListener,
+    shutdown: &AtomicBool,
+    magic: Magic,
+    shared: &ConnectionShared,
+    inbound_sync_sinks: &InboundSyncSinks,
+) -> Result<(), ListenerError> {
     let mut accept_backoff = POLL_INTERVAL;
     while !shutdown.load(Ordering::Relaxed) && !shared.is_session_cancelled() {
         #[cfg(test)]
@@ -292,11 +358,8 @@ pub fn serve_with_controls(
     sync_wake_tx: Option<Sender<()>>,
 ) -> Result<(), ListenerError> {
     let shared = ConnectionShared::from_controls(&controls, chain_query);
-    let inbound_sync_sinks = InboundSyncSinks {
-        headers_tx: inbound_headers_tx,
-        blocks_tx: inbound_blocks_tx,
-        wake_tx: sync_wake_tx,
-    };
+    let inbound_sync_sinks =
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
 }
 
@@ -349,11 +412,7 @@ pub fn spawn_outbound_connection_with_chain_and_sync_wake(
         addr,
         magic,
         shared,
-        InboundSyncSinks {
-            headers_tx: inbound_headers_tx,
-            blocks_tx: inbound_blocks_tx,
-            wake_tx: sync_wake_tx,
-        },
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx),
     )
 }
 
@@ -377,12 +436,43 @@ pub fn serve_with_session_cancel(
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
-    let inbound_sync_sinks = InboundSyncSinks {
-        headers_tx: inbound_headers_tx,
-        blocks_tx: inbound_blocks_tx,
-        wake_tx: sync_wake_tx,
-    };
+    let inbound_sync_sinks =
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
     serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
+}
+
+/// Runs the accept loop on an already-bound listener while observing a
+/// start-scoped cancellation token.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+pub fn serve_bound_with_session_cancel(
+    addr: SocketAddr,
+    listener: TcpListener,
+    shutdown: Arc<AtomicBool>,
+    network_active: Arc<AtomicBool>,
+    magic: Magic,
+    peer_table: Arc<crate::PeerTable>,
+    inbound_headers_tx: Sender<crate::InboundHeaders>,
+    inbound_blocks_tx: Sender<crate::InboundBlock>,
+    banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
+    sync_wake_tx: Option<Sender<()>>,
+    session_cancel: Arc<AtomicBool>,
+) -> Result<(), ListenerError> {
+    let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
+        .with_session_cancel(session_cancel);
+    shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
+        network_active,
+    )));
+    let inbound_sync_sinks =
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
+    accept_connections(
+        addr,
+        listener,
+        &shutdown,
+        magic,
+        &shared,
+        &inbound_sync_sinks,
+    )
 }
 
 /// Outbound dial that also observes a start-scoped cancellation token.
@@ -408,11 +498,7 @@ pub fn spawn_outbound_connection_with_session_cancel(
         addr,
         magic,
         shared,
-        InboundSyncSinks {
-            headers_tx: inbound_headers_tx,
-            blocks_tx: inbound_blocks_tx,
-            wake_tx: sync_wake_tx,
-        },
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx),
     )
 }
 
@@ -436,11 +522,7 @@ pub fn spawn_outbound_connection_with_controls(
         addr,
         magic,
         shared,
-        InboundSyncSinks {
-            headers_tx: inbound_headers_tx,
-            blocks_tx: inbound_blocks_tx,
-            wake_tx: sync_wake_tx,
-        },
+        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx),
     )
 }
 
@@ -448,8 +530,9 @@ fn spawn_outbound(
     addr: SocketAddr,
     magic: Magic,
     shared: ConnectionShared,
-    inbound_sync_sinks: InboundSyncSinks,
+    mut inbound_sync_sinks: InboundSyncSinks,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    inbound_sync_sinks.attach_session_cancel(&shared);
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
@@ -600,8 +683,9 @@ fn spawn_handshake_thread(
     peer_addr: SocketAddr,
     magic: Magic,
     shared: ConnectionShared,
-    inbound_sync_sinks: InboundSyncSinks,
+    mut inbound_sync_sinks: InboundSyncSinks,
 ) {
+    inbound_sync_sinks.attach_session_cancel(&shared);
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
     let spawn_result = std::thread::Builder::new()
         .name(thread_name)
@@ -1111,11 +1195,7 @@ mod resilient_accept_tests {
     fn sinks() -> InboundSyncSinks {
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
-        InboundSyncSinks {
-            headers_tx,
-            blocks_tx,
-            wake_tx: None,
-        }
+        InboundSyncSinks::new(headers_tx, blocks_tx, None)
     }
 
     /// A transient accept error must not kill the listener thread — the loop
@@ -1194,11 +1274,7 @@ mod writer_setup_cleanup_tests {
     fn sinks() -> InboundSyncSinks {
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
-        InboundSyncSinks {
-            headers_tx,
-            blocks_tx,
-            wake_tx: None,
-        }
+        InboundSyncSinks::new(headers_tx, blocks_tx, None)
     }
 
     /// When the writer-thread setup fails (`try_clone` or `spawn`), the lease
@@ -1264,7 +1340,7 @@ mod writer_shutdown_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -1311,11 +1387,7 @@ mod writer_shutdown_tests {
     fn sinks_stamp_exact_connection_source() -> Result<(), Box<dyn std::error::Error>> {
         let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
-        let sinks = InboundSyncSinks {
-            headers_tx,
-            blocks_tx,
-            wake_tx: None,
-        };
+        let sinks = InboundSyncSinks::new(headers_tx, blocks_tx, None);
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_443));
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
@@ -1337,6 +1409,48 @@ mod writer_shutdown_tests {
     }
 
     #[test]
+    fn send_block_unblocks_when_session_is_cancelled() -> Result<(), Box<dyn std::error::Error>> {
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::bounded(1);
+        let session_cancel = Arc::new(AtomicBool::new(false));
+        let sinks = InboundSyncSinks::new(headers_tx, blocks_tx, None)
+            .with_session_cancel(Arc::clone(&session_cancel));
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let first_bytes = bitcoin::consensus::encode::serialize(&genesis);
+        let first = bitcoin_rs_primitives::Block::consensus_decode(&first_bytes)
+            .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+        let second_bytes = first_bytes.clone();
+        let second = bitcoin_rs_primitives::Block::consensus_decode(&second_bytes)
+            .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+        let source = lease.source(addr);
+        sinks.send_block(source, first, bytes::Bytes::from(first_bytes));
+
+        let blocked = std::thread::spawn(move || {
+            sinks.send_block(source, second, bytes::Bytes::from(second_bytes));
+        });
+        let started = std::time::Instant::now();
+        while !blocked.is_finished() && started.elapsed() < Duration::from_millis(250) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !blocked.is_finished(),
+            "full inbound block channel must block until cancel"
+        );
+        session_cancel.store(true, Ordering::Release);
+        blocked
+            .join()
+            .map_err(|_| std::io::Error::other("send_block thread panicked"))?;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancelled send_block must not wait on the full queue"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn message_loop_exits_before_read_when_cancelled() {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_444));
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -1350,11 +1464,11 @@ mod writer_shutdown_tests {
         );
         peer.state = PeerState::Ready;
 
-        let sinks = InboundSyncSinks {
-            headers_tx: crossbeam_channel::unbounded().0,
-            blocks_tx: crossbeam_channel::unbounded().0,
-            wake_tx: None,
-        };
+        let sinks = InboundSyncSinks::new(
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+            None,
+        );
         assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None).is_ok());
     }
 
@@ -1377,11 +1491,7 @@ mod writer_shutdown_tests {
         )
         .expect("headers encodes");
         let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
-        let sinks = InboundSyncSinks {
-            headers_tx,
-            blocks_tx: crossbeam_channel::unbounded().0,
-            wake_tx: None,
-        };
+        let sinks = InboundSyncSinks::new(headers_tx, crossbeam_channel::unbounded().0, None);
         let mut peer = Peer::new(
             ScriptedStream {
                 script: io::Cursor::new(wire),
@@ -1426,11 +1536,11 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new(tx);
         let mut peer = Peer::new(ContinuingStream(Arc::clone(&reads)), Magic::BITCOIN);
         peer.state = PeerState::Ready;
-        let sinks = InboundSyncSinks {
-            headers_tx: crossbeam_channel::unbounded().0,
-            blocks_tx: crossbeam_channel::unbounded().0,
-            wake_tx: None,
-        };
+        let sinks = InboundSyncSinks::new(
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+            None,
+        );
 
         assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None).is_err());
         assert_eq!(reads.load(Ordering::Relaxed), 2);
@@ -1760,11 +1870,11 @@ mod writer_shutdown_tests {
             time_offset: 0,
             counters: std::sync::Arc::new(crate::PeerCounters::default()),
         };
-        let sinks = InboundSyncSinks {
-            headers_tx: crossbeam_channel::unbounded().0,
-            blocks_tx: crossbeam_channel::unbounded().0,
-            wake_tx: None,
-        };
+        let sinks = InboundSyncSinks::new(
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+            None,
+        );
 
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let worker = std::thread::spawn(move || {
@@ -1816,11 +1926,11 @@ mod writer_shutdown_tests {
         );
         peer.state = PeerState::Ready;
 
-        let sinks = InboundSyncSinks {
-            headers_tx: crossbeam_channel::unbounded().0,
-            blocks_tx: crossbeam_channel::unbounded().0,
-            wake_tx: None,
-        };
+        let sinks = InboundSyncSinks::new(
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+            None,
+        );
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_447));
 
         // The Pong response cannot be admitted onto the zero budget, so the
