@@ -55,7 +55,7 @@ use bitcoin::{
     absolute, opcodes, script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-use bitcoin_rs_index::BlockSource as _;
+use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
     BlockSync, Network, NoOpZmqPublisher, NodeConfig, TxIndexRuntime,
@@ -65,7 +65,7 @@ use bitcoin_rs_node::{
 };
 use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::deserialize;
-use bitcoin_rs_rpc::context::{BlockBodySource, BlockLog, BlockRecord};
+use bitcoin_rs_rpc::context::BlockLog;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -451,27 +451,20 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
     );
 }
 
-fn block_source_fixture(max_height: u32) -> bitcoin_rs_node::NodeBlockSource {
+fn block_source_fixture(max_height: u32) -> HeightBlockSource {
     let block = Network::Regtest.genesis_block();
-    let records = (0..=max_height)
-        .map(|height| BlockRecord::from_block(height, &block))
-        .collect();
-    bitcoin_rs_node::NodeBlockSource::new(Arc::new(RwLock::new(records))).with_block_body_source(
-        Arc::new(InstalledBlockBody {
-            hash: block.block_hash(),
-            bytes: consensus_bytes(&block),
-        }),
-    )
+    HeightBlockSource {
+        blocks: vec![block; usize::try_from(max_height).expect("height fits usize") + 1],
+    }
 }
 
-struct InstalledBlockBody {
-    hash: BlockHash,
-    bytes: Vec<u8>,
+struct HeightBlockSource {
+    blocks: Vec<Block>,
 }
 
-impl BlockBodySource for InstalledBlockBody {
-    fn block_body(&self, _height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-        (hash == self.hash).then(|| self.bytes.clone())
+impl BlockSource for HeightBlockSource {
+    fn block_at_height(&self, height: u32) -> Option<Block> {
+        self.blocks.get(usize::try_from(height).ok()?).cloned()
     }
 }
 

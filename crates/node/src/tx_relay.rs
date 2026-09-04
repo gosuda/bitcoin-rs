@@ -34,7 +34,7 @@
 //! # Integration one-liner
 //!
 //! The source peer's node id is only in scope at the tx-ingress consumer
-//! (`source.connection_id().get()`), not in [`crate::mempool_observer`]
+//! (`source.connection_id().get()`), not in [`crate::zmq_publisher`]
 //! (the observer sees [`bitcoin_rs_mempool::MutationResult`] which carries
 //! no per-connection attribution). The relay hook therefore belongs in the
 //! tx-ingress accepted-only branch, replacing the current broadcast

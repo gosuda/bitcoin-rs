@@ -6,12 +6,12 @@
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
-    BlockBodyMetadata, BlockBodySource, BlockLog, NetworkState, PruneResult, PruneService,
-    PruneServiceError, PruneStatus, ZmqNotification,
+    BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
+    ZmqNotification,
 };
 #[cfg(any(
     not(feature = "rocksdb"),
@@ -1421,7 +1421,7 @@ fn build_tx_index_open_spec(
 struct TxIndexSpawn {
     spec: crate::txindex_worker::TxIndexOpenSpec,
     generation: crate::txindex_worker::Generation,
-    block_source: crate::NodeBlockSource,
+    block_source: crate::txindex_worker::IndexBlockSource,
     body_source: Arc<dyn BlockBodySource>,
     wake_rx: Receiver<()>,
     recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
@@ -1448,8 +1448,8 @@ pub struct NodeState {
     tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
     tx_index_adapter: Option<Arc<crate::txindex_worker::TxIndexQueryAdapter>>,
-    /// Live capability report backing `getcapabilities`.
-    capabilities: Arc<crate::capabilities::NodeCapabilities>,
+    /// Live txindex facts for the RPC capability projection.
+    txindex_status: Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexStatusSource>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     active_zmq_notifications: Vec<ZmqNotification>,
@@ -1734,11 +1734,12 @@ impl NodeState {
                     spec.chain_transition = Some(Arc::clone(&chain_transition));
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                     let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
-                    let body_source: Arc<dyn bitcoin_rs_rpc::context::BlockBodySource> =
+                    let body_source: Arc<dyn BlockBodySource> =
                         Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
-                    let block_source = crate::NodeBlockSource::new(Arc::clone(&blocks))
-                        .with_block_body_source(Arc::clone(&body_source))
-                        .with_block_tree(Arc::clone(&block_tree));
+                    let block_source =
+                        crate::txindex_worker::IndexBlockSource::new(Arc::clone(&blocks))
+                            .with_block_body_source(Arc::clone(&body_source))
+                            .with_block_tree(Arc::clone(&block_tree));
                     let lifecycle: Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>> =
                         Arc::new(arc_swap::ArcSwap::from_pointee(
                             crate::txindex_worker::TxIndexLifecycle::Opening,
@@ -1763,14 +1764,12 @@ impl NodeState {
                 }
                 None => (None, None, None, None),
             };
-        let capabilities = Arc::new(crate::capabilities::NodeCapabilities::new(
-            crate::capabilities::CapabilityInputs {
-                tx_lifecycle: tx_index_lifecycle.clone(),
-                tx_runtime: tx_index_runtime.clone(),
-                txindex_enabled: crate::capabilities::txindex_enabled(&config),
-                index_capabilities: tx_index_capabilities(&config),
-            },
-        ));
+        let txindex_status: Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexStatusSource> =
+            Arc::new(crate::txindex_worker::TxIndexCapability::new(
+                tx_index_lifecycle.clone(),
+                tx_index_runtime.clone(),
+                tx_index_capabilities(&config),
+            ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let network_active = Arc::new(AtomicBool::new(true));
         let banned = Arc::new(RwLock::new(Vec::new()));
@@ -1789,34 +1788,30 @@ impl NodeState {
         // path and the gateway can fire it before `run` builds the
         // coordinator; the coordinator attaches itself once constructed.
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        // One node-owned gateway: every admission (RPC sendrawtransaction,
-        // embedded broadcast, reorg re-admission, block-connect eviction)
-        // mutates through this instance, so publication order equals commit
-        // order process-wide. The sequence observer rides along only when a
-        // `--zmq-pub-sequence` endpoint is configured; the mining
-        // generation wake always does.
+        // One gateway per pool. Mempool owns fan-out: mining always occupies
+        // the observer slot, and ZMQ sequence (or a test observer) attaches as
+        // an extra named leg. Node only wires.
         let mempool_gateway = {
             let publisher = Arc::clone(&zmq_publisher);
-            let sequence: Option<Arc<dyn bitcoin_rs_mempool::MempoolObserver>> =
-                if publisher.wants_notifications() {
-                    let observer: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = Arc::new(
-                        crate::mempool_observer::MempoolSequenceObserver::new(publisher),
-                    );
-                    Some(observer)
-                } else {
-                    mempool_observer.cloned()
-                };
-            let observer = crate::mempool_observer::NodeMutationObserver::new(
-                sequence,
-                Arc::clone(&mining_generation),
-            );
-            // Intern it: one gateway per pool, so every route that resolves
-            // the pool - including a test attaching its own observer leg -
-            // reaches this instance and its observer slot.
-            bitcoin_rs_mempool::MempoolGateway::shared_with(
+            let gateway = bitcoin_rs_mempool::MempoolGateway::shared_with(
                 Arc::clone(&mempool),
-                Arc::new(observer),
-            )
+                Arc::clone(&mining_generation) as Arc<dyn bitcoin_rs_mempool::MempoolObserver>,
+            );
+            if publisher.wants_notifications() {
+                gateway
+                    .attach_observer_leg(
+                        "sequence",
+                        Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
+                            publisher,
+                        )),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+            } else if let Some(observer) = mempool_observer.cloned() {
+                gateway
+                    .attach_observer_leg("test", observer)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            gateway
         };
         let mut apply_handles = crate::apply::ApplyHandles {
             network: config.network,
@@ -1914,7 +1909,7 @@ impl NodeState {
             tx_index_worker: None,
             tx_index_lifecycle,
             tx_index_adapter,
-            capabilities,
+            txindex_status,
             prune_service,
             zmq_publisher,
             active_zmq_notifications,
@@ -2128,10 +2123,10 @@ impl NodeState {
         Ok(())
     }
 
-    /// Returns the live capability report provider for `getcapabilities`.
+    /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
-    pub fn capability_provider(&self) -> Arc<dyn bitcoin_rs_rpc::context::CapabilityProvider> {
-        self.capabilities.clone()
+    pub fn txindex_status(&self) -> Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexStatusSource> {
+        Arc::clone(&self.txindex_status)
     }
 
     /// Returns the manual pruning service when pruning is enabled.

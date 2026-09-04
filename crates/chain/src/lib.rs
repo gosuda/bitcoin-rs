@@ -3,6 +3,10 @@
 
 /// BIP9 deployment-state memoization cache.
 mod bip9_cache;
+/// Neutral block-body read seam.
+mod block_body;
+/// BIP9/softfork lookups over [`BlockTree`].
+mod deployment;
 /// Header acceptance and proof-of-work validation.
 pub mod header_sync;
 /// Block-tree node types.
@@ -18,7 +22,10 @@ use bitcoin_rs_primitives::Hash256;
 use thiserror::Error;
 
 pub use bip9_cache::CachedState;
+pub use bitcoin_rs_consensus::SoftforkState;
 pub use bitcoin_rs_primitives::Network;
+pub use block_body::{BlockBodyMetadata, BlockBodySource};
+pub use deployment::{candidate_version, softfork_state};
 pub use header_sync::{accept_headers, current_unix_seconds, validate_header_timestamp};
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use reorg::{ReorgPlan, plan_reorg};

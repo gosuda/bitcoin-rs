@@ -10,14 +10,6 @@ extern crate alloc;
 
 /// Block-apply pipeline executed by `NodeState::apply_block` and `BlockSync::tick`.
 pub mod apply;
-/// BIP9 deployment-state adapter over `BlockTree`.
-pub mod bip9_context;
-/// Adapter.
-///
-/// Bridges in-memory block records to the index crate's BlockSource trait.
-pub mod block_source;
-/// RPC status for concrete node-owned capabilities.
-mod capabilities;
 mod chainstate_journal;
 mod checkpoint;
 mod checkpoint_fs;
@@ -34,14 +26,10 @@ pub mod event_loop;
 pub mod import;
 /// Tracing initialization.
 pub mod logging;
-/// Mempool mutation observer publishing `A`/`R` sequence events.
-pub mod mempool_observer;
 /// Metrics instrumentation and optional exposition.
 pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.
 pub mod mining;
-/// Node-side active-chain view for server-side P2P responders.
-pub mod p2p_chain;
 /// Chain-event reconciliation seam for index consumers.
 pub mod reconcile;
 /// Durable rollback evidence: witness and marker file protocol, warning snapshot.
@@ -67,15 +55,12 @@ pub mod tx_ingress;
 /// excluding the source connection.
 pub mod tx_relay;
 mod txindex_worker;
-/// UTXO view adapter for consensus transaction checks.
-pub mod utxo_view;
 /// Prevout lookups across a window of consecutive blocks.
 mod window_overlay;
 /// ZMQ publisher trait + implementations for the notification subsystem.
 pub mod zmq_publisher;
 
 pub use bitcoin_rs_primitives::Network;
-pub use block_source::NodeBlockSource;
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
     NetworkSelection, NodeConfig, NotificationConfig, ObservabilityConfig, ObservabilityOverrides,
@@ -84,12 +69,10 @@ pub use config::{
 };
 pub use embed::{Node, NodeError, SyncProgress};
 pub use mining::{GenerationKey, MiningCoordinator};
-pub use p2p_chain::NodeP2pChainQuery;
 pub use run::run;
 pub use state::{ApplyError, DisconnectError};
 pub use sync::BlockSync;
 pub use txindex_worker::TxIndexRuntime;
-pub use utxo_view::UtxoSetView;
 #[cfg(feature = "zmq")]
 pub use zmq_publisher::SocketZmqPublisher;
 pub use zmq_publisher::{
