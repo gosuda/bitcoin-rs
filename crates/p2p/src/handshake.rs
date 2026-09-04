@@ -127,10 +127,7 @@ pub(crate) fn send_handshake_message<S: Read + Write>(
     lease: &PeerLease,
     totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), PeerError> {
-    peer.send(message)?;
-    let wire_len =
-        u64::try_from(crate::wire::HEADER_LEN + crate::wire::encode_payload(message)?.len())
-            .unwrap_or(u64::MAX);
+    let wire_len = u64::try_from(peer.send(message)?).unwrap_or(u64::MAX);
     lease.stats().record_sent(wire_len);
     lease.stats().record_msg_sent();
     if let Some(totals) = totals {
