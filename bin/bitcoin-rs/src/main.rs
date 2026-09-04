@@ -269,11 +269,11 @@ hwm = 5000
         let path = dir.path().join("node.toml");
         std::fs::write(
             &path,
-            r#"
+            r"
 [chainstate_journal]
 enabled = true
 blocks = 100
-"#,
+",
         )
         .unwrap_or_else(|error| panic!("write toml: {error}"));
 
@@ -283,8 +283,7 @@ blocks = 100
                 "--config",
                 path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
             ],
-            [("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200")]
-                .into_iter()
+            std::iter::once(("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200"))
                 .map(|(key, value)| (OsString::from(key), OsString::from(value))),
         )
         .unwrap_or_else(|error| panic!("valid journal configuration: {error}"));
