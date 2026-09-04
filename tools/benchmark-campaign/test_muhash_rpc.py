@@ -336,6 +336,8 @@ class _TrialEnv:
         self.server = _FixtureServer(mode, state or _state_literal())
         self.thread = self.server.start()
         self.endpoint = endpoint or self.server.endpoint
+        self.owner_pid = os.getpid()
+        self.owner_starttime = module._read_starttime(self.owner_pid)
         corpus = _write_file(self.root, "corpus.bin", b"frozen-corpus")
         executable = _write_file(self.root, "bitcoind", b"core-binary")
         config = _write_file(self.root, "bitcoin.conf", b"conf-bytes")
@@ -369,8 +371,8 @@ class _TrialEnv:
             "backend": "coinsdb",
             "datadir": str(self.root / "datadir"),
             "endpoint": self.endpoint,
-            "attested_pid": 4242,
-            "attested_starttime": 100,
+            "attested_pid": self.owner_pid,
+            "attested_starttime": self.owner_starttime,
             "affinity": "0-3",
             "cache_policy_action": {
                 "warm": "warm-untimed-query-done",
@@ -2153,8 +2155,16 @@ class CampaignControllerTests(unittest.TestCase):
     def test_warm_campaign_agrees_across_all_backends(self) -> None:
         frozen: object | None = None
         for backend in sorted(module.BITCOIN_RS_BACKENDS):
-            code, output, _workspace = self._run(backend=backend, policy="warm")
+            code, output, workspace = self._run(backend=backend, policy="warm")
             self.assertEqual(code, 0, backend)
+            self.assertEqual(
+                _sha256((workspace / "core-config").read_bytes()),
+                _sha256(self._state_bytes()),
+            )
+            self.assertEqual(
+                _sha256((workspace / "candidate-config").read_bytes()),
+                _sha256(self._state_bytes()),
+            )
             result = json.loads(output.read_bytes(), parse_float=Decimal, parse_int=int)
             self.assertEqual(result["schema"], module.RESULT_SCHEMA)
             self.assertEqual(result["policy"], "warm")
@@ -2237,6 +2247,7 @@ class CampaignControllerTests(unittest.TestCase):
             module._parse_campaign_config(parsed)
 
     def test_command_must_include_config_placeholder(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
         _root, config_path, _output = self._campaign_files()
         parsed, _ = module._load_json_path(
             config_path, module.MAX_INPUT_BYTES, "campaign config"
@@ -2251,6 +2262,7 @@ class CampaignControllerTests(unittest.TestCase):
             module._parse_campaign_config(parsed)
 
     def test_readiness_rejects_a_listener_the_child_does_not_own(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-02.
         decoy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         decoy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         decoy.bind(("127.0.0.1", 0))
@@ -2271,6 +2283,61 @@ class CampaignControllerTests(unittest.TestCase):
             child.kill()
             child.wait(timeout=2)
             decoy.close()
+
+    def test_rpc_does_not_send_credentials_to_a_foreign_peer(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-02.
+        spy = _FixtureServer("ok", _state_literal())
+        thread = spy.start()
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            with self.assertRaises(module.ContractError) as raised:
+                module._rpc_once(
+                    spy.endpoint,
+                    ("bench-user", CREDENTIAL_SECRET),
+                    Decimal("2"),
+                    65_536,
+                    HEIGHT,
+                    BESTBLOCK,
+                    child.pid,
+                    module._read_starttime(child.pid),
+                )
+            self.assertRegex(str(raised.exception), r"not owned|never owned")
+            self.assertEqual(spy.requests, [])
+        finally:
+            child.kill()
+            child.wait(timeout=2)
+            spy.shutdown()
+            spy.server_close()
+            thread.join(timeout=5)
+
+    def test_pinned_config_copy_ignores_later_operator_path_writes(self) -> None:
+        # Contract clause: docs/contracts/muhash-rpc.md MRPC-03.
+        root = _make_root("muhash-config-copy-")
+        source = root / "operator.json"
+        source.write_bytes(b"pinned-config")
+        digest = _sha256(b"pinned-config")
+        destination = root / "workspace-config"
+        module._copy_pinned_file(
+            source,
+            digest,
+            destination,
+            cap=module.MAX_RECEIPT_BYTES,
+            mode=0o400,
+            field="arm config",
+        )
+        source.write_bytes(b"replaced-config")
+        module._rehash_copy(
+            destination, digest, module.MAX_RECEIPT_BYTES, "arm config copy"
+        )
+        with self.assertRaises(module.ContractError):
+            module._rehash_copy(
+                source, digest, module.MAX_RECEIPT_BYTES, "operator config"
+            )
+        shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
