@@ -971,7 +971,11 @@ fn strip_checksum(text: &str) -> &str {
     text.rsplit_once('#').map_or(text, |(body, _)| body)
 }
 
+pub(crate) const GENERATEBLOCK_INVALID_OUTPUT: &str = "Error: Invalid address or descriptor";
+
 /// Coinbase script for `generateblock`'s `output` argument (`API-05`).
+///
+/// CONTRACT: docs/contracts/external-api.md#API-26
 pub(crate) fn generateblock_payout_script(
     text: &str,
     network: bitcoin::Network,
@@ -979,12 +983,7 @@ pub(crate) fn generateblock_payout_script(
     match script_from_descriptor(text, network) {
         Ok(script) => Ok(script),
         Err(error @ DescriptorError::Range(_)) => Err(descriptor_error(error)),
-        Err(error) => {
-            match payout_script_from_address(text, network, "Error: Invalid address or script") {
-                Ok(script) => Ok(script),
-                Err(_) => Err(descriptor_error(error)),
-            }
-        }
+        Err(_) => payout_script_from_address(text, network, GENERATEBLOCK_INVALID_OUTPUT),
     }
 }
 
