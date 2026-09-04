@@ -9,7 +9,8 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-12` is GBT proposal request parsing. `API-13` is `submitblock` uncommitted
 witness fill. `API-14` is Core v31 `submitblock` / GBT proposal duplicate
 vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
-`vbrequired` always 0.
+`vbrequired` always 0. `API-17` is Core `CheckWitnessMalleation`
+reject reasons.
 
 ## Clauses
 
@@ -212,6 +213,23 @@ vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
   deployments still appear in `vbavailable`; locked-in bits are not OR'd
   into `vbrequired`.
 
+### `API-17`: BIP141 witness malleation reasons
+
+- **Owner**: `check_witness_malleation` in
+  `crates/consensus/src/verify_block.rs`.
+- Core `CheckWitnessMalleation` distinguishes three BIP22 strings:
+  - commitment present, coinbase witness not a single 32-byte element →
+    `bad-witness-nonce-size`
+  - commitment present, reserved nonce well-formed, hash mismatch →
+    `bad-witness-merkle-match`
+  - witness data without a commitment, or before SegWit →
+    `unexpected-witness`
+- Proposal does not fill an omitted reserved nonce (`API-13` is
+  `submitblock`-only), so an empty coinbase witness with a commitment is
+  miner-facing `bad-witness-nonce-size`.
+- `bip22_reject_reason` maps the consensus variants; consensus Display
+  remains log text.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -298,3 +316,14 @@ owned by [wallet-facing.md](wallet-facing.md).
     `proposal_rejects_excess_coinbase_without_side_effects`
 - `API-16`:
   - `crates/node/tests/mining.rs` test `template_does_not_echo_client_capabilities`
+- `API-17`:
+  - `crates/consensus/src/verify_block.rs` tests
+    `contextual_rules_reject_witness_before_segwit_activation`,
+    `contextual_rules_enforce_bip141_commitment_after_segwit_activation`,
+    `bip141_coinbase_witness_must_have_exactly_one_32_byte_element`,
+    `bip141_witness_commitment_last_output_wins`
+  - `crates/node/src/mining.rs` test `consensus_failures_use_core_bip22_reasons`
+  - `crates/node/tests/mining.rs` tests
+    `proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size`,
+    `proposal_witness_without_commitment_is_unexpected_witness`,
+    `proposal_wrong_witness_commitment_is_bad_witness_merkle_match`

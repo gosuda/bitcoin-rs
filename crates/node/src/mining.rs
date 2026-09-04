@@ -1021,6 +1021,8 @@ fn bip22_consensus_reason(error: &ConsensusError) -> CompactString {
         ConsensusError::MerkleRoot => "bad-txnmrklroot",
         ConsensusError::CoinbaseAmount { .. } => "bad-cb-amount",
         ConsensusError::BlockValueOverflow => "bad-txns-accumulated-fee-outofrange",
+        ConsensusError::WitnessNonceSize => "bad-witness-nonce-size",
+        ConsensusError::UnexpectedWitness => "unexpected-witness",
         ConsensusError::WitnessCommitment => "bad-witness-merkle-match",
         ConsensusError::BlockWeight { .. } => "bad-blk-weight",
         ConsensusError::Script { reason, .. } => {
@@ -1131,6 +1133,14 @@ mod apply_error_tests {
         assert_eq!(
             rejected(ApplyError::Consensus(ConsensusError::MerkleMutation)),
             "bad-txns-duplicate"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::WitnessNonceSize)),
+            "bad-witness-nonce-size"
+        );
+        assert_eq!(
+            rejected(ApplyError::Consensus(ConsensusError::UnexpectedWitness)),
+            "unexpected-witness"
         );
         assert_eq!(
             rejected(ApplyError::Consensus(ConsensusError::WitnessCommitment)),
