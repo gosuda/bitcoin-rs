@@ -18,8 +18,8 @@ Seeds under fuzz/corpus/ were imported from
 | Target | Upstream corpus | Transformation |
 |---|---|---|
 | p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload kept as-is (harness rebuilds magic/length/checksum) |
-| block_decode | fuzz_corpora/bitcoin_deserialize_block | direct copy (raw consensus bytes) |
-| tx_decode | fuzz_corpora/bitcoin_deserialize_transaction | direct copy (raw consensus bytes) |
+| block_validate | fuzz_corpora/bitcoin_deserialize_block, fuzz_corpora/bitcoin_arbitrary_block | raw bytes; rust-bitcoin deserializes, then bitcoin-rs `verify_block_rules`. Current seeds were the minimized `bitcoin_deserialize_block` set, moved from the retired `block_decode` target. |
+| tx_validate | fuzz_corpora/bitcoin_deserialize_transaction, fuzz_corpora/bitcoin_deserialize_witness, fuzz_corpora/bitcoin_arbitrary_transaction, fuzz_corpora/bitcoin_arbitrary_witness | raw bytes; rust-bitcoin deserializes, then bitcoin-rs consensus + mempool `check_acceptance`. Current seeds were the minimized `bitcoin_deserialize_transaction` set, moved from the retired `tx_decode` target. |
 | script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector 0x00 = NONE); files >= 32 bytes also emit a P2TR key-path variant (selector 0x03 = TAPROOT) |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized

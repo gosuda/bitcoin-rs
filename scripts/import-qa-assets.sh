@@ -4,15 +4,23 @@
 # record provenance in fuzz/CORPUS_PROVENANCE.md.
 #
 # Mapping (target <- qa-assets/fuzz_corpora):
-#   p2p_message   <- p2p_deserialize_raw_net_msg  (reframed: strip the 24-byte
-#                    envelope, map the command to the harness selector byte;
-#                    the harness rebuilds magic/length/checksum itself)
-#   block_decode  <- bitcoin_deserialize_block    (raw consensus bytes, direct)
-#   tx_decode     <- bitcoin_deserialize_transaction (raw consensus bytes, direct)
-#   script_eval   <- bitcoin_deserialize_script + bitcoin_script_bytes_to_asm_fmt
-#                    (raw script bytes, wrapped into the script_eval framing:
-#                    selector 0x00 = NONE, and for files >= 32 bytes a P2TR
-#                    variant with selector 0x03 = TAPROOT)
+#   p2p_message    <- p2p_deserialize_raw_net_msg  (reframed: strip the 24-byte
+#                     envelope, map the command to the harness selector byte;
+#                     the harness rebuilds magic/length/checksum itself)
+#   block_validate <- bitcoin_deserialize_block + bitcoin_arbitrary_block
+#                     (raw bytes; harness rust-bitcoin-deserializes, then runs
+#                     bitcoin-rs verify_block_rules)
+#   tx_validate    <- bitcoin_deserialize_transaction + bitcoin_deserialize_witness
+#                     + bitcoin_arbitrary_transaction + bitcoin_arbitrary_witness
+#                     (raw bytes; harness rust-bitcoin-deserializes, then runs
+#                     native consensus + mempool check_acceptance)
+#   script_eval    <- bitcoin_deserialize_script + bitcoin_script_bytes_to_asm_fmt
+#                     (raw script bytes, wrapped into the script_eval framing:
+#                     selector 0x00 = NONE, and for files >= 32 bytes a P2TR
+#                     variant with selector 0x03 = TAPROOT)
+#
+# Do not import parser corpora into decode-only targets that only call
+# rust-bitcoin. block_decode and tx_decode are gone.
 #
 # Disk discipline (repo AGENTS.md): the worst-case footprint of the clone is
 # declared below (shallow clone ~= corpus size, assumed <= 2 GiB); free space
@@ -152,14 +160,20 @@ print(f"script_eval: imported={imported} files (raw + P2TR variants)")
 PYEOF
 }
 
-# --- 5. Direct byte-for-byte mappings ----------------------------------------
+# --- 5. Direct byte-for-byte mappings into validation targets ----------------
 # Seeds >= MAX_SEED_BYTES are skipped by policy (repo-size bound, matching the
 # fuzz targets' own input caps) and the skip count is recorded so the mapping
 # stays honest about what it left behind.
+# Parser-only rust-bitcoin corpora are imported here because the harnesses
+# deserialize with rust-bitcoin and then run bitcoin-rs consensus/mempool.
 map_direct() {
     local src="$1" dst="$2" name="$3"
     mkdir -p "${dst:?}"
     local count=0 skipped=0
+    if [ ! -d "${src:?}" ]; then
+        log "${name}: skipped missing source ${src}"
+        return
+    fi
     while IFS= read -r -d '' file; do
         if [ "$(stat -c %s -- "${file:?}")" -ge "${MAX_SEED_BYTES}" ]; then
             skipped=$((skipped + 1))
@@ -172,13 +186,17 @@ map_direct() {
 }
 map_p2p
 map_script
-map_direct "${CORPORA}/bitcoin_deserialize_block" "${OUT_BASE}/block_decode" block_decode
-map_direct "${CORPORA}/bitcoin_deserialize_transaction" "${OUT_BASE}/tx_decode" tx_decode
+map_direct "${CORPORA}/bitcoin_deserialize_block" "${OUT_BASE}/block_validate" block_validate/deserialize
+map_direct "${CORPORA}/bitcoin_arbitrary_block" "${OUT_BASE}/block_validate" block_validate/arbitrary
+map_direct "${CORPORA}/bitcoin_deserialize_transaction" "${OUT_BASE}/tx_validate" tx_validate/deserialize
+map_direct "${CORPORA}/bitcoin_arbitrary_transaction" "${OUT_BASE}/tx_validate" tx_validate/arbitrary
+map_direct "${CORPORA}/bitcoin_deserialize_witness" "${OUT_BASE}/tx_validate" tx_validate/witness
+map_direct "${CORPORA}/bitcoin_arbitrary_witness" "${OUT_BASE}/tx_validate" tx_validate/arbitrary_witness
 
 # --- 6. Minimize each target corpus with cargo fuzz cmin ---------------------
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
-"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_decode
-"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_decode
+"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
+"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" script_eval
 
 # --- 7. Provenance ------------------------------------------------------------
@@ -204,8 +222,8 @@ Seeds under fuzz/corpus/ were imported from
 | Target | Upstream corpus | Transformation |
 |---|---|---|
 | p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload kept as-is (harness rebuilds magic/length/checksum) |
-| block_decode | fuzz_corpora/bitcoin_deserialize_block | direct copy (raw consensus bytes) |
-| tx_decode | fuzz_corpora/bitcoin_deserialize_transaction | direct copy (raw consensus bytes) |
+| block_validate | fuzz_corpora/bitcoin_deserialize_block, fuzz_corpora/bitcoin_arbitrary_block | raw bytes; rust-bitcoin deserializes, then bitcoin-rs `verify_block_rules` |
+| tx_validate | fuzz_corpora/bitcoin_deserialize_transaction, fuzz_corpora/bitcoin_deserialize_witness, fuzz_corpora/bitcoin_arbitrary_transaction, fuzz_corpora/bitcoin_arbitrary_witness | raw bytes; rust-bitcoin deserializes, then bitcoin-rs consensus + mempool `check_acceptance` |
 | script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector 0x00 = NONE); files >= 32 bytes also emit a P2TR key-path variant (selector 0x03 = TAPROOT) |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized
