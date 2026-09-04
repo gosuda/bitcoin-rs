@@ -887,8 +887,9 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// API-16: `vbrequired` stays zero even when versionbits are negotiated.
 #[test]
-fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
+fn api_16_template_vbrequired_is_zero() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
