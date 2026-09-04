@@ -265,9 +265,6 @@ Index row values carry transaction byte positions without a block tag. The reade
 
 ## Storage
 
-### Datadir schema marker
-`CURRENT_SCHEMA` at the datadir root is the sole persistent-format authority, written and synced before any checkpoint or KV store opens. Rules and the startup table live in `docs/policies/db-migration.md`. `Cold` means no committed checkpoint; `CURRENT` is the only checkpoint commit point and an invalid referenced generation is corruption with no legacy fallback. The node never deletes or converts state.
-
 ### UTXO snapshot read contract
 The node accepts only complete native version-4 snapshots: exact magic and version, validated v4 records, the declared record count, a 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 fail startup with a remove-and-resync instruction; there is no legacy reader.
 
