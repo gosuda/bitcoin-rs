@@ -888,7 +888,8 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
 }
 
 #[test]
-fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
+/// API-16: GBT reports `vbrequired` as zero.
+  fn api_16_template_vbrequired_is_zero() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let mining = coordinator(&state);
