@@ -7,6 +7,14 @@ fn main() {
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
     let lock_path = manifest_dir.join("../../Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock_path.display());
+    let git_dir = manifest_dir.join("../../.git");
+    let head_path = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head_path.display());
+    if let Ok(head) = std::fs::read_to_string(&head_path) {
+        if let Some(rel) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed={}", git_dir.join(rel).display());
+        }
+    }
 
     if let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
