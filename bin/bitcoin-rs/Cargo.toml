@@ -31,10 +31,9 @@ bitcoin-rs-storage.workspace = true
 [dev-dependencies]
 parking_lot.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tempfile = ">=3.20.0, <4"
-bitcoin-rs-consensus.workspace = true
-bitcoin-rs-primitives.workspace = true
+bitcoin.workspace = true
+
 [features]
 default = ["fjall", "redb", "zmq"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]
