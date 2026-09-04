@@ -174,7 +174,7 @@ fn txid_positions_address_their_own_transaction() {
 fn a_partial_position_decodes_to_none() {
     let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
     for truncated in 1..value.len() {
-        if truncated % 8 == 0 {
+        if truncated % 6 == 0 {
             // Whole positions are a well-formed shorter list.
             continue;
         }
@@ -188,7 +188,7 @@ fn a_partial_position_decodes_to_none() {
 proptest! {
     #[test]
     fn position_values_round_trip(
-        raw in proptest::collection::vec((any::<u32>(), any::<u32>()), 1..32),
+        raw in proptest::collection::vec((0u32..=0x00FF_FFFF, 0u32..=0x00FF_FFFF), 1..32),
     ) {
         let positions = raw
             .iter()

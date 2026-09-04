@@ -14,9 +14,9 @@ const DELETE_ROWS: u32 = 1_000;
 const RANGE_START_INDEX: usize = 1_000;
 const RANGE_END_INDEX: usize = 1_500;
 const PREFIX: &[u8] = &[0];
-const SCRIPT_LIVE_KEY_LEN: usize = 44;
+const SCRIPT_LIVE_KEY_LEN: usize = 43;
 
-/// `ScriptLive` rows are a 44-byte empty-value locator. Other families stay
+/// `ScriptLive` rows are a 43-byte empty-value locator. Other families stay
 /// generic byte stores in this suite.
 fn cf_key(cf: ColumnFamily, counter: u32) -> Vec<u8> {
     if cf == ColumnFamily::ScriptLive {

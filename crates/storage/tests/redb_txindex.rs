@@ -22,16 +22,16 @@ fn key_12(counter: u32) -> [u8; 12] {
     k
 }
 
-fn header_80(counter: u32) -> [u8; 80] {
-    let mut h = [0u8; 80];
+fn header_32(counter: u32) -> [u8; 32] {
+    let mut h = [0u8; 32];
     h[0..4].copy_from_slice(&counter.to_le_bytes());
     h
 }
 
-fn script_live_44(counter: u32) -> [u8; 44] {
-    let mut k = [0u8; 44];
+fn script_live_43(counter: u32) -> [u8; 43] {
+    let mut k = [0u8; 43];
     k[0..4].copy_from_slice(&counter.to_le_bytes());
-    k[40..].copy_from_slice(&counter.to_le_bytes());
+    k[40..].copy_from_slice(&counter.to_le_bytes()[..3]);
     k
 }
 
@@ -75,14 +75,14 @@ fn txindex_all_six_family_roundtrips() -> TestResult<()> {
         Some(Vec::new())
     );
 
-    let header = header_80(4);
+    let header = header_32(4);
     store.put(ColumnFamily::BlockHeaders, &header, b"")?;
     assert_eq!(
         store.get(ColumnFamily::BlockHeaders, &header)?,
         Some(Vec::new())
     );
 
-    let live = script_live_44(5);
+    let live = script_live_43(5);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
@@ -124,7 +124,7 @@ fn txindex_script_live_roundtrips_with_empty_value() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    let live = script_live_44(1);
+    let live = script_live_43(1);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
@@ -132,7 +132,7 @@ fn txindex_script_live_roundtrips_with_empty_value() -> TestResult<()> {
     );
 
     // Non-empty values are rejected for the fixed-width ScriptLive table.
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_44(2), b"value"));
+    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
 
     // Wrong key length is rejected before touching the database.
     assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
@@ -145,7 +145,7 @@ fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
 
-    let live = script_live_44(1);
+    let live = script_live_43(1);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     assert_eq!(
         store.get(ColumnFamily::ScriptLive, &live)?,
@@ -154,14 +154,14 @@ fn generic_redb_store_enforces_script_live_row_contract() -> TestResult<()> {
 
     // The generic store must reject the same invalid ScriptLive rows as the
     // dedicated txindex store: non-empty values and wrong-width keys.
-    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_44(2), b"value"));
+    assert_invalid(store.put(ColumnFamily::ScriptLive, &script_live_43(2), b"value"));
     assert_invalid(store.put(ColumnFamily::ScriptLive, &live[..12], b""));
 
     let mut batch = store.new_batch();
-    batch.put(ColumnFamily::ScriptLive, &script_live_44(3), b"value");
+    batch.put(ColumnFamily::ScriptLive, &script_live_43(3), b"value");
     assert_invalid(store.write(batch));
     assert_eq!(
-        store.get(ColumnFamily::ScriptLive, &script_live_44(3))?,
+        store.get(ColumnFamily::ScriptLive, &script_live_43(3))?,
         None
     );
 
@@ -328,13 +328,13 @@ fn txindex_fixed_prefix_boundaries_12() -> TestResult<()> {
 }
 
 #[test]
-fn txindex_fixed_prefix_boundaries_80() -> TestResult<()> {
+fn txindex_fixed_prefix_boundaries_32() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    let zero = [0u8; 80];
+    let zero = [0u8; 32];
     let mut zero_one = zero;
-    zero_one[79] = 0x01;
+    zero_one[31] = 0x01;
     let mut one = zero;
     one[0] = 0x01;
     let mut one_ff = zero;
@@ -342,7 +342,7 @@ fn txindex_fixed_prefix_boundaries_80() -> TestResult<()> {
     one_ff[1..].fill(0xff);
     let mut ff = zero;
     ff[0] = 0xff;
-    let ff_ff = [0xffu8; 80];
+    let ff_ff = [0xffu8; 32];
 
     let mut batch = store.new_batch();
     for key in [&zero, &zero_one, &one, &one_ff, &ff, &ff_ff] {
@@ -368,14 +368,14 @@ fn txindex_fixed_prefix_boundaries_80() -> TestResult<()> {
     // Adjacent prefixes are disjoint.
     assert!(zero_keys.iter().all(|k| !one_keys.contains(k)));
 
-    // Exact 80-byte prefix matches one row.
+    // Exact 32-byte prefix matches one row.
     let exact = store.scan_prefix_bounded(ColumnFamily::BlockHeaders, &zero, MAX_SCAN)?;
     assert!(exact.complete);
     assert_eq!(exact.rows.len(), 1);
 
     // Prefix longer than the fixed key width is rejected.
-    assert_invalid(store.iter_prefix(ColumnFamily::BlockHeaders, &[0x00; 81]));
-    assert_invalid(store.scan_prefix_bounded(ColumnFamily::BlockHeaders, &[0x00; 81], MAX_SCAN));
+    assert_invalid(store.iter_prefix(ColumnFamily::BlockHeaders, &[0x00; 33]));
+    assert_invalid(store.scan_prefix_bounded(ColumnFamily::BlockHeaders, &[0x00; 33], MAX_SCAN));
 
     Ok(())
 }
@@ -495,19 +495,19 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
     batch.put(ColumnFamily::Spending, &key_12(2), b"non-empty");
-    batch.put(ColumnFamily::ScriptLive, &script_live_44(2), b"non-empty");
+    batch.put(ColumnFamily::ScriptLive, &script_live_43(2), b"non-empty");
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
     assert!(store.get(ColumnFamily::Spending, &key_12(2))?.is_none());
     assert!(
         store
-            .get(ColumnFamily::ScriptLive, &script_live_44(2))?
+            .get(ColumnFamily::ScriptLive, &script_live_43(2))?
             .is_none()
     );
 
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
-    let header = header_80(2);
+    let header = header_32(2);
     batch.put(ColumnFamily::BlockHeaders, &header, b"non-empty");
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
@@ -522,12 +522,12 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
 
     // Delete range with non-exact-width bounds aborts the batch.
     let mut batch = store.new_batch();
-    batch.put(ColumnFamily::BlockHeaders, &header_80(1), b"");
-    batch.delete_range(ColumnFamily::BlockHeaders, &[0u8; 79], &[0u8; 80]);
+    batch.put(ColumnFamily::BlockHeaders, &header_32(1), b"");
+    batch.delete_range(ColumnFamily::BlockHeaders, &[0u8; 31], &[0u8; 32]);
     assert_invalid(store.write(batch));
     assert!(
         store
-            .get(ColumnFamily::BlockHeaders, &header_80(1))?
+            .get(ColumnFamily::BlockHeaders, &header_32(1))?
             .is_none()
     );
 
@@ -601,7 +601,7 @@ fn txindex_snapshot_isolation() -> TestResult<()> {
 fn txindex_durable_reopen() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let k = key_12(42);
-    let h = header_80(42);
+    let h = header_32(42);
     let meta_key = b"watermark";
     let meta_value = b"123:abcd";
 
@@ -744,7 +744,7 @@ fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
     )?);
     assert_eq!(store.get(ColumnFamily::Spending, &spending)?, None);
 
-    let header = header_80(4);
+    let header = header_32(4);
     store.put(ColumnFamily::BlockHeaders, &header, b"")?;
     let mut batch = store.new_batch();
     batch.delete(ColumnFamily::BlockHeaders, &header);
@@ -758,7 +758,7 @@ fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
     )?);
     assert_eq!(store.get(ColumnFamily::BlockHeaders, &header)?, None);
 
-    let live = script_live_44(5);
+    let live = script_live_43(5);
     store.put(ColumnFamily::ScriptLive, &live, b"")?;
     let mut batch = store.new_batch();
     batch.delete(ColumnFamily::ScriptLive, &live);
@@ -830,7 +830,7 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
     assert_invalid(store.write_durable_if(
         &[WriteCondition::Equals {
             cf: ColumnFamily::BlockHeaders,
-            key: &[0u8; 79],
+            key: &[0u8; 31],
             expected: b"",
         }],
         store.new_batch(),
@@ -838,7 +838,7 @@ fn txindex_write_durable_if_metadata_and_widths() -> TestResult<()> {
     assert_invalid(store.write_durable_if(
         &[WriteCondition::Equals {
             cf: ColumnFamily::ScriptLive,
-            key: &[0u8; 43],
+            key: &[0u8; 42],
             expected: b"",
         }],
         store.new_batch(),
@@ -888,7 +888,7 @@ fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
     {
         let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
         let k = key_12(9);
-        let h = header_80(9);
+        let h = header_32(9);
         let mut batch = store.new_batch();
         batch.put(ColumnFamily::TxConfirmed, &k, b"");
         batch.put(ColumnFamily::BlockHeaders, &h, b"");
@@ -915,7 +915,7 @@ fn txindex_isolated_from_legacy_redb_store() -> TestResult<()> {
         assert!(store.get(ColumnFamily::TxConfirmed, &key_12(9))?.is_some());
         assert!(
             store
-                .get(ColumnFamily::BlockHeaders, &header_80(9))?
+                .get(ColumnFamily::BlockHeaders, &header_32(9))?
                 .is_some()
         );
         assert_eq!(

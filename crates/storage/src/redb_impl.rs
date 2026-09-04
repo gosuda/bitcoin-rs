@@ -10,8 +10,9 @@ use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCo
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
 type TxIndexValueTable = TableDefinition<'static, &'static [u8; 12], &'static [u8]>;
-/// `ScriptLive` key width: `prefix(8) || txid(32) || vout(4)`.
-const SCRIPT_LIVE_KEY_LEN: usize = 44;
+/// `ScriptLive` key width: `prefix(8) || txid(32) || vout_u24(3)`.
+const SCRIPT_LIVE_KEY_LEN: usize = 43;
+const HEADER_KEY_LEN: usize = 32;
 
 const TXINDEX_TX_CONFIRMED: FixedTable<12> = TableDefinition::new("txindex_v1_tx_confirmed");
 const TXINDEX_TX_CONFIRMED_VALUES: TxIndexValueTable =
@@ -21,9 +22,10 @@ const TXINDEX_FUNDING_VALUES: TxIndexValueTable = TableDefinition::new("txindex_
 const TXINDEX_SPENDING: FixedTable<12> = TableDefinition::new("txindex_v1_spending");
 const TXINDEX_SPENDING_VALUES: TxIndexValueTable =
     TableDefinition::new("txindex_v1_spending_values");
-const TXINDEX_BLOCK_HEADERS: FixedTable<80> = TableDefinition::new("txindex_v1_block_headers");
+const TXINDEX_BLOCK_HEADERS: FixedTable<HEADER_KEY_LEN> =
+    TableDefinition::new("txindex_v2_block_headers");
 const TXINDEX_SCRIPT_LIVE: FixedTable<SCRIPT_LIVE_KEY_LEN> =
-    TableDefinition::new("txindex_v1_script_live");
+    TableDefinition::new("txindex_v2_script_live");
 const TXINDEX_META: ByteTable = TableDefinition::new("txindex_v1_meta");
 
 /// redb's builder-default page-cache capacity for the transaction index.
@@ -784,7 +786,7 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// Rejects a `ScriptLive` write that is not a 44-byte key with an empty value.
+/// Rejects a `ScriptLive` write that is not a 43-byte key with an empty value.
 ///
 /// The dedicated txindex store enforces this with a fixed-width table. The
 /// generic [`RedbStore`] path uses variable-width tables, so the same
@@ -1034,7 +1036,7 @@ fn collect_txindex_prefix(
             fixed_value_prefix_collect(read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, prefix)
         }
         ColumnFamily::BlockHeaders => {
-            fixed_prefix_collect::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
+            fixed_prefix_collect::<HEADER_KEY_LEN>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
         }
         ColumnFamily::ScriptLive => {
             fixed_prefix_collect::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix)
@@ -1073,7 +1075,7 @@ fn scan_txindex_prefix(
             limit,
         ),
         ColumnFamily::BlockHeaders => {
-            fixed_prefix_scan::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, limit)
+            fixed_prefix_scan::<HEADER_KEY_LEN>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, limit)
         }
         ColumnFamily::ScriptLive => {
             fixed_prefix_scan::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix, limit)
@@ -1236,7 +1238,7 @@ fn validate_txindex_key(cf: ColumnFamily, key: &[u8]) -> Result<(), StorageError
         ColumnFamily::TxConfirmed | ColumnFamily::Funding | ColumnFamily::Spending => {
             fixed_key::<12>(key).map(|_| ())
         }
-        ColumnFamily::BlockHeaders => fixed_key::<80>(key).map(|_| ()),
+        ColumnFamily::BlockHeaders => fixed_key::<HEADER_KEY_LEN>(key).map(|_| ()),
         ColumnFamily::ScriptLive => fixed_key::<SCRIPT_LIVE_KEY_LEN>(key).map(|_| ()),
         ColumnFamily::UtxoMeta => Ok(()),
         _ => Err(invalid_txindex_cf()),
