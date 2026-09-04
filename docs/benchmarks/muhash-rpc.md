@@ -211,8 +211,10 @@ always `coinsdb`) to one bitcoin-rs arm (`backend` is exactly one of
 pinned binaries and commands. `{binary}` is copied and re-hashed before every
 spawn; `{config}` is required so the receipt's pinned config is the file the
 daemon received (`docs/contracts/muhash-rpc.md` `MRPC-03`): the controller
-copies that file into the workspace, opens the copy, re-hashes it into a
-sealed memfd, and passes `/proc/self/fd/<n>` to the child. `{rpc_bind}`, `{rpc_port}`, `{data_dir}`, and
+copies that file into the workspace, opens the copy through the shared
+regular-file reader, re-hashes it into a sealed memfd (`MFD_EXEC` for the
+binary, `MFD_NOEXEC_SEAL` for `{config}`), and passes `/proc/self/fd/<n>`
+to the child. `{rpc_bind}`, `{rpc_port}`, `{data_dir}`, and
 `{cookie}` are the only other placeholders. Readiness requires the listening
 socket inode to belong to the spawned child. The timed query is sent only
 after the ESTABLISHED peer inode belongs to that same attested process
