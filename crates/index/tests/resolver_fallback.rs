@@ -8,7 +8,8 @@ use std::sync::Arc;
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash, ScriptHashRow, ScriptHistoryEntry};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, varint,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, varint,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore as _, WriteBatch as _};
 
@@ -40,7 +41,7 @@ fn header() -> Header {
         prev_blockhash: BlockHash::default(),
         merkle_root: Hash256::default(),
         time: 0,
-        bits: 0,
+        bits: CompactTarget::from_consensus(0),
         nonce: 0,
     }
 }
@@ -48,19 +49,19 @@ fn header() -> Header {
 fn tx(seed: u8, script_pubkey: Vec<u8>, value: u64) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&[seed; 32])),
                 vout: u32::from(seed),
             },
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey,
+            value: Amount::from_sat(value),
+            script_pubkey: script_pubkey.into(),
         }],
     }
 }

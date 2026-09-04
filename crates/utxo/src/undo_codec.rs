@@ -17,7 +17,7 @@
 
 use std::collections::HashSet;
 
-use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
 use thiserror::Error;
 
 use crate::set::{UndoBatch, UtxoAdd};
@@ -306,8 +306,8 @@ mod tests {
 
     pub(super) fn txout(sats: u64) -> TxOut {
         TxOut {
-            value: sats,
-            script_pubkey: vec![0x51, byte_of(sats)],
+            value: bitcoin_rs_primitives::Amount::from_sat(sats),
+            script_pubkey: vec![0x51, byte_of(sats)].into(),
         }
     }
 

@@ -14,8 +14,8 @@ use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::UtxoView};
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 use bitcoin_rs_primitives::{
-    Block, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid, consensus_bytes,
-    varint,
+    Amount, Block, CompactTarget, ConsensusEncode as _, Hash256, LockTime, Network, OutPoint,
+    Script, Sequence, Tx, TxOut, Txid, Witness, consensus_bytes, varint,
 };
 use bitcoin_rs_utxo::{
     LiveOutput, LiveOutputMeta, UtxoSet,
@@ -3061,7 +3061,8 @@ fn apply_block_admitted<'b>(
 /// `arith_uint256::SetCompact` semantics; the sign bit decodes to zero.
 /// Node-local port: `bitcoin_rs_chain::header_sync` keeps its `pow` module
 /// crate-private, and the header `PoW` gate here must match it exactly.
-fn compact_to_target(bits: u32) -> ChainWork {
+fn compact_to_target(bits: CompactTarget) -> ChainWork {
+    let bits = bits.to_consensus();
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mut mantissa = u64::from(bits & 0x007f_ffff);
     let target = if exponent <= 3 {
@@ -3084,7 +3085,7 @@ fn compact_to_target(bits: u32) -> ChainWork {
 
 /// Returns `true` when `hash`, read as a 256-bit little-endian integer, does
 /// not exceed the decoded compact target.
-fn compact_is_met_by(bits: u32, hash: Hash256) -> bool {
+fn compact_is_met_by(bits: CompactTarget, hash: Hash256) -> bool {
     let target = compact_to_target(bits);
     target != ChainWork::ZERO && ChainWork::from_le_bytes(hash.to_le_bytes()) <= target
 }
@@ -4375,15 +4376,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: funding_outpoint,
-                script_sig,
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: script_sig.into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(1),
+                script_pubkey: op_true_script().into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let block = block_with_transactions(vec![funding_tx, bad_same_block_spend]);
         let plan = tx_plan(&block);
@@ -4432,8 +4433,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             base_prevout,
             TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x87],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x87].into(),
             },
             false,
             1,
@@ -4448,15 +4449,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: base_prevout,
-                script_sig,
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: script_sig.into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(1),
+                script_pubkey: op_true_script().into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let funding_outpoint = OutPoint::new(funding_tx.txid(), 0);
         // tx1 spends tx0's output inside the block, forcing the overlay walk.
@@ -4537,7 +4538,7 @@ mod consensus_rule_tests {
     #[test]
     fn verify_block_transactions_rejects_bad_coinbase_script_sig() {
         let mut coinbase = coinbase_transaction(0x63);
-        coinbase.inputs[0].script_sig = vec![0x63];
+        coinbase.inputs[0].script_sig = vec![0x63].into();
         let block = block_with_transaction(coinbase);
         let handles = empty_apply_handles();
 
@@ -4888,7 +4889,7 @@ mod consensus_rule_tests {
     #[test]
     fn verify_block_transactions_still_checks_coinbase_script_sig_under_assume_valid_height() {
         let mut coinbase = coinbase_transaction(0x63);
-        coinbase.inputs[0].script_sig = vec![0x63];
+        coinbase.inputs[0].script_sig = vec![0x63].into();
         let block = block_with_transaction(coinbase);
         let mut handles = empty_apply_handles();
         handles.assume_valid_height = 100;
@@ -4939,8 +4940,8 @@ mod consensus_rule_tests {
     fn build_utxo_changes_excludes_op_return_outputs() -> Result<(), Box<dyn std::error::Error>> {
         let mut coinbase = coinbase_transaction(0x6f);
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: op_return_script(b"not a coin"),
+            value: Amount::from_sat(0),
+            script_pubkey: op_return_script(b"not a coin").into(),
         });
         let txid = coinbase.txid();
         let block = block_with_transaction(coinbase);
@@ -4970,12 +4971,12 @@ mod consensus_rule_tests {
     fn build_utxo_changes_excludes_oversized_scripts() -> Result<(), Box<dyn std::error::Error>> {
         let mut coinbase = coinbase_transaction(0x70);
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: vec![0x51; MAX_SCRIPT_SIZE],
+            value: Amount::from_sat(0),
+            script_pubkey: vec![0x51; MAX_SCRIPT_SIZE].into(),
         });
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: vec![0x51; MAX_SCRIPT_SIZE + 1],
+            value: Amount::from_sat(0),
+            script_pubkey: vec![0x51; MAX_SCRIPT_SIZE + 1].into(),
         });
         let txid = coinbase.txid();
         let block = block_with_transaction(coinbase);
@@ -5098,7 +5099,7 @@ mod consensus_rule_tests {
     #[test]
     fn verify_block_transactions_defers_same_block_coinbase_spend_to_maturity() {
         let mut coinbase = coinbase_transaction(0x65);
-        coinbase.outputs[0].script_pubkey = op_true_script();
+        coinbase.outputs[0].script_pubkey = op_true_script().into();
         let coinbase_outpoint = OutPoint::new(coinbase.txid(), 0);
         let spend = spending_transaction_to_script(coinbase_outpoint, u32::MAX, op_true_script());
         let block = block_with_transactions(vec![coinbase, spend]);
@@ -5709,8 +5710,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(duplicate_txid, 1),
             TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             },
             false,
             0,
@@ -5724,7 +5725,7 @@ mod consensus_rule_tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: vec![duplicate_tx],
@@ -5757,8 +5758,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(duplicate_txid, 0),
             TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             },
             false,
             0,
@@ -5789,8 +5790,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(duplicate_txid, 0),
             TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             },
             false,
             0,
@@ -5822,8 +5823,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(duplicate_txid, 0),
             TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             },
             false,
             0,
@@ -6155,8 +6156,8 @@ mod consensus_rule_tests {
         let outpoint = OutPoint::new(fixture_txid(0x2c), 7);
         let removed = OutPoint::new(fixture_txid(0x3d), 1);
         let txout = TxOut {
-            value: 123_456,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(123_456),
+            script_pubkey: op_true_script().into(),
         };
 
         let mut batch = UndoBatch::default();
@@ -6312,10 +6313,10 @@ mod consensus_rule_tests {
         // coinbase scriptSig of at least two.
         let mut script_sig = push_int(1);
         script_sig.extend_from_slice(&push_data(&[0_u8; 4]));
-        coinbase.inputs[0].script_sig = script_sig;
+        coinbase.inputs[0].script_sig = script_sig.into();
         coinbase.outputs = vec![TxOut {
-            value: coinbase_value,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(coinbase_value),
+            script_pubkey: op_true_script().into(),
         }];
         let mut txdata = vec![coinbase];
         txdata.extend(extra);
@@ -6685,7 +6686,7 @@ mod consensus_rule_tests {
             let txdata = match case {
                 Case::CoinbaseScriptSigLength => {
                     let mut coinbase = coinbase_transaction(1);
-                    coinbase.inputs[0].script_sig = vec![1];
+                    coinbase.inputs[0].script_sig = vec![1].into();
                     vec![coinbase]
                 }
                 Case::SigopOverflow => {
@@ -6708,11 +6709,11 @@ mod consensus_rule_tests {
                         Case::DuplicateInput => spend.inputs.push(spend.inputs[0].clone()),
                         Case::MissingPrevout => {}
                         Case::NonFinalLocktime => {
-                            spend.lock_time = 2;
-                            spend.inputs[0].sequence = 0;
+                            spend.lock_time = LockTime::from_consensus(2);
+                            spend.inputs[0].sequence = Sequence::ZERO;
                         }
                         Case::OutputsGreaterThanInputs => {
-                            spend.outputs[0].value = 2_000;
+                            spend.outputs[0].value = Amount::from_sat(2_000);
                         }
                         Case::CoinbaseScriptSigLength | Case::SigopOverflow => unreachable!(),
                     }
@@ -6752,8 +6753,8 @@ mod consensus_rule_tests {
             changes.add(UtxoAdd::new(
                 prevout,
                 TxOut {
-                    value: 1_000,
-                    script_pubkey: vec![0x87],
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: vec![0x87].into(),
                 },
                 false,
                 0,
@@ -6901,8 +6902,8 @@ mod consensus_rule_tests {
         // The older coin at the very same outpoint, with values the new one does
         // not share, so a restore that invents a coin cannot pass.
         let older = TxOut {
-            value: 4_242,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(4_242),
+            script_pubkey: op_true_script().into(),
         };
         let mut seed = bitcoin_rs_utxo::BlockChanges::default();
         seed.add(bitcoin_rs_utxo::UtxoAdd::new(
@@ -7221,8 +7222,8 @@ mod consensus_rule_tests {
         seed.restore(bitcoin_rs_utxo::UtxoAdd::new(
             funded,
             TxOut {
-                value: funded_value,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(funded_value),
+                script_pubkey: op_true_script().into(),
             },
             false,
             0,
@@ -8004,7 +8005,7 @@ mod consensus_rule_tests {
         handles.applied_tip.store(Some(Arc::new(genesis_tip)));
 
         let mut coinbase = coinbase_transaction(0x94);
-        coinbase.outputs[0].script_pubkey = op_true_script();
+        coinbase.outputs[0].script_pubkey = op_true_script().into();
         let coinbase_outpoint = OutPoint::new(coinbase.txid(), 0);
         let spend = spending_transaction_to_script(coinbase_outpoint, u32::MAX, op_true_script());
         let block = mined_block_with_prev_hash_and_transactions(
@@ -8060,15 +8061,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(fixture_txid(seed), u32::from(seed)),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -8077,15 +8078,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![seed, seed],
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: vec![seed, seed].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -8094,15 +8095,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: push_int(i64::from(height)),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: push_int(i64::from(height)).into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -8125,8 +8126,8 @@ mod consensus_rule_tests {
             changes.add(UtxoAdd::new(
                 *previous_output,
                 TxOut {
-                    value: 1_000,
-                    script_pubkey: op_true_script(),
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: op_true_script().into(),
                 },
                 false,
                 height,
@@ -8143,7 +8144,7 @@ mod consensus_rule_tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: vec![tx],
@@ -8157,7 +8158,7 @@ mod consensus_rule_tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: txdata,
@@ -8171,7 +8172,7 @@ mod consensus_rule_tests {
                 prev_blockhash,
                 merkle_root: Hash256::default(),
                 time: next_fixture_time(),
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: txdata,
@@ -8226,7 +8227,7 @@ mod consensus_rule_tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce,
         }
     }
@@ -8383,7 +8384,7 @@ mod consensus_rule_tests {
         let min_timespan = expected_timespan / 4;
         let max_timespan = expected_timespan * 4;
         let actual_clamped = actual_timespan.clamp(min_timespan, max_timespan);
-        let previous_target = compact_to_target(previous_bits);
+        let previous_target = compact_to_target(CompactTarget::from_consensus(previous_bits));
         let actual = ChainWork::from(actual_clamped);
         let expected = ChainWork::from(expected_timespan);
         let target = ((previous_target / expected) * actual)
@@ -8426,15 +8427,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output,
-                script_sig: Vec::new(),
-                sequence,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(sequence),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey,
+                value: Amount::from_sat(1),
+                script_pubkey: script_pubkey.into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -8470,7 +8471,7 @@ mod consensus_rule_tests {
                     .unwrap_or_else(BlockHash::default),
                 merkle_root: Hash256::default(),
                 time: BIP68_TEST_PREVOUT_MTP,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: height,
             };
             let id = tree.insert_node(parent, header, NodeStatus::Active)?;
@@ -8498,7 +8499,7 @@ mod consensus_rule_tests {
                     .unwrap_or_else(BlockHash::default),
                 merkle_root: Hash256::default(),
                 time,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: u32::try_from(height).map_err(|_| ApplyError::HeightOverflow(u32::MAX))?,
             };
             let id = tree.insert_node(parent, header, NodeStatus::Active)?;
@@ -8685,8 +8686,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             base_prevout,
             TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x87],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x87].into(),
             },
             false,
             1,
@@ -8699,15 +8700,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: base_prevout,
-                script_sig,
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: script_sig.into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(1),
+                script_pubkey: op_true_script().into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let block = block_with_transaction(spend);
         let plan = tx_plan(&block);
@@ -8750,8 +8751,8 @@ mod consensus_rule_tests {
         changes.add(UtxoAdd::new(
             base_prevout,
             TxOut {
-                value: 1_000,
-                script_pubkey: p2sh_output_script,
+                value: Amount::from_sat(1_000),
+                script_pubkey: p2sh_output_script.into(),
             },
             false,
             1,
@@ -8762,15 +8763,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: base_prevout,
-                script_sig: push_data(&redeem),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: push_data(&redeem).into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(1),
+                script_pubkey: op_true_script().into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let block = block_with_transaction(spend);
         let plan = tx_plan(&block);
@@ -8868,15 +8869,15 @@ mod consensus_rule_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: base_prevout,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 2_000,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(2_000),
+                script_pubkey: op_true_script().into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let block = block_with_transaction(spend);
         let plan = tx_plan(&block);
@@ -10450,7 +10451,7 @@ mod consensus_rule_tests {
         // header merkle root no longer matches and block rules reject the
         // block with a permanent consensus error before any write.
         let mut bad_body = bad.clone();
-        bad_body.txs[0].outputs[0].value = 2;
+        bad_body.txs[0].outputs[0].value = Amount::from_sat(2);
         let descendant = mined_block_with_prev_hash_and_transactions(
             bad.block_hash(),
             vec![coinbase_transaction(3)],
@@ -10856,7 +10857,10 @@ mod chain_generation_tests {
     use std::sync::atomic::Ordering;
 
     use bitcoin_rs_mempool::{MempoolObserver, MutationEnvelope};
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+        Txid, Witness,
+    };
     use bitcoin_rs_utxo::UtxoSet;
     use parking_lot::Mutex;
 
@@ -11157,7 +11161,7 @@ mod chain_generation_tests {
         for height in 1..=101_u32 {
             let mut coinbase = coinbase_transaction(u8::try_from(height).unwrap_or(0xFF));
             if height == 1 {
-                coinbase.outputs[0].value = subsidy;
+                coinbase.outputs[0].value = Amount::from_sat(subsidy);
             }
             let mut txs = vec![coinbase];
             if height == 101 {
@@ -11168,15 +11172,15 @@ mod chain_generation_tests {
                     version: 2,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(first, 0),
-                        script_sig: push_int(1),
-                        sequence: 0xffff_ffff,
-                        witness: Vec::new(),
+                        script_sig: push_int(1).into(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
                     }],
                     outputs: vec![TxOut {
-                        value: subsidy - 100_000,
-                        script_pubkey: Vec::new(),
+                        value: Amount::from_sat(subsidy - 100_000),
+                        script_pubkey: Script::new(),
                     }],
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                 });
             }
             let block = mined_block_with_prev_hash_and_transactions(prev_hash, txs)
@@ -11261,15 +11265,15 @@ mod chain_generation_tests {
                     Txid::from(bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xAA; 32])),
                     0,
                 ),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let _ = &mut bad_tx;
 

@@ -9,8 +9,8 @@ use std::{
 };
 
 use bitcoin_rs_primitives::{
-    Block, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    encode::double_sha256,
+    Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    consensus_bytes, encode::double_sha256,
 };
 use parking_lot::{Mutex, RwLock};
 
@@ -928,19 +928,19 @@ fn spending_rows_carry_transaction_positions() -> Result<(), Box<dyn std::error:
     let funding_txid = block.txs[0].txid();
     let spending_tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: funding_txid,
                 vout: 0,
             },
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: block.txs[0].outputs[0].value,
-            script_pubkey: Vec::new(),
+            script_pubkey: Script::new(),
         }],
     };
     block.txs.push(spending_tx.clone());

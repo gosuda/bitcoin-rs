@@ -1,4 +1,7 @@
-use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, Wtxid, encode::double_sha256};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Tx, Txid, Witness, Wtxid,
+    encode::double_sha256,
+};
 
 use crate::ConsensusError;
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
@@ -414,7 +417,8 @@ fn next_merkle_level_scalar(level: &mut Vec<Txid>) {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid,
     };
 
     use super::{
@@ -434,7 +438,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: vec![coinbase_tx()],
@@ -453,15 +457,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let block = Block {
             header: Header {
@@ -469,7 +473,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: vec![tx],
@@ -513,7 +517,7 @@ mod tests {
     #[test]
     fn contextual_rules_always_enforce_block_weight_limit() {
         let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].script_sig = vec![1; 1_000_001];
+        coinbase.inputs[0].script_sig = vec![1; 1_000_001].into();
         let block = block_with_transactions(vec![coinbase]);
 
         assert!(matches!(
@@ -580,14 +584,14 @@ mod tests {
         let valid = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
 
         let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].witness = vec![reserved];
+        coinbase.inputs[0].witness = vec![reserved].into();
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: commitment_script(&valid),
+            value: Amount::from_sat(0),
+            script_pubkey: commitment_script(&valid).into(),
         });
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: commitment_script(&[0xff; 32]),
+            value: Amount::from_sat(0),
+            script_pubkey: commitment_script(&[0xff; 32]).into(),
         });
 
         let block = block_with_transactions(vec![coinbase, spend]);
@@ -611,14 +615,14 @@ mod tests {
         let valid = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
 
         let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].witness = vec![reserved];
+        coinbase.inputs[0].witness = vec![reserved].into();
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: commitment_script(&[0xff; 32]),
+            value: Amount::from_sat(0),
+            script_pubkey: commitment_script(&[0xff; 32]).into(),
         });
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: commitment_script(&valid),
+            value: Amount::from_sat(0),
+            script_pubkey: commitment_script(&valid).into(),
         });
 
         let block = block_with_transactions(vec![coinbase, spend]);
@@ -640,10 +644,10 @@ mod tests {
 
         let make_block = |witness: Vec<Vec<u8>>| -> Block {
             let mut coinbase = coinbase_tx();
-            coinbase.inputs[0].witness = witness;
+            coinbase.inputs[0].witness = witness.into();
             coinbase.outputs.push(TxOut {
-                value: 0,
-                script_pubkey: commitment_script(&commitment),
+                value: Amount::from_sat(0),
+                script_pubkey: commitment_script(&commitment).into(),
             });
             block_with_transactions(vec![coinbase, spend.clone()])
         };
@@ -692,10 +696,10 @@ mod tests {
         let commitment = compute_witness_commitment(&[coinbase_tx(), spend.clone()], &reserved);
 
         let mut coinbase = coinbase_tx();
-        coinbase.inputs[0].witness = vec![reserved];
+        coinbase.inputs[0].witness = vec![reserved].into();
         coinbase.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: commitment_script(&commitment),
+            value: Amount::from_sat(0),
+            script_pubkey: commitment_script(&commitment).into(),
         });
 
         let block = block_with_transactions(vec![coinbase, spend]);
@@ -822,7 +826,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root,
             time: 0,
-            bits: 0,
+            bits: CompactTarget::from_consensus(0),
             nonce: 0,
         };
         // Empty input is a MerkleRoot error regardless of the header.
@@ -963,7 +967,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: wrong_root,
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: Vec::new(),
@@ -1015,15 +1019,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![1, 1],
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: vec![1, 1].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1032,15 +1036,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: vec![vec![1; 32]],
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: vec![vec![1; 32]].into(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1049,15 +1053,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1068,7 +1072,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs,

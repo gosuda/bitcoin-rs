@@ -2,8 +2,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot, accept_headers};
-use bitcoin_rs_primitives::{Hash256, Network};
-use bitcoin_rs_primitives::{Header, deserialize};
+use bitcoin_rs_primitives::{Amount, CompactTarget, Hash256, Header, Network, deserialize};
 use bitcoin_rs_utxo::stats::{
     CoinStats, CoinStatsAccumulator, CoinStatsListener, coin_stats::COIN_STATS_ENCODED_LEN,
 };
@@ -1745,7 +1744,8 @@ mod tests {
 
     use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot, accept_headers};
     use bitcoin_rs_primitives::{
-        BlockHash, Hash256, Header, Network, OutPoint, TxOut, Txid, deserialize,
+        Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, TxOut, Txid,
+        deserialize,
     };
     use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
@@ -1890,7 +1890,7 @@ mod tests {
         let mut bad_nbits = bytes;
         let previous = header_from_row(&bad_nbits[header_offset..header_offset + 80])?;
         let mut nbits_mismatch = Header {
-            bits: 0x207f_fffe,
+            bits: CompactTarget::from_consensus(0x207f_fffe),
             ..previous
         };
         mine_header_to_declared_target(&mut nbits_mismatch)?;
@@ -2527,8 +2527,8 @@ mod tests {
             changes.add(UtxoAdd::new(
                 OutPoint::new(record_txid, vout),
                 TxOut {
-                    value: u64::from(vout) + 1,
-                    script_pubkey: vec![0x51],
+                    value: Amount::from_sat(u64::from(vout) + 1),
+                    script_pubkey: vec![0x51].into(),
                 },
                 false,
                 0,
@@ -2596,8 +2596,8 @@ mod tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 42),
             TxOut {
-                value: 123_456,
-                script_pubkey: vec![0x51, 0xac],
+                value: Amount::from_sat(123_456),
+                script_pubkey: vec![0x51, 0xac].into(),
             },
             false,
             restored.applied_tip.height,
@@ -2821,7 +2821,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: 1_296_688_602_u32.saturating_add(height),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         }
     }
@@ -2838,7 +2838,8 @@ mod tests {
 
     /// Decodes a compact target and checks whether `hash` meets it, mirroring
     /// the chain crate's private `compact_is_met_by`.
-    fn pow_meets_target(bits: u32, hash: Hash256) -> bool {
+    fn pow_meets_target(bits: CompactTarget, hash: Hash256) -> bool {
+        let bits = bits.to_consensus();
         let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
         let mantissa = u64::from(bits & 0x007f_ffff);
         let negative = mantissa != 0 && bits & 0x0080_0000 != 0;
@@ -2874,8 +2875,8 @@ mod tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(Txid(Hash256::from_le_bytes(&[7_u8; 32])), 3),
             TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51, 0x21],
+                value: Amount::from_sat(50_000),
+                script_pubkey: vec![0x51, 0x21].into(),
             },
             true,
             0,

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, Tx, Txid, Wtxid, encode::double_sha256,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
+    encode::double_sha256,
 };
 
 use crate::MiningError;
@@ -24,7 +25,7 @@ pub struct CandidateContext {
     /// Versionbits candidate version.
     pub version: i32,
     /// Compact target the candidate header must carry (`nBits`).
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Earliest legal timestamp (previous MTP + 1).
     pub min_time: u32,
     /// Candidate header time used for the template clock.
@@ -118,7 +119,7 @@ pub struct Candidate {
     /// Candidate version.
     pub version: i32,
     /// Compact target bits.
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Minimum legal timestamp.
     pub min_time: u32,
     /// Candidate creation time.
@@ -361,7 +362,7 @@ fn finish_candidate(
     let coinbase_value = coinbase
         .outputs
         .first()
-        .map(|output| output.value)
+        .map(|output| output.value.to_sat())
         .ok_or(MiningError::CoinbaseValueOverflow)?;
     // Fees change a fixed-width amount and the witness commitment replaces a
     // fixed-width hash, so the reservation and final coinbase have the same

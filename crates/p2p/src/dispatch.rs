@@ -2,7 +2,10 @@ use std::cell::RefCell;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
+    Witness, Wtxid,
+};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
@@ -340,7 +343,10 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
-    use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+    use bitcoin_rs_primitives::{
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Script, Sequence, Tx,
+        Txid, Witness, Wtxid,
+    };
 
     use super::{
         ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, MAX_LOCATOR_HASHES, TxInventory,
@@ -927,15 +933,15 @@ mod tests {
                     txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
                     vout: 0,
                 },
-                script_sig: vec![byte],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: vec![byte].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1124,7 +1130,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&[0; 32]),
             time: nonce,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce,
         }
     }

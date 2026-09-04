@@ -263,8 +263,8 @@ impl ConsensusEncode for TxOut {
 impl ConsensusDecode for TxOut {
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
         Ok(Self {
-            value: read_u64_le(reader)?,
-            script_pubkey: read_script(reader)?,
+            value: crate::Amount::from_sat(read_u64_le(reader)?),
+            script_pubkey: crate::Script::from_bytes(read_script(reader)?),
         })
     }
 }
@@ -287,9 +287,9 @@ impl ConsensusDecode for TxIn {
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
         Ok(Self {
             previous_output: OutPoint::consensus_decode(reader)?,
-            script_sig: read_script(reader)?,
-            sequence: read_u32_le(reader)?,
-            witness: Vec::new(),
+            script_sig: crate::Script::from_bytes(read_script(reader)?),
+            sequence: crate::Sequence::from_consensus(read_u32_le(reader)?),
+            witness: crate::Witness::new(),
         })
     }
 }
@@ -401,7 +401,7 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
                 let needed = usize::try_from(len).unwrap_or(usize::MAX);
                 witness.push(take(reader, needed)?.to_vec());
             }
-            input.witness = witness;
+            input.witness = crate::Witness::from_stack(witness);
         }
         // BIP144: the marker/flag exists only to carry witness data. Core rejects the
         // all-empty form ("Superfluous witness record") and rust-bitcoin rejects the
@@ -412,7 +412,7 @@ pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
             return Err(DecodeError::SuperfluousWitness);
         }
     }
-    let lock_time = read_u32_le(reader)?;
+    let lock_time = crate::LockTime::from_consensus(read_u32_le(reader)?);
 
     Ok(Tx {
         version,
@@ -540,12 +540,12 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: crate::Script::new(),
+                sequence: crate::Sequence::MAX,
+                witness: crate::Witness::new(),
             }],
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: crate::LockTime::ZERO,
         };
         let mut bytes = crate::encode::consensus_bytes(&tx);
         bytes.push(0xff);
@@ -564,12 +564,12 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: vec![0x51],
-                sequence: 0xffff_fffe,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: crate::Sequence::from_consensus(0xffff_fffe),
+                witness: crate::Witness::new(),
             }],
             outputs: Vec::new(),
-            lock_time: 7,
+            lock_time: crate::LockTime::from_consensus(7),
         };
         let bytes = crate::encode::consensus_bytes(&tx);
         // No witness data: no marker/flag is emitted.
@@ -587,12 +587,12 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: vec![0x51],
-                sequence: 0xffff_fffe,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: crate::Sequence::from_consensus(0xffff_fffe),
+                witness: crate::Witness::new(),
             }],
             outputs: Vec::new(),
-            lock_time: 7,
+            lock_time: crate::LockTime::from_consensus(7),
         };
         let stripped = crate::encode::consensus_bytes(&tx);
         assert_eq!(&stripped[4], &0x01, "witness-free tx carries no marker");
@@ -638,15 +638,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: vec![vec![0x21_u8; 64], vec![0x03_u8; 33]],
+                script_sig: crate::Script::new(),
+                sequence: crate::Sequence::MAX,
+                witness: vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: crate::Amount::from_sat(50_000),
+                script_pubkey: vec![0x51].into(),
             }],
-            lock_time: 0,
+            lock_time: crate::LockTime::ZERO,
         };
         let bytes = crate::encode::consensus_bytes(&tx);
         assert_eq!(tx.consensus_size(), bytes.len());

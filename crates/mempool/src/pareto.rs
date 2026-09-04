@@ -158,23 +158,25 @@ mod memory_usage_tests {
     use alloc::sync::Arc;
     use core::mem::size_of;
 
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
 
     use super::*;
 
     fn entry(tag: u8) -> MempoolEntry {
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: alloc::vec![TxIn {
                 previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[tag; 32])), 0,),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: alloc::vec![TxOut {
-                value: 10_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::new(),
             }],
         };
         MempoolEntry::new(Arc::new(tx), 100, 10_000, u64::from(tag), 7)

@@ -5,7 +5,8 @@ use core::{fmt, fmt::Write as _};
 use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, Script, Sequence,
+    TxOut, Witness, consensus_bytes, deserialize,
 };
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use hashbrown::HashMap;
@@ -27,12 +28,12 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let applied_tip = ctx.applied_tip.load_full();
     let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
     let headers = ctx.height();
-    let (difficulty, time, mediantime, tip_bits) =
-        applied_tip
-            .as_ref()
-            .map_or((0.0, 0_u64, 0_u64, 0_u32), |tip| {
-                let tree = ctx.block_tree.read();
-                tree.node(tip.tip_id).map_or((0.0, 0, 0, 0), |node| {
+    let (difficulty, time, mediantime, tip_bits) = applied_tip.as_ref().map_or(
+        (0.0, 0_u64, 0_u64, CompactTarget::from_consensus(0)),
+        |tip| {
+            let tree = ctx.block_tree.read();
+            tree.node(tip.tip_id)
+                .map_or((0.0, 0, 0, CompactTarget::from_consensus(0)), |node| {
                     (
                         ctx.difficulty_for_bits(node.header.bits),
                         u64::from(node.header.time),
@@ -40,7 +41,8 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
                         node.header.bits,
                     )
                 })
-            });
+        },
+    );
     // Core's estimate when this node knows how many transactions it has
     // verified, and the old height ratio when it does not.
     //
@@ -663,7 +665,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         }
         ins = ins.saturating_add(u64::try_from(tx.inputs.len()).unwrap_or(u64::MAX));
         for output in &tx.outputs {
-            total_out = total_out.saturating_add(output.value);
+            total_out = total_out.saturating_add(output.value.to_sat());
         }
         let tx_size = u64::try_from(tx.total_size()).unwrap_or(u64::MAX);
         let tx_weight = tx.weight();
@@ -760,10 +762,9 @@ fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, 
                 Err(error) => return Err(error),
             }
         }
-        let total_out = tx
-            .outputs
-            .iter()
-            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        let total_out = tx.outputs.iter().fold(0_u64, |sum, output| {
+            sum.saturating_add(output.value.to_sat())
+        });
         let Some(fee) = total_in.checked_sub(total_out) else {
             return Err(TxQueryError::Unavailable("negative fee".into()));
         };
@@ -1341,7 +1342,7 @@ fn scan_unspents(
         .unspents
         .iter()
         .map(|utxo| {
-            total_amount = total_amount.saturating_add(utxo.txout.value);
+            total_amount = total_amount.saturating_add(utxo.txout.value.to_sat());
             let desc = descs
                 .get(utxo.txout.script_pubkey.as_slice())
                 .copied()
@@ -1360,7 +1361,7 @@ fn scan_unspents(
                 vout,
                 script_pubkey: hex_encode(&utxo.txout.script_pubkey),
                 descriptor: desc.to_owned(),
-                amount: sat_to_btc(utxo.txout.value),
+                amount: sat_to_btc(utxo.txout.value.to_sat()),
                 coinbase: utxo.coinbase,
                 height: u64::from(utxo.height),
                 block_hash,
@@ -1555,7 +1556,8 @@ fn next_applied_block_hash(ctx: &Context, height: u32) -> Option<BlockHash> {
 /// needs the `PoW` self-consistency verdict the old `validate_pow` call made:
 /// decode `bits` into a 256-bit target and compare the header hash against it
 /// (both read as little-endian integers, as consensus does).
-fn compact_target_met_by(bits: u32, hash: Hash256) -> bool {
+fn compact_target_met_by(bits: CompactTarget, hash: Hash256) -> bool {
+    let bits = bits.to_consensus();
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mantissa = u64::from(bits & 0x007f_ffff);
     // A zero mantissa or a negative sign bit decodes to a zero target, and an
@@ -1670,7 +1672,7 @@ mod tests {
                     prev_blockhash: previous_hash,
                     merkle_root: Hash256::default(),
                     time,
-                    bits,
+                    bits: CompactTarget::from_consensus(bits),
                     nonce: u32::try_from(index).unwrap_or(u32::MAX),
                 };
                 previous_hash = header.compute_hash();
@@ -1716,15 +1718,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 5_000_000_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(5_000_000_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         Block {
             header: Header {
@@ -1732,7 +1734,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: coinbase.txid().0,
                 time: 1_296_688_602,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -2116,7 +2118,7 @@ mod tests {
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce,
         };
 
@@ -2287,16 +2289,16 @@ mod tests {
     fn coinbase_only_block(header: Header) -> Block {
         let coinbase = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x51],
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50 * 100_000_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50 * 100_000_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         Block {
@@ -2640,9 +2642,9 @@ mod tests {
     #[test]
     fn difficulty_matches_core_for_mainnet_and_regtest_targets() {
         let ctx = Context::new();
-        let mainnet = ctx.difficulty_for_bits(0x1d00_ffff);
+        let mainnet = ctx.difficulty_for_bits(CompactTarget::from_consensus(0x1d00_ffff));
         assert_eq!(mainnet.to_bits(), 1.0_f64.to_bits());
-        let regtest = ctx.difficulty_for_bits(0x207f_ffff);
+        let regtest = ctx.difficulty_for_bits(CompactTarget::from_consensus(0x207f_ffff));
         let expected = 4.656_542_373_906_924_7e-10_f64;
         assert_eq!(regtest.to_bits(), expected.to_bits());
     }
@@ -3012,7 +3014,7 @@ mod tests {
                     prev_blockhash: prev,
                     merkle_root: Hash256::default(),
                     time: 1_000_u32.saturating_add(height.saturating_mul(10)),
-                    bits: 0x207f_ffff,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
                     nonce: height,
                 };
                 prev = header.compute_hash();
@@ -3079,7 +3081,7 @@ mod tests {
                     prev_blockhash: prev,
                     merkle_root: Hash256::default(),
                     time: 1_000_u32.saturating_add(height.saturating_mul(10)),
-                    bits: 0x207f_ffff,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
                     nonce: height,
                 };
                 prev = header.compute_hash();
@@ -3125,7 +3127,7 @@ mod tests {
                     prev_blockhash: prev,
                     merkle_root: Hash256::default(),
                     time,
-                    bits: 0x207f_ffff,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
                     nonce: height,
                 };
                 prev = header.compute_hash();
@@ -3285,7 +3287,7 @@ mod pruneblockchain_tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_296_688_602,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         }
     }
@@ -3458,7 +3460,7 @@ mod getchaintips_tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         }
     }
@@ -4114,7 +4116,7 @@ mod chaintxstats_durability_tests {
                 prev_blockhash: prev,
                 merkle_root: Hash256::default(),
                 time,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: height,
             };
             prev = header.compute_hash();
@@ -4302,7 +4304,7 @@ mod chaintxstats_durability_tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         let genesis_id = tree
@@ -4315,7 +4317,7 @@ mod chaintxstats_durability_tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 1_100,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 1,
         };
         let lost_id = tree
@@ -4328,7 +4330,7 @@ mod chaintxstats_durability_tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 1_200,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 2,
         };
         let won_id = tree
@@ -4341,7 +4343,7 @@ mod chaintxstats_durability_tests {
             prev_blockhash: won.compute_hash(),
             merkle_root: Hash256::default(),
             time: 1_300,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 3,
         };
         let child_id = tree
@@ -4443,7 +4445,7 @@ mod chaintxstats_window_tests {
             prev_blockhash: previous,
             merkle_root: Hash256::default(),
             time,
-            bits: REGTEST_BITS,
+            bits: CompactTarget::from_consensus(REGTEST_BITS),
             nonce,
         }
     }
@@ -5043,7 +5045,7 @@ mod chaintxstats_window_tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         let genesis_id = tree
@@ -5056,7 +5058,7 @@ mod chaintxstats_window_tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 1_100,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 1,
         };
         let lost_id = tree
@@ -5069,7 +5071,7 @@ mod chaintxstats_window_tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 1_200,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 2,
         };
         let won_id = tree
@@ -5082,7 +5084,7 @@ mod chaintxstats_window_tests {
             prev_blockhash: won.compute_hash(),
             merkle_root: Hash256::default(),
             time: 1_300,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 3,
         };
         let child_id = tree
@@ -5163,7 +5165,7 @@ mod verification_progress_wiring_tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         let id = {
@@ -5288,7 +5290,7 @@ mod initial_block_download_tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             let Ok(genesis_id) = tree.insert_node(None, genesis, NodeStatus::Active) else {
@@ -5299,7 +5301,7 @@ mod initial_block_download_tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: tip_time,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 1,
             };
             let Ok(_child_id) = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)
@@ -5458,8 +5460,8 @@ mod scantxoutset_tests {
         let address = "1111111111111111111114oLvT2";
         let script = burn_p2pkh_script();
         let txout = TxOut {
-            value: 12_345,
-            script_pubkey: script.clone(),
+            value: Amount::from_sat(12_345),
+            script_pubkey: script.clone().into(),
         };
         let outpoint = OutPoint::new(Txid::from(test_txid(11)), 0);
         commit_test_utxo(&ctx, outpoint, txout, true, 0);
@@ -5467,8 +5469,8 @@ mod scantxoutset_tests {
             &ctx,
             OutPoint::new(Txid::from(test_txid(12)), 0),
             TxOut {
-                value: 9_999,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(9_999),
+                script_pubkey: vec![0x51].into(),
             },
             false,
             0,
@@ -5531,8 +5533,8 @@ mod scantxoutset_tests {
             &ctx,
             OutPoint::new(Txid::from(test_txid(101)), 0),
             TxOut {
-                value: 10_000,
-                script_pubkey: script.clone(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: script.clone().into(),
             },
             false,
             0,
@@ -5555,8 +5557,8 @@ mod scantxoutset_tests {
             &ctx,
             OutPoint::new(Txid::from(test_txid(102)), 0),
             TxOut {
-                value: 20_000,
-                script_pubkey: script,
+                value: Amount::from_sat(20_000),
+                script_pubkey: script.into(),
             },
             false,
             1,
@@ -5601,8 +5603,8 @@ mod scantxoutset_tests {
         let address = "1111111111111111111114oLvT2";
         let script = burn_p2pkh_script();
         let txout = TxOut {
-            value: 12_345,
-            script_pubkey: script,
+            value: Amount::from_sat(12_345),
+            script_pubkey: script.into(),
         };
         let outpoint = OutPoint::new(Txid::from(test_txid(13)), 0);
         commit_test_utxo(&ctx, outpoint, txout, true, 0);

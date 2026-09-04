@@ -906,7 +906,7 @@ fn work_from_header(header: &BlockHeader) -> ChainWork {
 }
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget};
 
     use std::sync::Arc;
 
@@ -1245,7 +1245,7 @@ mod tests {
                 prev_blockhash: prev_hash,
                 merkle_root: Hash256::default(),
                 time: 1_000_000 + i * 600,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             prev_hash = header.compute_hash();
@@ -1277,7 +1277,7 @@ mod tests {
                 prev_blockhash: prev_hash,
                 merkle_root: Hash256::default(),
                 time: 1_000_000 + i * 600,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             prev_hash = header.compute_hash();
@@ -1534,7 +1534,7 @@ mod tests {
                 prev_blockhash: prev_hash,
                 merkle_root: Hash256::default(),
                 time: 1_000_000 + height * 600,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: height,
             };
             prev_hash = header.compute_hash();
@@ -1857,7 +1857,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&merkle),
             time: height,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: height,
         }
     }

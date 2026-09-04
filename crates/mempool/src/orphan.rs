@@ -13,7 +13,7 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use bitcoin_rs_primitives::{Tx, Txid};
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Tx, Txid, Witness};
 use hashbrown::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -416,19 +416,19 @@ mod tests {
     fn orphan_tx(label: u8, prevouts: Vec<OutPoint>) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: prevouts
                 .into_iter()
                 .map(|previous_output| TxIn {
                     previous_output,
-                    script_sig: Vec::new(),
-                    sequence: 0xFFFF_FFFF,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: vec![TxOut {
-                value: 5_000 + u64::from(label),
-                script_pubkey: vec![label],
+                value: Amount::from_sat(5_000 + u64::from(label)),
+                script_pubkey: vec![label].into(),
             }],
         }
     }
@@ -436,17 +436,17 @@ mod tests {
     /// Builds a large transaction (many outputs) to exceed weight limits.
     fn large_tx(label: u8) -> Tx {
         let output = TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51; 200],
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x51; 200].into(),
         };
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![output; 50],
         }

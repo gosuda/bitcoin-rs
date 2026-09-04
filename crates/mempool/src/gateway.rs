@@ -19,7 +19,9 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use bitcoin_rs_consensus::{UtxoView, verify_transaction};
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
@@ -1004,7 +1006,9 @@ mod tests {
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use core::sync::atomic::Ordering;
     use parking_lot::{Mutex, RwLock};
     use std::sync::mpsc;
@@ -1012,16 +1016,16 @@ mod tests {
     fn tx(label: u8) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label].into(),
             }],
         }
     }
@@ -1085,16 +1089,16 @@ mod tests {
         script.push(0xac); // OP_CHECKSIG
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 10_000,
-                script_pubkey: script,
+                value: Amount::from_sat(10_000),
+                script_pubkey: script.into(),
             }],
         }
     }
@@ -1104,16 +1108,16 @@ mod tests {
     fn prevout_spend(prev: OutPoint, value: u64, script: u8) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prev,
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFD, // RBF signal
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME, // RBF signal
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value,
-                script_pubkey: vec![script],
+                value: Amount::from_sat(value),
+                script_pubkey: vec![script].into(),
             }],
         }
     }
@@ -1138,10 +1142,10 @@ mod tests {
             prevouts: vec![(
                 tx.inputs[0].previous_output,
                 TxOut {
-                    value: 11_000,
+                    value: Amount::from_sat(11_000),
                     // OP_TRUE: an anyone-can-spend prevout, the same shape the
                     // RPC fixtures use, so script verification passes.
-                    script_pubkey: vec![0x51],
+                    script_pubkey: vec![0x51].into(),
                 },
             )],
             locktime_cutoff: 0,
@@ -1277,14 +1281,14 @@ mod tests {
             .expect("parent in");
         let mut child = tx(7);
         child.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
-        child.inputs[0].sequence = 0xFFFF_FFFD;
+        child.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let child_txid = child.txid();
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&child))
             .expect("child in");
         let mut grandchild = tx(8);
         grandchild.inputs[0].previous_output = OutPoint::new(child_txid, 0);
-        grandchild.inputs[0].sequence = 0xFFFF_FFFD;
+        grandchild.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let grandchild_txid = grandchild.txid();
         gateway
             .insert_entry(AdmissionOrigin::Rpc, entry(&grandchild))
@@ -1296,7 +1300,7 @@ mod tests {
         // (Descendant). The parent survives.
         let mut replacement = tx(9);
         replacement.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
-        replacement.inputs[0].sequence = 0xFFFF_FFFD;
+        replacement.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let replacement_txid = replacement.txid();
         let result = gateway
             .replace_transaction(
@@ -2157,8 +2161,8 @@ mod tests {
     fn admit_transaction_accepts_locktime_equal_to_tip_at_next_height() {
         let gateway = gateway_with(None);
         let mut tx = standard_tx(0x80);
-        tx.lock_time = 100;
-        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+        tx.lock_time = LockTime::from_consensus(100);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // non-final
 
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
         request.height = 100;
@@ -2176,8 +2180,8 @@ mod tests {
     fn admit_transaction_rejects_locktime_one_past_tip() {
         let gateway = gateway_with(None);
         let mut tx = standard_tx(0x81);
-        tx.lock_time = 101;
-        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+        tx.lock_time = LockTime::from_consensus(101);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // non-final
 
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
         request.height = 100;
@@ -2197,8 +2201,8 @@ mod tests {
         let gateway = gateway_with(None);
         let mut tx = standard_tx(0x82);
         // Timestamp-based lock time, above the threshold.
-        tx.lock_time = 1_800_000_000;
-        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+        tx.lock_time = LockTime::from_consensus(1_800_000_000);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // non-final
 
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
         // The applied-tip MTP is lower than the header-tip MTP; a tx with
@@ -2227,7 +2231,7 @@ mod tests {
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
         // OP_FALSE: the input script evaluates to false, so the spend is
         // invalid under any verify flags.
-        request.prevouts[0].1.script_pubkey = vec![0x00];
+        request.prevouts[0].1.script_pubkey = vec![0x00].into();
 
         let result = gateway.admit_transaction(request);
         assert!(
@@ -2361,16 +2365,16 @@ mod tests {
 
         // Set up a conflict: insert a tx, then admit a replacement.
         let mut original = standard_tx(44);
-        original.inputs[0].sequence = 0xFFFF_FFFD; // RBF signal (< 0xFFFF_FFFE)
+        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME; // RBF signal (< 0xFFFF_FFFE)
         let original_txid = original.txid();
         // The replacement spends the same input as the original but
         // signals RBF (sequence < 0xFFFF_FFFF) and pays a higher fee.
         let mut replacement = standard_tx(45);
         replacement.inputs[0].previous_output = original.inputs[0].previous_output;
-        replacement.inputs[0].sequence = 0xFFFF_FFFE; // RBF signal
+        replacement.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // RBF signal
         // Higher fee to pass BIP125 (original output is 10 000, replacement
         // output is 5 000, so fee = 5 000 > original fee = 0).
-        replacement.outputs[0].value = 5_000;
+        replacement.outputs[0].value = Amount::from_sat(5_000);
         let replacement_txid = replacement.txid();
 
         // Fund the original's output in the UTXO set so the replacement
@@ -2398,10 +2402,10 @@ mod tests {
             prevouts: vec![(
                 replacement.inputs[0].previous_output,
                 TxOut {
-                    value: 10_000,
+                    value: Amount::from_sat(10_000),
                     // OP_TRUE: anyone-can-spend, so script verification passes
                     // and only the RBF rules are under test.
-                    script_pubkey: vec![0x51],
+                    script_pubkey: vec![0x51].into(),
                 },
             )],
             locktime_cutoff: 0,
@@ -2717,9 +2721,9 @@ mod tests {
         let mut double_spend = tx(13);
         double_spend.inputs[0] = TxIn {
             previous_output: spent_outpoint,
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         };
         let double_spend_txid = double_spend.txid();
 
@@ -2819,8 +2823,8 @@ mod tests {
             prevouts: vec![(
                 tx.inputs[0].previous_output,
                 TxOut {
-                    value: 11_000,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(11_000),
+                    script_pubkey: Script::new(),
                 },
             )],
             locktime_cutoff: 0,

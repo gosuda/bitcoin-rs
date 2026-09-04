@@ -1,4 +1,6 @@
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
 
@@ -72,17 +74,17 @@ pub(crate) fn build_coinbase(
         .checked_add(fees)
         .ok_or(MiningError::CoinbaseValueOverflow)?;
 
-    let mut witness = Vec::new();
+    let mut witness = Witness::new();
     let mut outputs = vec![TxOut {
-        value,
-        script_pubkey: payout,
+        value: Amount::from_sat(value),
+        script_pubkey: payout.into(),
     }];
 
     if let Some(commitment) = witness_commitment {
         witness.push(WITNESS_RESERVED_VALUE.to_vec());
         outputs.push(TxOut {
-            value: 0,
-            script_pubkey: witness_commitment_script(commitment),
+            value: Amount::ZERO,
+            script_pubkey: witness_commitment_script(commitment).into(),
         });
     }
 
@@ -90,12 +92,12 @@ pub(crate) fn build_coinbase(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0xffff_ffff),
-            script_sig: coinbase_script_sig(height)?,
-            sequence: 0xffff_ffff,
+            script_sig: coinbase_script_sig(height)?.into(),
+            sequence: Sequence::MAX,
             witness,
         }],
         outputs,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     })
 }
 

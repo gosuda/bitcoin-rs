@@ -17,8 +17,8 @@ use bitcoin_rs_mining::{
 };
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    encode::double_sha256,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
 };
 use bitcoin_rs_rpc::context::{BlockRecord, ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
@@ -45,7 +45,7 @@ impl MiningControl for SmokeMiningControl {
                 previous_block_hash,
                 height: 0,
                 version: 0x2000_0000,
-                bits: 0x1d00_ffff,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
                 min_time: 0,
                 current_time: 0,
                 csv_active: false,
@@ -56,12 +56,12 @@ impl MiningControl for SmokeMiningControl {
                 mempool_sequence: 0,
                 coinbase: Tx {
                     version: 1,
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                        script_sig: Vec::new(),
-                        sequence: u32::MAX,
-                        witness: Vec::new(),
+                        script_sig: Script::new(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
                     }],
                     outputs: Vec::new(),
                 },
@@ -89,12 +89,12 @@ impl MiningControl for SmokeMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,
             network: Network::Regtest,
-            next_bits: 0x207f_ffff,
+            next_bits: CompactTarget::from_consensus(0x207f_ffff),
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
@@ -305,8 +305,8 @@ fn gettxoutsetinfo_returns_real_utxo_counts() -> Result<(), Box<dyn std::error::
     changes.add(UtxoAdd::new(
         OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0),
         TxOut {
-            value: 50_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50_000),
+            script_pubkey: vec![0x51].into(),
         },
         false,
         1,
@@ -655,11 +655,11 @@ fn fee_stats_context(values: Option<HashMap<OutPoint, u64>>) -> (Arc<Context>, T
                 Txid(Hash256::from_le_bytes(&[label; 32])),
                 Tx {
                     version: 2,
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                     inputs: Vec::new(),
                     outputs: vec![TxOut {
-                        value: 10_000,
-                        script_pubkey: Vec::new(),
+                        value: Amount::from_sat(10_000),
+                        script_pubkey: Script::new(),
                     }],
                 },
             );
@@ -744,16 +744,16 @@ fn fixture_merkle_root(txs: &[Tx]) -> Hash256 {
 fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
     let coinbase = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0_u8; 32])), u32::MAX),
-            script_sig: vec![0x51],
-            sequence: 0xFFFF_FFFE,
-            witness: Vec::new(),
+            script_sig: vec![0x51].into(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFE),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50_000),
+            script_pubkey: vec![0x51].into(),
         }],
     };
     let txs = vec![coinbase, low_tx, high_tx];
@@ -764,7 +764,7 @@ fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
             prev_blockhash: BlockHash::default(),
             merkle_root,
             time: 1_231_006_505,
-            bits: 0x1d00_ffff,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
             nonce: 0,
         },
         txs,
@@ -774,16 +774,16 @@ fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
 fn fee_tx(label: u8, output_sat: u64) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint(label),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFE,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFE),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: output_sat,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(output_sat),
+            script_pubkey: vec![0x51].into(),
         }],
     }
 }
@@ -818,7 +818,7 @@ impl Fixture {
                 prev_blockhash: BlockHash::default(),
                 merkle_root,
                 time: 1_231_006_505,
-                bits: 0x1d00_ffff,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
                 nonce: 0,
             },
             txs: vec![tx.clone()],
@@ -871,16 +871,16 @@ fn context_with_peers(peer_table: Arc<PeerTable>) -> Arc<Context> {
 fn tx(label: u8, script_pubkey: Vec<u8>) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint(label),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFE,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFE),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 5_000,
-            script_pubkey,
+            value: Amount::from_sat(5_000),
+            script_pubkey: script_pubkey.into(),
         }],
     }
 }

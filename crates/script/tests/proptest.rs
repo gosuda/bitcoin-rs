@@ -9,10 +9,10 @@ use bitcoin::script::Builder;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 use bitcoin::{
-    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut as OracleTxOut, Txid, Witness,
-    absolute, transaction,
+    Amount as OracleAmount, OutPoint, ScriptBuf, Sequence as OracleSequence, Transaction, TxIn,
+    TxOut as OracleTxOut, Txid, Witness as OracleWitness, absolute, transaction,
 };
-use bitcoin_rs_primitives::{Tx, TxOut};
+use bitcoin_rs_primitives::{Amount, LockTime, Sequence, Tx, TxOut, Witness};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use proptest::prelude::*;
 
@@ -25,8 +25,8 @@ fn to_native(tx: &Transaction) -> Tx {
 
 fn to_native_prevout(prevout: &OracleTxOut) -> TxOut {
     TxOut {
-        value: prevout.value.to_sat(),
-        script_pubkey: prevout.script_pubkey.as_bytes().to_vec(),
+        value: bitcoin_rs_primitives::Amount::from_sat(prevout.value.to_sat()),
+        script_pubkey: prevout.script_pubkey.as_bytes().to_vec().into(),
     }
 }
 
@@ -132,7 +132,7 @@ fn signed_p2tr(byte: u8) -> Option<SpendFixture> {
     let tweaked = bitcoin::key::TapTweak::tap_tweak(keypair, &secp, None);
     let (output_key, _) = tweaked.public_parts();
     let prevout = OracleTxOut {
-        value: Amount::from_sat(50_000),
+        value: OracleAmount::from_sat(50_000),
         script_pubkey: ScriptBuf::new_p2tr_tweaked(output_key),
     };
     let mut tx = unsigned_spend(byte);
@@ -147,7 +147,7 @@ fn signed_p2tr(byte: u8) -> Option<SpendFixture> {
     };
     let message = Message::from_digest(*sighash.as_byte_array());
     let signature = secp.sign_schnorr(&message, tweaked.as_keypair());
-    tx.input[0].witness = Witness::from_slice(&[signature.serialize().to_vec()]);
+    tx.input[0].witness = OracleWitness::from_slice(&[signature.serialize().to_vec()]);
     Some(SpendFixture {
         prevout: to_native_prevout(&prevout),
         tx: to_native(&tx),
@@ -168,7 +168,7 @@ fn signed_multi_input_p2tr(seeds: [u8; 2]) -> Option<(Transaction, Vec<OracleTxO
         let tweaked = bitcoin::key::TapTweak::tap_tweak(keypair, &secp, None);
         let (output_key, _) = tweaked.public_parts();
         prevouts.push(OracleTxOut {
-            value: Amount::from_sat(50_000),
+            value: OracleAmount::from_sat(50_000),
             script_pubkey: ScriptBuf::new_p2tr_tweaked(output_key),
         });
         keypairs.push(tweaked);
@@ -186,12 +186,12 @@ fn signed_multi_input_p2tr(seeds: [u8; 2]) -> Option<(Transaction, Vec<OracleTxO
                     vout: u32::try_from(index).unwrap_or_else(|_| panic!("input index fits u32")),
                 },
                 script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
+                sequence: OracleSequence::MAX,
+                witness: OracleWitness::new(),
             })
             .collect(),
         output: vec![OracleTxOut {
-            value: Amount::from_sat(99_000),
+            value: OracleAmount::from_sat(99_000),
             script_pubkey: Builder::new().push_int(1).into_script(),
         }],
     };
@@ -207,7 +207,7 @@ fn signed_multi_input_p2tr(seeds: [u8; 2]) -> Option<(Transaction, Vec<OracleTxO
         };
         let message = Message::from_digest(*sighash.as_byte_array());
         let signature = secp.sign_schnorr(&message, keypair.as_keypair());
-        tx.input[input_idx].witness = Witness::from_slice(&[signature.serialize().to_vec()]);
+        tx.input[input_idx].witness = OracleWitness::from_slice(&[signature.serialize().to_vec()]);
     }
 
     Some((tx, prevouts))
@@ -223,11 +223,11 @@ fn unsigned_spend(byte: u8) -> Transaction {
                 vout: 0,
             },
             script_sig: ScriptBuf::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            sequence: OracleSequence::MAX,
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(49_000),
+            value: OracleAmount::from_sat(49_000),
             script_pubkey: Builder::new().push_int(1).into_script(),
         }],
     }

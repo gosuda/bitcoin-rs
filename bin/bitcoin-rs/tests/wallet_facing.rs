@@ -732,7 +732,7 @@ fn spend_first_anyone_can_spend(client: &Client, payout: &ScriptBuf) -> TestResu
         }],
         output: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS.saturating_sub(FEE_SATS)),
-            script_pubkey: payout.clone(),
+            script_pubkey: payout.clone().into(),
         }],
     };
     Ok(serialize_hex(&spend))
@@ -763,18 +763,18 @@ fn assemble_from_template(template: &Value, coinbase: Coinbase<'_>) -> TestResul
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: coinbase_script_sig(height),
+            script_sig: coinbase_script_sig(height).into(),
             sequence: Sequence::MAX,
             witness: Witness::from_slice(&[&WITNESS_RESERVED]),
         }],
         output: vec![
             TxOut {
                 value: Amount::from_sat(coinbase_value),
-                script_pubkey: coinbase.script_pubkey(),
+                script_pubkey: coinbase.script_pubkey().into(),
             },
             TxOut {
                 value: Amount::from_sat(0),
-                script_pubkey: commitment,
+                script_pubkey: commitment.into(),
             },
         ],
     };

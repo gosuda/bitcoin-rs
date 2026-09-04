@@ -265,7 +265,9 @@ mod tests {
     use alloc::vec::Vec;
 
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use sonic_rs::{JsonContainerTrait, JsonValueTrait, json};
 
     use super::*;
@@ -617,25 +619,25 @@ mod tests {
         let handler = crate::Handler::new(Arc::clone(&ctx));
         let parent = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let parent_txid = parent.txid();
         let child = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint {
                     txid: parent_txid,
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: Vec::new(),
         };
@@ -667,19 +669,19 @@ mod tests {
         let ctx = Arc::new(Context::new());
         let rbf_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint {
                     txid: Txid(Hash256::from_le_bytes(&[0xaa; 32])),
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: 0x0000_0001,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0x0000_0001),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let rbf_txid = rbf_tx.txid();
@@ -705,19 +707,19 @@ mod tests {
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: previous_outputs
                 .into_iter()
                 .map(|previous_output| TxIn {
                     previous_output,
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: vec![TxOut {
-                value: 5_000 + u64::from(label),
-                script_pubkey: vec![label],
+                value: Amount::from_sat(5_000 + u64::from(label)),
+                script_pubkey: vec![label].into(),
             }],
         }
     }
@@ -729,7 +731,9 @@ mod usage_wiring_tests {
     use alloc::vec::Vec;
 
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;
@@ -742,19 +746,19 @@ mod usage_wiring_tests {
             for tag in 0_u8..4 {
                 let tx = Tx {
                     version: 2,
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(
                             Txid::from(Hash256::from_le_bytes(&[tag; 32])),
                             0,
                         ),
-                        script_sig: Vec::new(),
-                        sequence: u32::MAX,
-                        witness: Vec::new(),
+                        script_sig: Script::new(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
                     }],
                     outputs: vec![TxOut {
-                        value: 10_000,
-                        script_pubkey: vec![0x51; 128],
+                        value: Amount::from_sat(10_000),
+                        script_pubkey: vec![0x51; 128].into(),
                     }],
                 };
                 let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
@@ -788,7 +792,9 @@ mod spentby_tests {
     use alloc::vec::Vec;
 
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use sonic_rs::json;
 
     use super::*;
@@ -796,22 +802,24 @@ mod spentby_tests {
     fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: inputs
                 .iter()
                 .map(|previous_output| TxIn {
                     previous_output: *previous_output,
-                    script_sig: Vec::new(),
-                    sequence: 0xFFFF_FFFD,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: (0..outputs)
                 .map(|vout| TxOut {
-                    value: 10_000_u64
-                        .saturating_add(u64::from(vout))
-                        .saturating_add(tag.saturating_mul(1_000)),
-                    script_pubkey: vec![0x51],
+                    value: Amount::from_sat(
+                        10_000_u64
+                            .saturating_add(u64::from(vout))
+                            .saturating_add(tag.saturating_mul(1_000)),
+                    ),
+                    script_pubkey: vec![0x51].into(),
                 })
                 .collect(),
         }

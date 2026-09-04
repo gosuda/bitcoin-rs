@@ -356,7 +356,7 @@ fn load_schemas_from(
 mod tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{Block, Network};
+    use bitcoin_rs_primitives::{Block, CompactTarget, Network};
     use sonic_rs::JsonValueTrait as _;
 
     use super::{diff_best, load_schemas};
@@ -386,12 +386,12 @@ mod tests {
             Ok(MiningInfo {
                 blocks: 0,
                 last_candidate: None,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 difficulty: 1.0,
                 network_hashes_per_second: 0.0,
                 pooled_transactions: 0,
                 network: Network::Regtest,
-                next_bits: 0x207f_ffff,
+                next_bits: CompactTarget::from_consensus(0x207f_ffff),
                 next_difficulty: 1.0,
                 minimum_fee_rate: 1_000,
                 signet: None,

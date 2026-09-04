@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_p2p::{InboundTx, PeerSource, TxInventory};
-use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Sequence, Tx, Txid, Witness, Wtxid};
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 
@@ -458,15 +458,15 @@ mod tests {
                     txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
                     vout: 0,
                 },
-                script_sig: vec![byte],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: vec![byte].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 

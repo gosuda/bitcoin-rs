@@ -8,7 +8,9 @@
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, LockTime, Script, Sequence, Tx, Txid, Witness, deserialize,
+};
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
     ZmqNotification,
@@ -2546,7 +2548,8 @@ mod tests {
     use bitcoin_rs_index::IndexCapabilities;
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, consensus_bytes,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, OutPoint, Script, Sequence, Tx,
+        TxIn, TxOut, Txid, Witness, consensus_bytes,
     };
     use bitcoin_rs_rpc::context::BlockRecord;
 
@@ -3120,7 +3123,7 @@ mod tests {
             version: 1,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
             sender
@@ -3749,7 +3752,7 @@ mod tests {
         let pruned_txid = pruned_tx.txid();
         let unrelated_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
@@ -4970,16 +4973,16 @@ mod tests {
         script_sig.extend_from_slice(&time.to_le_bytes());
         let coinbase = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig,
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: script_sig.into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
         };
         let mut block = Block {
@@ -4988,7 +4991,7 @@ mod tests {
                 prev_blockhash,
                 merkle_root: Hash256::default(),
                 time,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -5032,7 +5035,8 @@ mod tests {
     /// Regtest-easy compact-target `PoW` check over the hash as a 256-bit
     /// little-endian integer (mirrors `chain::pow::compact_is_met_by` for the
     /// >3-exponent, 3-byte-mantissa forms these fixtures mine).
-    fn pow_met(bits: u32, hash: Hash256) -> bool {
+    fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
+        let bits = bits.to_consensus();
         let exponent = u8::try_from(bits >> 24).unwrap_or(0);
         let mantissa = bits & 0x007f_ffff;
         if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {

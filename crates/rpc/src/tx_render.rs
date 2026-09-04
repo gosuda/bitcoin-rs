@@ -8,7 +8,10 @@
 // the sanctioned rust-bitcoin compat seam (`Address<T>`/`Script` disassembly);
 // all transaction/amount/hash plumbing here is native.
 use bitcoin::Address;
-use bitcoin_rs_primitives::{BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness, consensus_bytes,
+};
 use sonic_rs::{Value, json};
 
 use crate::script_util::{
@@ -108,7 +111,7 @@ pub fn transaction_json_with_prevouts(
         "size": size,
         "vsize": vsize,
         "weight": weight,
-        "locktime": tx.lock_time,
+        "locktime": tx.lock_time.to_consensus(),
         "vin": vin,
         "vout": vout,
         "hex": hex_encode(&consensus_bytes(tx))
@@ -130,10 +133,9 @@ pub fn transaction_json_with_prevouts(
         let input_value = prevouts.iter().fold(0_u64, |sum, prevout| {
             sum.saturating_add(prevout.as_ref().map_or(0, |prevout| prevout.value))
         });
-        let output_value = tx
-            .outputs
-            .iter()
-            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
+            sum.saturating_add(output.value.to_sat())
+        });
         let _ = value.insert(
             "fee",
             btc_amount_json(input_value.saturating_sub(output_value)),
@@ -167,7 +169,7 @@ fn input_json(
     if coinbase {
         let mut value = json!({
             "coinbase": hex_encode(&input.script_sig),
-            "sequence": input.sequence
+            "sequence": input.sequence.to_consensus()
         });
         if !input.witness.is_empty() {
             let witness: Vec<String> = input.witness.iter().map(|item| hex_encode(item)).collect();
@@ -180,13 +182,7 @@ fn input_json(
     // (consensus wire layout), so field references would be unaligned.
     let (prev_txid, prev_vout) = (previous_output.txid, previous_output.vout);
     let mut value = json!({
-        "txid": prev_txid.to_string(),
-        "vout": prev_vout,
-        "scriptSig": {
-            "asm": script_asm(&input.script_sig),
-            "hex": hex_encode(&input.script_sig)
-        },
-        "sequence": input.sequence
+        "sequence": input.sequence.to_consensus()
     });
     if !input.witness.is_empty() {
         let witness: Vec<String> = input.witness.iter().map(|item| hex_encode(item)).collect();
@@ -208,7 +204,7 @@ fn input_json(
 
 fn output_json(output: &TxOut, n: usize, network: Network) -> Value {
     json!({
-        "value": btc_amount_json(output.value),
+        "value": btc_amount_json(output.value.to_sat()),
         "n": n,
         "scriptPubKey": script_pub_key_json(&output.script_pubkey, network)
     })
@@ -308,11 +304,11 @@ mod tests {
     fn sample_tx() -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
         }
     }
@@ -360,16 +356,16 @@ mod tests {
         let mut tx = sample_tx();
         tx.inputs.push(TxIn {
             previous_output: null_outpoint(),
-            script_sig: vec![1, 2, 3],
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: vec![1, 2, 3].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         });
         assert!(is_coinbase(&tx));
         tx.inputs.push(TxIn {
             previous_output: null_outpoint(),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         });
         assert!(!is_coinbase(&tx));
     }
@@ -379,9 +375,9 @@ mod tests {
         let mut tx = sample_tx();
         tx.inputs.push(TxIn {
             previous_output: null_outpoint(),
-            script_sig: vec![0x51],
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: vec![0x51].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         });
         let value = transaction_json(&tx, Network::Regtest, None);
         let vin = value.get("vin").expect("vin present");
@@ -397,14 +393,15 @@ mod tests {
     fn p2wpkh_output_classifies_and_addresses_on_regtest() {
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 5_000,
+                value: Amount::from_sat(5_000),
                 script_pubkey: vec![
                     0x00, 0x14, 0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c,
                     0x45, 0xd1, 0xb3, 0xa3, 0x23, 0xf1, 0x43, 0x3b, 0xd6,
-                ],
+                ]
+                .into(),
             }],
         };
         let value = transaction_json(&tx, Network::Regtest, None);

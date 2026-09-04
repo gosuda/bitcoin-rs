@@ -1,5 +1,5 @@
 //! Undo coverage for deterministic block disconnects.
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{BlockChanges, UndoBatch, UtxoAdd, UtxoSet, aggregate_hash};
 
 fn txid(seed: u64) -> Hash256 {
@@ -16,8 +16,8 @@ fn txout(seed: u64) -> TxOut {
     script.extend_from_slice(&[0x00, 0x08]);
     script.extend_from_slice(&seed.to_le_bytes());
     TxOut {
-        value: 50_000 + seed,
-        script_pubkey: script,
+        value: Amount::from_sat(50_000 + seed),
+        script_pubkey: script.into(),
     }
 }
 

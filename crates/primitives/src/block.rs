@@ -133,19 +133,19 @@ mod tests {
         Ok(())
     }
 
-    fn witness_tx(witness: Vec<Vec<u8>>) -> Tx {
+    fn witness_tx(witness: crate::Witness) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: crate::LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0_u8; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
+                script_sig: crate::Script::new(),
+                sequence: crate::Sequence::MAX,
                 witness,
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: crate::Amount::from_sat(50_000),
+                script_pubkey: vec![0x51].into(),
             }],
         }
     }
@@ -157,7 +157,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_700_000_000,
-                bits: 0x207f_ffff,
+                bits: crate::CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: vec![tx],
@@ -166,7 +166,9 @@ mod tests {
 
     #[test]
     fn stripped_size_drops_witness_and_matches_header_plus_base_transactions() {
-        let block = block_with_tx(witness_tx(vec![vec![0x21_u8; 64], vec![0x03_u8; 33]]));
+        let block = block_with_tx(witness_tx(
+            vec![vec![0x21_u8; 64], vec![0x03_u8; 33]].into(),
+        ));
         let total = crate::encode::consensus_bytes(&block).len();
         let stripped = block.stripped_size();
         assert!(
@@ -181,7 +183,7 @@ mod tests {
 
     #[test]
     fn stripped_size_equals_total_size_without_witness() {
-        let block = block_with_tx(witness_tx(Vec::new()));
+        let block = block_with_tx(witness_tx(crate::Witness::new()));
         assert_eq!(
             block.stripped_size(),
             crate::encode::consensus_bytes(&block).len()

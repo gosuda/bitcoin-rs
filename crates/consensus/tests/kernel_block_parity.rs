@@ -80,7 +80,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Witness, consensus_bytes, deserialize,
+};
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use serde::Deserialize;
 
@@ -517,8 +519,8 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
         .iter()
         .map(|prevout| {
             Ok(TxOut {
-                value: prevout.amount_sat,
-                script_pubkey: decode_hex(&prevout.script_hex)?,
+                value: bitcoin_rs_primitives::Amount::from_sat(prevout.amount_sat),
+                script_pubkey: decode_hex(&prevout.script_hex)?.into(),
             })
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
@@ -724,16 +726,16 @@ fn op_true_spend_with_push_script_sig() -> Tx {
 
     Tx {
         version: 1,
-        lock_time: 0,
+        lock_time: bitcoin_rs_primitives::LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::default(),
-            script_sig: vec![0x51],
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: vec![0x51].into(),
+            sequence: bitcoin_rs_primitives::Sequence::MAX,
+            witness: bitcoin_rs_primitives::Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 40_000,
-            script_pubkey: Vec::new(),
+            value: bitcoin_rs_primitives::Amount::from_sat(40_000),
+            script_pubkey: bitcoin_rs_primitives::Script::new(),
         }],
     }
 }

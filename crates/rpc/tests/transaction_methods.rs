@@ -12,7 +12,8 @@ use alloc::sync::Arc;
 
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 use bitcoin_rs_primitives::{
-    Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    consensus_bytes, deserialize,
 };
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::{Handler, RpcError};
@@ -64,16 +65,16 @@ fn is_op_return(script: &[u8]) -> bool {
 fn make_tx(prevout: OutPoint, output_value: u64, script: Vec<u8>) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFE,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFE),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey: script,
+            value: Amount::from_sat(output_value),
+            script_pubkey: script.into(),
         }],
     }
 }
@@ -85,10 +86,10 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
     changes.add(UtxoAdd::new(
         outpoint,
         TxOut {
-            value,
+            value: Amount::from_sat(value),
             // OP_TRUE: an anyone-can-spend prevout, so the empty scriptSigs
             // these fixtures build satisfy script verification.
-            script_pubkey: vec![0x51],
+            script_pubkey: vec![0x51].into(),
         },
         false,
         1,
@@ -298,16 +299,16 @@ fn gettxout_returns_unconfirmed_output_from_mempool() -> Result<(), Box<dyn std:
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xaa; 32])), 0),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFE,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFE),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 7_500,
-            script_pubkey: script,
+            value: Amount::from_sat(7_500),
+            script_pubkey: script.into(),
         }],
     };
     let txid = tx.txid();
@@ -330,16 +331,16 @@ fn gettxout_include_mempool_false_skips_mempool() -> Result<(), Box<dyn std::err
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xbb; 32])), 0),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFE,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFE),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 7_500,
-            script_pubkey: script,
+            value: Amount::from_sat(7_500),
+            script_pubkey: script.into(),
         }],
     };
     let txid = tx.txid();

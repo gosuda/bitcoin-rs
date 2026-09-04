@@ -15,7 +15,10 @@ use bitcoin_rs_node::{
     state::NodeState,
 };
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 use compact_str::CompactString;
 use crossbeam_channel::bounded;
 use parking_lot::Mutex;
@@ -121,16 +124,16 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
     let script_opcode = u8::try_from(label + 0x50)?;
     let coinbase = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![script_opcode, 0x51],
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: vec![script_opcode, 0x51].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50 * 100_000_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50 * 100_000_000),
+            script_pubkey: vec![0x51].into(),
         }],
     };
     let mut block = Block {
@@ -139,7 +142,7 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time: 1_296_688_603 + 600,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase],
@@ -154,7 +157,7 @@ fn excess_coinbase_child(prev: BlockHash) -> anyhow::Result<Block> {
     let Some(output) = block.txs.first_mut().and_then(|tx| tx.outputs.first_mut()) else {
         panic!("coinbase has no output");
     };
-    output.value = output.value.saturating_add(1);
+    output.value = output.value.saturating_add(Amount::from_sat(1));
     block.header.merkle_root = block_merkle_root(&block);
     mine_block_to_regtest_target(&mut block)?;
     Ok(block)
@@ -193,7 +196,8 @@ fn block_merkle_root(block: &Block) -> Hash256 {
 
 /// Decodes a 256-bit compact target into little-endian bytes. Negative,
 /// overflowed, and zero-mantissa encodings decode to an unreachable zero.
-fn compact_to_target(bits: u32) -> [u8; 32] {
+fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
+    let bits = bits.to_consensus();
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mantissa = u64::from(bits & 0x007f_ffff);
     let mut target = [0_u8; 32];
@@ -217,7 +221,7 @@ fn compact_to_target(bits: u32) -> [u8; 32] {
 
 /// Returns true when `hash` is at or below the compact target, comparing the
 /// little-endian byte arrays from the most significant end.
-fn pow_met(bits: u32, hash: &BlockHash) -> bool {
+fn pow_met(bits: CompactTarget, hash: &BlockHash) -> bool {
     let target = compact_to_target(bits);
     let hash_le = hash.as_bytes();
     for index in (0..32).rev() {
@@ -235,16 +239,16 @@ fn pow_met(bits: u32, hash: &BlockHash) -> bool {
 fn mempool_sequence_tx() -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x51].into(),
         }],
     }
 }
@@ -837,16 +841,16 @@ fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
 
     let tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x51].into(),
         }],
     };
     {
@@ -1151,15 +1155,15 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x11; 32])), 0),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50_000),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
     let error = mining
         .generate(GenerateRequest {

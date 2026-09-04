@@ -12,7 +12,10 @@ use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_mining::{
     CandidateContext, MiningError, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
 };
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Wtxid,
+};
 
 #[test]
 fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), Box<dyn Error>> {
@@ -146,7 +149,7 @@ fn context(height: u32, segwit_active: bool) -> CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
         height,
         version: 0x2000_0000,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1_700_000_001,
         current_time: 1_700_000_600,
         locktime_cutoff: 1_700_000_000,
@@ -219,14 +222,14 @@ fn tx_with_witness(label: u8, value: u64, parent: Option<Txid>) -> Tx {
                 parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&bytes))),
                 0,
             ),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![vec![label; 32]],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: vec![vec![label; 32]].into(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }

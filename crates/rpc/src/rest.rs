@@ -10,7 +10,8 @@ use alloc::sync::Arc;
 use std::str::FromStr;
 
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Script, Sequence, TxOut,
+    Txid, Witness, consensus_bytes, deserialize,
 };
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
@@ -396,7 +397,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
                 .map(|(height, txout)| {
                     json!({
                         "height": height,
-                        "value": tx_render::btc_amount_json(txout.value),
+                        "value": tx_render::btc_amount_json(txout.value.to_sat()),
                         "scriptPubKey": tx_render::script_pub_key_json(&txout.script_pubkey, ctx.chain_network)
                     })
                 })
@@ -976,7 +977,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: Vec::new(),
@@ -1089,7 +1090,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 1,
         };
         let genesis = Block {
@@ -1101,7 +1102,7 @@ mod tests {
             prev_blockhash: genesis.block_hash(),
             merkle_root: Hash256::default(),
             time: 2,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 2,
         };
         let child = Block {
@@ -1113,7 +1114,7 @@ mod tests {
             prev_blockhash: child.block_hash(),
             merkle_root: Hash256::default(),
             time: 3,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 3,
         };
         let tip = Block {
@@ -1153,7 +1154,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 1,
         };
         let applied = Header {
@@ -1161,7 +1162,7 @@ mod tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 2,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 2,
         };
         let header_tip = Header {
@@ -1169,7 +1170,7 @@ mod tests {
             prev_blockhash: applied.compute_hash(),
             merkle_root: Hash256::default(),
             time: 3,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 3,
         };
         let applied_tip = {
@@ -1207,7 +1208,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 1,
         };
         let child = Header {
@@ -1215,7 +1216,7 @@ mod tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 2,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 2,
         };
         let tip = Header {
@@ -1223,7 +1224,7 @@ mod tests {
             prev_blockhash: child.compute_hash(),
             merkle_root: Hash256::default(),
             time: 3,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 3,
         };
         publish_active_chain(&ctx, &[genesis, child, tip]);
@@ -1254,7 +1255,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 1,
         };
         let active_child = Header {
@@ -1262,7 +1263,7 @@ mod tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 2,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 2,
         };
         let active_tip = Header {
@@ -1270,7 +1271,7 @@ mod tests {
             prev_blockhash: active_child.compute_hash(),
             merkle_root: Hash256::default(),
             time: 3,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 3,
         };
         let side_child = Header {
@@ -1278,7 +1279,7 @@ mod tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 4,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 4,
         };
         let ids = publish_active_chain(&ctx, &[genesis, active_child, active_tip]);
@@ -1312,7 +1313,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1,
-                bits,
+                bits: CompactTarget::from_consensus(bits),
                 nonce: 1,
             },
             txs: Vec::new(),
@@ -1323,7 +1324,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 2,
-                bits,
+                bits: CompactTarget::from_consensus(bits),
                 nonce: 2,
             },
             txs: Vec::new(),
@@ -1379,7 +1380,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 1,
         };
         let first = Header {
@@ -1387,7 +1388,7 @@ mod tests {
             prev_blockhash: genesis.compute_hash(),
             merkle_root: Hash256::default(),
             time: 2,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 2,
         };
         let middle = Header {
@@ -1395,7 +1396,7 @@ mod tests {
             prev_blockhash: first.compute_hash(),
             merkle_root: Hash256::default(),
             time: 3,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 3,
         };
         let tail = Header {
@@ -1403,7 +1404,7 @@ mod tests {
             prev_blockhash: middle.compute_hash(),
             merkle_root: Hash256::default(),
             time: 4,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 4,
         };
         let hashes = publish_active_chain(&ctx, &[genesis, first, middle, tail]);
@@ -1438,15 +1439,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0xffff_ffff),
-                script_sig: vec![0x51],
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50 * 100_000_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50 * 100_000_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         Block {
             header: Header {
@@ -1454,7 +1455,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: coinbase.txid().0,
                 time: 1_296_688_602,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
             },
             txs: vec![coinbase],

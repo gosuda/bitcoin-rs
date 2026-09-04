@@ -25,7 +25,9 @@ use bitcoin_rs_mempool::{
     standardness::{PackageTxContext, is_standard_tx},
 };
 use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness,
+};
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
@@ -333,22 +335,21 @@ impl TxIngressConsumer {
                 continue;
             }
             if let Some(output) = mempool_prevouts.get(&input.previous_output) {
-                input_value = input_value.saturating_add(output.value);
+                input_value = input_value.saturating_add(output.value.to_sat());
                 prevouts.push((input.previous_output, output.clone()));
                 continue;
             }
             if let Some(live) = self.utxo.get_entry(&input.previous_output) {
-                input_value = input_value.saturating_add(live.txout.value);
+                input_value = input_value.saturating_add(live.txout.value.to_sat());
                 prevouts.push((input.previous_output, live.txout.clone()));
                 continue;
             }
             missing_inputs = true;
         }
 
-        let output_value = tx
-            .outputs
-            .iter()
-            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
+            sum.saturating_add(output.value.to_sat())
+        });
         let fee = input_value.saturating_sub(output_value);
         let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
         let sigop_cost = bitcoin_rs_script::count_tx_legacy(tx);
@@ -545,15 +546,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: vec![0x51],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(value),
+                script_pubkey: vec![0x6A].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -570,15 +571,15 @@ mod tests {
                     txid: parent_txid,
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 49_000,
-                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+                value: Amount::from_sat(49_000),
+                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -598,8 +599,8 @@ mod tests {
                 vout: 0,
             },
             TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50_000),
+                script_pubkey: vec![0x51].into(),
             },
             false,
             100,
@@ -805,15 +806,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x00],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: vec![0x00].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(50_000),
+                script_pubkey: vec![0x6A].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let txid = coinbase.txid();
         consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
@@ -838,8 +839,8 @@ mod tests {
         let mining = Arc::new(RecordingMining::new());
         let consumer = make_consumer_with_utxo(&gateway, mining);
         let mut tx = spending_tx();
-        tx.lock_time = 100;
-        tx.inputs[0].sequence = 0xFFFF_FFFE;
+        tx.lock_time = LockTime::from_consensus(100);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
         let txid = tx.txid();
         consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
         assert!(
@@ -866,15 +867,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(parent, 0),
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: vec![vec![0; 400_000]],
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: vec![vec![0; 400_000]].into(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         assert!(
             tx.weight() > 400_000,
