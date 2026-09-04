@@ -284,6 +284,7 @@ fn serve_metrics(
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                let _ = stream.set_nodelay(true);
                 let _ = stream.set_nonblocking(false);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
