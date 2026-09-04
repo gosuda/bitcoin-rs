@@ -216,8 +216,13 @@ impl TxIngressConsumer {
             reason,
             Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs)
         ) {
+            if is_coinbase(&tx) {
+                tracing::debug!(%txid, "p2p coinbase rejected; not held as orphan");
+                self.tx_admission.record_reject(txid, wtxid);
+                return;
+            }
             let held = Arc::new(tx);
-            self.tx_admission.record_orphan(&held);
+            self.tx_admission.record_orphan(&held, source);
             self.request_missing_parents(&held, source);
             tracing::debug!(%txid, "p2p tx missing inputs; held as orphan");
             return;
@@ -269,9 +274,8 @@ impl TxIngressConsumer {
                         .announce(txid, wtxid, Some(source.connection_id().get()));
                     self.mining_control.publish_generation();
                     tracing::trace!(%txid, "p2p tx admitted and relayed");
-                    for orphan in self.tx_admission.take_orphans_waiting_on(txid) {
-                        self.process_one(bitcoin_rs_p2p::InboundTx::new((*orphan).clone(), source));
-                    }
+                    // Waiting children are re-queued by the gateway observer
+                    // so RPC, reorg, and peer accepts share one wake path.
                 }
             }
             Err(error) => {
@@ -362,14 +366,24 @@ impl TxIngressConsumer {
         if !lease.is_current(source) {
             return;
         }
-        let items: Vec<Inventory> = tx
-            .inputs
-            .iter()
-            .filter(|input| input.previous_output != OutPoint::default())
-            .map(|input| {
-                Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(
-                    *input.previous_output.txid.as_bytes(),
-                ))
+        let mut parent_ids = hashbrown::HashSet::new();
+        {
+            let pool = self.mempool_gateway.read();
+            for input in &tx.inputs {
+                let prevout = input.previous_output;
+                if prevout.is_null() || prevout == OutPoint::default() {
+                    continue;
+                }
+                if pool.contains_txid(&prevout.txid) || self.utxo.get_entry(&prevout).is_some() {
+                    continue;
+                }
+                parent_ids.insert(prevout.txid);
+            }
+        }
+        let items: Vec<Inventory> = parent_ids
+            .into_iter()
+            .map(|txid| {
+                Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(*txid.as_bytes()))
             })
             .collect();
         if items.is_empty() {
@@ -397,6 +411,11 @@ fn unix_time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Core's `IsCoinBase`: one input spending the null prevout.
+fn is_coinbase(tx: &Tx) -> bool {
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 #[cfg(test)]
@@ -712,6 +731,39 @@ mod tests {
             mining.publish_count(),
             1,
             "accepted tx must wake mining exactly once"
+        );
+    }
+
+    #[test]
+    fn coinbase_is_rejected_not_orphaned() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let gateway = MempoolGateway::shared(Arc::clone(&pool));
+        let mining = Arc::new(RecordingMining::new());
+        let consumer = make_consumer(&gateway, mining);
+        let coinbase = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                script_sig: vec![0x00],
+                sequence: 0xFFFF_FFFF,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 50_000,
+                script_pubkey: vec![0x6A],
+            }],
+            lock_time: 0,
+        };
+        let txid = coinbase.txid();
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
+        assert_eq!(
+            consumer.tx_admission.orphan_count(),
+            0,
+            "a peer coinbase must not consume orphan quota"
+        );
+        assert!(
+            consumer.tx_admission.is_rejected(Hash256::from(txid)),
+            "a peer coinbase must enter recent-rejects"
         );
     }
 }

@@ -1848,17 +1848,14 @@ impl NodeState {
         let tx_admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::clone(
             &mempool_gateway,
         )));
-        // Chain movement (block connect / reorg) must drop stale recent-rejects
-        // so a previously-invalid tx can be requested again once its inputs
-        // confirm. The apply path already publishes those mutations through
-        // this gateway; the observer is the one place that sees them all.
+        tx_admission.attach_ingress(inbound_tx_tx.clone());
         if let Err(error) = mempool_gateway.attach_observer_leg(
-            "tx-admission",
-            Arc::new(crate::mempool_observer::RejectInvalidationObserver::new(
+            "tx-orphans",
+            Arc::new(crate::mempool_observer::OrphanWakeObserver::new(
                 Arc::clone(&tx_admission),
             )),
         ) {
-            tracing::error!(error, "failed to attach tx-admission observer");
+            tracing::error!(error, "failed to attach orphan-wake observer");
         }
         let mut apply_handles = crate::apply::ApplyHandles {
             network: config.network,
@@ -1888,6 +1885,7 @@ impl NodeState {
             )),
             journal,
             checkpoint_publisher: None,
+            tx_admission: Some(Arc::clone(&tx_admission)),
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
         // A restored checkpoint is durable at its own height by definition, so

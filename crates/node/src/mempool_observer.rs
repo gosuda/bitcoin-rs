@@ -2,37 +2,39 @@
 //!
 //! Sequence ZMQ and mining-generation wakes stay with their owner crates
 //! ([`crate::zmq_publisher`] and [`crate::mining`]). This module holds only
-//! the two legs this wiring adds: recent-reject invalidation on chain
-//! movement, and `inv` announce for RPC/reorg accepts.
+//! the two legs this wiring adds: orphan wake on any-origin parent accept,
+//! and `inv` announce for RPC/reorg accepts. Chain movement clears
+//! recent-rejects in [`crate::apply`], not here.
 
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolObserver, MutationEnvelope, MutationOutcome};
 use bitcoin_rs_primitives::{Txid, Wtxid};
 
-/// Clears the recent-rejects cache when the chain moves.
+/// Re-queues orphans whose parent was just admitted, from any origin.
 ///
-/// A transaction rejected against an old tip may become valid once its
-/// inputs confirm, so stale rejections must not suppress the next `inv`.
-pub(crate) struct RejectInvalidationObserver {
+/// Peer, RPC, and reorg accepts all publish `Accepted` here, so waiting
+/// children share one wake path. Block confirmation of a parent that was
+/// never in the pool is handled by the apply path, which sees every
+/// connected txid.
+pub(crate) struct OrphanWakeObserver {
     admission: Arc<crate::tx_admission::TxAdmission>,
 }
 
-impl RejectInvalidationObserver {
-    /// Observes chain-moving mutations on behalf of `admission`.
+impl OrphanWakeObserver {
+    /// Wakes held children when `admission` sees a newly available parent.
     #[must_use]
     pub(crate) fn new(admission: Arc<crate::tx_admission::TxAdmission>) -> Self {
         Self { admission }
     }
 }
 
-impl MempoolObserver for RejectInvalidationObserver {
+impl MempoolObserver for OrphanWakeObserver {
     fn on_mutation(&self, envelope: &MutationEnvelope) {
-        if matches!(
-            envelope.origin,
-            AdmissionOrigin::Block | AdmissionOrigin::Reorg
-        ) {
-            self.admission.invalidate_recent_rejects();
+        for change in &envelope.result.changes {
+            if matches!(change.outcome, MutationOutcome::Accepted) {
+                self.admission.enqueue_orphans_waiting_on(Txid(change.txid));
+            }
         }
     }
 }
@@ -82,6 +84,7 @@ mod tests {
     use bitcoin_rs_mempool::{
         AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationOutcome,
     };
+    use bitcoin_rs_p2p::InboundTx;
     use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
     use parking_lot::RwLock;
     use std::sync::Arc;
@@ -118,49 +121,35 @@ mod tests {
     }
 
     #[test]
-    fn reject_invalidation_clears_cache_only_on_chain_movement() {
-        use bitcoin_rs_primitives::Wtxid;
-
+    fn orphan_wake_requeues_children_on_parent_accept() {
         let gateway = MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             None,
         );
         let admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::new(gateway)));
-        let rejected = tx(8);
-        admission.record_reject(rejected.txid(), rejected.wtxid());
-        assert!(admission.is_rejected(Hash256::from(rejected.txid())));
+        let (ingress_tx, ingress_rx) = crossbeam_channel::bounded::<InboundTx>(4);
+        admission.attach_ingress(ingress_tx);
 
-        let observer = super::RejectInvalidationObserver::new(Arc::clone(&admission));
+        let child = Arc::new(tx(8));
+        let parent = child.inputs[0].previous_output.txid;
+        let (lease_tx, _lease_rx) = crossbeam_channel::unbounded();
+        let source = bitcoin_rs_p2p::PeerLease::new(lease_tx)
+            .source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        admission.record_orphan(&child, source);
+
+        let observer = super::OrphanWakeObserver::new(Arc::clone(&admission));
         observer.on_mutation(&envelope(
             AdmissionOrigin::Rpc,
-            Hash256::from(rejected.txid()),
+            Hash256::from(parent),
             MutationOutcome::Accepted,
         ));
-        assert!(
-            admission.is_rejected(Hash256::from(rejected.txid())),
-            "RPC admission must not drop recent-rejects"
-        );
 
-        observer.on_mutation(&envelope(
-            AdmissionOrigin::Block,
-            Hash256::from(rejected.txid()),
-            MutationOutcome::Removed(bitcoin_rs_mempool::RemovalReason::BlockInclusion),
-        ));
-        assert!(
-            !admission.is_rejected(Hash256::from(rejected.txid())),
-            "block-connect must drop recent-rejects"
-        );
-
-        admission.record_reject(rejected.txid(), Wtxid(rejected.txid().0));
-        observer.on_mutation(&envelope(
-            AdmissionOrigin::Reorg,
-            Hash256::from(rejected.txid()),
-            MutationOutcome::Accepted,
-        ));
-        assert!(
-            !admission.is_rejected(Hash256::from(rejected.txid())),
-            "reorg must drop recent-rejects"
-        );
+        let inbound = ingress_rx
+            .try_recv()
+            .expect("accepted parent must re-queue the waiting child");
+        assert_eq!(inbound.tx.txid(), child.txid());
+        assert_eq!(inbound.source, source);
+        assert_eq!(admission.orphan_count(), 0);
     }
 
     #[test]
