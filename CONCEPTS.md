@@ -11,11 +11,12 @@ signing, import, and fee-bump methods are absent. Key-free descriptor helpers,
 signer can drive a PSBT workflow without giving key custody to the node.
 
 ### Wallet-facing public surface
-What an external wallet is allowed to call: native Esplora HTTP (tip, fees,
-block-height checkpoints, address/script history and UTXOs, `POST /tx`) and
-the key-free node RPCs above. The consumer is a separate process — or the
-embeddable `Node` API — and does not receive `NodeState`, `UtxoSet`, or index
-types. See `docs/contracts/wallet-facing.md`.
+What an external wallet is allowed to call: native Esplora HTTP at `/api`
+on the JSON-RPC listener (tip, fees, block-height checkpoints,
+address/script history and UTXOs, `POST /tx`) and the key-free node RPCs
+above. The consumer is a separate process — or the embeddable `Node`
+API — and does not receive `NodeState`, `UtxoSet`, or index types. See
+`docs/contracts/wallet-facing.md`.
 
 ### Stable chainstate RPC read
 A whole-UTXO RPC read that shares the node's chain-transition mutex. The mutex

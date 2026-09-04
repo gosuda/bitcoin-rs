@@ -220,7 +220,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 
 | surface | since | notes |
 |---|---|---|
-| `esplora/*` | 0.4.0 | Esplora-compatible indexer HTTP surface, a separate non-Core contract (crates/rpc/src/esplora.rs, docs/rest-interface.md). |
+| `esplora/*` | 0.4.0 | Esplora-compatible indexer HTTP surface at /api on the JSON-RPC listener (crates/rpc/src/esplora.rs, docs/contracts/wallet-facing.md). |
 
 ## ZMQ topics
 
