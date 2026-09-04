@@ -1209,6 +1209,11 @@ pub struct Context {
     /// `None` in test contexts; populated by `NodeState` with the process-wide
     /// `WarningStore`. Each request loads one immutable snapshot.
     warnings: Option<Arc<dyn WarningSource>>,
+    /// When this node started, the origin `uptime` measures from.
+    ///
+    /// The node records it before storage opens; a context built without
+    /// one (tests) starts its clock at construction.
+    started_at: std::time::Instant,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
 // handle behind it uses atomics, channels, or locks for interior mutation.
@@ -1278,6 +1283,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             warnings: None,
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -1330,6 +1336,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             warnings: None,
+            started_at: std::time::Instant::now(),
         }
     }
     /// Builds a context that shares pre-existing handles owned elsewhere.
@@ -1398,6 +1405,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             warnings: None,
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -1421,6 +1429,19 @@ impl Context {
     pub fn with_warnings(mut self, source: Arc<dyn WarningSource>) -> Self {
         self.warnings = Some(source);
         self
+    }
+
+    /// Sets the node start instant `uptime` measures from.
+    #[must_use]
+    pub fn with_started_at(mut self, started_at: std::time::Instant) -> Self {
+        self.started_at = started_at;
+        self
+    }
+
+    /// Seconds since the node started.
+    #[must_use]
+    pub fn uptime_seconds(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
     }
 
     /// The node's active warnings, rendered in deterministic order.

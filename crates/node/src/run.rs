@@ -878,6 +878,9 @@ pub(crate) fn start_node(
     NodeServices,
     Arc<bitcoin_rs_rpc::context::Context>,
 )> {
+    // The `uptime` origin: recorded before storage opens so a long recovery
+    // or replay counts as runtime, the way Core's startup clock does.
+    let started_at = std::time::Instant::now();
     cap_global_thread_pool();
 
     let injected_shutdown = runtime.shutdown;
@@ -994,6 +997,7 @@ pub(crate) fn start_node(
     rpc_context = rpc_context.with_zmq_notifications(state.active_zmq_notifications());
     rpc_context = rpc_context.with_debug_log_path(state.data_dir().join("debug.log"));
     rpc_context = rpc_context.with_warnings(state.warning_store());
+    rpc_context = rpc_context.with_started_at(started_at);
     let context = Arc::new(rpc_context);
     let rpc_handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let rpc_server = bitcoin_rs_rpc::RpcServer::bind(

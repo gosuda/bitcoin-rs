@@ -1,8 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::str::FromStr as _;
-use std::sync::OnceLock;
-use std::time::Instant;
 
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
@@ -12,8 +10,6 @@ use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_om
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{params_array, required_str, required_u64};
-
-static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
 fn conf_target_blocks(conf_target: u64) -> u32 {
     u32::try_from(conf_target).unwrap_or(u32::MAX)
@@ -40,11 +36,9 @@ fn btc_amount_json(satoshis: u64) -> Value {
     }
 }
 
-pub(crate) fn uptime(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+pub(crate) fn uptime(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     crate::handlers::ensure_no_params(params)?;
-    let start = SERVER_START.get_or_init(Instant::now);
-    let secs = start.elapsed().as_secs();
-    Ok(json!(secs))
+    Ok(json!(ctx.uptime_seconds()))
 }
 
 pub(crate) fn getrpcinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -379,12 +373,18 @@ mod tests {
     }
 
     #[test]
-    fn uptime_returns_u64_seconds() {
-        let ctx = Arc::new(Context::new());
+    fn uptime_measures_from_the_node_start_not_the_first_call() {
+        // Core's `uptime` counts from process start. A clock that starts on
+        // the first RPC call reports ~0 no matter how long the node has run.
+        let started_at = std::time::Instant::now() - std::time::Duration::from_secs(90);
+        let ctx = Arc::new(Context::new().with_started_at(started_at));
         let result = uptime(&ctx, &json!([])).unwrap_or_else(|err| panic!("uptime failed: {err}"));
+        let secs = result
+            .as_u64()
+            .unwrap_or_else(|| panic!("uptime returns u64 seconds: {result:?}"));
         assert!(
-            result.is_u64() || result.is_i64(),
-            "uptime returns numeric: {result:?}"
+            (90..95).contains(&secs),
+            "uptime {secs}s must count from the supplied start"
         );
     }
 
