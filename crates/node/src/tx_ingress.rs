@@ -215,7 +215,10 @@ impl TxIngressConsumer {
         if matches!(
             reason,
             Some(bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs)
-        ) {
+        ) && tx.inputs.iter().all(|input| {
+            input.previous_output.txid != Txid::default()
+                || input.previous_output.vout != u32::MAX
+        }) {
             let held = Arc::new(tx);
             self.tx_admission.record_orphan(&held);
             self.request_missing_parents(&held, source);
@@ -362,15 +365,26 @@ impl TxIngressConsumer {
         if !lease.is_current(source) {
             return;
         }
-        let items: Vec<Inventory> = tx
-            .inputs
-            .iter()
-            .filter(|input| input.previous_output != OutPoint::default())
-            .map(|input| {
-                Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(
-                    *input.previous_output.txid.as_bytes(),
-                ))
-            })
+        let pool = self.mempool_gateway.read();
+        let mut parent_ids = hashbrown::HashSet::new();
+        for input in &tx.inputs {
+            if input.previous_output == OutPoint::default() {
+                continue;
+            }
+            let present = pool.transaction_by_txid(&input.previous_output.txid)
+                .and_then(|parent| usize::try_from(input.previous_output.vout).ok()
+                    .and_then(|vout| parent.outputs.get(vout)))
+                .is_some()
+                || self.utxo.get_entry(&input.previous_output).is_some();
+            if !present {
+                parent_ids.insert(input.previous_output.txid);
+            }
+        }
+        let items: Vec<Inventory> = parent_ids
+            .into_iter()
+            .map(|txid| Inventory::Transaction(bitcoin::hashes::Hash::from_byte_array(
+                *txid.as_bytes(),
+            )))
             .collect();
         if items.is_empty() {
             return;
