@@ -351,6 +351,17 @@ fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dy
 }
 
 #[test]
+fn gettxoutsetinfo_rejects_trailing_parameters() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let error = handler
+        .dispatch("gettxoutsetinfo", &json!(["muhash", null, false, true]))
+        .expect_err("trailing parameters must be refused");
+    assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
+    Ok(())
+}
+
+#[test]
 fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
