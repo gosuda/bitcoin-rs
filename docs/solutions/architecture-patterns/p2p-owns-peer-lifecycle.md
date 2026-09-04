@@ -40,6 +40,8 @@ operation cannot publish, send to, or cancel a replacement.
 - The node starts one `P2pService`. RPC applies the same network-activity
   transition (`apply_network_active`) on the shared flag and `PeerTable`.
   Production block-download scheduling stays on `BlockSync`'s download window.
+  `P2pService` does not hold a second window or a ready-path `forget_peer`
+  that would shadow that owner.
 - Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale
