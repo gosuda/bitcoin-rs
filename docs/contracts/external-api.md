@@ -11,7 +11,8 @@ witness fill. `API-14` is Core v31 `submitblock` / GBT proposal duplicate
 vocabulary. `API-15` is BIP22 reject-reason mapping. `API-16` is GBT
 `vbrequired` always 0. `API-17` is Core `CheckWitnessMalleation`
 reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
-`prioritisetransaction` dummy/`fee_delta` arity.
+`prioritisetransaction` dummy/`fee_delta` arity. `API-20` is
+`prioritisetransaction` dust-output refusal.
 
 ## Clauses
 
@@ -247,6 +248,17 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
   prioritisetransaction must be 0.`
 - Two-argument calls do not treat params[1] as `fee_delta`.
 
+### `API-20`: `prioritisetransaction` refuses pooled dust
+
+- **Owner**: `prioritisetransaction` in `crates/rpc/src/handlers/mining.rs`.
+- Core v31 rejects a mempool transaction with dust outputs when
+  `require_standard` is set: `-8` `Priority is not supported for
+  transactions with dust outputs.`
+- `require_standard` follows Core's `-acceptnonstdtxn` default: enforced
+  everywhere except regtest. Absent txids (fee-delta overlay only) are
+  not checked. Dust classification uses the pool's dust-relay fee via
+  `tx_has_dust_outputs`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -353,3 +365,9 @@ owned by [wallet-facing.md](wallet-facing.md).
     `prioritisetransaction_calls_mempool_prioritise_directly`,
     `prioritisetransaction_rejects_nonzero_dummy_like_core`,
     `prioritisetransaction_requires_fee_delta_as_third_parameter`
+- `API-20`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `prioritisetransaction_rejects_dust_outputs_like_core`,
+    `prioritisetransaction_allows_dust_overlay_on_regtest`,
+    `prioritisetransaction_allows_absent_txid_overlay`
+  - `crates/mempool/src/standardness.rs` test `dust_relay_fee_changes_the_boundary`

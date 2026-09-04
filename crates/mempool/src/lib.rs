@@ -52,4 +52,6 @@ pub use pool::{
     PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
-pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
+pub use standardness::{
+    StandardnessError, StandardnessPolicy, is_standard_tx, tx_has_dust_outputs,
+};
