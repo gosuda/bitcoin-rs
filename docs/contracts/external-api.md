@@ -16,7 +16,8 @@ reject reasons. `API-18` is GBT `coinbaseaux.flags`. `API-19` is
 `submitblock` duplicate for reorged scripts-valid bodies. `API-22` is
 `getmininginfo` omitting unset optional fields. `API-23` is
 `estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-24`
-is `generateblock` Core txid/raw-tx parse errors.
+is `generateblock` Core txid/raw-tx parse errors. `API-25` is
+`getprioritisedtransactions` `modified_fee` in satoshis.
 
 ## Clauses
 
@@ -312,6 +313,15 @@ is `generateblock` Core txid/raw-tx parse errors.
   `Transaction decode failed for {str}. Make sure the tx has at least one
   input.`
 
+### `API-25`: `getprioritisedtransactions` `modified_fee` is satoshis
+
+- **Owner**: `getprioritisedtransactions` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Core mining RPCs use satoshi amounts, not BTC. `fee_delta` is already
+  an integer satoshi overlay. `modified_fee` (actual fee plus delta,
+  present only when `in_mempool`) is the same unit: a JSON number in
+  satoshis, matching Core `CAmount`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -446,3 +456,6 @@ owned by [wallet-facing.md](wallet-facing.md).
     `generateblock_rejects_unknown_mempool_txid_like_core`,
     `generateblock_rejects_undecodable_raw_tx_like_core`,
     `generateblock_keeps_raw_transactions`
+- `API-25`:
+  - `crates/rpc/src/handlers/mining.rs` test
+    `getprioritisedtransactions_projects_the_overlay`

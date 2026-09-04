@@ -77,7 +77,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. |
 | `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag. Unknown 64-hex txids are -5; raw-tx decode failures are -22. |
 | `getnetworkhashps` | 0.4.0 | Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip. |
-| `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. |
+| `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. modified_fee is satoshis like Core mining RPCs, not BTC. |
 
 ### Deviation
 
