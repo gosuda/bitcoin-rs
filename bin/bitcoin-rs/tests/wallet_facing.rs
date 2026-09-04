@@ -120,21 +120,32 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
 #[test]
 fn source_does_not_import_node_internals() {
     let source = include_str!("wallet_facing.rs");
-    let imports = source.lines().filter_map(|line| {
-        let line = line.trim_start();
-        line.starts_with("use ").then_some(line)
-    });
+    let contract = include_str!("../../../docs/contracts/wallet-facing.md");
+    let banned_imports = contract
+        .lines()
+        .skip_while(|line| !line.contains("wallet-facing-forbidden-imports:start"))
+        .skip(1)
+        .take_while(|line| !line.contains("wallet-facing-forbidden-imports:end"))
+        .filter_map(|line| line.trim().strip_prefix("- `")?.strip_suffix('`'))
+        .collect::<Vec<_>>();
+
+    let mut imports = Vec::new();
+    let mut current_import = None;
+    for line in source.lines().map(str::trim_start) {
+        if current_import.is_none() && line.starts_with("use ") {
+            current_import = Some(String::new());
+        }
+        if let Some(import) = &mut current_import {
+            import.push_str(line);
+            if line.contains(';') {
+                imports.push(std::mem::take(import));
+                current_import = None;
+            }
+        }
+    }
+
     for line in imports {
-        for banned in [
-            "bitcoin_rs::",
-            "bitcoin_rs_node",
-            "bitcoin_rs_storage",
-            "bitcoin_rs_primitives",
-            "bitcoin_rs_index",
-            "bitcoin_rs_utxo",
-            "NodeState",
-            "UtxoSet",
-        ] {
+        for banned in banned_imports.clone() {
             assert!(
                 !line.contains(banned),
                 "wallet-facing proof must not import {banned}: {line}"

@@ -37,6 +37,17 @@ out of tree.
 
 - In-tree fixtures that import `NodeState`, `UtxoSet`, index types, or
   other node crates do not prove this contract.
+- The forbidden import tokens used by the executable proof are defined here:
+  <!-- wallet-facing-forbidden-imports:start -->
+  - `bitcoin_rs::`
+  - `bitcoin_rs_node`
+  - `bitcoin_rs_storage`
+  - `bitcoin_rs_primitives`
+  - `bitcoin_rs_index`
+  - `bitcoin_rs_utxo`
+  - `NodeState`
+  - `UtxoSet`
+  <!-- wallet-facing-forbidden-imports:end -->
 - Proof: `bin/bitcoin-rs/tests/wallet_facing.rs` lives in the binary
   package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. The package `[lib]`
   is process-input adapters (`bitcoin.conf`); the test source does not
