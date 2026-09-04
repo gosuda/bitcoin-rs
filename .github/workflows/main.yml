@@ -50,7 +50,7 @@ jobs:
       # Consensus fixture corpus: committed tests that are --ignored by
       # design (large deterministic vectors), so the workspace run never
       # picks them up.
-      - run: cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
+      - run: cargo test -p bitcoin-rs-consensus --features kernel --no-fail-fast -- --include-ignored
       # Full-node feature lint surface (the default-feature lint runs in
       # ci.yml). In a virtual workspace (no root [package]), `--features`
       # flags are not forwarded to library crates; use `-p bitcoin-rs` so the
@@ -64,12 +64,9 @@ jobs:
           # (virtual workspace: -p bitcoin-rs does not forward features to node's own
           # test targets, so their lints are silently skipped without this step).
           cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
-          # -p bitcoin-rs-consensus lints consensus's own test targets with
-          # kernel enabled (the PR-gate clippy lane lints them without kernel).
-          # Without this step, consensus's kernel-gated integration tests
-          # (kernel_block_parity, kernel_vector_parity) and the
-          # kernel_verify_spike example would never be linted.
-          cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings
+          # Kernel-gated integration tests (kernel_block_parity,
+          # kernel_vector_parity) only compile with the feature on.
+          cargo clippy -p bitcoin-rs-consensus --all-targets --features kernel -- -D warnings
 
   bench-smoke:
     runs-on: ubuntu-latest
@@ -118,10 +115,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # consensus and node have `kernel` in their per-crate defaults, so
-      # `cargo check --workspace --all-targets` compiles the C++ kernel
-      # engine; install its prerequisites.
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # consensus and node no longer default to kernel, so workspace check
+      # does not compile libbitcoinkernel.
       # dtolnay action installs the newest nightly via rustup in-job.
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2

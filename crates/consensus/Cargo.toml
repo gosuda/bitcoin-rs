@@ -12,7 +12,9 @@ description = "bitcoin-rs :: consensus"
 workspace = true
 
 [features]
-default = ["kernel"]
+default = []
+# Compiles libbitcoinkernel as an independent Core oracle. Production apply
+# stays on the native interpreter even when this feature is on.
 kernel = ["dep:bitcoinkernel"]
 rocksdb = []
 fjall = []

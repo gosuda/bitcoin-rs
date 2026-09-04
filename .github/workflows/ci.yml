@@ -56,28 +56,10 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Pure-Rust clippy gate with -D warnings. consensus and node have
-      # `kernel` in their per-crate defaults, which would pull in the C++
-      # libbitcoinkernel build (cmake + libboost-dev); exclude them from the
-      # workspace-wide pass and lint them separately with --no-default-features
-      # so the PR gate needs no C++ toolchain install.
-      - run: |
-          cargo clippy --workspace --all-targets \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
-            -- -D warnings
-          # consensus without kernel: --all-targets compiles its unit tests
-          # (bip30/bip34/bip112/bip113/bip141/bip143 modules in src/),
-          # integration tests (vectors, coinbase_amount), and benches.
-          # Previously invisible to the hook lanes: the workspace-wide pass
-          # would either fail (no cmake for kernel) or the crate was excluded
-          # entirely, leaving its test-target lints unchecked.
-          cargo clippy -p bitcoin-rs-consensus \
-            --no-default-features --all-targets -- -D warnings
-          # node without kernel: add back fjall and zmq (the pure-Rust
-          # defaults from bin/bitcoin-rs) so the crate and its test/bench
-          # targets compile and are linted.
-          cargo clippy -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      # Pure-Rust clippy gate with -D warnings. Library defaults no longer
+      # pull libbitcoinkernel, so the workspace pass covers consensus and
+      # node without a C++ toolchain.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -86,17 +68,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # Pure-Rust test gate: each workspace member tested with its own default
-      # features minus kernel. Deliberately no apt step -- the default path
-      # needs no CMake/Boost toolchain; the kernel engine is opt-in and
-      # exercised only by the main-only lanes in main.yml. consensus and node
-      # are excluded from the workspace pass (their defaults include kernel)
-      # and tested separately with --no-default-features.
-      - run: |
-          cargo test --workspace --no-fail-fast \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-          cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
-          cargo test -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq --no-fail-fast
+      # features. Deliberately no apt step -- the default path needs no
+      # CMake/Boost toolchain; the kernel oracle is opt-in and exercised only
+      # by the main-only lanes in main.yml.
+      - run: cargo test --workspace --no-fail-fast
       # Isolated so node's default `zmq` feature cannot unify this package on.
       - run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
       # Node / binary tests run with the full-node backend set, minus the
@@ -116,9 +91,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The kernel engine is built from C++ (cmake + libboost-dev); the default
-      # feature set now includes it, so every production lane installs the
-      # prerequisites up front.
+      # The kernel oracle is built from C++ (cmake + libboost-dev); benches
+      # that request FULL_NODE_FEATURES install the prerequisites up front.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
       - run: |
           cargo bench -p bitcoin-rs --no-run \

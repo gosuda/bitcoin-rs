@@ -4,8 +4,8 @@
 //! Consensus authority is `bitcoinkernel`. This harness replays real mainnet
 //! transactions — one committed fixture per script class under
 //! `tests/vectors/scripts/` — through the kernel entry the production apply
-//! path uses (`bitcoin_rs_consensus::kernel::verify_tx_scripts`, the seam
-//! `verify_transaction` dispatches to under `feature = "kernel"`), and asserts:
+//! through the kernel oracle (`bitcoin_rs_consensus::kernel::verify_tx_scripts`)
+//! and asserts:
 //!
 //! * every pristine fixture is **accepted**, and
 //! * every applicable in-code mutation (signature bit flip, scriptSig
@@ -15,14 +15,10 @@
 //! ## The differential is interpreter-vs-kernel, not kernel-vs-kernel (ADV-1)
 //!
 //! The Rust side of the differential calls `bitcoin_rs_script::Interpreter`
-//! **directly**. It must not route through `verify_transaction`: under
-//! `feature = "kernel"`, that function dispatches script verdicts to the same
-//! `kernel::verify_tx_scripts` path as the kernel side
-//! (by design, per R2/KTD5 of plan 2026-06-10-001), which would silently turn
-//! this differential into kernel-vs-kernel and make it unable to detect any
-//! interpreter divergence. That cfg structure is production-correct and is
-//! pinned elsewhere (`verify_tx.rs` kernel tests); this file deliberately
-//! bypasses it for the *test-only* Rust verdict. [`differential_is_non_vacuous`]
+//! **directly**. `verify_transaction` is always the native path, so routing
+//! through it would still be a valid native verdict; this file keeps the
+//! interpreter call explicit so a future dispatch change cannot silently
+//! compare kernel against itself. [`differential_is_non_vacuous`]
 //! proves the bypass holds: each engine is run twice on a committed taproot
 //! script-path fixture (pristine vs tampered control block) and must accept
 //! the first and reject the second.

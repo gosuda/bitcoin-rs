@@ -1,14 +1,9 @@
 //! Consensus validation surfaces for bitcoin-rs.
 //!
-//! Script verification has two backends. The native Rust interpreter in
-//! `bitcoin-rs-script` executes every consensus spend class: legacy, P2SH,
-//! `SegWit` v0, and Taproot key-path and script-path. The `kernel` feature
-//! routes the same checks through bitcoinkernel (Bitcoin Core's C++ engine)
-//! and is the production default in this crate and in `bitcoin-rs-node`.
-//! The `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no
-//! `kernel`), so `cargo build -p bitcoin-rs` uses the native interpreter.
-//! Issue #213 keeps `kernel` as the library default until native wins the
-//! signed-spend and full-replay gates; see
+//! Script verification always runs through the native Rust interpreter in
+//! `bitcoin-rs-script`: legacy, P2SH, `SegWit` v0, and Taproot key-path and
+//! script-path. The `kernel` feature compiles `libbitcoinkernel` as an
+//! independent Core oracle; it does not replace the apply path. See
 //! `docs/contracts/validation-default.md`.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -42,7 +37,7 @@ pub mod bip68;
 pub mod bip9;
 /// Parse-once block state shared by the native apply path.
 pub mod block_view;
-/// Feature-gated bitcoinkernel wrapper.
+/// Feature-gated `libbitcoinkernel` oracle.
 pub mod kernel;
 /// Portable Rust validator.
 pub mod rust_path;

@@ -481,6 +481,71 @@ impl Interpreter {
         tx: &Tx,
         input_idx: usize,
     ) -> Result<bool, ScriptError> {
+        self.execute_with_cache(
+            script_pubkey,
+            script_sig,
+            witness,
+            flags,
+            prevouts,
+            tx,
+            input_idx,
+            None,
+        )
+    }
+
+    /// Executes one input using a caller-filled sighash cache.
+    ///
+    /// The cache must have been constructed over `tx`. Apply-path verification
+    /// precomputes midstates once per transaction and clones that cache into
+    /// each input so parallel checks do not rehash prevouts, sequences, or
+    /// outputs.
+    pub fn execute_cached(
+        &self,
+        flags: VerifyFlags,
+        spent_outputs: &[TxOut],
+        tx: &Tx,
+        input_idx: usize,
+        cache: SighashCache<'_>,
+    ) -> Result<bool, ScriptError> {
+        let input = tx
+            .inputs
+            .get(input_idx)
+            .ok_or(ScriptError::InputIndexOutOfRange {
+                index: input_idx,
+                inputs: tx.inputs.len(),
+            })?;
+        self.execute_with_cache(
+            &spent_outputs
+                .get(input_idx)
+                .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
+                .script_pubkey,
+            &input.script_sig,
+            &input.witness,
+            flags,
+            spent_outputs,
+            tx,
+            input_idx,
+            Some(cache),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::unused_self,
+        clippy::trivially_copy_pass_by_ref,
+        reason = "same driver shape as execute_with_prevouts plus the shared cache; Interpreter is a ZST"
+    )]
+    fn execute_with_cache(
+        &self,
+        script_pubkey: &[u8],
+        script_sig: &[u8],
+        witness: &[Vec<u8>],
+        flags: VerifyFlags,
+        prevouts: &[TxOut],
+        tx: &Tx,
+        input_idx: usize,
+        cache: Option<SighashCache<'_>>,
+    ) -> Result<bool, ScriptError> {
         let inputs = tx.inputs.len();
         let input = tx
             .inputs
@@ -527,6 +592,8 @@ impl Interpreter {
             Cow::Owned(grafted)
         };
 
+        let cache = if matches_tx { cache } else { None };
+
         if is_p2tr(script_pubkey) && flags.contains(VerifyFlags::TAPROOT) {
             return verify_taproot(
                 &spending,
@@ -535,10 +602,16 @@ impl Interpreter {
                 witness,
                 prevouts,
                 flags,
+                cache,
             );
         }
 
-        let mut checker = TxSignatureChecker::new(&spending, input_idx, prevout.value, prevouts);
+        let mut checker = match cache {
+            Some(cache) => {
+                TxSignatureChecker::with_cache(tx, input_idx, prevout.value, prevouts, cache)
+            }
+            None => TxSignatureChecker::new(&spending, input_idx, prevout.value, prevouts),
+        };
         verify_script(
             script_sig,
             script_pubkey,
@@ -781,6 +854,7 @@ fn verify_taproot(
     witness: &[Vec<u8>],
     prevouts: &[TxOut],
     flags: VerifyFlags,
+    cache: Option<SighashCache<'_>>,
 ) -> Result<bool, ScriptError> {
     if prevouts.len() != spending.inputs.len() {
         return Err(ScriptError::TaprootPrevoutsUnavailable);
@@ -811,6 +885,7 @@ fn verify_taproot(
             &stack,
             annex_bytes.as_deref(),
             prevouts,
+            cache,
         )
     } else {
         verify_taproot_scriptpath(
@@ -822,6 +897,7 @@ fn verify_taproot(
             annex_bytes,
             prevouts,
             flags,
+            cache,
         )
     }
 }
@@ -848,6 +924,7 @@ fn verify_taproot_keypath(
     stack: &[Vec<u8>],
     annex_bytes: Option<&[u8]>,
     prevouts: &[TxOut],
+    cache: Option<SighashCache<'_>>,
 ) -> Result<bool, ScriptError> {
     let signature_bytes = &stack[0];
     let sighash_type = match signature_bytes.len() {
@@ -864,7 +941,7 @@ fn verify_taproot_keypath(
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
     let public_key = XOnlyPublicKey::from_slice(program)
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
-    let mut cache = SighashCache::new(spending);
+    let mut cache = cache.unwrap_or_else(|| SighashCache::new(spending));
     let sighash = cache
         .taproot_signature_hash(input_idx, prevouts, annex_bytes, None, sighash_type)
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
@@ -879,6 +956,10 @@ fn verify_taproot_keypath(
 }
 
 /// Verifies a taproot script-path spend (BIP341/BIP342).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "script-path needs witness, control, annex, flags, and the shared sighash cache"
+)]
 fn verify_taproot_scriptpath(
     spending: &Tx,
     input_idx: usize,
@@ -888,6 +969,7 @@ fn verify_taproot_scriptpath(
     annex_bytes: Option<Vec<u8>>,
     prevouts: &[TxOut],
     flags: VerifyFlags,
+    cache: Option<SighashCache<'_>>,
 ) -> Result<bool, ScriptError> {
     // Core: "const valtype& control = SpanPopBack(stack); const valtype& script = SpanPopBack(stack);"
     let control = stack
@@ -955,7 +1037,10 @@ fn verify_taproot_scriptpath(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
     );
 
-    let mut checker = TxSignatureChecker::new(spending, input_idx, 0, prevouts);
+    let mut checker = match cache {
+        Some(cache) => TxSignatureChecker::with_cache(spending, input_idx, 0, prevouts, cache),
+        None => TxSignatureChecker::new(spending, input_idx, 0, prevouts),
+    };
     checker.set_annex(annex_bytes);
 
     eval::eval_script(

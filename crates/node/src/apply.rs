@@ -1847,7 +1847,7 @@ pub fn replay_local_block(
 /// below the parallel threshold and wasted a further 11s above it. Sixty-four
 /// blocks turns roughly 21,000 dispatches into 330.
 ///
-/// Bounded by memory: the window holds every block's parsed kernel block and
+/// Bounded by memory: the window holds every block's prepared view and
 /// resolved prevouts at once, which costs far more than the block bytes.
 /// Measured over `0..150_000`, pinned to 32 cores, medians of interleaved runs:
 ///
@@ -2169,7 +2169,7 @@ fn prove_window<'a>(
     let parsed: Vec<core::result::Result<_, ApplyError>> = blocks
         .par_iter()
         .zip(serialized.par_iter())
-        .map(|(block, raw)| parse_block_for_apply(block, Some(raw.clone())))
+        .map(|(block, raw)| parse_block_for_apply(block, Some(raw.as_ref())))
         .collect();
     metrics::histogram!("node.window.parse_seconds").record(parse_started.elapsed().as_secs_f64());
 
@@ -2177,7 +2177,7 @@ fn prove_window<'a>(
     let mut overlay = crate::window_overlay::WindowOverlay::new(handles.utxo.as_ref());
     let mut prepared = Vec::with_capacity(blocks.len());
     for ((block, parsed), context) in blocks.iter().zip(parsed).zip(&contexts) {
-        let Ok((kernel_block, txids)) = parsed else {
+        let Ok(txids) = parsed else {
             return Vec::new();
         };
         let tx_plan = plan_block_transactions(block, &txids);
@@ -2195,7 +2195,6 @@ fn prove_window<'a>(
             return Vec::new();
         }
         prepared.push(PreparedApply {
-            kernel_block,
             view,
             tx_plan,
             resolved,
@@ -2245,8 +2244,8 @@ fn prove_window<'a>(
     // One slot per input block, so a skipped unit leaves a hole rather than
     // shifting every later block onto the wrong prepared state.
     let mut skipped = vec![false; prepared.len()];
-    // One dispatch for the whole window. The check units borrow their kernel
-    // blocks, so they live and die inside this scope, before anything commits.
+    // One dispatch for the whole window. Check units borrow the prepared
+    // BlockView, so they live and die inside this scope, before anything commits.
     {
         // Each block's checks are built from its own prepared state, so the
         // window builds them all at once. The overlay walk above already fixed
@@ -2289,7 +2288,6 @@ fn prove_window<'a>(
                 &mut unit.view,
                 context.height,
                 context.locktime_cutoff,
-                &unit.kernel_block,
             ) {
                 Ok(checks) => {
                     units.push(checks);
@@ -2380,9 +2378,8 @@ enum ProvenApply<'b> {
 /// Split out because a window of consecutive blocks can produce all of these
 /// at once, against one ordered overlay, and share a single script dispatch.
 /// The measured duplication that made an earlier batching attempt a wash was
-/// exactly the kernel parse and the prevout resolution below being done twice.
+/// exactly the txid pass and the prevout resolution below being done twice.
 struct PreparedApply<'b> {
-    kernel_block: bitcoin_rs_consensus::kernel::KernelBlock,
     /// Parse-once transaction state: identities computed once in
     /// [`parse_block_for_apply`], witness IDs on demand, and the prevout
     /// matrix installed once right before script verification.
@@ -2447,61 +2444,28 @@ pub(crate) fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
     sink.equal && sink.offset == raw.len()
 }
 
-#[cfg_attr(
-    not(feature = "kernel"),
-    expect(
-        clippy::needless_pass_by_value,
-        reason = "the kernel build consumes preserved bytes through this shared signature"
-    )
-)]
 fn parse_block_for_apply(
     block: &Block,
-    provided_serialized: Option<bytes::Bytes>,
-) -> core::result::Result<(bitcoin_rs_consensus::kernel::KernelBlock, Vec<Txid>), ApplyError> {
+    provided_serialized: Option<&[u8]>,
+) -> core::result::Result<Vec<Txid>, ApplyError> {
     // Preserved bytes must BE this block, not merely agree with it on
-    // transaction count. In kernel builds the txids and the transactions that
-    // script verification runs come from these bytes, while the witness
-    // commitment check and the UTXO mutation use the decoded block. Changing a
-    // witness does not change a txid, so a count check lets a caller pair a
-    // block carrying an invalid witness with bytes carrying a valid one: the
-    // scripts verify against the bytes and the invalid block gets applied.
-    if let Some(raw) = provided_serialized.as_deref()
+    // transaction count. Changing a witness does not change a txid, so a
+    // count check lets a caller pair a block carrying an invalid witness
+    // with bytes carrying a valid one. Apply hashes the decoded block, so
+    // the bytes still have to match it exactly.
+    if let Some(raw) = provided_serialized
         && !bytes_are_block(raw, block)
     {
         return Err(ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Kernel(
+            bitcoin_rs_consensus::ConsensusError::Encoding(
                 "preserved bytes are not the serialization of the block they accompany".to_owned(),
             ),
         ));
     }
-    #[cfg(feature = "kernel")]
-    let (kernel_block, txids) = {
-        let raw_block: bytes::Bytes =
-            provided_serialized.unwrap_or_else(|| bytes::Bytes::from(consensus_bytes(block)));
-        let kernel_block = bitcoin_rs_consensus::kernel::KernelBlock::parse(&raw_block)
-            .map_err(ApplyError::Consensus)?;
-        if kernel_block.transaction_count() != block.txs.len() {
-            return Err(ApplyError::Consensus(
-                bitcoin_rs_consensus::ConsensusError::Kernel(format!(
-                    "kernel parsed {} transactions, decoder produced {}",
-                    kernel_block.transaction_count(),
-                    block.txs.len()
-                )),
-            ));
-        }
-        let txids = kernel_block.txids().map_err(ApplyError::Consensus)?;
-        (kernel_block, txids)
-    };
-    // Without the kernel there is no second parse to harvest identities from,
-    // so hash each transaction of the already-decoded block exactly once.
-    // Re-decoding the preserved bytes here would make the native path pay two
-    // full decodes plus one consensus re-serialization per block.
-    #[cfg(not(feature = "kernel"))]
-    let (kernel_block, txids) = (
-        bitcoin_rs_consensus::kernel::KernelBlock,
-        block_txids(block),
-    );
-    Ok((kernel_block, txids))
+    // Hash each transaction of the already-decoded block exactly once.
+    // Re-decoding preserved bytes here would make apply pay two full
+    // decodes plus one consensus re-serialization per block.
+    Ok(block_txids(block))
 }
 
 /// Transaction IDs of an already-decoded block, hashed exactly once.
@@ -2509,7 +2473,6 @@ fn parse_block_for_apply(
 /// Blocks beyond the threshold the window verifier uses fan the hashing out;
 /// below it, serial iteration wins because dispatch costs more than the
 /// per-transaction double SHA256.
-#[cfg(any(test, not(feature = "kernel")))]
 fn block_txids(block: &Block) -> Vec<Txid> {
     if block.txs.len() > 32 {
         block.txs.par_iter().map(Tx::txid).collect()
@@ -2525,15 +2488,14 @@ fn block_txids(block: &Block) -> Vec<Txid> {
 /// outputs an earlier block in the same window created.
 fn prepare_apply<'b, S: crate::window_overlay::OutputSource + ?Sized>(
     block: &'b Block,
-    provided_serialized: Option<bytes::Bytes>,
+    provided_serialized: Option<&[u8]>,
     source: &S,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
-    let (kernel_block, txids) = parse_block_for_apply(block, provided_serialized)?;
+    let txids = parse_block_for_apply(block, provided_serialized)?;
     let tx_plan = plan_block_transactions(block, &txids);
     let view = bitcoin_rs_consensus::BlockView::new(&block.txs, txids);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
     Ok(PreparedApply {
-        kernel_block,
         view,
         tx_plan,
         resolved,
@@ -2666,27 +2628,23 @@ fn apply_block_admitted<'b>(
         flags: verify_flags,
         locktime_cutoff,
     };
-    // Parse the block once with the kernel and take its txids. Core's
-    // `CTransaction` hashes itself while deserializing with the SHA-256
-    // implementation selected at runtime, so this one parse replaces the
-    // scalar `compute_txid` pass *and* the per-transaction serialize/reparse
-    // that script preparation used to perform.
-    // A window prepares several blocks against one overlay and hands the result
-    // back, so the kernel parse and the prevout resolution happen once. A proof
-    // whose context no longer matches is discarded together with its prepared
-    // view; the ordinary path rebuilds both from the live UTXO set.
+    // Hash each already-decoded transaction once and reuse those txids for
+    // merkle, BIP30/BIP34, overlay, and script preparation. A window prepares
+    // several blocks against one overlay and hands the result back, so the
+    // txid pass and the prevout resolution happen once. A proof whose context
+    // no longer matches is discarded together with its prepared view; the
+    // ordinary path rebuilds both from the live UTXO set.
     let (prepared, transactions_proven) = match proven {
         Some(ProvenApply::Proven(proof)) if proof.context == validation_context => {
             (proof.prepared, true)
         }
         Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
         Some(ProvenApply::Proven(_)) | None => (
-            prepare_apply(block, provided_serialized.clone(), handles.utxo.as_ref())?,
+            prepare_apply(block, provided_serialized.as_deref(), handles.utxo.as_ref())?,
             false,
         ),
     };
     let PreparedApply {
-        kernel_block,
         mut view,
         tx_plan,
         resolved,
@@ -2750,7 +2708,6 @@ fn apply_block_admitted<'b>(
             Arc::clone(&resolved),
             &validation_context,
             provenance,
-            &kernel_block,
         )
     };
     let script_verify_dur = script_verify_started.elapsed();
@@ -3264,11 +3221,9 @@ impl WitnessPresence {
 
 /// Plans a block whose txids are already known.
 ///
-/// Identities come from the parse-once view: the kernel parse hashes every
-/// transaction on the way past using the SHA-256 implementation Core picks at
-/// runtime, and the native build hashes each transaction once in
-/// [`block_txids`]. Either way the plan borrows them instead of re-hashing
-/// with a scalar implementation.
+/// Identities come from the parse-once view: [`block_txids`] hashes each
+/// already-decoded transaction once, and the plan borrows those hashes
+/// instead of re-hashing.
 fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxPlan {
     let mut only_coinbase = true;
     let mut needs_local_utxo_overlay = false;
@@ -3531,13 +3486,6 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
-#[cfg_attr(
-    not(feature = "kernel"),
-    expect(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "the kernel build borrows an owning block handle through this shared signature"
-    )
-)]
 #[allow(
     clippy::as_conversions,
     clippy::cast_sign_loss,
@@ -3551,7 +3499,6 @@ fn verify_block_transactions(
     resolved: Arc<ResolvedUtxoView>,
     context: &BlockValidationContext,
     provenance: BlockProvenance,
-    kernel_block: &bitcoin_rs_consensus::kernel::KernelBlock,
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(block.txs.len(), view.txids().len());
     if tx_plan.only_coinbase {
@@ -3598,7 +3545,6 @@ fn verify_block_transactions(
         context.locktime_cutoff,
         context.flags,
         &mut script_timings,
-        kernel_block,
     );
     metrics::histogram!("node.apply_block.script_prepare_seconds")
         .record(script_timings.prepare_seconds);
@@ -4085,13 +4031,6 @@ mod consensus_rule_tests {
     const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
     const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
 
-    /// Parses `block` the way production does, so tests exercise the real
-    /// one-shot kernel parse rather than a stand-in.
-    fn kernel_block_of(block: &Block) -> bitcoin_rs_consensus::kernel::KernelBlock {
-        bitcoin_rs_consensus::kernel::KernelBlock::parse(&consensus_bytes(block))
-            .unwrap_or_else(|error| panic!("test block must parse: {error}"))
-    }
-
     fn tx_plan(block: &Block) -> BlockTxPlan {
         plan_block_transactions(block, &block_txids(block))
     }
@@ -4235,7 +4174,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         )?;
         Ok(())
     }
@@ -4340,12 +4278,9 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    /// R2 pin (shared-view parallel path): under the kernel feature the script
-    /// verdict carries the kernel dispatch marker — the Rust interpreter did
-    /// not produce it.
+    /// Shared-view parallel path: a bad script is a Script consensus error.
     #[test]
-    #[cfg(feature = "kernel")]
-    fn verify_block_transactions_shared_view_path_uses_kernel_verdict()
+    fn verify_block_transactions_shared_view_path_rejects_bad_script()
     -> Result<(), Box<dyn std::error::Error>> {
         let (block, plan, utxo) = bad_script_spend_block()?;
         let handles = apply_handles(utxo);
@@ -4362,9 +4297,8 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
-            Ok(()) => panic!("bad script must fail under the kernel build"),
+            Ok(()) => panic!("bad script must fail"),
             Err(error) => error,
         };
 
@@ -4372,17 +4306,16 @@ mod consensus_rule_tests {
             error,
             ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
                 input_index: 0,
-                ref reason,
-            }) if reason.starts_with("kernel script verification failed:")
+                ..
+            })
         ));
         Ok(())
     }
 
-    /// R2 pin (overlay path): a same-block spend resolved against the frozen
-    /// per-tx snapshot view is also verdict-checked by the kernel.
+    /// Overlay path: a same-block spend resolved against the frozen per-tx
+    /// snapshot view is also a Script consensus error on a bad redeem.
     #[test]
-    #[cfg(feature = "kernel")]
-    fn verify_block_transactions_overlay_path_uses_kernel_verdict()
+    fn verify_block_transactions_overlay_path_rejects_bad_script()
     -> Result<(), Box<dyn std::error::Error>> {
         let base_prevout = OutPoint::new(fixture_txid(0x67), 0);
         let utxo = utxo_with_output(base_prevout, 1)?;
@@ -4421,9 +4354,8 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
-            Ok(()) => panic!("bad same-block spend must fail under the kernel build"),
+            Ok(()) => panic!("bad same-block spend must fail"),
             Err(error) => error,
         };
 
@@ -4431,8 +4363,8 @@ mod consensus_rule_tests {
             error,
             ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
                 input_index: 0,
-                ref reason,
-            }) if reason.starts_with("kernel script verification failed:")
+                ..
+            })
         ));
         Ok(())
     }
@@ -4440,8 +4372,7 @@ mod consensus_rule_tests {
     /// The unified full-verify path resolves same-block spends in order (tx1 spends
     /// tx0's output, forcing the overlay walk) yet still surfaces the *earlier*
     /// transaction's script failure deterministically — the node rewrite preserves
-    /// error identity through `verify_block_input_scripts`. Feature-agnostic: the
-    /// Script reason differs between the portable and kernel engines, so only the
+    /// error identity through `verify_block_input_scripts`. Only the Script
     /// variant and input index are asserted.
     #[test]
     fn verify_block_transactions_same_block_spend_surfaces_earlier_bad_script()
@@ -4498,7 +4429,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("earlier tx bad script must reject the block"),
             Err(error) => error,
@@ -4539,7 +4469,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("cross-transaction duplicate spend must fail script verification"),
             Err(error) => error,
@@ -4573,7 +4502,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 1, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("bad coinbase scriptSig length must fail transaction verification"),
             Err(error) => error,
@@ -4694,7 +4622,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("duplicate spend must fail when assume_valid_height is zero"),
             Err(error) => error,
@@ -4727,7 +4654,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::NONE),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("duplicate spend must fail even under assume_valid_height"),
             Err(error) => error,
@@ -4760,7 +4686,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 3, 0, bitcoin_rs_script::VerifyFlags::NONE),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("duplicate spend must fail above assume_valid_height"),
             Err(error) => error,
@@ -4793,7 +4718,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         )?;
         Ok(())
     }
@@ -4816,7 +4740,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("bad script must fail when assume_valid_height is zero"),
             Err(error) => error,
@@ -4850,7 +4773,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 3, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("bad script must fail above assume_valid_height"),
             Err(error) => error,
@@ -4887,7 +4809,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 2, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("outputs exceeding inputs must fail even under assume_valid_height"),
             Err(error) => error,
@@ -4925,7 +4846,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 1, 0, bitcoin_rs_script::VerifyFlags::MANDATORY),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         ) {
             Ok(()) => panic!("bad coinbase scriptSig length must fail under assume_valid_height"),
             Err(error) => error,
@@ -5136,8 +5056,7 @@ mod consensus_rule_tests {
                     &tx_plan(&block)
                 )),
                 &validation_context(&block, 1, 0, bitcoin_rs_script::VerifyFlags::NONE),
-                BlockProvenance::Network,
-                &kernel_block_of(&block),
+                BlockProvenance::Network
             )
             .is_ok()
         );
@@ -6896,7 +6815,7 @@ mod consensus_rule_tests {
             !bytes_are_block(&honest, &block),
             "bytes whose witness differs from the block must be rejected"
         );
-        let outcome = parse_block_for_apply(&block, Some(honest));
+        let outcome = parse_block_for_apply(&block, Some(honest.as_ref()));
         assert!(
             outcome.is_err(),
             "apply must refuse a block whose preserved bytes are not its serialization"
@@ -8746,10 +8665,6 @@ mod consensus_rule_tests {
     /// P2SH eval (P2SH ON): the last scriptSig push `[0x00]` is deserialized as the
     /// redeemScript `OP_0`, run with an empty stack -> pushes FALSE -> FAIL at input 0.
     ///
-    /// Gated to a real script backend: the acceptance arm asserts `Ok`, which only
-    /// holds when scripts actually execute. With no backend the verifier returns a
-    /// `Script { .. "backend disabled" }` error, so the helper would be dead code.
-    #[cfg(feature = "kernel")]
     fn p2sh_template_bare_spend_block()
     -> Result<(Block, BlockTxPlan, Arc<UtxoSet>), Box<dyn std::error::Error>> {
         // hash160([0x00]): the bare-eval arm only accepts when the redeem script
@@ -8797,9 +8712,6 @@ mod consensus_rule_tests {
         Ok((block, plan, utxo))
     }
 
-    // Asserts acceptance under the BIP16 exception, which needs a real script backend
-    // (the backend-less default build returns a "backend disabled" Script error).
-    #[cfg(feature = "kernel")]
     #[test]
     fn bip16_exception_accepts_bare_p2sh_template_spend_that_normal_p2sh_rejects()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -8841,7 +8753,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block, 170_060, 0, exc_flags),
             BlockProvenance::Network,
-            &kernel_block_of(&block),
         )?;
 
         // Normal block at the same height: P2SH enforced -> REJECTED at input 0.
@@ -8859,7 +8770,6 @@ mod consensus_rule_tests {
             )),
             &validation_context(&block2, 170_060, 0, normal_flags),
             BlockProvenance::Network,
-            &kernel_block_of(&block2),
         ) {
             Ok(()) => {
                 panic!("normal P2SH enforcement must reject the bare-script redeem spend")

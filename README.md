@@ -1,12 +1,10 @@
 # bitcoin-rs
 
-A Bitcoin full node in Rust 2024. The default binary build is pure Rust (no
-C++ toolchain required) and runs the native script interpreter for every
-consensus spend class. Enable `--features kernel` to route the same checks
-through `libbitcoinkernel` as an independent oracle. The `kernel` feature
-remains the default in the `bitcoin-rs-consensus` and `bitcoin-rs-node`
-library crates, and in the Compose image, until issue #213 promotes native
-(`docs/contracts/validation-default.md`).
+A Bitcoin full node in Rust 2024. The default build is pure Rust (no C++
+toolchain required). Production apply always runs the native script
+interpreter for every consensus spend class. `--features kernel` compiles
+`libbitcoinkernel` as an independent Core oracle; it does not replace the
+native apply path (`docs/contracts/validation-default.md`).
 
 [![CI](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
@@ -85,14 +83,11 @@ risk of correlated implementation failures.
   and Taproot key-path and script-path spends. Core's committed `script_tests`,
   `tx_valid`, and `tx_invalid` vectors pin zero native mismatches. Script checks
   run in parallel across rayon workers with sighash midstate reuse per
-  transaction. `--features kernel` routes the same checks through
-  `libbitcoinkernel` (Bitcoin Core's C++ engine) as an independent oracle.
-- Kernel feature: `--features kernel` enables `libbitcoinkernel`. The
-  `crates/consensus` and `crates/node` library crates still default to `kernel`;
-  the `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no kernel)
-  so a default binary build is pure Rust. Issue #213 keeps that split until
-  native wins the signed-spend and full-replay gates
-  (`docs/contracts/validation-default.md`).
+  transaction. `--features kernel` compiles `libbitcoinkernel` (Bitcoin Core's
+  C++ engine) as an independent oracle; production apply stays native.
+- Kernel feature: `--features kernel` enables `libbitcoinkernel`. It is off
+  by default in `crates/consensus`, `crates/node`, and `bin/bitcoin-rs`, so a
+  default build is pure Rust (`docs/contracts/validation-default.md`).
 - Pure-Rust storage defaults: LSM-tree storage backed by `fjall` by default,
   with `redb` compiled in, and `rocksdb`/`mdbx` available through optional Cargo
   features.
@@ -139,9 +134,9 @@ curl -s --user bitcoin-rs:bitcoin-rs \
 
 ### Kernel oracle build
 
-To route script verification through `libbitcoinkernel` instead of the native
-interpreter, install C++ dependencies (`cmake` and `libboost-dev` on
-Debian/Ubuntu), then pass `--features kernel`:
+To compile `libbitcoinkernel` as an independent Core oracle (differential
+tests; production apply stays native), install C++ dependencies (`cmake` and
+`libboost-dev` on Debian/Ubuntu), then pass `--features kernel`:
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
@@ -178,8 +173,8 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 
 - Validation: script execution runs in parallel across rayon workers, with
   sighash midstate reuse per transaction. The native interpreter covers every
-  consensus spend class. Under the `kernel` feature, `libbitcoinkernel` is the
-  verifier instead.
+  consensus spend class. `--features kernel` compiles `libbitcoinkernel` as an
+  independent oracle; it does not become the apply engine.
 - Kernel boundary: `crates/consensus/src/kernel.rs` contains all
   `libbitcoinkernel` types behind `#[cfg(feature = "kernel")]`. Kernel types
   never leak into node state or apply logic.
@@ -193,8 +188,8 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Setting | Default |
 |---|---|
 | Storage backend | `fjall` |
-| Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/node library default |
-| Kernel feature | Off in default binary build; on in `crates/consensus` and `crates/node` library defaults |
+| Validation engine | Native Rust interpreter |
+| Kernel feature | Off by default; compiles `libbitcoinkernel` as an independent oracle |
 | Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
 | Multi-peer download | On (8 outbound peers, 128-block window) |
 | Transaction index | Off |

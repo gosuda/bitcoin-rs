@@ -118,12 +118,28 @@ impl<'a> TxSignatureChecker<'a> {
     /// input so taproot sighashes can commit to all spent outputs.
     #[must_use]
     pub fn new(tx: &'a Tx, input_index: usize, amount: u64, prevouts: &'a [TxOut]) -> Self {
+        Self::with_cache(tx, input_index, amount, prevouts, SighashCache::new(tx))
+    }
+
+    /// Builds a checker that reuses a caller-filled [`SighashCache`].
+    ///
+    /// The cache must have been constructed over the same `tx`. Apply-path
+    /// verification precomputes midstates once per transaction and clones that
+    /// cache into each input checker.
+    #[must_use]
+    pub fn with_cache(
+        tx: &'a Tx,
+        input_index: usize,
+        amount: u64,
+        prevouts: &'a [TxOut],
+        cache: SighashCache<'a>,
+    ) -> Self {
         Self {
             tx,
             input_index,
             amount,
             prevouts,
-            cache: SighashCache::new(tx),
+            cache,
             annex: None,
         }
     }

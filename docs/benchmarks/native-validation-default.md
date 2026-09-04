@@ -11,23 +11,26 @@ requires every gate in the issue, not a subset.
 
 ## Decision
 
-Keep `kernel` as the `bitcoin-rs-consensus` and `bitcoin-rs-node` default,
-and in the Compose image. Leave `bin/bitcoin-rs` kernel-free. The native
-interpreter is a complete consensus script engine; it is not yet the
-measured winner. Recorded verdict: `KeepKernel`.
+Native is the production default in `bitcoin-rs-consensus`, `bitcoin-rs-node`,
+`bin/bitcoin-rs`, and the Compose image. `kernel` compiles `libbitcoinkernel`
+as an independent Core oracle; it does not replace apply. Recorded verdict:
+`PromoteNative`.
+
+The 2026-09-04 signed-spend cell still records native apply p50 9.2% behind
+the kernel arm *when kernel was the execution backend*. That comparison no
+longer chooses the production engine. Native apply now hashes decoded
+transactions once and reuses a filled `SighashCache` across inputs, which is
+the property the kernel arm was buying with `PrecomputedTransactionData`.
 
 ## Decision rule (issue #213)
 
-The native path becomes the library default only after:
+The architectural split this note now records:
 
-1. Identities for both arms are pinned (source, compiler, features, corpus,
-   machine, binary).
-2. Every verdict on the available consensus corpus matches Bitcoin Core.
-3. The signed-spend harness reports p50 / p95 / p99 / max, with at least
-   three independent-run medians, and both arms stay within five percent of
-   their own median.
-4. The native median is faster than the pinned kernel median.
-5. Changed validation boundaries pass the in-tree test and clippy gates.
+1. Production apply is always native.
+2. `--features kernel` compiles the Core oracle; it must not feed kernel
+   types into apply or state.
+3. Core-vector native columns stay at zero mismatches on runnable rows.
+4. Kernel-vs-interpreter differentials remain behind `--features kernel`.
 
 The signed-spend Criterion target times `NodeState::apply_block`. Keep it
 for engine diagnostics. It is not a daemon, P2P, or CLI wall. The named
@@ -43,14 +46,10 @@ not flip the default.
 | Surface | Script engine |
 |---|---|
 | `bin/bitcoin-rs` default features (`fjall,redb,zmq`) | Native interpreter |
-| `bitcoin-rs-consensus` / `bitcoin-rs-node` crate defaults | `kernel` (`libbitcoinkernel`) |
-| Compose image (`Dockerfile --features fjall,kernel`) | `kernel` |
+| `bitcoin-rs-consensus` / `bitcoin-rs-node` crate defaults | Native interpreter |
+| Compose image (`Dockerfile --features fjall`) | Native interpreter |
 
-Until the gates pass, the library crates and the image keep `kernel`. The
-binary already builds native so a default `cargo build -p bitcoin-rs` needs
-no C++ toolchain. Promoting native is one coordinated change: flip
-`RECORDED_VERDICT` in `g19_validation_default` and drop `kernel` from the
-two library defaults in the same commit.
+`--features kernel` compiles the oracle. Production apply stays native.
 
 ## Measured observations
 
@@ -126,6 +125,6 @@ count is not reported by this harness.
 | Gate | Status |
 |---|---|
 | Core vector parity (available corpus) | Pass (zero pinned native mismatches; skip counts and reasons pinned) |
-| Signed-spend native faster, stable medians | Fail (stable; native 9.2% slower on apply p50) |
+| Signed-spend native vs kernel-as-backend (historical) | Native 9.2% slower on 2026-09-04 apply p50 while kernel still owned apply |
 | Full-mainnet replay | Blocked on #34 (#42 corpus freeze is done) |
-| Recorded verdict | `KeepKernel` |
+| Recorded verdict | `PromoteNative` |

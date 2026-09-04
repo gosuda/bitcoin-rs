@@ -10,10 +10,8 @@ verify progress before moving on.
   libraries. It uses the native Rust script interpreter, which verifies
   legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends.
   Core's committed script and transaction vectors currently pin zero native
-  mismatches. `libbitcoinkernel` remains the library production default and
-  the Compose image engine until issue #213 promotes native
-  (`docs/contracts/validation-default.md`). For that engine, enable the
-  `kernel` feature.
+  mismatches. `libbitcoinkernel` is an optional independent oracle behind the
+  `kernel` feature (`docs/contracts/validation-default.md`).
 
 If you plan to compile with the `kernel` feature to run `libbitcoinkernel` as
 an independent verification oracle, install `cmake` and `libboost-dev`:
@@ -34,8 +32,7 @@ cargo build --release -p bitcoin-rs
 This produces `./target/release/bitcoin-rs`. The default configuration includes
 the `fjall` storage backend, `redb`, and `zmq` sequence publishing. The default
 binary build uses the native Rust script interpreter for every consensus spend
-class. Library crates and the Compose image still default to
-`libbitcoinkernel` (`docs/contracts/validation-default.md`).
+class.
 
 To compile with `libbitcoinkernel` as an independent verification oracle:
 
