@@ -139,7 +139,7 @@ fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
     Ok((state, dir))
 }

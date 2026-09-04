@@ -20,7 +20,7 @@ fn open_regtest() -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     // Keep the tempdir alive for the process lifetime of this test by leaking it.
     // NodeState retains open files under data_dir for the test duration.
     std::mem::forget(dir);
@@ -67,7 +67,7 @@ fn open_network(network: Network) -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(network);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     std::mem::forget(dir);
     NodeState::open(config, None)
 }

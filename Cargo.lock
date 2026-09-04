@@ -231,11 +231,15 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-node",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "clap",
  "mimalloc",
  "parking_lot",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
+ "toml 1.1.5+spec-1.1.0",
 ]
 
 [[package]]
@@ -354,7 +358,6 @@ dependencies = [
  "bytes",
  "cap-fs-ext",
  "cap-std",
- "clap",
  "compact_str",
  "criterion",
  "crossbeam-channel",

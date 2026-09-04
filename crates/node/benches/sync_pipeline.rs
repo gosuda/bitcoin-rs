@@ -479,8 +479,8 @@ fn open_regtest_state() -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
-    config.txindex = false;
+    config.p2p.listen.clear();
+    config.indexes.txindex = false;
     let state = NodeState::open(config, None)
         .unwrap_or_else(|error| panic!("open node state failed: {error}"));
     (dir, state)
@@ -491,10 +491,10 @@ fn open_pruned_regtest_state() -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.path().join("node");
-    config.p2p_listen.clear();
-    "rocksdb".clone_into(&mut config.storage_backend);
-    config.txindex = false;
-    config.prune_target_mb = 1;
+    config.p2p.listen.clear();
+    config.storage.backend = bitcoin_rs_storage::StorageBackend::RocksDb;
+    config.indexes.txindex = false;
+    config.storage.prune_target_mb = 1;
     let state = NodeState::open(config, None)
         .unwrap_or_else(|error| panic!("open pruned node state failed: {error}"));
     (dir, state)
@@ -832,8 +832,8 @@ impl ProductionStateSyncFixture {
     #[cfg(feature = "fjall")]
     fn new_fjall_all_indexes(peer_count: usize) -> Self {
         let mut config = production_state_config();
-        "fjall".clone_into(&mut config.storage_backend);
-        config.txindex = true;
+        config.storage.backend = bitcoin_rs_storage::StorageBackend::Fjall;
+        config.indexes.txindex = true;
         Self::with_config(peer_count, config)
     }
 
@@ -853,8 +853,8 @@ impl ProductionStateSyncFixture {
     #[cfg(feature = "fjall")]
     fn new_fjall_all_indexes_spend_heavy() -> Self {
         let mut config = production_state_config();
-        "fjall".clone_into(&mut config.storage_backend);
-        config.txindex = true;
+        config.storage.backend = bitcoin_rs_storage::StorageBackend::Fjall;
+        config.indexes.txindex = true;
         let body_blocks = spend_heavy_proxy_blocks()
             .into_iter()
             .skip(1)
@@ -1033,8 +1033,8 @@ impl ProductionStateSyncFixture {
 
 fn production_state_config() -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
-    config.p2p_listen.clear();
-    config.txindex = false;
+    config.p2p.listen.clear();
+    config.indexes.txindex = false;
     config
 }
 

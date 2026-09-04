@@ -205,10 +205,11 @@ impl P2pService {
         let sync_wake_tx = sync_wake_tx.cloned();
         let scheduler_window = Arc::clone(&self.download_window);
         let peer_ready = peer_ready.clone();
-        let peer_ready = Arc::new(move |source: crate::PeerSource| {
-            scheduler_window.lock().forget_peer(source.addr);
-            peer_ready(source);
-        });
+        let peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync> =
+            Arc::new(move |source: crate::PeerSource| {
+                scheduler_window.lock().forget_peer(source.addr);
+                peer_ready(source);
+            });
         let mut slot = self.workers.lock();
         if slot.is_some() {
             return Err(P2pServiceError::AlreadyStarted);
@@ -236,6 +237,7 @@ impl P2pService {
             let chain_query = chain_query.clone();
             let sync_wake_tx = sync_wake_tx.clone();
             let session_cancel = Arc::clone(&session_cancel);
+            let peer_ready = Arc::clone(&peer_ready);
             let magic = self.config.magic;
             let handle = match thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
@@ -253,6 +255,7 @@ impl P2pService {
                         chain_query,
                         sync_wake_tx,
                         session_cancel,
+                        peer_ready,
                     )
                 }) {
                 Ok(handle) => handle,
@@ -268,6 +271,7 @@ impl P2pService {
             chain_query,
             sync_wake_tx,
             Arc::clone(&session_cancel),
+            Arc::clone(&peer_ready),
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -282,7 +286,6 @@ impl P2pService {
                 return Err(error.into());
             }
         };
-        let _ = peer_ready;
         *slot = Some(Workers {
             listeners,
             outbound: Some(outbound),
@@ -314,6 +317,7 @@ impl P2pService {
         chain_query: Option<Arc<dyn crate::ChainQuery + 'static>>,
         sync_wake_tx: Option<Sender<()>>,
         session_cancel: Arc<AtomicBool>,
+        peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
     ) -> Result<JoinHandle<()>, io::Error> {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let lifecycle = Arc::clone(&self.lifecycle);
@@ -363,6 +367,7 @@ impl P2pService {
                         chain_query.clone(),
                         sync_wake_tx.clone(),
                         Arc::clone(&session_cancel),
+                        Arc::clone(&peer_ready),
                     );
                     active.insert(addr);
                     handles.push((addr, handle));

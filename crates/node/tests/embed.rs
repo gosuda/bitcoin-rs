@@ -213,7 +213,7 @@ fn assert_broadcast_and_lookups(node: &Node) -> Result<()> {
 fn seed_config(data_dir: &std::path::Path) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir.to_path_buf();
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config
 }
 
@@ -221,7 +221,7 @@ fn seed_config(data_dir: &std::path::Path) -> NodeConfig {
 fn embedded_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
     let mut config = seed_config(data_dir);
     let rpc_bind: std::net::SocketAddr = "127.0.0.1:0".parse()?;
-    config.rpc_bind = rpc_bind;
+    config.rpc.bind = rpc_bind;
     Ok(config)
 }
 
@@ -475,7 +475,7 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
     drop(probe);
 
     let mut held_config = embedded_config(&held_dir)?;
-    held_config.rpc_bind = port;
+    held_config.rpc.bind = port;
     let held = block_on(Node::start(
         held_config,
         bitcoin_rs_node::RuntimeInputs::default(),
@@ -484,7 +484,7 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
     // Node B targets the same port: `start_node` opens B's state first,
     // then fails at the RPC bind. The rollback must release B's state.
     let mut failed_config = embedded_config(&failed_dir)?;
-    failed_config.rpc_bind = port;
+    failed_config.rpc.bind = port;
     match block_on(Node::start(
         failed_config,
         bitcoin_rs_node::RuntimeInputs::default(),

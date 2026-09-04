@@ -3,6 +3,66 @@
 
 extern crate alloc;
 
+use core::fmt;
+use core::str::FromStr;
+
+/// Selectable storage backend.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub enum StorageBackend {
+    /// `RocksDB`.
+    RocksDb,
+    /// `Fjall`.
+    Fjall,
+    /// `redb`.
+    Redb,
+    /// `MDBX`.
+    Mdbx,
+}
+
+impl StorageBackend {
+    /// Returns the stable configuration spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RocksDb => "rocksdb",
+            Self::Fjall => "fjall",
+            Self::Redb => "redb",
+            Self::Mdbx => "mdbx",
+        }
+    }
+
+    /// Whether this backend is compiled into the current crate.
+    #[must_use]
+    pub const fn is_compiled_in(self) -> bool {
+        match self {
+            Self::RocksDb => cfg!(feature = "rocksdb"),
+            Self::Fjall => cfg!(feature = "fjall"),
+            Self::Redb => cfg!(feature = "redb"),
+            Self::Mdbx => cfg!(feature = "mdbx"),
+        }
+    }
+}
+
+impl FromStr for StorageBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "rocksdb" => Ok(Self::RocksDb),
+            "fjall" => Ok(Self::Fjall),
+            "redb" => Ok(Self::Redb),
+            "mdbx" => Ok(Self::Mdbx),
+            _ => Err(format!("unsupported storage backend {value}")),
+        }
+    }
+}
+
+impl fmt::Display for StorageBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Append-only flat files for immutable block bodies.
 pub mod block_file;
 /// Process cache-budget division shared by the storage backends.

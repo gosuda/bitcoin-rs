@@ -24,7 +24,7 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> TxIndexOpenSpec {
     TxIndexOpenSpec {
         data_dir: dir.to_path_buf(),
         namespace: "txindex",
-        storage_backend: "fjall".to_owned(),
+        storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
         cache_bytes: 8 * 1024 * 1024,
         batch_limits: DEFAULT_BATCH_LIMITS,
         epoch,
@@ -391,7 +391,7 @@ fn async_index_open_preserves_backend() {
         let fjall_dir = dir.path().join("txindex-fjall");
         std::fs::create_dir_all(&fjall_dir).expect("create fjall dir");
         let result = open_tx_index_on_worker(
-            "fjall",
+            bitcoin_rs_storage::StorageBackend::Fjall,
             &fjall_dir,
             8 * 1024 * 1024,
             DEFAULT_BATCH_LIMITS,
@@ -408,8 +408,13 @@ fn async_index_open_preserves_backend() {
     {
         let redb_dir = dir.path().join("txindex-redb");
         std::fs::create_dir_all(&redb_dir).expect("create redb dir");
-        let result =
-            open_tx_index_on_worker("redb", &redb_dir, 8 * 1024 * 1024, REDB_BATCH_LIMITS, 1);
+        let result = open_tx_index_on_worker(
+            bitcoin_rs_storage::StorageBackend::Redb,
+            &redb_dir,
+            8 * 1024 * 1024,
+            REDB_BATCH_LIMITS,
+            1,
+        );
         assert!(
             result.is_ok(),
             "redb backend open must succeed: {:?}",
@@ -422,7 +427,7 @@ fn async_index_open_preserves_backend() {
         let rocks_dir = dir.path().join("txindex-rocksdb");
         std::fs::create_dir_all(&rocks_dir).expect("create rocksdb dir");
         let result = open_tx_index_on_worker(
-            "rocksdb",
+            bitcoin_rs_storage::StorageBackend::RocksDb,
             &rocks_dir,
             8 * 1024 * 1024,
             ROCKSDB_BATCH_LIMITS,
@@ -439,8 +444,13 @@ fn async_index_open_preserves_backend() {
     {
         let mdbx_dir = dir.path().join("txindex-mdbx");
         std::fs::create_dir_all(&mdbx_dir).expect("create mdbx dir");
-        let result =
-            open_tx_index_on_worker("mdbx", &mdbx_dir, 8 * 1024 * 1024, DEFAULT_BATCH_LIMITS, 1);
+        let result = open_tx_index_on_worker(
+            bitcoin_rs_storage::StorageBackend::Mdbx,
+            &mdbx_dir,
+            8 * 1024 * 1024,
+            DEFAULT_BATCH_LIMITS,
+            1,
+        );
         assert!(
             result.is_ok(),
             "mdbx backend open must succeed: {:?}",
@@ -607,7 +617,7 @@ fn open_timeout_publishes_error_not_infinite_spin() {
     OPEN_TIMEOUT_OVERRIDE_SECS.store(1, Ordering::Relaxed);
 
     let result = open_tx_index_with_timeout(
-        "fjall",
+        bitcoin_rs_storage::StorageBackend::Fjall,
         &dir.path().join("txindex"),
         8 * 1024 * 1024,
         DEFAULT_BATCH_LIMITS,

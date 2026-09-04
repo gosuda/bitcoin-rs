@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
-    ConsumerCursorUpdate, HashPrefixRow, IndexCapabilities, IndexCapability, IndexError,
-    IndexReader, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
+    ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
     types::{TxPosition, TxPositionValue},
 };
@@ -584,7 +584,7 @@ impl Heartbeat {
 pub(crate) struct TxIndexOpenSpec {
     pub(crate) data_dir: PathBuf,
     pub(crate) namespace: &'static str,
-    pub(crate) storage_backend: String,
+    pub(crate) storage_backend: bitcoin_rs_storage::StorageBackend,
     pub(crate) cache_bytes: u64,
     #[allow(dead_code)]
     pub(crate) batch_limits: PreparedBatchLimits,
@@ -825,7 +825,11 @@ pub(crate) struct OpenTxIndex {
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
-/// Opens an `IndexWriter` with legacy/unsupported-format selective reset.
+/// Opens an `IndexWriter` with legacy/unsupported-format recovery.
+///
+/// Format 3 is upgraded inside [`bitcoin_rs_index::IndexWriter::open`] by
+/// resetting `ScriptHistory` only. This path still full-resets foreign
+/// versions and cursorless legacy tables so they can rebuild.
 pub(crate) fn open_writer<S>(
     store: &Arc<S>,
     generation: u64,
@@ -901,7 +905,7 @@ fn run_worker_with_open(
     let heartbeat = Heartbeat::start(
         "txindex",
         spec.namespace.to_owned(),
-        spec.storage_backend.clone(),
+        spec.storage_backend.to_string(),
     );
 
     let worker_result = open_and_run(
@@ -1003,7 +1007,7 @@ fn open_and_run(
         .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
     let open: OpenTxIndex = open_tx_index_with_timeout(
-        &spec.storage_backend,
+        spec.storage_backend,
         &txindex_dir,
         spec.cache_bytes,
         spec.batch_limits,
@@ -1068,7 +1072,7 @@ fn open_and_run(
 /// kill a thread) and `OpenTimeout` is returned so the worker publishes
 /// `Failed` and the node stays operable without the index.
 fn open_tx_index_with_timeout(
-    storage_backend: &str,
+    storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
     batch_limits: PreparedBatchLimits,
@@ -1076,12 +1080,12 @@ fn open_tx_index_with_timeout(
     shutdown: &Arc<AtomicBool>,
 ) -> Result<OpenTxIndex, TxIndexWorkerError> {
     let (tx, rx) = std::sync::mpsc::channel();
-    let backend = storage_backend.to_owned();
+    let backend = storage_backend;
     let dir = txindex_dir.to_path_buf();
     let _join = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
-            let result = open_tx_index_on_worker(&backend, &dir, cache_bytes, batch_limits, epoch);
+            let result = open_tx_index_on_worker(backend, &dir, cache_bytes, batch_limits, epoch);
             let _ = tx.send(result);
         })
         .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
@@ -1098,7 +1102,7 @@ fn open_tx_index_with_timeout(
         if remaining.is_zero() {
             tracing::error!(
                 timeout_secs = timeout.as_secs(),
-                backend = storage_backend,
+                backend = %storage_backend,
                 dir = %txindex_dir.display(),
                 "txindex store open timed out — the storage engine recovery \
                  appears stuck; detaching the open thread and publishing Failed"
@@ -1129,7 +1133,7 @@ static OPEN_DELAY_SECS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// Opens the txindex store on the worker thread, preserving all backend
 /// constructors, cache paths, and batch limits.
 fn open_tx_index_on_worker(
-    storage_backend: &str,
+    storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
     batch_limits: PreparedBatchLimits,
@@ -1144,7 +1148,7 @@ fn open_tx_index_on_worker(
     }
     match storage_backend {
         #[cfg(feature = "rocksdb")]
-        "rocksdb" => {
+        bitcoin_rs_storage::StorageBackend::RocksDb => {
             let store = Arc::new(
                 bitcoin_rs_storage::RocksDbStore::open_with_cache(txindex_dir, cache_bytes)
                     .map_err(|e| {
@@ -1154,7 +1158,7 @@ fn open_tx_index_on_worker(
             open_tx_index_store_on_worker(store, batch_limits, epoch)
         }
         #[cfg(feature = "fjall")]
-        "fjall" => {
+        bitcoin_rs_storage::StorageBackend::Fjall => {
             let store = Arc::new(
                 bitcoin_rs_storage::FjallStore::open_with_cache(txindex_dir, cache_bytes).map_err(
                     |e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e)),
@@ -1163,7 +1167,7 @@ fn open_tx_index_on_worker(
             open_tx_index_store_on_worker(store, batch_limits, epoch)
         }
         #[cfg(feature = "redb")]
-        "redb" => {
+        bitcoin_rs_storage::StorageBackend::Redb => {
             let store = Arc::new(
                 bitcoin_rs_storage::open_redb_tx_index_store_with_cache(txindex_dir, cache_bytes)
                     .map_err(|e| {
@@ -1173,7 +1177,7 @@ fn open_tx_index_on_worker(
             open_tx_index_store_on_worker(store, batch_limits, epoch)
         }
         #[cfg(feature = "mdbx")]
-        "mdbx" => {
+        bitcoin_rs_storage::StorageBackend::Mdbx => {
             let store = Arc::new(
                 bitcoin_rs_storage::MdbxStore::open_with_cache(txindex_dir, cache_bytes).map_err(
                     |e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e)),
@@ -1181,6 +1185,12 @@ fn open_tx_index_on_worker(
             );
             open_tx_index_store_on_worker(store, batch_limits, epoch)
         }
+        #[cfg(any(
+            not(feature = "rocksdb"),
+            not(feature = "fjall"),
+            not(feature = "redb"),
+            not(feature = "mdbx")
+        ))]
         other => Err(TxIndexWorkerError::Storage(
             bitcoin_rs_storage::StorageError::Backend(format!(
                 "unsupported storage backend for txindex: {other}"
@@ -2901,16 +2911,12 @@ impl TxIndexQueryEngine {
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-    ) -> Result<Vec<HashPrefixRow>, TxQueryError> {
+    ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
         let limit = budget.next_scan_limit()?;
         let scan = snapshot
             .spending_rows(outpoint, limit)
             .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
-        Ok(budget
-            .accept_scan(scan)?
-            .into_iter()
-            .map(|row| row.row)
-            .collect())
+        budget.accept_scan(scan)
     }
 
     fn collect_funding_outputs(
@@ -2987,33 +2993,54 @@ impl TxIndexQueryEngine {
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
-        let spend_rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
+        let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
         let mut last_height = None;
-        for row in spend_rows {
-            let height = row.height();
+        for row in rows {
+            let height = row.row.height();
             if last_height == Some(height) {
                 continue;
             }
             last_height = Some(height);
+            if let Some(positions) = Self::validated_positions(&row.value) {
+                for &position in positions {
+                    let Some(transaction) =
+                        self.resolve_positioned_transaction(tip, budget, height, position)?
+                    else {
+                        break;
+                    };
+                    if let Some(record) = Self::spending_input(&transaction, height, outpoint)? {
+                        return Ok(Some(record));
+                    }
+                }
+            }
             let hash = self.resolve_hash_at_height(height, tip)?;
             let block = self.resolve_block(budget, height, hash)?;
             for transaction in &block.txs {
-                let Some(vin) = transaction
-                    .inputs
-                    .iter()
-                    .position(|input| input.previous_output == *outpoint)
-                else {
-                    continue;
-                };
-                return Ok(Some(SpendingRecord {
-                    txid: transaction.txid(),
-                    height,
-                    vin: u32::try_from(vin)
-                        .map_err(|_| TxQueryError::Storage("vin overflow".into()))?,
-                }));
+                if let Some(record) = Self::spending_input(transaction, height, outpoint)? {
+                    return Ok(Some(record));
+                }
             }
         }
         Ok(None)
+    }
+
+    fn spending_input(
+        transaction: &Tx,
+        height: u32,
+        outpoint: &OutPoint,
+    ) -> Result<Option<SpendingRecord>, TxQueryError> {
+        let Some(vin) = transaction
+            .inputs
+            .iter()
+            .position(|input| input.previous_output == *outpoint)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(SpendingRecord {
+            txid: transaction.txid(),
+            height,
+            vin: u32::try_from(vin).map_err(|_| TxQueryError::Storage("vin overflow".into()))?,
+        }))
     }
 
     fn history_snapshot_for(

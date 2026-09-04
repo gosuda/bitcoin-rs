@@ -141,5 +141,5 @@ impl CapabilityProvider for NodeCapabilities {
 /// Returns whether the transaction-index capability is enabled by config.
 #[must_use]
 pub(crate) fn txindex_enabled(config: &NodeConfig) -> bool {
-    config.txindex || config.script_index.is_enabled()
+    config.indexes.txindex || config.indexes.script_index.is_enabled()
 }

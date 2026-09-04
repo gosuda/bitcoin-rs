@@ -25,6 +25,7 @@ ledger. This page adds nothing normative; it places the policy under the
 
 - `crates/mempool/tests/policy_contract.rs` (`cargo test -p bitcoin-rs-mempool --test policy_contract`)
 - `crates/rpc/tests/policy_contract.rs` (`cargo test -p bitcoin-rs-rpc --test policy_contract`)
+- `crates/rpc/tests/transaction_methods.rs` (POL-01 duplicate submission: in-mempool idempotency and evicted resubmission)
 - `crates/mempool/tests/rbf_bip125.rs` (BIP125 RBF rules 1–6)
 - `crates/mempool/tests/ancestor_limits.rs` (ancestor and descendant limits)
 - `crates/mempool` unit tests in `src/pool.rs` (cluster connectivity, count and

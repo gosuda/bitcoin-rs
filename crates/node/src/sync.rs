@@ -151,6 +151,18 @@ impl BlockSync {
         *self.block_stager.lock() = BlockStager::new(budget);
     }
 
+    /// Clears address-scoped sync state before a replacement is published ready.
+    ///
+    /// Matching is by socket address, not connection identity: a same-address
+    /// replacement never shares the predecessor's `PeerSource`.
+    pub fn on_peer_ready(&self, source: bitcoin_rs_p2p::PeerSource) {
+        self.download_window.lock().forget_peer(source.addr);
+        let mut pending = self.pending_getheaders.lock();
+        if pending.is_some_and(|request| request.peer_addr == source.addr) {
+            *pending = None;
+        }
+    }
+
     fn reconcile_peer_sessions(&self) {
         let live = self.peer_table.live_connections();
         let mut window = self.download_window.lock();
@@ -6559,6 +6571,27 @@ mod tests {
             inbound_headers_tx,
             peers,
         })
+    }
+
+    #[test]
+    fn on_peer_ready_clears_same_address_header_state_for_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        *sync.pending_getheaders.lock() = Some(super::PendingHeaderRequest {
+            peer_addr,
+            locator_tip_hash: Hash256::default(),
+            target_height: 1,
+            requested_at: Instant::now(),
+        });
+        let (tx, _rx) = unbounded::<Message>();
+        let replacement = bitcoin_rs_p2p::PeerLease::new(tx);
+        sync.on_peer_ready(replacement.source(peer_addr));
+        assert!(
+            sync.pending_getheaders.lock().is_none(),
+            "replacement readiness must drop address-scoped header state"
+        );
+        Ok(())
     }
 
     fn genesis_header() -> Header {

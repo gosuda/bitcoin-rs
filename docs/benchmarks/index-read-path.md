@@ -197,14 +197,14 @@ evidence for the lazy-txid change, not a current test or runtime contract.
 
 ## Landed: transaction byte positions in row values
 
-Groundwork for the resolver rewrite, no read-path change yet.
+The resolver now uses the positions for one-transaction reads.
 
 **Change.** Funding and `TxConfirmed` row values were empty. They now carry a
 packed `TxPosition[n]` — the `(offset, length)` byte range of each transaction
 that produced the row, within its block's serialized body. Keys, key ordering
-and row counts are untouched, so every existing row-shape test passes unchanged.
-Spending rows are left empty: nothing resolves them back to transactions today,
-so positions there would cost storage for no reader.
+and row counts remain unchanged.
+Spending rows now carry positions too, since `spender_for` reads them to resolve
+the spending transaction without loading the full block.
 
 **Storage cost, measured** on a 248 KB / 2,200-transaction block:
 
@@ -212,11 +212,11 @@ so positions there would cost storage for no reader.
 |---|---:|---:|---:|---:|
 | Funding | 4,400 | 52,800 | 35,200 | **1.67x** |
 | `TxConfirmed` | 2,200 | 26,400 | 17,600 | **1.67x** |
-| Spending | 2,200 | 26,400 | 0 | 1.00x |
+| Spending | 2,200 | 26,400 | 17,600 | **1.67x** |
 
 Uncompressed and before the backend's own compression. At mainnet scale the
-order of magnitude is tens of GB across the two families; a real figure needs a
-reindex.
+order of magnitude is tens of GB across the indexed row families; a real figure
+needs a reindex.
 
 **No block identity tag.** An earlier draft prefixed each value with 8 bytes of
 block hash so a reader could detect positions left behind by a superseded block

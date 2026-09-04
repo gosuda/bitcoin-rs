@@ -110,7 +110,7 @@ pub(crate) fn current_tip(state: &NodeState) -> GateResult<bitcoin_rs_chain::Tip
 pub(crate) fn regtest_config(dir: &std::path::Path) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = dir.to_path_buf();
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config
 }
 

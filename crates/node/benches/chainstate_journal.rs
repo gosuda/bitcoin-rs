@@ -127,7 +127,7 @@ fn peak_rss_kib() -> Result<u64> {
 fn test_config(data_dir: PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;
-    config.p2p_listen.clear();
+    config.p2p.listen.clear();
     config.chainstate_journal.blocks = 100;
     config.chainstate_journal.max_lag_blocks = 200;
     config

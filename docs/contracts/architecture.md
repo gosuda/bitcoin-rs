@@ -114,8 +114,10 @@ Owners:
   mempool admission and mutation sequencing in mempool, connection lifecycle in
   p2p, template assembly in mining, and index schemas in their owning crates.
 - `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
-  parsing, and process-level cache budgeting (`dbcache` distribution across
-  chainstate and txindex namespaces).
+  resolution and validation (`UserConfig` layers → `NodeConfig`), and
+  process-level cache budgeting (`dbcache` distribution across chainstate and
+  txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
+  TOML parsing.
 
 ### `ARCH-06`: Hierarchy change and exception process
 

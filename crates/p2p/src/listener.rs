@@ -22,6 +22,7 @@ const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 type SyncWakeHandle = Option<Sender<()>>;
+type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 
 /// State shared by the listener and every connection thread it spawns.
 ///
@@ -37,6 +38,7 @@ struct ConnectionShared {
     totals: Option<Arc<crate::TrafficTotals>>,
     chain_query: ChainQueryHandle,
     session_cancel: Option<Arc<AtomicBool>>,
+    peer_ready: PeerReadyHandle,
 }
 
 impl ConnectionShared {
@@ -52,6 +54,7 @@ impl ConnectionShared {
             totals: None,
             chain_query,
             session_cancel: None,
+            peer_ready: None,
         }
     }
 
@@ -66,12 +69,24 @@ impl ConnectionShared {
             totals: Some(Arc::clone(controls.totals())),
             chain_query,
             session_cancel: None,
+            peer_ready: None,
         }
     }
 
     fn with_session_cancel(mut self, session_cancel: Arc<AtomicBool>) -> Self {
         self.session_cancel = Some(session_cancel);
         self
+    }
+
+    fn with_peer_ready(mut self, peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>) -> Self {
+        self.peer_ready = Some(peer_ready);
+        self
+    }
+
+    fn notify_peer_ready(&self, source: crate::PeerSource) {
+        if let Some(peer_ready) = &self.peer_ready {
+            peer_ready(source);
+        }
     }
 
     fn is_session_cancelled(&self) -> bool {
@@ -457,9 +472,11 @@ pub fn serve_bound_with_session_cancel(
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
     session_cancel: Arc<AtomicBool>,
+    peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
 ) -> Result<(), ListenerError> {
     let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
-        .with_session_cancel(session_cancel);
+        .with_session_cancel(session_cancel)
+        .with_peer_ready(peer_ready);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -489,9 +506,11 @@ pub fn spawn_outbound_connection_with_session_cancel(
     chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
     sync_wake_tx: Option<Sender<()>>,
     session_cancel: Arc<AtomicBool>,
+    peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
-        .with_session_cancel(session_cancel);
+        .with_session_cancel(session_cancel)
+        .with_peer_ready(peer_ready);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -860,6 +879,10 @@ fn run_connected_session(
             return Err(error);
         }
     };
+    let source = lease.source(peer_addr);
+    if shared.peer_table.is_current(source) {
+        shared.notify_peer_ready(source);
+    }
     shared.peer_table.publish_info(peer_addr, &lease, info);
 
     let inbound = lease.is_inbound();

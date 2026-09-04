@@ -227,6 +227,38 @@ fn txindex_position_values_follow_authoritative_rows() -> TestResult<()> {
 }
 
 #[test]
+fn spending_rows_round_trip_values() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    let spending = key_12(3);
+    let value = b"position";
+
+    store.put(ColumnFamily::Spending, &spending, value)?;
+    assert_eq!(
+        store.get(ColumnFamily::Spending, &spending)?,
+        Some(value.to_vec())
+    );
+    assert_eq!(
+        store
+            .scan_prefix_bounded(ColumnFamily::Spending, &spending[..4], MAX_SCAN)?
+            .rows,
+        vec![(spending.to_vec(), value.to_vec())]
+    );
+
+    let mut batch = store.new_batch();
+    batch.delete(ColumnFamily::Spending, &spending);
+    store.write(batch)?;
+    assert_eq!(store.get(ColumnFamily::Spending, &spending)?, None);
+
+    store.put(ColumnFamily::Spending, &spending, b"")?;
+    assert_eq!(
+        store.get(ColumnFamily::Spending, &spending)?,
+        Some(Vec::new())
+    );
+    Ok(())
+}
+
+#[test]
 fn txindex_fixed_prefix_boundaries_12() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
@@ -447,13 +479,14 @@ fn txindex_invalid_operation_aborts_transaction() -> TestResult<()> {
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
 
-    // Non-empty value on a fixed-width table aborts the batch.
+    // Non-empty value on a unit-valued fixed-width table aborts the batch.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::TxConfirmed, &valid, b"");
-    batch.put(ColumnFamily::Spending, &key_12(2), b"non-empty");
+    let header = header_80(2);
+    batch.put(ColumnFamily::BlockHeaders, &header, b"non-empty");
     assert_invalid(store.write(batch));
     assert!(store.get(ColumnFamily::TxConfirmed, &valid)?.is_none());
-    assert!(store.get(ColumnFamily::Spending, &key_12(2))?.is_none());
+    assert!(store.get(ColumnFamily::BlockHeaders, &header)?.is_none());
 
     // Delete with an invalid key length aborts the batch.
     let mut batch = store.new_batch();
@@ -648,7 +681,7 @@ fn txindex_write_durable_if_unit_tables() -> TestResult<()> {
     let temp = tempfile::TempDir::new()?;
     let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
 
-    // Unit-valued fixed tables only ever match an empty expectation.
+    // Empty values are represented by absent entries in paired value tables.
     let funding = key_12(2);
     store.put(ColumnFamily::Funding, &funding, b"")?;
     assert!(!store.write_durable_if(
