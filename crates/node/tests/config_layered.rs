@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use bitcoin_rs_node::{Auth, Network, NodeConfig, ScriptIndexMode};
+use std::ffi::OsString;
 use std::fs;
 use std::net::SocketAddr;
 
@@ -46,11 +47,11 @@ rpc_password = "toml-pass"
         Some(&bitcoin_conf_path),
         env,
         [
-            "bitcoin-rs",
-            "--network",
-            "testnet4",
-            "--data-dir",
-            data_dir.to_str().expect("temp path is utf-8"),
+            OsString::from("bitcoin-rs"),
+            OsString::from("--network"),
+            OsString::from("testnet4"),
+            OsString::from("--data-dir"),
+            data_dir.clone().into_os_string(),
         ],
     )?;
 
@@ -434,9 +435,9 @@ fn cli_config_flag_loads_toml() -> Result<()> {
         None,
         core::iter::empty::<EnvPair>(),
         [
-            "bitcoin-rs",
-            "--config",
-            toml_path.to_str().expect("temp path is utf-8"),
+            OsString::from("bitcoin-rs"),
+            OsString::from("--config"),
+            toml_path.into_os_string(),
         ],
     )?;
     assert_eq!(config.storage_backend, "redb");

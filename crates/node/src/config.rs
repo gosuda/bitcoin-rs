@@ -1019,20 +1019,22 @@ mod tests {
     fn public_cli_surface_is_the_launcher_flags() {
         use std::collections::BTreeSet;
 
-        let longs: BTreeSet<&str> = CliArgs::command()
+        let command = CliArgs::command();
+        let longs: BTreeSet<&str> = command
             .get_arguments()
             .filter_map(clap::Arg::get_long)
             .collect();
         assert_eq!(
             longs,
-            BTreeSet::from([
-                "bitcoin-conf",
-                "config",
-                "data-dir",
-                "help",
-                "network",
-                "version"
-            ])
+            BTreeSet::from(["bitcoin-conf", "config", "data-dir", "network"])
+        );
+        assert!(
+            command.get_version().is_some(),
+            "launcher CLI must expose --version"
+        );
+        assert!(
+            !command.is_disable_help_flag_set(),
+            "launcher CLI must expose --help"
         );
     }
 
