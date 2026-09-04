@@ -5,7 +5,7 @@
 pub mod index;
 /// Unconfirmed transaction row writing over the workspace key-value store.
 pub mod mempool;
-/// Stable electrs-shaped row types.
+/// Stable electrs-shaped scan prefixes with sortable big-endian heights.
 pub mod types;
 
 pub use index::{
@@ -19,4 +19,5 @@ pub use mempool::{MempoolRowCounts, MempoolRowWriter};
 pub use types::{
     HASH_PREFIX_LEN, HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, HashPrefix, HashPrefixRow, HeaderRow,
     SCRIPT_LIVE_ROW_SIZE, ScriptHash, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow,
+    height_from_key, height_key,
 };
