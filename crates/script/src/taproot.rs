@@ -1,5 +1,5 @@
 use bitcoin_rs_primitives::Hash256;
-use secp256k1::{Message, Parity, Scalar, Secp256k1, XOnlyPublicKey, schnorr::Signature};
+use secp256k1::{Message, Parity, Scalar, XOnlyPublicKey, schnorr::Signature};
 use sha2::{Digest, Sha256};
 
 /// BIP341 annex tag prefix (Core `ANNEX_TAG`).
@@ -124,8 +124,7 @@ pub fn verify_taproot_commitment(control: &[u8], program: &[u8], tapleaf_hash: &
     } else {
         Parity::Odd
     };
-    let secp = Secp256k1::verification_only();
-    internal.tweak_add_check(&secp, &output, parity, tweak)
+    internal.tweak_add_check(secp256k1::SECP256K1, &output, parity, tweak)
 }
 
 #[cfg(test)]
