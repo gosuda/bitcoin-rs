@@ -206,7 +206,7 @@ hwm = 5000
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
-    /// IDX-01: `--scriptindex=utxo` enables ScriptLive only.
+    /// IDX-01: `--scriptindex=utxo` enables `ScriptLive` only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
         let config = super::load(
