@@ -390,7 +390,7 @@ fn chainstate_journal_rejects_invalid_values() {
 }
 
 #[test]
-// Contract: ARCH-05 — payout address precedence is resolved then decoded for the selected network.
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn mining_payout_address_decodes_after_all_layers() -> Result<()> {
     use bitcoin_rs_node::MiningOverrides;
 

@@ -1002,7 +1002,10 @@ impl Mempool {
                 txid,
                 fee_delta,
                 in_mempool: self.by_txid.contains_key(&txid),
-                modified_fee: self.by_txid.get(&txid).and_then(|&id| self.entry(id).map(|entry| entry.modified_fee())),
+                modified_fee: self
+                    .by_txid
+                    .get(&txid)
+                    .and_then(|&id| self.entry(id).map(MempoolEntry::modified_fee)),
             })
             .collect()
     }
@@ -2930,12 +2933,36 @@ mod tests {
             .expect("pooled overlay is listed");
         assert_eq!(pooled_row.fee_delta, 500);
         assert!(pooled_row.in_mempool);
+        assert_eq!(pooled_row.modified_fee, Some(1_500));
         let absent_row = overlay
             .iter()
             .find(|entry| entry.txid == absent_txid)
             .expect("absent overlay is listed");
         assert_eq!(absent_row.fee_delta, -25);
         assert!(!absent_row.in_mempool);
+        assert_eq!(absent_row.modified_fee, None);
+        Ok(())
+    }
+
+    #[test]
+    fn prioritise_removes_a_zeroed_overlay() -> Result<(), MempoolError> {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let pooled = tx(32, Vec::new());
+        let pooled_txid = pooled.txid();
+        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7))?;
+        pool.prioritise(pooled_txid, 500)
+            .expect("pooled overlay applies");
+        pool.prioritise(pooled_txid, -500)
+            .expect("reversing the overlay clears it");
+        assert!(
+            pool.prioritised_transactions().is_empty(),
+            "a zero accumulated delta must leave the overlay map"
+        );
+        assert_eq!(
+            pool.entry_by_txid(&pooled_txid)
+                .map(|entry| entry.fee_delta),
+            Some(0)
+        );
         Ok(())
     }
 

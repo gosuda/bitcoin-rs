@@ -208,8 +208,9 @@ pub trait MiningControl: Send + Sync {
 
     /// Estimated hashes per second over `lookup` blocks ending at `height`.
     ///
-    /// `lookup <= 0` means "since the last difficulty retarget". `height < 0`
-    /// means the applied tip. Matches Bitcoin Core's `getnetworkhashps`.
+    /// `lookup` must be a positive block count or `-1` (since the last
+    /// difficulty retarget). `height` must be `-1` (applied tip) or an existing
+    /// applied-chain height. Matches Bitcoin Core's `getnetworkhashps`.
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError>;
 
     /// Synchronously validates and applies a solved block.
