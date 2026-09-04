@@ -1986,12 +1986,10 @@ def _open_verified_snapshot(
 ) -> int:
     """Return a sealed, non-CLOEXEC memfd of the verified bytes.
 
-    The child inherits this descriptor and opens ``/proc/self/fd/<n>``. A
-    later rename or in-place write of the workspace pathname cannot change
-    those bytes. Binary snapshots request ``MFD_EXEC``; config snapshots
-    request ``MFD_NOEXEC_SEAL``. Older kernels that reject those flags
-    fall back to ``MFD_ALLOW_SEALING`` alone. The caller closes the fd
-    after ``Popen``.
+    The child inherits this descriptor and opens ``/proc/self/fd/<n>``.
+    Execution-policy flags and the older-kernel ``EINVAL`` fallback are
+    ``docs/contracts/muhash-rpc.md`` ``MRPC-03``. The caller closes the
+    fd after ``Popen``.
     """
     raw = _read_regular_file(path, cap, field)
     if hashlib.sha256(raw).hexdigest() != expected:
