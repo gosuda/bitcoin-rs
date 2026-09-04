@@ -141,9 +141,11 @@ Owners:
   `ChainTransition`. Reorg planning that must abort without mutating takes
   `lock_transition` first and promotes it with `begin_transition_locked` only
   after the authoritative plan matches the preloaded plan.
-- Snapshot reads (`Chainstate::snapshot`, `ChainEventPublisher` cells) copy
-  published values. They do not take the transition lock and cannot mutate
-  chainstate.
+- Snapshot reads (`Chainstate::snapshot`) copy the independently published
+  header tip and a coherent applied-tip / chain-tx-count pair. They do not
+  take the transition lock and cannot mutate chainstate. `ChainEventPublisher`
+  cells remain a separate coherent snapshot of the applied tip for index
+  consumers (`EVT-01`).
 - Authoritative apply still lives in `crates/node` because it composes chain,
   consensus, utxo, and storage. Optional consumers (RPC `BlockLog`, ZMQ,
   TxIndex wake) remain wired here until #77's committed-event consumers own

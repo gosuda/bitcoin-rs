@@ -11,8 +11,7 @@ extern crate alloc;
 
 /// Authoritative chainstate mutation: connect, disconnect, and window apply.
 ///
-/// [`Chainstate`] is the in-process facade. Callers that mutate the applied
-/// tip obtain a [`ChainTransition`].
+/// See `ARCH-07` in `docs/contracts/architecture.md`.
 pub mod apply;
 mod chainstate_journal;
 mod checkpoint;
@@ -30,10 +29,10 @@ pub mod event_loop;
 pub mod import;
 /// Tracing initialization.
 pub mod logging;
-/// Metrics instrumentation and optional exposition.
-pub mod metrics;
 /// P2P admission and local-relay mempool observer legs.
 mod mempool_observer;
+/// Metrics instrumentation and optional exposition.
+pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.
 pub mod mining;
 /// Chain-event reconciliation seam for index consumers.

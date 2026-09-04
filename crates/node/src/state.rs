@@ -1864,6 +1864,7 @@ impl NodeState {
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
             chain_tx_count: Arc::clone(&chain_tx_count),
+            applied_seq: Arc::new(AtomicU64::new(0)),
             block_tree: Arc::clone(&block_tree),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
