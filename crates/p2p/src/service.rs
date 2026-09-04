@@ -535,10 +535,7 @@ impl P2pService {
     /// Enables or disables network activity. Disabling cancels current peers;
     /// their owners remove the leases during teardown.
     pub fn set_network_active(&self, active: bool) {
-        self.network_active.store(active, Ordering::Release);
-        if !active {
-            self.lifecycle.cancel_all();
-        }
+        apply_network_active(&self.network_active, &self.lifecycle.table(), active);
     }
 
     /// Returns the shared admission switch for compatibility with node
@@ -795,6 +792,17 @@ impl P2pService {
     /// Replaces the P2P-owned download budget.
     pub fn install_download_budget(&self, budget: SyncBudget) {
         self.with_download_window(|window| *window = DownloadWindow::new(budget));
+    }
+}
+
+/// Applies the network-activity transition used by [`P2pService`] and RPC.
+///
+/// Disabling cancels current leases; connection owners remove their own
+/// sessions during teardown.
+pub fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: bool) {
+    flag.store(active, Ordering::Release);
+    if !active {
+        table.cancel_all();
     }
 }
 
@@ -1060,5 +1068,22 @@ mod tests {
             .expect("empty listen set starts");
         service.shutdown();
         service.join().expect("clean join");
+    }
+
+    #[test]
+    fn apply_network_active_cancels_leases_only_when_disabled() {
+        let table = crate::PeerTable::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        table.register(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)), lease.clone());
+        let flag = AtomicBool::new(true);
+
+        apply_network_active(&flag, &table, true);
+        assert!(flag.load(Ordering::Acquire));
+        assert!(!lease.is_cancelled());
+
+        apply_network_active(&flag, &table, false);
+        assert!(!flag.load(Ordering::Acquire));
+        assert!(lease.is_cancelled());
     }
 }

@@ -36,9 +36,9 @@ operation cannot publish, send to, or cancel a replacement.
 - Scheduler state is reset only after the current lease publishes ready
   metadata. A stale predecessor must not notify.
 - Handshake metadata is published only for the current lease.
-- The node and RPC use one shared `Arc<P2pService>` for workers and
-  session-store access. Production block-download scheduling stays on
-  `BlockSync`'s download window.
+- The node starts one `P2pService`. RPC applies the same network-activity
+  transition (`apply_network_active`) on the shared flag and `PeerTable`.
+  Production block-download scheduling stays on `BlockSync`'s download window.
 - Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale
