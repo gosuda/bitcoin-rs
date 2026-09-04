@@ -377,6 +377,9 @@ mod tests {
     /// wrapper. Falling back to `write` would split header and payload into
     /// two syscalls and under-count if the first slice were taken as the whole
     /// message.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`. Syscall shape is the
+    /// named invariant; elapsed time is `crates/p2p/benches/write_message.rs`.
     #[test]
     fn write_message_through_counting_stream_stays_vectored() {
         struct FailOnUnvectored {
