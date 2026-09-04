@@ -2331,11 +2331,17 @@ class CampaignControllerTests(unittest.TestCase):
             field="arm config",
         )
         source.write_bytes(b"replaced-config")
-        module._rehash_copy(
+        descriptor = module._open_verified_inode(
             destination, digest, module.MAX_RECEIPT_BYTES, "arm config copy"
         )
+        try:
+            self.assertEqual(Path(f"/proc/self/fd/{descriptor}").read_bytes(), b"pinned-config")
+            with self.assertRaises(OSError):
+                os.write(descriptor, b"changed")
+        finally:
+            os.close(descriptor)
         with self.assertRaises(module.ContractError):
-            module._rehash_copy(
+            module._open_verified_inode(
                 source, digest, module.MAX_RECEIPT_BYTES, "operator config"
             )
         shutil.rmtree(root, ignore_errors=True)
