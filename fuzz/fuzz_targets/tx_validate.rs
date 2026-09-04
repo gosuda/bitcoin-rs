@@ -42,6 +42,7 @@ fn accept_context() -> AcceptContext {
 
 fn validate_native(tx: Tx) {
     let tx = Arc::new(tx);
+    let context = accept_context();
     let view = SpendingView {
         coin: TxOut {
             value: 50_000_000,
@@ -49,9 +50,14 @@ fn validate_native(tx: Tx) {
         },
         tx: tx.as_ref(),
     };
-    let _ = verify_transaction_non_script(&tx, &view, 800_001, 1_700_000_000);
+    let _ = verify_transaction_non_script(
+        &tx,
+        &view,
+        context.height,
+        context.locktime_cutoff,
+    );
     let pool = Mempool::new(MempoolLimits::default());
-    let _ = check_acceptance(&pool, &tx, &view, &accept_context());
+    let _ = check_acceptance(&pool, &tx, &view, &context);
 }
 
 /// rust-bitcoin parses tx/witness; bitcoin-rs runs consensus and mempool.
@@ -71,7 +77,10 @@ fn validate_tx(data: &[u8]) {
     let tx = Tx {
         version: 2,
         inputs: vec![bitcoin_rs_primitives::TxIn {
-            previous_output: OutPoint::default(),
+            previous_output: OutPoint {
+                txid: Default::default(),
+                vout: 0,
+            },
             script_sig: Vec::new(),
             sequence: u32::MAX,
             witness: stack,
