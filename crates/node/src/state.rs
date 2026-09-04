@@ -3469,6 +3469,8 @@ mod tests {
         std::fs::write(&current_file, [])?;
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+        // The prune is a no-op until a durable tip is published;
+        // `bitcoin_rs_storage::pruning::stage_block_and_undo_prune` owns file selection.
         state
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
@@ -3553,6 +3555,8 @@ mod tests {
 
         let state = NodeState::open(config, None)?;
         publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+        // The prune is a no-op until a durable tip is published;
+        // `bitcoin_rs_storage::pruning::stage_block_and_undo_prune` owns file selection.
         state
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
