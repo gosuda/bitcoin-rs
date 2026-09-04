@@ -5,6 +5,8 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
+/// Out-of-order inbound block staging bounded by the download window budget.
+pub mod block_stager;
 /// Active-chain `getheaders` / `getdata` serving.
 pub mod chain_query;
 /// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
@@ -64,6 +66,7 @@ pub use service::{
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use wire::{Message, PeerError};
 
+pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
 pub use download_window::{
     DownloadWindow, FanoutCandidate, SyncBudget, SyncPeer, SyncPeerSelection,
     configure_request_mode, default_sync_budget, statically_fanout_eligible,
