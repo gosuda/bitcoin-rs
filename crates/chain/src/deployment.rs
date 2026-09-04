@@ -13,7 +13,8 @@ use bitcoin_rs_primitives::Network;
 
 use crate::{BlockTree, CachedState, NodeId};
 
-const MTP_WINDOW: usize = 11;
+/// Number of blocks used by the consensus median-time-past invariant.
+pub const MTP_WINDOW: usize = 11;
 const KNOWN_DEPLOYMENT_IDS: [u32; 2] = [CSV_DEPLOYMENT_ID, SEGWIT_DEPLOYMENT_ID];
 
 /// Read-only [`DeploymentContext`] over a [`BlockTree`] rooted at `tip_id`.

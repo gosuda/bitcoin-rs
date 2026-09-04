@@ -7,6 +7,7 @@
 
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync,
+    deployment::MTP_WINDOW,
     node::{BlockHeader, NodeId},
     softfork_state,
 };
