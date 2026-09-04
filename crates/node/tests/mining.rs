@@ -1112,10 +1112,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after generate"));
     assert_eq!(tip.height, 2);
-    assert_eq!(
-        tip.hash,
-        Hash256::from(hashes.last().expect("two hashes").hash)
-    );
+    assert_eq!(tip.hash, Hash256::from(hashes[1].hash));
     Ok(())
 }
 
@@ -1126,15 +1123,16 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
     apply_genesis(&state)?;
     let mining = coordinator(&state);
     let missing = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
-    let error = mining
-        .generate(GenerateRequest {
-            payout: vec![0x51],
-            count: 1,
-            max_tries: 16,
-            selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
-            submit: true,
-        })
-        .expect_err("missing mempool txid must fail");
+    let error = match mining.generate(GenerateRequest {
+        payout: vec![0x51],
+        count: 1,
+        max_tries: 16,
+        selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
+        submit: true,
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("missing mempool txid must fail"),
+    };
     assert!(matches!(error, MiningControlError::InvalidRequest(_)));
     Ok(())
 }
@@ -1161,15 +1159,16 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
         }],
         lock_time: 0,
     };
-    let error = mining
-        .generate(GenerateRequest {
-            payout: vec![0x51],
-            count: 1,
-            max_tries: 16,
-            selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
-            submit: false,
-        })
-        .expect_err("invalid raw spend must fail validation, not mempool lookup");
+    let error = match mining.generate(GenerateRequest {
+        payout: vec![0x51],
+        count: 1,
+        max_tries: 16,
+        selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
+        submit: false,
+    }) {
+        Err(error) => error,
+        Ok(_) => panic!("invalid raw spend must fail validation, not mempool lookup"),
+    };
     assert!(
         matches!(error, MiningControlError::Failed(_)),
         "raw generateblock txs skip mempool membership: {error:?}"
@@ -1184,7 +1183,11 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     let rate = mining.network_hash_ps(120, -1)?;
-    assert_eq!(rate, info.network_hashes_per_second);
+    assert!(
+        (rate - info.network_hashes_per_second).abs() < f64::EPSILON,
+        "default window must match mining_info: {rate} vs {}",
+        info.network_hashes_per_second
+    );
     Ok(())
 }
 
