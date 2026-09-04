@@ -56,6 +56,8 @@ match a regression.
 | [storage-footprint.md](storage-footprint.md) | `FP-01`–`FP-04` | Logical and physical data-directory ledgers, custody-grade collection, explicit `--measure-storage` command, default unpruned 1-TB peak budget | `crates/storage/src/footprint.rs`, `crates/node/src/storage_footprint.rs`, `bin/bitcoin-rs --measure-storage` | `crates/storage/tests/storage_footprint.rs`; `crates/node/src/storage_footprint.rs` tests `default_regtest_record_is_inapplicable_to_the_mainnet_budget`, `snapshot_of_default_mainnet_is_insufficient_for_the_peak_gate`; `bin/bitcoin-rs/tests/cli_help.rs` |
 | [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-11` | Frozen 36-cell denominator, attribution noise floor, overlap-aware wall accounting, ledger ownership, forbidden probes, and dispositions | `docs/benchmarks/hot-path-ledger.toml`; product-domain comparators | `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs` (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`) |
 
+| [sync-window.md](sync-window.md) | `SYNC-01` | Bounded block-download window, fan-out per-peer cap, and requeue behavior | `crates/p2p/src/download_window.rs`, `crates/node/src/sync.rs` | Permanent sync-window tests and pipeline fixtures |
+
 ## Vocabulary
 
 Terms used above are defined in [../../CONCEPTS.md](../../CONCEPTS.md). A
