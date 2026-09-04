@@ -5,7 +5,7 @@
 path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
 BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 `API-08` is mainnet template operational gates. `API-09` is `submitheader`.
-`API-10` is GBT client-rule negotiation.
+`API-10` is GBT client-rule negotiation. `API-11` is `submitblock` decode.
 
 ## Clauses
 
@@ -142,6 +142,16 @@ BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
 - After assembly, any remaining mandatory template rule the client omitted
   is Core `-8`: `Support for 'NAME' rule requires explicit client support`.
 
+### `API-11`: `submitblock` decode
+
+- **Owner**: `decode_submitted_block` in `crates/rpc/src/handlers/mining.rs`.
+  Admission stays on `MiningControl::submit_block`.
+- Invalid hex or a payload that is not a complete block is Core `-22`
+  (`Block decode failed`), matching Core `DecodeHexBlk`. Extra bytes after a
+  complete block are ignored.
+- A second dummy argument is accepted and ignored (BIP22). A third argument
+  is JSON-RPC `-32602`.
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
@@ -202,3 +212,6 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getblocktemplate_requires_signet_rule_on_signet`,
     `getblocktemplate_rejects_template_mandatory_rule_without_client_support`,
     `getblocktemplate_proposal_skips_client_rule_negotiation`
+- `API-11`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
+    `submitblock_ignores_bip22_dummy_and_trailing_bytes`

@@ -137,7 +137,7 @@ declare_rows! {
     "getnodeaddresses", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(network::getnodeaddresses);
     "getblocktemplate", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "BIP22/BIP23 template: client must advertise segwit (and signet on signet); submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll.", "0.4.0", Some(mining::getblocktemplate);
     "getmininginfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator.", "0.4.0", Some(mining::getmininginfo);
-    "submitblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::submitblock);
+    "submitblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored.", "0.4.0", Some(mining::submitblock);
     "submitheader", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Header-only admission through the same tree path as inbound P2P headers. Decode failures are -22; missing previous or invalid headers are -25.", "0.4.0", Some(mining::submitheader);
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mining::prioritisetransaction);
     "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
