@@ -2,8 +2,8 @@
 //! `sighash.json` vectors, and fuzz-corpus self-consistency.
 //!
 //! Fuzz-corpus gates loud-skip (with a stderr note) only when `fuzz/corpus/<target>/`
-//! is entirely absent; a present-but-empty corpus, or seeds that all fail to parse,
-//! fails.
+//! is entirely absent; a present-but-empty corpus, or any seed that fails the native
+//! consensus codec contract, fails.
 
 #![expect(
     clippy::expect_used,
@@ -49,6 +49,9 @@ fn fixture_blocks() -> Vec<(String, Vec<u8>)> {
 }
 
 /// Reads fuzz seeds from `fuzz/corpus/<target>/`.
+///
+/// The corpus is a checked-in input set for the native consensus codec contract:
+/// every seed is expected to be a valid, canonical encoding for its target.
 ///
 /// Returns `None` when the corpus directory is entirely absent (the QA-corpora track
 /// owns `fuzz/corpus` and may not have landed on this branch); `Some` — possibly empty —
@@ -115,14 +118,14 @@ fn tx_corpus_seeds_roundtrip_when_decoded() {
     );
     let seed_count = seeds.len();
     let mut checked = 0_usize;
-    // Decode success must re-encode byte-identically. Failures (including Core's
-    // SuperfluousWitness reject of empty BIP144 witness sections) are not a
-    // contract against rust-bitcoin 0.32's looser decoder.
+    // This is the native consensus-codec contract: every checked-in seed must
+    // decode, and canonical serialization must preserve its bytes. A failure
+    // is actionable rather than an acceptable corpus verdict.
     for (path, bytes) in seeds {
-        if let Ok(native_tx) = deserialize::<NativeTx>(&bytes) {
-            assert_eq!(consensus_bytes(&native_tx), bytes, "{path}: re-encode");
-            checked += 1;
-        }
+        let native_tx = deserialize::<NativeTx>(&bytes)
+            .unwrap_or_else(|error| panic!("{path}: consensus decode failed: {error}"));
+        assert_eq!(consensus_bytes(&native_tx), bytes, "{path}: re-encode");
+        checked += 1;
     }
     assert!(
         checked > 0,
@@ -146,11 +149,13 @@ fn block_corpus_seeds_roundtrip_when_decoded() {
     );
     let seed_count = seeds.len();
     let mut checked = 0_usize;
+    // The checked-in block corpus is part of the native consensus-codec
+    // contract: rejection is a regression, not an ignored verdict.
     for (path, bytes) in seeds {
-        if let Ok(native_block) = deserialize::<NativeBlock>(&bytes) {
-            assert_eq!(consensus_bytes(&native_block), bytes, "{path}: re-encode");
-            checked += 1;
-        }
+        let native_block = deserialize::<NativeBlock>(&bytes)
+            .unwrap_or_else(|error| panic!("{path}: consensus decode failed: {error}"));
+        assert_eq!(consensus_bytes(&native_block), bytes, "{path}: re-encode");
+        checked += 1;
     }
     assert!(
         checked > 0,
