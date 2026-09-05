@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{IoSlice, Read, Write};
 
 use bytes;
 
@@ -284,11 +284,19 @@ pub fn write_message<W: Write + ?Sized>(
 
     // Assemble header and payload into one vectored write so each message is
     // emitted with a single syscall instead of five (avoids header/payload
-    // segment splits and per-part syscall overhead on TcpStream).
-    let mut slices: &mut [std::io::IoSlice<'_>] = &mut [
-        std::io::IoSlice::new(&header),
-        std::io::IoSlice::new(&payload),
-    ];
+    // segment splits and per-part syscall overhead on TcpStream). The writer
+    // must forward `write_vectored`; a wrapper that only implements `write`
+    // would split the frame again.
+    write_all_vectored(writer, &mut [IoSlice::new(&header), IoSlice::new(&payload)])?;
+    Ok(HEADER_LEN + payload.len())
+}
+
+/// Writes every byte in `slices` with `write_vectored`, advancing through
+/// short writes until the frame is on the wire.
+fn write_all_vectored<W: Write + ?Sized>(
+    writer: &mut W,
+    mut slices: &mut [IoSlice<'_>],
+) -> Result<(), PeerError> {
     while !slices.is_empty() {
         match writer.write_vectored(slices) {
             Ok(0) => {
@@ -297,12 +305,12 @@ pub fn write_message<W: Write + ?Sized>(
                     "failed to write whole message",
                 )));
             }
-            Ok(written) => std::io::IoSlice::advance_slices(&mut slices, written),
+            Ok(written) => IoSlice::advance_slices(&mut slices, written),
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(PeerError::Io(error)),
         }
     }
-    Ok(HEADER_LEN + payload.len())
+    Ok(())
 }
 
 /// Read and validate a Bitcoin v1 network message.

@@ -64,6 +64,13 @@ while the chain transition is still held. It cannot fail the authoritative
 transition. Index recovery still uses `ChainEventPublisher` hints (`EVT-02`);
 this is not a second event log.
 
+### Peer socket
+A connected P2P TCP stream after accept or connect. `CountingStream::from_connected`
+is the owner of socket posture: it disables Nagle (`TCP_NODELAY`) once, then wraps
+the stream so handshake, reader, and writer-clone I/O all count into one
+`PeerCounters`. Vectored writes go through the same wrapper, so a framed message
+stays one `writev` instead of a header syscall plus a payload syscall.
+
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
 metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
