@@ -56,10 +56,8 @@ use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 use bitcoin_rs_node::{
-    BlockSync, Network, NodeConfig, TxIndexRuntime,
-    apply::Chainstate,
-    state::NodeState,
-    sync::{SyncBudget, default_sync_budget},
+    BlockSync, Network, NodeConfig, TxIndexRuntime, apply::Chainstate, state::NodeState,
+    sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
 use bitcoin_rs_primitives::deserialize;

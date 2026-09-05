@@ -3340,14 +3340,20 @@ mod tests {
             let addr = test_addr(9001, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
         sync.tick();
 
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Effective fan-out stripe (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET
+            .div_ceil(super::MIN_PEERS_FOR_FANOUT)
+            .clamp(
+                super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                super::PEER_INFLIGHT_BUDGET,
+            );
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(
@@ -3386,7 +3392,7 @@ mod tests {
             let addr = test_addr(9021, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
@@ -3547,7 +3553,7 @@ mod tests {
             let addr = test_addr(9230, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
@@ -3680,7 +3686,7 @@ mod tests {
             let addr = test_addr(9254, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
@@ -3701,7 +3707,13 @@ mod tests {
             "a timed-out peer must not immediately reacquire the same block stripe"
         );
 
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Effective fan-out stripe (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET
+            .div_ceil(super::MIN_PEERS_FOR_FANOUT)
+            .clamp(
+                super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                super::PEER_INFLIGHT_BUDGET,
+            );
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(std::io::Error::other("expected getdata for eligible peer").into());
@@ -4828,7 +4840,7 @@ mod tests {
         let (sync, peers, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-        let rx = connect_peer(&peers, synthetic_peer(addr, 200));
+        let rx = connect_peer(&peers, synthetic_peer(addr, 300));
 
         let mut requested = Vec::new();
         let ticks = super::PENDING_BUDGET / super::GETDATA_BATCH_SIZE;
@@ -7114,12 +7126,18 @@ mod tests {
         for idx in 0..super::MIN_PEERS_FOR_FANOUT {
             receivers.push(connect_peer(
                 &peers,
-                eligible_peer(test_addr(9505, idx)?, 200 - i32::try_from(idx)?),
+                eligible_peer(test_addr(9505, idx)?, 300 - i32::try_from(idx)?),
             ));
         }
         sync.tick();
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Effective fan-out stripe (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET
+            .div_ceil(super::MIN_PEERS_FOR_FANOUT)
+            .clamp(
+                super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                super::PEER_INFLIGHT_BUDGET,
+            );
         for (idx, receiver) in receivers.iter().enumerate() {
             let Message::GetData(inventory) = receiver.try_recv()? else {
                 return Err(std::io::Error::other("expected fanout getdata").into());
@@ -7155,12 +7173,17 @@ mod tests {
             addrs.push(addr);
             receivers.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
         sync.tick();
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Nine live peers at the first tick: the window divides nine ways
+        // (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET.div_ceil(PEER_COUNT).clamp(
+            super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+            super::PEER_INFLIGHT_BUDGET,
+        );
         for (idx, receiver) in receivers[..SELECTED_PEERS].iter().enumerate() {
             let Message::GetData(inventory) = receiver.try_recv()? else {
                 return Err(std::io::Error::other("expected initial stripe").into());
@@ -7171,13 +7194,34 @@ mod tests {
             );
         }
         let _ = receivers[0].try_recv()?;
+        // The spare takes the window remainder past the eight full stripes;
+        // drain it now so the next read sees only the requeued stripe.
+        let Message::GetData(remainder) = receivers[SELECTED_PEERS].try_recv()? else {
+            return Err(std::io::Error::other("expected remainder getdata for spare peer").into());
+        };
+        assert_eq!(
+            witness_block_inventory(remainder)?,
+            expected[SELECTED_PEERS * cap..]
+        );
         let dropped = addrs[1];
         peers.disconnect(dropped);
         sync.tick();
         let Message::GetData(inventory) = receivers[SELECTED_PEERS].try_recv()? else {
             return Err(std::io::Error::other("expected requeued getdata").into());
         };
-        assert_eq!(witness_block_inventory(inventory)?, expected[cap..2 * cap]);
+        // The freed stripe spreads across remaining capacity (the spare tops
+        // up its remainder share while the other peers absorb the rest), so
+        // assert membership in the freed stripe rather than its full extent.
+        // The `pending_len` assert below proves all freed blocks were
+        // re-requested somewhere.
+        let requeued = witness_block_inventory(inventory)?;
+        assert!(
+            !requeued.is_empty()
+                && requeued
+                    .iter()
+                    .all(|hash| expected[cap..2 * cap].contains(hash)),
+            "spare must requeue blocks from the freed stripe"
+        );
         assert_eq!(
             sync.download_window.lock().pending_len(),
             super::PENDING_BUDGET
