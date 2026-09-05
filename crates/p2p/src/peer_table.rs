@@ -82,6 +82,26 @@ impl PeerTable {
         }
     }
 
+    /// Raises the recorded best-known height of the peer at `addr` when the
+    /// peer has demonstrated a higher chain height (it handed us accepted
+    /// headers). Monotonic: never lowers, so a stale announcement cannot drag
+    /// eligibility below the handshake snapshot. Returns `true` when a live
+    /// entry was updated.
+    pub fn note_announced_height(&self, addr: SocketAddr, height: i32) -> bool {
+        let mut entries = self.entries.write();
+        match entries.get_mut(&addr) {
+            Some(entry) => {
+                if let Some(info) = entry.info.as_mut() {
+                    if height > info.best_known_height {
+                        info.best_known_height = height;
+                    }
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Removes and cancels the connection `lease` refers to. Returns `false`
     /// when a different connection is live at `addr`, leaving it untouched.
     pub fn remove_current(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
@@ -338,6 +358,7 @@ mod tests {
             services: 0,
             user_agent: String::new(),
             start_height,
+            best_known_height: start_height,
             conn_time: 0,
             inbound: false,
             addr_bind: addr,

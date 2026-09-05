@@ -18,8 +18,15 @@ pub struct PeerInfo {
     pub services: u64,
     /// User-agent string advertised by the remote.
     pub user_agent: String,
-    /// Best-chain height the remote reports.
+    /// Best-chain height the remote reports at handshake.
     pub start_height: i32,
+    /// Highest chain height this peer has demonstrated while connected:
+    /// starts at the handshake `start_height` and is raised monotonically as
+    /// the peer hands us accepted headers. Sync request eligibility and
+    /// per-request truncation read this, not the handshake snapshot, so a
+    /// long-lived connection at the tip can still serve newly announced
+    /// blocks (the `pindexBestKnownBlock` role, headers-fed).
+    pub best_known_height: i32,
     /// Unix-epoch seconds of handshake completion.
     pub conn_time: u64,
     /// Whether this connection was inbound (`true` for listener-accepted peers).
@@ -63,6 +70,7 @@ impl PeerInfo {
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,
+            best_known_height: version.start_height,
             conn_time,
             inbound: true,
             addr_bind,
@@ -91,6 +99,7 @@ impl PeerInfo {
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,
+            best_known_height: version.start_height,
             conn_time,
             inbound: false,
             addr_bind,
@@ -172,6 +181,7 @@ mod tests {
             services,
             user_agent: String::new(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound: false,
             addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333),

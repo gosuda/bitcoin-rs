@@ -360,8 +360,24 @@ impl BlockSync {
             );
             match acceptance {
                 Ok(node_ids) => {
+                    // The delivering peer has every header it handed us that
+                    // we accepted, so raise its demonstrated best-known
+                    // height: at-tip peers stay request-eligible for the
+                    // bodies of newly announced blocks even though their
+                    // handshake snapshot went stale the moment we caught up.
+                    let announced = node_ids
+                        .iter()
+                        .filter_map(|id| tree.node(*id).ok())
+                        .map(|node| node.height)
+                        .max()
+                        .and_then(|height| i32::try_from(height).ok());
                     self.handles.assume_valid_gate.evaluate(&tree);
                     drop(tree);
+                    if let (Some(height), Some(source)) = (announced, source) {
+                        if self.peer_table.is_current(source) {
+                            self.peer_table.note_announced_height(source.addr, height);
+                        }
+                    }
                     tracing::debug!(
                         accepted = node_ids.len(),
                         received = batch_len,
@@ -424,7 +440,7 @@ impl BlockSync {
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let mut header_peer: Option<SyncPeer> = None;
         for peer in self.peer_table.infos() {
-            let Ok(height) = u32::try_from(peer.start_height) else {
+            let Ok(height) = u32::try_from(peer.best_known_height) else {
                 continue;
             };
             if height <= applied_height {
@@ -432,7 +448,7 @@ impl BlockSync {
             }
             let candidate = SyncPeer {
                 addr: peer.addr,
-                start_height: peer.start_height,
+                start_height: peer.best_known_height,
             };
             if header_peer.is_none_or(|current| current.start_height < candidate.start_height) {
                 header_peer = Some(candidate);
@@ -1062,14 +1078,15 @@ impl BlockSync {
         for peer in self.peer_table.infos() {
             // Height clause of the fan-out eligibility predicate (KTD6) and
             // the pre-existing candidate filter: the peer's known chain must
-            // reach past our applied tip, i.e. cover the window front being
-            // requested. Delta vs Core: Core tracks a continuously updated
-            // per-peer best header (`pindexBestKnownBlock`, fed by headers/
-            // inv processing); this codebase only has the handshake-time
-            // `start_height`, so that is the proxy used — per-request
-            // truncation by `peer_best_height` bounds the damage of a stale
-            // value.
-            if u32::try_from(peer.start_height)
+            // reach past our applied tip, i.e., cover the window front being
+            // requested. Like Core's `pindexBestKnownBlock`, eligibility reads
+            // the demonstrated best-known height (handshake snapshot, raised
+            // as the peer hands us accepted headers) rather than the
+            // handshake value alone — a long-lived at-tip peer would
+            // otherwise become ineligible for every newly announced block
+            // (#617). Per-request truncation by `peer_best_height` still
+            // bounds the damage of a stale value.
+            if u32::try_from(peer.best_known_height)
                 .ok()
                 .is_none_or(|height| height <= our_height)
             {
@@ -1077,7 +1094,7 @@ impl BlockSync {
             }
             let sync_peer = SyncPeer {
                 addr: peer.addr,
-                start_height: peer.start_height,
+                start_height: peer.best_known_height,
             };
             if header_peer
                 .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
@@ -1690,6 +1707,96 @@ mod tests {
         let second = rx.try_recv()?;
         if !matches!(second, Message::GetHeaders(_)) {
             return Err(std::io::Error::other("expected getheaders").into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::error::Error>> {
+        // Regression test for the #617 shape: once a node has caught up, no
+        // connected peer has a handshake-time start_height above its applied
+        // height — every peer connected while the node was at or below the
+        // tip. When a new header then extends the tip (a sendheaders
+        // announcement), the announcing peer demonstrably has the block, so
+        // its demonstrated best-known height must keep it request-eligible
+        // and tick must fetch the missing body instead of skipping every
+        // peer for a stale handshake snapshot.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        for height in 1_u32..=2 {
+            let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+        }
+        // Applied frontier at height 2; header 3 arrives later, below.
+        let applied = {
+            let node = tree.node(tip_id)?;
+            TipSnapshot {
+                tip_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+        let announced_header = test_header(BlockHash::from(tree.node(tip_id)?.hash), 3);
+        let expected = announced_header.compute_hash();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::for_test(
+            handles,
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // The peer's handshake height equals the applied height: it connected
+        // while the node was at the tip, before the new block existed.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(addr, 2));
+
+        // The peer announces the new tip header; drain accepts it and must
+        // record the demonstrated height on the peer.
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![announced_header],
+            source: Some(current_source(&peers, addr)),
+        })?;
+
+        sync.tick();
+
+        let first = rx
+            .try_recv()
+            .map_err(|_| std::io::Error::other("no getdata sent for the new tip header"))?;
+        let Message::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            inventory.len(),
+            1,
+            "only the unapplied new block is requested"
+        );
+        match &inventory[0] {
+            Inventory::WitnessBlock(hash) => {
+                assert_eq!(
+                    Hash256::from_le_bytes(hash.as_byte_array()),
+                    expected.into()
+                );
+            }
+            _ => return Err(std::io::Error::other("expected witness block inventory").into()),
         }
         Ok(())
     }
@@ -6824,6 +6931,7 @@ mod tests {
             services: 0,
             user_agent: String::from("/test/"),
             start_height,
+            best_known_height: start_height,
             conn_time: 0,
             inbound: true,
             addr_bind: addr,

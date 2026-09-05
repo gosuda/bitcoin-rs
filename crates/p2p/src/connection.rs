@@ -673,6 +673,7 @@ mod tests {
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,
+            best_known_height: 0,
             conn_time,
             inbound: false,
             addr_bind: addr,
