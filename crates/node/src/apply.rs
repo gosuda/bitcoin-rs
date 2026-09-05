@@ -7759,11 +7759,13 @@ mod consensus_rule_tests {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
 
-        fn prepare_block(
+        fn prepare_block_with_spent_scripts(
             &self,
+            _capabilities: bitcoin_rs_index::IndexCapabilities,
             _height: u32,
             _hash: [u8; 32],
             _body: &[u8],
+            _spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
         ) -> Result<bitcoin_rs_index::PreparedBlock, bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
@@ -7779,13 +7781,14 @@ mod consensus_rule_tests {
         ) -> Result<(), bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
-        fn commit_rollback_one_for_with_cursor(
+        fn commit_rollback_one_for_with_cursor_with_spent_scripts(
             &self,
             _fence: bitcoin_rs_index::IndexWriteFence,
             _capabilities: bitcoin_rs_index::IndexCapabilities,
             _prev: Option<bitcoin_rs_index::IndexWatermark>,
             _body: &[u8],
             _cursor: bitcoin_rs_index::ConsumerCursorUpdate<'_>,
+            _spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
         ) -> Result<(), bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
