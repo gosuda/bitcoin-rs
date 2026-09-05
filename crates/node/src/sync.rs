@@ -1083,7 +1083,8 @@ impl BlockSync {
             }
             let sync_peer = SyncPeer {
                 addr: peer.addr,
-                start_height: peer.start_height,
+                
+                  start_height: peer.start_height,
             };
             candidates.push(FanoutCandidate {
                 peer: sync_peer,
@@ -1116,7 +1117,8 @@ impl BlockSync {
                 };
                 let sync_peer = SyncPeer {
                     addr: peer.addr,
-                    start_height: i32::try_from(height).unwrap_or(i32::MAX),
+                    
+                      start_height: i32::try_from(height).unwrap_or(i32::MAX),
                 };
                 if let Some(candidate) = candidates
                     .iter_mut()
@@ -2694,7 +2696,8 @@ mod tests {
     }
 
     #[test]
-    fn accepted_at_tip_header_rearms_body_fetch_for_stale_handshake_peer()
+    // Contract ARCH-05-SYNC: accepted active-tip headers rearm body scheduling.
+      fn accepted_at_tip_header_rearms_body_fetch_for_stale_handshake_peer()
     -> Result<(), Box<dyn std::error::Error>> {
         let HeaderSyncFixture {
             sync,
