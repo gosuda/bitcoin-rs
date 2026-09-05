@@ -1042,14 +1042,14 @@ fn script_from_descriptor(
     let (descriptor, keys) =
         MiniscriptDescriptor::<DescriptorPublicKey>::parse_descriptor(&secp, &checksummed)
             .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    ensure_keys_match_network(&descriptor, network)?;
+    ensure_secret_keys_match_network(keys, network)?;
     if descriptor.is_multipath() {
         return Err(multipath_descriptor_rejected());
     }
     if descriptor.has_wildcard() {
         return Err(ranged_descriptor_rejected());
     }
-    ensure_keys_match_network(&descriptor, network)?;
-    ensure_secret_keys_match_network(keys, network)?;
     reject_hardened_xpub(&descriptor)?;
     let derived = descriptor
         .at_derivation_index(0)
@@ -1087,9 +1087,7 @@ fn ranged_descriptor_rejected() -> DescriptorError {
 }
 
 /// rust-miniscript panics in `at_derivation_index` on an xpub hardened step.
-/// Core `Expand` returns false, which `getScriptFromDescriptor` maps to
-/// `Cannot derive script without private keys`. An xprv is converted to an
-/// xpub with those steps already applied during parse, so it never hits this.
+/// See docs/contracts/external-api.md#API-28 for the corresponding Core behavior.
 fn reject_hardened_xpub(
     descriptor: &MiniscriptDescriptor<DescriptorPublicKey>,
 ) -> Result<(), DescriptorError> {
