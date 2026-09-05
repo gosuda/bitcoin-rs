@@ -25,13 +25,5 @@ Mempool behavioral contracts are defined in `docs/contracts/`:
 - **Mutation gateway and ordering**: Gateway serialization, atomic `MutationResult` records, and per-change sequence assignments follow [`docs/contracts/mempool-mutations.md`](../../docs/contracts/mempool-mutations.md) (`MPL-01`, `MPL-02`).
 - **Relay standardness and policy**: Admission checks, limits, BIP125 RBF rules, and eviction ranking follow [`docs/contracts/mempool-policy.md`](../../docs/contracts/mempool-policy.md) (`POL-01`).
 
-## Features
-- `rocksdb`: forwarding marker for the rocksdb storage backend; gates no code in
-  this crate.
-- `fjall`: forwarding marker for the fjall storage backend; gates no code in this
-  crate.
-- `redb`: forwarding marker for the redb storage backend; gates no code in this
-  crate.
-
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

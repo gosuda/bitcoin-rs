@@ -205,7 +205,8 @@ Owners:
     layer table, verifies `bitcoin-rs-storage` exclusively owns storage engine
     dependencies, confirms `bitcoin-rs-rpc` has no dependency on storage and
     forwards no backend features, and verifies backend feature forwarding is
-    confined to operator tiers and service adapters.
+    confined to operator tiers and service adapters, and rejects empty
+    backend markers on crates that do not own an engine.
 - Manifest enforcement:
   - Root `Cargo.toml`: workspace member list and package versions.
   - `crates/storage/Cargo.toml`: engine dependency definitions.
