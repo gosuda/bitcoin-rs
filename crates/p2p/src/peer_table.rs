@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 
+use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -25,12 +26,15 @@ pub struct PeerSession {
     pub lease: PeerLease,
     /// Handshake metadata, `None` while the handshake is still in progress.
     pub info: Option<PeerInfo>,
+    /// Header tips this connection has delivered and the node accepted.
+    pub demonstrated_tips: Vec<Hash256>,
 }
 
 #[derive(Debug)]
 struct Entry {
     lease: PeerLease,
     info: Option<PeerInfo>,
+    demonstrated_tips: Vec<Hash256>,
 }
 
 /// Authoritative table of live peer connections keyed by remote address.
@@ -55,14 +59,28 @@ impl PeerTable {
         match entries.get(&addr) {
             Some(current) if current.lease.same_connection(&lease) => false,
             Some(_) => {
-                let prior = entries.insert(addr, Entry { lease, info: None });
+                let prior = entries.insert(
+                    addr,
+                    Entry {
+                        lease,
+                        info: None,
+                        demonstrated_tips: Vec::new(),
+                    },
+                );
                 if let Some(prior) = prior {
                     prior.lease.cancel();
                 }
                 true
             }
             None => {
-                entries.insert(addr, Entry { lease, info: None });
+                entries.insert(
+                    addr,
+                    Entry {
+                        lease,
+                        info: None,
+                        demonstrated_tips: Vec::new(),
+                    },
+                );
                 false
             }
         }
@@ -82,14 +100,40 @@ impl PeerTable {
         }
     }
 
-    /// Raises the demonstrated best-known height of the connection that
-    /// stamped `source` when that same connection is still live at its
-    /// address and has demonstrated a higher chain height (it handed us
-    /// accepted headers). Identity-aware and atomic under the table write
-    /// lock: a same-address replacement never inherits its predecessor's
-    /// credit. Monotonic: never lowers, so a stale announcement cannot drag
-    /// eligibility below the handshake snapshot. Returns `true` only when
-    /// a live, metadata-published entry's height was actually raised.
+    /// Records that the live connection accepted `tip_hash` and raises its
+    /// active-chain credit when `height` is supplied. See P2P-03 in
+    /// `docs/contracts/p2p-wire.md`. Returns `false` for a stale or unpublished
+    /// connection and `true` for any live published connection.
+    pub fn note_announced_tip(
+        &self,
+        source: PeerSource,
+        tip_hash: Hash256,
+        height: Option<i32>,
+    ) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source))
+        else {
+            return false;
+        };
+        let Some(info) = entry.info.as_mut() else {
+            return false;
+        };
+        if !entry.demonstrated_tips.contains(&tip_hash) {
+            entry.demonstrated_tips.push(tip_hash);
+        }
+        if let Some(height) = height
+            && height > info.best_known_height
+        {
+            info.best_known_height = height;
+            return true;
+        }
+        true
+    }
+
+    /// Raises the active-chain credit for `source`. See P2P-03 in
+    /// `docs/contracts/p2p-wire.md`.
     pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&source.addr) {
@@ -260,6 +304,7 @@ impl PeerTable {
                 addr: *addr,
                 lease: entry.lease.clone(),
                 info: entry.info.clone(),
+                demonstrated_tips: entry.demonstrated_tips.clone(),
             })
             .collect();
         sessions.sort_unstable_by_key(|session| session.lease.connection_id().get());
@@ -562,6 +607,16 @@ mod tests {
         // Higher height: update.
         assert!(table.note_announced_height(source, 12));
         assert_eq!(table.infos()[0].best_known_height, 12);
+
+        // Accepted-tip evidence is retained with the live connection so the
+        // node can re-evaluate it if a later fork becomes active.
+        let demonstrated_tip = Hash256::from_le_bytes(&[7_u8; 32]);
+        assert!(table.note_announced_tip(source, demonstrated_tip, Some(13)));
+        assert_eq!(table.infos()[0].best_known_height, 13);
+        assert_eq!(
+            table.sessions()[0].demonstrated_tips,
+            vec![demonstrated_tip]
+        );
 
         // Unknown address: no update.
         let other = lease();

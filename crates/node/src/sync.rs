@@ -16,7 +16,7 @@ mod stage;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerTable};
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
@@ -142,6 +142,32 @@ fn sync_peer_candidate(peer: &PeerInfo, floor: u32) -> Option<SyncPeer> {
 /// height; first-wins on ties.
 fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
     candidate.best_known_height > current.best_known_height
+}
+
+fn active_demonstrated_height(
+    tree: &BlockTree,
+    active_tip: NodeId,
+    demonstrated_tips: &[Hash256],
+) -> Option<u32> {
+    demonstrated_tips
+        .iter()
+        .filter_map(|hash| tree.active_height_of(active_tip, *hash))
+        .max()
+}
+
+fn body_capability_height(
+    peer: &PeerInfo,
+    tree: &BlockTree,
+    active_tip: Option<NodeId>,
+    demonstrated_tips: &[Hash256],
+) -> Option<u32> {
+    // A session has no branch evidence until its first accepted header batch;
+    // keep the handshake capability during that discovery window. Once it has
+    // evidence, only a tip on the current active chain is usable for bodies.
+    if demonstrated_tips.is_empty() {
+        return u32::try_from(peer.best_known_height).ok();
+    }
+    active_tip.and_then(|tip| active_demonstrated_height(tree, tip, demonstrated_tips))
 }
 
 impl BlockSync {
@@ -378,32 +404,24 @@ impl BlockSync {
             );
             match acceptance {
                 Ok(node_ids) => {
-                    // The delivering peer has every header it handed us that
-                    // we accepted, so raise its demonstrated best-known
-                    // height: at-tip peers stay request-eligible for the
-                    // bodies of newly announced blocks even though their
-                    // handshake snapshot went stale the moment we caught up
-                    // (#617). Only headers on the currently selected best
-                    // chain establish credit — a peer that demonstrated
-                    // only a losing side fork gains no eligibility for
-                    // active-chain bodies; if its fork later wins, those
-                    // headers are then on the best chain and credit follows.
-                    let announced = tree.tip().and_then(|active_tip| {
-                        node_ids
-                            .iter()
-                            .filter_map(|id| tree.node(*id).ok().map(|node| (*id, node.height)))
-                            .filter(|(id, height)| {
-                                tree.node_at_height_from(active_tip.tip_id, *height) == Some(*id)
-                            })
-                            .map(|(_, height)| height)
-                            .max()
-                            .and_then(|height| i32::try_from(height).ok())
-                    });
+                    let announced_tip = node_ids
+                        .last()
+                        .and_then(|id| tree.node(*id).ok())
+                        .map(|node| node.hash);
+                    let active_height =
+                        tree.tip()
+                            .zip(announced_tip)
+                            .and_then(|(active_tip, hash)| {
+                                tree.active_height_of(active_tip.tip_id, hash)
+                                    .and_then(|height| i32::try_from(height).ok())
+                            });
                     self.handles.assume_valid_gate.evaluate(&tree);
                     drop(tree);
-                    if let (Some(height), Some(source)) = (announced, source) {
-                        self.peer_table.note_announced_height(source, height);
+                    if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
+                        self.peer_table
+                            .note_announced_tip(source, tip_hash, active_height);
                     }
+                    self.refresh_active_peer_credit();
                     tracing::debug!(
                         accepted = node_ids.len(),
                         received = batch_len,
@@ -447,6 +465,33 @@ impl BlockSync {
         }
         if total_headers > 0 {
             tracing::debug!(total_headers, "block sync: drained inbound headers");
+        }
+    }
+
+    fn refresh_active_peer_credit(&self) {
+        let sessions = self.peer_table.sessions();
+        let updates: Vec<(PeerSource, i32)> = {
+            let tree = self.handles.block_tree.read();
+            let Some(active_tip) = tree.tip() else {
+                return;
+            };
+            sessions
+                .into_iter()
+                .filter_map(|session| {
+                    let info = session.info?;
+                    let height = active_demonstrated_height(
+                        &tree,
+                        active_tip.tip_id,
+                        &session.demonstrated_tips,
+                    )?;
+                    let height = i32::try_from(height).ok()?;
+                    (height > info.best_known_height)
+                        .then_some((session.lease.source(session.addr), height))
+                })
+                .collect()
+        };
+        for (source, height) in updates {
+            self.peer_table.note_announced_height(source, height);
         }
     }
 
@@ -1094,7 +1139,13 @@ impl BlockSync {
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
         let mut header_peer: Option<SyncPeer> = None;
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        for peer in self.peer_table.infos() {
+        let sessions = self.peer_table.sessions();
+        let tree = self.handles.block_tree.read();
+        let active_tip = tree.tip_id();
+        for session in sessions {
+            let Some(peer) = session.info else {
+                continue;
+            };
             // Height clause of the fan-out eligibility predicate (KTD6) and
             // the pre-existing candidate filter: the peer's known chain must
             // reach past our applied tip, i.e., cover the window front being
@@ -1111,12 +1162,25 @@ impl BlockSync {
             if header_peer.is_none_or(|current| outranks(current, sync_peer)) {
                 header_peer = Some(sync_peer);
             }
+            let Some(active_height) =
+                body_capability_height(&peer, &tree, active_tip, &session.demonstrated_tips)
+            else {
+                continue;
+            };
+            if active_height <= our_height {
+                continue;
+            }
+            let body_peer = SyncPeer {
+                addr: peer.addr,
+                best_known_height: i32::try_from(active_height).unwrap_or(i32::MAX),
+            };
             candidates.push(FanoutCandidate {
-                peer: sync_peer,
+                peer: body_peer,
                 fanout_eligible: statically_fanout_eligible(&peer),
                 soft_blocked: false,
             });
         }
+        drop(tree);
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut window = self.download_window.lock();
             for candidate in &mut candidates {
@@ -1454,18 +1518,29 @@ impl BlockSync {
         front_height: u32,
         now: Instant,
     ) -> Option<SocketAddr> {
+        let sessions = self.peer_table.sessions();
+        let tree = self.handles.block_tree.read();
+        let active_tip = self.handles.chain_tip.load_full()?.tip_id;
+        let active_front_height = tree.active_height_of(active_tip, front_hash)?;
         let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
-        // Hedge candidates qualify on the demonstrated best-known height
-        // (P2P-03): an at-tip peer that announced the front block can
-        // serve it even though its handshake snapshot predates the block.
-        for peer in self.peer_table.infos() {
+        for session in sessions {
+            let Some(peer) = session.info else {
+                continue;
+            };
             if peer.addr != owner
                 && statically_fanout_eligible(&peer)
-                && u32::try_from(peer.best_known_height).is_ok_and(|height| height >= front_height)
+                && body_capability_height(
+                    &peer,
+                    &tree,
+                    Some(active_tip),
+                    &session.demonstrated_tips,
+                )
+                .is_some_and(|height| height >= active_front_height)
             {
                 candidates.push(peer.addr);
             }
         }
+        drop(tree);
         let candidates: SmallVec<[SocketAddr; 8]> = {
             let window = self.download_window.lock();
             candidates
@@ -1901,6 +1976,108 @@ mod tests {
         assert_eq!(
             requested, expected,
             "the reorg connect set must be requested after the common ancestor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md). Peer A's
+        // accepted fork is initially losing, peer B later extends it so the
+        // fork wins, and B then disconnects. A must retain the accepted tip
+        // evidence and remain eligible for the bodies it demonstrated.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let losing1 = test_header(genesis.compute_hash(), 1);
+        let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+        let losing2 = test_header(losing1.compute_hash(), 2);
+        tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+        let genesis_node = tree.node(genesis_id)?;
+        let applied = TipSnapshot {
+            tip_id: genesis_id,
+            height: genesis_node.height,
+            chainwork: genesis_node.chainwork,
+            hash: genesis_node.hash,
+        };
+
+        let fork1 = test_header(genesis.compute_hash(), 101);
+        let fork2 = test_header(fork1.compute_hash(), 102);
+        let fork3 = test_header(fork2.compute_hash(), 103);
+        let expected = [fork1, fork2, fork3];
+        let expected_hashes: Vec<Hash256> = expected
+            .iter()
+            .map(|header| header.compute_hash().into())
+            .collect();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+
+        let peer_a = test_addr(8333, 0)?;
+        let peer_b = test_addr(8333, 1)?;
+        let rx_a = connect_peer(&peers, synthetic_peer(peer_a, 0));
+        let _rx_b = connect_peer(&peers, synthetic_peer(peer_b, 0));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork1, fork2],
+            source: Some(current_source(&peers, peer_a)),
+        })?;
+        sync.drain_inbound_headers();
+        assert_eq!(
+            peers
+                .infos()
+                .into_iter()
+                .find(|info| info.addr == peer_a)
+                .ok_or("peer A info missing")?
+                .best_known_height,
+            0,
+            "a losing fork must not receive scalar credit yet"
+        );
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork3],
+            source: Some(current_source(&peers, peer_b)),
+        })?;
+        sync.drain_inbound_headers();
+        assert_eq!(
+            peers
+                .infos()
+                .into_iter()
+                .find(|info| info.addr == peer_a)
+                .ok_or("peer A info missing after reorg")?
+                .best_known_height,
+            2,
+            "peer A's retained fork tip must be credited after the fork wins"
+        );
+        assert!(peers.disconnect_source(current_source(&peers, peer_b)));
+
+        sync.tick();
+
+        let requested = next_getdata(&rx_a)?
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            requested,
+            expected_hashes[..2],
+            "the surviving peer must serve the bodies it demonstrated"
         );
         Ok(())
     }
@@ -4084,6 +4261,27 @@ mod tests {
         };
         let (sync, peers, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
         let owner = test_addr(9320, 0)?;
+        let alternate = test_addr(9320, 1)?;
+
+        // The alternate peer connected at height zero. Its accepted header
+        // announcement proves the active front, which must make it a hedge
+        // candidate even though the handshake snapshot remains at zero.
+        let alternate_lease = peers
+            .lease(alternate)
+            .ok_or_else(|| std::io::Error::other("alternate peer lease missing"))?;
+        let mut alternate_info = peers
+            .infos()
+            .into_iter()
+            .find(|info| info.addr == alternate)
+            .ok_or_else(|| std::io::Error::other("alternate peer info missing"))?;
+        alternate_info.start_height = 0;
+        alternate_info.best_known_height = 0;
+        assert!(peers.publish_info(alternate, &alternate_lease, alternate_info));
+        assert!(peers.note_announced_tip(
+            current_source(&peers, alternate),
+            Hash256::from_le_bytes(expected[0].as_bytes()),
+            Some(1),
+        ));
 
         // The first drain builds the asymmetric wedge and starts the episode.
         sync.tick();

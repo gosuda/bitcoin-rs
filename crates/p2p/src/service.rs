@@ -660,11 +660,11 @@ impl P2pService {
         let candidates: Vec<FanoutCandidate> = ready_peers
             .iter()
             .filter_map(|peer| {
-                let height = u32::try_from(peer.info.start_height).ok()?;
+                let height = u32::try_from(peer.info.best_known_height).ok()?;
                 (height > our_height).then_some(FanoutCandidate {
                     peer: crate::SyncPeer {
                         addr: peer.source.addr,
-                        best_known_height: peer.info.start_height,
+                        best_known_height: peer.info.best_known_height,
                     },
                     fanout_eligible: statically_fanout_eligible(&peer.info)
                         && !window.peer_has_expired_pending(peer.source.addr, now)
@@ -698,10 +698,10 @@ impl P2pService {
             .ready_peers()
             .into_iter()
             .filter_map(|peer| {
-                let height = u32::try_from(peer.info.start_height).ok()?;
+                let height = u32::try_from(peer.info.best_known_height).ok()?;
                 (height > our_height).then_some(crate::SyncPeer {
                     addr: peer.source.addr,
-                    best_known_height: peer.info.start_height,
+                    best_known_height: peer.info.best_known_height,
                 })
             })
             .fold(None, |best, peer| {
@@ -730,12 +730,12 @@ impl P2pService {
             .filter(|peer| {
                 peer.source.addr != owner
                     && statically_fanout_eligible(&peer.info)
-                    && u32::try_from(peer.info.start_height)
+                    && u32::try_from(peer.info.best_known_height)
                         .is_ok_and(|height| height >= front_height)
             })
             .map(|peer| crate::SyncPeer {
                 addr: peer.source.addr,
-                best_known_height: peer.info.start_height,
+                best_known_height: peer.info.best_known_height,
             });
         let window = self.download_window.lock();
         candidates
