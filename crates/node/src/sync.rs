@@ -62,6 +62,7 @@ pub struct BlockSync {
     block_stager: Arc<Mutex<BlockStager>>,
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
+    accepted_headers: Mutex<Vec<AcceptedHeaderAnnouncement>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
 }
 
@@ -81,12 +82,9 @@ struct ExpectedApplyCache {
     hashes: ExpectedBlockHashes,
 }
 
-/// A header tip that a peer proved during the current synchronization tick.
-///
-/// This is deliberately an event passed through one tick, not peer state. The
-/// hash is checked against the active tree again when candidates are selected,
-/// so a branch switch or invalidation cannot turn an old announcement into
-/// body-fetch credit.
+/// Exact header evidence retained only while its active-chain body work remains.
+/// Selection retires it on connection loss, branch change, or apply completion.
+/// At most one active tip per live source survives selection; no fork history is kept.
 #[derive(Clone, Copy, Debug)]
 struct AcceptedHeaderAnnouncement {
     source: PeerSource,
@@ -158,6 +156,7 @@ impl BlockSync {
             block_stager: Arc::new(Mutex::new(BlockStager::new(default_sync_budget()))),
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
+            accepted_headers: Mutex::new(Vec::new()),
             known_sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -262,7 +261,7 @@ impl BlockSync {
     /// Runs one orchestrator tick: requests pending blocks from eligible peers
     /// and asks them to extend the header chain.
     pub fn tick(&self) {
-        let accepted_headers = self.drain_inbound_headers();
+        self.drain_inbound_headers();
         self.ensure_genesis_tip();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
@@ -279,14 +278,14 @@ impl BlockSync {
             self.disconnect_timed_out_peer(now);
         }
         self.reconcile_peer_sessions();
-        let sync_peer_selection = self.sync_peer_selection(applied_height, now, &accepted_headers);
+        let sync_peer_selection = self.sync_peer_selection(applied_height, now);
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
         for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             let request_outcome = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
-                    peer.addr,
+                    peer.source,
                     peer_idx + 1 == request_peer_count,
                     peer_best_height,
                     chain_tip,
@@ -341,9 +340,9 @@ impl BlockSync {
         }
     }
     #[allow(clippy::too_many_lines)]
-    fn drain_inbound_headers(&self) -> SmallVec<[AcceptedHeaderAnnouncement; 4]> {
+    fn drain_inbound_headers(&self) {
         let receiver = self.inbound_headers_rx.lock();
-        let mut accepted_headers = SmallVec::new();
+        let mut accepted_headers = self.accepted_headers.lock();
         let mut total_headers = 0_usize;
         while let Ok(InboundHeaders { headers, source }) = receiver.try_recv() {
             let batch_len = headers.len();
@@ -376,11 +375,7 @@ impl BlockSync {
                             .last()
                             .and_then(|node_id| tree.node(*node_id).ok())
                             .map(|node| node.hash),
-                    ) && self.peer_table.is_current(source)
-                        && tree
-                            .tip_id()
-                            .is_some_and(|tip_id| tree.active_height_of(tip_id, tip_hash).is_some())
-                    {
+                    ) {
                         accepted_headers.push(AcceptedHeaderAnnouncement { source, tip_hash });
                     }
                     drop(tree);
@@ -428,7 +423,6 @@ impl BlockSync {
         if total_headers > 0 {
             tracing::debug!(total_headers, "block sync: drained inbound headers");
         }
-        accepted_headers
     }
 
     /// Requests the next header batch from the highest peer above the applied
@@ -448,7 +442,7 @@ impl BlockSync {
         if let Some(peer) = header_peer {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             if peer_best_height > header_height {
-                self.send_getheaders(peer.addr, header_height, peer.start_height);
+                self.send_getheaders(peer.source, header_height, peer.start_height);
             }
         }
     }
@@ -1064,17 +1058,13 @@ impl BlockSync {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn sync_peer_selection(
-        &self,
-        our_height: u32,
-        now: Instant,
-        accepted_headers: &[AcceptedHeaderAnnouncement],
-    ) -> SyncPeerSelection {
+    fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        let peer_infos = self.peer_table.infos();
-        for peer in &peer_infos {
+        let ready_peers = self.peer_table.ready_peers();
+        for ready in &ready_peers {
+            let peer = &ready.info;
             // The handshake height is only the baseline for peers that have
-            // not proved a newer active tip during this tick.
+            // not proved a newer active tip for unfinished body work.
             if u32::try_from(peer.start_height)
                 .ok()
                 .is_none_or(|height| height <= our_height)
@@ -1082,58 +1072,70 @@ impl BlockSync {
                 continue;
             }
             let sync_peer = SyncPeer {
-                addr: peer.addr,
+                source: ready.source,
                 start_height: peer.start_height,
             };
             candidates.push(FanoutCandidate {
                 peer: sync_peer,
-                fanout_eligible: statically_fanout_eligible(&peer),
+                fanout_eligible: statically_fanout_eligible(peer),
                 soft_blocked: false,
             });
         }
 
-        // A peer can learn the active tip after its handshake. Keep that
-        // evidence scoped to this tick and tie it to the exact header hash;
-        // do not turn it into persistent peer knowledge or a height history.
+        // Retain only unfinished work on the final active chain. Filtering here
+        // allows a later batch in the same drain to make a losing fork active.
+        let mut accepted_headers = self.accepted_headers.lock();
         let tree = self.handles.block_tree.read();
-        if let Some(active_tip_id) = tree.tip_id() {
-            for announcement in accepted_headers {
-                if !self.peer_table.is_current(announcement.source) {
-                    continue;
+        accepted_headers.retain(|announcement| {
+            ready_peers
+                .iter()
+                .any(|peer| peer.source == announcement.source)
+                && self.peer_table.is_current(announcement.source)
+                && tree
+                    .tip_id()
+                    .and_then(|tip| tree.active_height_of(tip, announcement.tip_hash))
+                    .is_some_and(|height| height > our_height)
+        });
+        // The highest active hash subsumes earlier announcements by this source.
+        accepted_headers.sort_by_key(|announcement| {
+            std::cmp::Reverse(tree.height_of_hash(announcement.tip_hash).unwrap_or(0))
+        });
+        let mut seen = Vec::new();
+        accepted_headers.retain(|announcement| {
+            if seen.contains(&announcement.source) {
+                return false;
+            }
+            seen.push(announcement.source);
+            true
+        });
+        for announcement in accepted_headers.iter() {
+            let Some(ready) = ready_peers
+                .iter()
+                .find(|peer| peer.source == announcement.source)
+            else {
+                continue;
+            };
+            let height = tree.height_of_hash(announcement.tip_hash).unwrap_or(0);
+            let sync_peer = SyncPeer {
+                source: announcement.source,
+                start_height: i32::try_from(height).unwrap_or(i32::MAX),
+            };
+            if let Some(candidate) = candidates
+                .iter_mut()
+                .find(|candidate| candidate.peer.source == sync_peer.source)
+            {
+                if candidate.peer.start_height < sync_peer.start_height {
+                    candidate.peer = sync_peer;
                 }
-                let Some(height) = tree.active_height_of(active_tip_id, announcement.tip_hash)
-                else {
-                    continue;
-                };
-                if height <= our_height {
-                    continue;
-                }
-                let Some(peer) = peer_infos
-                    .iter()
-                    .find(|peer| peer.addr == announcement.source.addr)
-                else {
-                    continue;
-                };
-                let sync_peer = SyncPeer {
-                    addr: peer.addr,
-                    start_height: i32::try_from(height).unwrap_or(i32::MAX),
-                };
-                if let Some(candidate) = candidates
-                    .iter_mut()
-                    .find(|candidate| candidate.peer.addr == sync_peer.addr)
-                {
-                    if candidate.peer.start_height < sync_peer.start_height {
-                        candidate.peer = sync_peer;
-                    }
-                } else {
-                    candidates.push(FanoutCandidate {
-                        peer: sync_peer,
-                        fanout_eligible: statically_fanout_eligible(peer),
-                        soft_blocked: false,
-                    });
-                }
+            } else {
+                candidates.push(FanoutCandidate {
+                    peer: sync_peer,
+                    fanout_eligible: statically_fanout_eligible(&ready.info),
+                    soft_blocked: false,
+                });
             }
         }
+        drop(accepted_headers);
         drop(tree);
 
         let header_peer = candidates.iter().fold(None, |current, candidate| {
@@ -1147,8 +1149,9 @@ impl BlockSync {
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut window = self.download_window.lock();
             for candidate in &mut candidates {
-                candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.addr, now)
-                    || window.peer_in_staller_cooldown(candidate.peer.addr, now);
+                candidate.soft_blocked = window
+                    .peer_has_expired_pending(candidate.peer.source.addr, now)
+                    || window.peer_in_staller_cooldown(candidate.peer.source.addr, now);
                 candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
             }
             let cold_preferred = configure_request_mode(&mut window, &candidates, now);
@@ -1220,13 +1223,13 @@ impl BlockSync {
             return;
         };
         let candidates = probe_peers.iter().filter(|peer| {
-            peer.addr != owner
+            peer.source.addr != owner
                 && u32::try_from(peer.start_height).is_ok_and(|height| height >= required_height)
         });
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
-            let peer_addr = peer.addr;
-            let Some(tx) = self.peer_table.lease(peer_addr) else {
+            let peer_addr = peer.source.addr;
+            let Some(tx) = self.peer_table.lease_source(peer.source) else {
                 continue;
             };
             let inventory = hashes
@@ -1258,7 +1261,7 @@ impl BlockSync {
 
     fn send_getdata_for_pending_blocks(
         &self,
-        sync_peer_addr: SocketAddr,
+        source: PeerSource,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         chain_tip: &TipSnapshot,
@@ -1282,7 +1285,7 @@ impl BlockSync {
 
         let mut window = self.download_window.lock();
         let request = window.next_peer_request(
-            sync_peer_addr,
+            source.addr,
             allow_expired_retry_from_peer,
             chain_tip,
             request_start_height,
@@ -1318,7 +1321,7 @@ impl BlockSync {
         }
         let msg = Message::GetData(inventory);
 
-        let tx = self.peer_table.lease(request.peer_addr());
+        let tx = self.peer_table.lease_source(source);
         let Some(tx) = tx else {
             tracing::trace!(
                 peer_addr = %request.peer_addr(),
@@ -1326,7 +1329,6 @@ impl BlockSync {
             );
             return GetdataRequestOutcome::default();
         };
-        let source = tx.source(request.peer_addr());
         let mut send_ok = false;
         let mut has_request_capacity = false;
         let still_current = self.peer_table.with_current(source, || {
@@ -1368,7 +1370,8 @@ impl BlockSync {
         }
     }
 
-    fn send_getheaders(&self, sync_peer_addr: SocketAddr, our_height: u32, target_height: i32) {
+    fn send_getheaders(&self, source: PeerSource, our_height: u32, target_height: i32) {
+        let sync_peer_addr = source.addr;
         let locator = self.build_locator();
         let Some(locator_tip_hash) = locator.first().copied() else {
             return;
@@ -1393,7 +1396,7 @@ impl BlockSync {
             locator_hashes,
             bitcoin::BlockHash::all_zeros(),
         ));
-        let tx = self.peer_table.lease(sync_peer_addr);
+        let tx = self.peer_table.lease_source(source);
         let Some(tx) = tx else {
             tracing::warn!(
                 peer_addr = %sync_peer_addr,
@@ -1809,8 +1812,14 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("missing losing applied tip"))?;
 
         assert!(
-            sync.send_getdata_for_pending_blocks(peer, false, 100, &chain_tip, &applied_tip)
-                .sent
+            sync.send_getdata_for_pending_blocks(
+                current_source(&peers, peer),
+                false,
+                100,
+                &chain_tip,
+                &applied_tip
+            )
+            .sent
         );
         assert_eq!(
             witness_block_inventory(next_getdata(&rx)?)?,
@@ -1892,6 +1901,7 @@ mod tests {
         let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
         let (tx, rx) = unbounded::<Message>();
         peers.register(peer, PeerLease::new(tx));
+        let source = current_source(&peers, peer);
         let applied = applied_tip
             .load_full()
             .ok_or_else(|| std::io::Error::other("missing genesis applied tip"))?;
@@ -1900,7 +1910,7 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("missing losing chain tip"))?;
 
         assert!(
-            sync.send_getdata_for_pending_blocks(peer, false, 100, &initial, &applied)
+            sync.send_getdata_for_pending_blocks(source, false, 100, &initial, &applied)
                 .sent
         );
         assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
@@ -1910,7 +1920,7 @@ mod tests {
             .load_full()
             .ok_or_else(|| std::io::Error::other("missing winning chain tip"))?;
         assert!(
-            sync.send_getdata_for_pending_blocks(peer, false, 100, &retargeted, &applied)
+            sync.send_getdata_for_pending_blocks(source, false, 100, &retargeted, &applied)
                 .sent
         );
         let requested = witness_block_inventory(next_getdata(&rx)?)?;
@@ -2730,7 +2740,186 @@ mod tests {
         assert_eq!(witness_block_inventory(inventory)?, vec![expected_hash]);
         assert!(
             rx.try_recv().is_err(),
-            "current-tick header evidence must not create persistent peer credit"
+            "accepted tip must not trigger redundant header requests"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_headers_complete_across_single_slot_ticks() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let HeaderSyncFixture {
+            sync,
+            inbound_headers_tx,
+            inbound_blocks_tx,
+            peers,
+            ..
+        } = header_sync_with_genesis()?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 1,
+                getdata_batch_limit: 1,
+                ..super::default_sync_budget()
+            },
+        );
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let rx = connect_peer(&peers, synthetic_peer(addr, 0));
+        let first = mined_block_with_prev_hash(
+            genesis_header().compute_hash(),
+            1,
+            vec![coinbase_transaction(1)],
+        );
+        let second =
+            mined_block_with_prev_hash(first.block_hash(), 2, vec![coinbase_transaction(2)]);
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![first.header, second.header],
+            source: Some(current_source(&peers, addr)),
+        })?;
+        sync.tick();
+        assert_eq!(
+            witness_block_inventory(next_getdata(&rx)?)?,
+            vec![first.block_hash()]
+        );
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(first))?;
+        sync.tick();
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.height),
+            Some(1)
+        );
+        assert_eq!(
+            witness_block_inventory(next_getdata(&rx)?)?,
+            vec![second.block_hash()]
+        );
+        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(second))?;
+        sync.tick();
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.height),
+            Some(2)
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(sync.accepted_headers.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_header_candidate_cannot_send_to_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let HeaderSyncFixture {
+            sync,
+            inbound_headers_tx,
+            peers,
+            ..
+        } = header_sync_with_genesis()?;
+        install_budget(&sync, super::default_sync_budget());
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let old_rx = connect_peer(&peers, synthetic_peer(addr, 0));
+        let source = current_source(&peers, addr);
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![test_header(genesis_header().compute_hash(), 1)],
+            source: Some(source),
+        })?;
+        sync.drain_inbound_headers();
+        sync.ensure_genesis_tip();
+        let selection = sync.sync_peer_selection(0, Instant::now());
+        let selected = selection
+            .request_peers
+            .first()
+            .ok_or_else(|| std::io::Error::other("missing candidate"))?;
+        assert_eq!(selected.source, source);
+        let replacement_rx = connect_peer(&peers, synthetic_peer(addr, 0));
+        let chain = sync
+            .handles
+            .chain_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing chain tip"))?;
+        let applied = sync
+            .handles
+            .applied_tip
+            .load_full()
+            .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
+        assert!(
+            !sync
+                .send_getdata_for_pending_blocks(selected.source, false, 1, &chain, &applied)
+                .sent
+        );
+        assert!(old_rx.try_recv().is_err());
+        assert!(replacement_rx.try_recv().is_err());
+        assert_eq!(sync.download_window.lock().pending_len(), 0);
+        assert!(
+            sync.sync_peer_selection(0, Instant::now())
+                .request_peers
+                .is_empty()
+        );
+        assert!(sync.accepted_headers.lock().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_headers_use_final_active_chain_of_drain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let HeaderSyncFixture {
+            sync,
+            inbound_headers_tx,
+            peers,
+            ..
+        } = header_sync_with_genesis()?;
+        let a = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let b = SocketAddr::from(([127, 0, 0, 1], 8334));
+        let _a_rx = connect_peer(&peers, eligible_peer(a, 0));
+        let _b_rx = connect_peer(&peers, eligible_peer(b, 0));
+        let main1 = test_header(genesis_header().compute_hash(), 1);
+        let main2 = test_header(main1.compute_hash(), 2);
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![main1, main2],
+            source: None,
+        })?;
+        sync.drain_inbound_headers();
+        let fork1 = test_header(genesis_header().compute_hash(), 3);
+        let fork2 = test_header(fork1.compute_hash(), 4);
+        let fork3 = test_header(fork2.compute_hash(), 5);
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork1],
+            source: Some(current_source(&peers, a)),
+        })?;
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork2, fork3],
+            source: Some(current_source(&peers, b)),
+        })?;
+        sync.drain_inbound_headers();
+        let selection = sync.sync_peer_selection(0, Instant::now());
+        assert!(
+            selection
+                .probe_peers
+                .iter()
+                .any(|peer| peer.source == current_source(&peers, a) && peer.start_height == 1)
+        );
+        assert_eq!(sync.accepted_headers.lock().len(), 2);
+        // A later branch switch retires evidence instead of keeping fork history.
+        let main3 = test_header(main2.compute_hash(), 6);
+        let main4 = test_header(main3.compute_hash(), 7);
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![main3, main4],
+            source: None,
+        })?;
+        sync.drain_inbound_headers();
+        assert!(
+            sync.sync_peer_selection(0, Instant::now())
+                .probe_peers
+                .is_empty()
+        );
+        assert!(sync.accepted_headers.lock().is_empty());
+        let fork4 = test_header(fork3.compute_hash(), 8);
+        let fork5 = test_header(fork4.compute_hash(), 9);
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork4, fork5],
+            source: None,
+        })?;
+        sync.drain_inbound_headers();
+        assert!(
+            sync.sync_peer_selection(0, Instant::now())
+                .probe_peers
+                .is_empty()
         );
         Ok(())
     }
@@ -2803,6 +2992,7 @@ mod tests {
             sync,
             inbound_headers_tx,
             peers,
+            ..
         } = header_sync_with_genesis()?;
         let invalid_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let other_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
@@ -2917,6 +3107,7 @@ mod tests {
             sync,
             inbound_headers_tx,
             peers,
+            ..
         } = header_sync_with_genesis()?;
         let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let _rx = connect_peer(&peers, synthetic_peer(peer_addr, 8));
@@ -6721,6 +6912,7 @@ mod tests {
         genesis: Header,
         sync: BlockSync,
         inbound_headers_tx: crossbeam_channel::Sender<InboundHeaders>,
+        inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
         peers: Arc<PeerTable>,
     }
 
@@ -6734,7 +6926,7 @@ mod tests {
         let peers = Arc::new(PeerTable::new());
         let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(chain_tip, applied_tip, block_tree);
@@ -6755,6 +6947,7 @@ mod tests {
             genesis,
             sync,
             inbound_headers_tx,
+            inbound_blocks_tx,
             peers,
         })
     }
@@ -6978,6 +7171,7 @@ mod tests {
             sync,
             inbound_headers_tx,
             peers,
+            ..
         } = header_sync_with_genesis()?;
         let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let (tx, rx) = unbounded::<Message>();

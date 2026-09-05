@@ -663,7 +663,7 @@ impl P2pService {
                 let height = u32::try_from(peer.info.start_height).ok()?;
                 (height > our_height).then_some(FanoutCandidate {
                     peer: crate::SyncPeer {
-                        addr: peer.source.addr,
+                        source: peer.source,
                         start_height: peer.info.start_height,
                     },
                     fanout_eligible: statically_fanout_eligible(&peer.info)
@@ -700,7 +700,7 @@ impl P2pService {
             .filter_map(|peer| {
                 let height = u32::try_from(peer.info.start_height).ok()?;
                 (height > our_height).then_some(crate::SyncPeer {
-                    addr: peer.source.addr,
+                    source: peer.source,
                     start_height: peer.info.start_height,
                 })
             })
@@ -734,14 +734,14 @@ impl P2pService {
                         .is_ok_and(|height| height >= front_height)
             })
             .map(|peer| crate::SyncPeer {
-                addr: peer.source.addr,
+                source: peer.source,
                 start_height: peer.info.start_height,
             });
         let window = self.download_window.lock();
         candidates
             .filter(|peer| {
-                !window.peer_has_expired_pending(peer.addr, now)
-                    && !window.peer_in_staller_cooldown(peer.addr, now)
+                !window.peer_has_expired_pending(peer.source.addr, now)
+                    && !window.peer_in_staller_cooldown(peer.source.addr, now)
             })
             .collect()
     }
