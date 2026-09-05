@@ -94,12 +94,22 @@ cargo install cargo-fuzz
 cargo +nightly fuzz run block_decode -- -runs=10000
 ```
 
-### Minimal-versions check
+### Dependency-range check
+
+Prove the declared ranges, not only the committed lockfile
+(`docs/contracts/dependency-range.md`):
 
 ```sh
-cargo +nightly update -Zdirect-minimal-versions
-cargo +nightly check --workspace --all-targets
+# Oldest allowed direct-dependency versions (nightly, mutates Cargo.lock)
+scripts/check-dep-range.sh minimal
+
+# Newest versions still inside each declared range (mutates Cargo.lock)
+scripts/check-dep-range.sh maximum
 ```
+
+The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
+Each lane also runs G20 against the mutated lockfile. Optional native
+storage backends are owned by the named feature matrix, not this script.
 
 ## Architecture and crate hierarchy
 

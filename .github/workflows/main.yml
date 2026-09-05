@@ -110,23 +110,34 @@ jobs:
             cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -runs=10000
           done
 
-  # Main-only (issue #174): resolves every direct dependency at its oldest
-  # allowed version and proves the workspace still compiles. Mutates
-  # Cargo.lock, so it must never run on PR checkouts -- this workflow only
-  # triggers on `main` pushes and manual dispatch.
-  minimal-versions:
+  # Main-only (issue #174 / DEP-01): prove the declared dependency ranges,
+  # not only the committed lockfile. `minimal` pins every direct dependency
+  # at its oldest allowed version; `maximum` takes the newest version still
+  # inside each range. Both mutate Cargo.lock, so they must never run on PR
+  # checkouts -- this workflow only triggers on `main` pushes and manual
+  # dispatch.
+  dependency-range:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        range: [minimal, maximum]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # consensus and node have `kernel` in their per-crate defaults, so
       # `cargo check --workspace --all-targets` compiles the C++ kernel
       # engine; install its prerequisites.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      # dtolnay action installs the newest nightly via rustup in-job.
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+        if: matrix.range == 'minimal'
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo +nightly update -Zdirect-minimal-versions
-      - run: cargo +nightly check --workspace --all-targets
+        with:
+          key: dep-range-${{ matrix.range }}
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-deny
+        with:
+          tool: cargo-deny
+      - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
   # Main-only (issue #174): the small real feature matrix, not a powerset.
   feature-combinations:
