@@ -28,6 +28,10 @@ tags:
 **Live branch switching is implemented and called from sync. Crash replay remains
 open.**
 
+The Done and Still open lists in this section and in *Work remaining* record the
+state as of this note's date (2026-08-08). Check the code before treating an
+"open" item as still open or a named gate as still present under that name.
+
 Done:
 
 * `ColumnFamily::UndoData` across all four backends, and a versioned undo codec
