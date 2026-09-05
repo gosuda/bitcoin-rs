@@ -2,7 +2,7 @@
 
 The compression-fix comparison was measured on 2026-09-02 at branch
 `overhaul/one-session` commit `b0e0935` against the empty-`Spending`
-(`12+0`) corpus. Current-format (`Spending 12+8`) totals were remesured on
+(`12+0`) corpus. Current-format (`Spending 12+8`) totals were remeasured on
 2026-09-04 from `crates/storage/examples/storage_footprint.rs`.
 
 ## What was measured
@@ -44,14 +44,14 @@ change stays matched to the corpus it was measured on.
 
 ### Current format (`Spending 12+8`)
 
-Remesured 2026-09-04 with the harness above.
+Remeasured 2026-09-04 with the harness above.
 
 | Backend | Total on-disk | Logical | Write amplification |
 |---|---:|---:|---:|
 | **fjall (default)** | **86,728,585 B (82.71 MiB)** | 129,570,000 B (123.57 MiB) | **0.669x** |
 | redb | 269,488,128 B (257.00 MiB) | 129,570,000 B (123.57 MiB) | 2.080x |
 
-RocksDB was not remesured here: this environment cannot compile
+RocksDB was not remeasured here: this environment cannot compile
 `rust-librocksdb-sys` (`cstdint` headers missing). Its last published total
 (134,671,921 B) belongs to the empty-`Spending` corpus below.
 
@@ -134,7 +134,7 @@ The fix is in `crates/storage/src/fjall_impl.rs`. No other backend was changed.
 - `crates/storage/tests/prune_then_reorg.rs`: 3 tests, all green.
 - `crates/storage/tests/cache_budget.rs`: 4 tests, all green.
 - `cargo clippy -p bitcoin-rs-storage --features fjall -- -D warnings`: clean.
-- Current-format remesure: `storage_footprint` release, features `fjall` and
+- Current-format remeasure: `storage_footprint` release, features `fjall` and
   `fjall,redb` (2026-09-04).
 
 ## What is not claimed

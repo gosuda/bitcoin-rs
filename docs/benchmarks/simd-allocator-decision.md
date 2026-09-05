@@ -31,9 +31,9 @@ does not approve an ARM implementation or a separate SHA acceleration path.
 
 ### Measured observations
 
-The custody artifact
-avx2-merkle custody evidence (retired by #224)
-has schema `bitcoin-rs-avx2-merkle-custody-v1`, capture date `2026-08-09`,
+The AVX2 Merkle custody artifact (campaign JSON retired from the tree by
+#224; the fields below are quoted from it) has schema
+`bitcoin-rs-avx2-merkle-custody-v1`, capture date `2026-08-09`,
 control commit `9f9eb0b5aca6bb6776cf919ee9dac8fc8843a1f2`, prepared-txids commit
 `b7e56570523111ff21727887af03ad140e07d7e7`, and AVX2 commit
 `65bae8dab0cbab41f2ef5d7cbc2cb906b2105643`. It identifies the control and
@@ -105,8 +105,8 @@ used as evidence for ARM.
 
 ### Measured observations
 
-allocator custody evidence (retired by #224)
-has schema `bitcoin-rs-allocator-custody-v1` and source commit
+The allocator custody artifact (campaign JSON retired from the tree by #224;
+fields quoted from it) has schema `bitcoin-rs-allocator-custody-v1` and source commit
 `ff2615a2946cfdf980ed80ed14c0ad5986631d8a`. Its source identity is
 `x86_64-unknown-linux-gnu` on an Intel Xeon Gold 6138, pinned to CPUs 0-31. The
 mimalloc and system binaries have SHA-256 identities

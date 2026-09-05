@@ -167,8 +167,8 @@ harness. Current resolver behavior is covered by the Indexer unit tests and
 the transaction-position contract tests; the private full-scan helpers remain
 the live fallback path.
 
-**Historical speed**, paired arms in one run, from the retired
-`crates/index/benches/history_resolve.rs` harness.
+**Historical speed**, paired arms in one run, from the retired `before_scan` /
+`after_fast` arms of `crates/index/benches/history_resolve.rs`.
 In-memory harness, and unaffected by that: both arms here are scan-path variants,
 so both are CPU-bound and I/O cancels out of the ratio.
 
@@ -373,12 +373,15 @@ Asked directly, and worth recording, because two effects pull in opposite
 directions and the published ratios are measured on the flattering side of one
 of them.
 
-**No read-path code is platform-gated.** `crates/index`, `crates/electrum`,
-`crates/storage` and `crates/primitives` contain zero `cfg(target_arch)`,
-`cfg(target_os)` or feature-detection sites. The workspace's only such file is
+**No read-path code is platform-gated.** At the time of this check,
+`crates/index`, the since-removed `crates/electrum`, `crates/storage` and
+`crates/primitives` contained zero `cfg(target_arch)`, `cfg(target_os)` or
+feature-detection sites, and the workspace's only such file was
 `crates/consensus/src/sha256d64.rs`, the AVX2 Merkle reducer, which is on the
-apply path and is not reached by anything measured here. So there is no
-Linux-only or x86-only optimization sitting idle on this host.
+apply path and is not reached by anything measured here. (Today
+`crates/storage/src/footprint.rs` carries a `cfg(target_os = "linux")` for
+`/proc/self/fd` path resolution; it is not on the resolver read path.) So
+there was no Linux-only or x86-only optimization sitting idle on this host.
 
 **SHA-256 is scalar here, and that flatters the `before` arm.**
 `bitcoin_hashes 0.14` carries an x86-only SHA-NI path

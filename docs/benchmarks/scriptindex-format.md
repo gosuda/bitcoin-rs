@@ -232,9 +232,12 @@ value. A smaller locator requires an injectivity proof.**
 
 ScriptLive is a compact reverse view of the authoritative UTXO set (current
 outpoint locators per script), not a mempool index and not a Coin copy.
-Rows are **not implemented** in this audit. This verdict freezes the
-baseline key shape so a future implementation does not need to revisit
-the decision.
+Rows were **not implemented** when this audit was frozen. This verdict
+froze the baseline key shape so the implementation did not need to
+revisit the decision. Since then `ScriptLiveRow` landed in
+`crates/index/src/types.rs` with exactly this 44-byte key
+(`SCRIPT_LIVE_ROW_SIZE = HASH_PREFIX_LEN + 32 + 4`) and its own
+watermark key (`SCRIPT_LIVE_WATERMARK_KEY` in `crates/index/src/index.rs`).
 
 **Baseline key: `prefix(8) || txid(32) || vout(4)` = 44 bytes, empty value.**
 

@@ -153,9 +153,6 @@ projection holds it at 3.626; it has not converged (2.296 at height 183k, 4.056
 at 390k), and it is the number the result is most sensitive to, because the
 32-byte txid amortizes over it directly.
 
-The projection holds outputs per record at 3.626, which has not converged and
-remains the number the result is most sensitive to.
-
 ## Step 2.2: the v5 record codec
 
 **Result: 11.75 bytes saved per output (21.7% of the payload), for a lookup cost
@@ -173,8 +170,8 @@ of about 3 ns on a typical record and a lookup *win* on a fat one.**
 Everything above about size came from a synthetic fixture. The same 2.03 GiB
 `utxo-v4.dat` a real pruned sync produced at height 412,732 — 10,519,335 records
 and **38,145,360 outputs** — was then loaded by a v4 build and a v5 build.
-Same file, same machine, only the codec differs
-using the now-retired `snapshot_memory` campaign helper.
+Same file, same machine, only the codec differs; both loads were measured
+with the now-retired `snapshot_memory` campaign helper.
 
 | Layer | v4 | v5 | Saved |
 |---|---:|---:|---:|

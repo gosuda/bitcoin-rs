@@ -1,12 +1,12 @@
 # End-to-end sync benchmarks
 
-> **Evidence status:** This page publishes completed historical runs and their raw JSON. All numbers and artifacts below reflect historical runs performed prior to the Task 16 cutover, where `bitcoinkernel` (`libbitcoinkernel`) became the default production consensus engine in `bitcoin-rs-consensus` and `bitcoin-rs-node`. The `bin/bitcoin-rs` binary later dropped `kernel` from its defaults (`default = ["fjall", "redb", "zmq"]`), so `cargo build -p bitcoin-rs` no longer links `bitcoinkernel`; pass `--features kernel` for the kernel consensus engine.
+> **Evidence status:** This page indexes completed historical runs. The raw JSON attachments were removed from the tree by #224; their SHA-256 digests remain in [Raw artifact integrity](#raw-artifact-integrity) so an external copy can be checked. All numbers below reflect runs performed prior to the Task 16 cutover, where `bitcoinkernel` (`libbitcoinkernel`) became the default production consensus engine in `bitcoin-rs-consensus` and `bitcoin-rs-node`. The `bin/bitcoin-rs` binary later dropped `kernel` from its defaults (`default = ["fjall", "redb", "zmq"]`), so `cargo build -p bitcoin-rs` does not link `bitcoinkernel`; pass `--features kernel` for the kernel consensus engine.
 >
 > The obsolete `bitcoinconsensus` backend was removed in Task 16 after fresh mainnet IBD stopped at block 938344 (exposing missing complete prevouts and unsupported Taproot script-path verification in the portable path). Builds with `kernel` require system dependencies (`cmake` and `libboost-dev`).
 >
 > Historical `bitcoinconsensus` and early experimental `kernel` numbers published here serve as historical records and are non-comparable with kernel-default production builds. No full-tip (height 957,600+) live IBD run or G14 performance-gate pass has been completed under the landed kernel default. Final performance claims remain pending fresh measurements.
 
-The machine-readable attachments preserve every recorded field and stage timer. The source artifacts do not record the exact command line, compiler flags, CPU affinity, cache state, host identity, exit code, or replication count. Those missing fields prevent a reproducible controlled claim.
+The retired machine-readable artifacts preserved every recorded field and stage timer. They did not record the exact command line, compiler flags, CPU affinity, cache state, host identity, exit code, or replication count. Those missing fields prevent a reproducible controlled claim.
 
 ## Completed machine-readable runs
 
@@ -18,7 +18,7 @@ The machine-readable attachments preserve every recorded field and stage timer. 
 | Inferred `parverify` full-validation replay, 0–150,000 | 0–150,000 | Full (`assume_valid_height=0`) | `rest` | `3023eb0` | 296.211s | 506.399 blocks/s | 2.210 GiB | rs-replay-150k-parverify (retired) |
 | Inferred `kernel` full-validation replay, 0–150,000 | 0–150,000 | Full (`assume_valid_height=0`) | `rest` | `fb2227e` | 232.208s | 645.977 blocks/s | 2.219 GiB | rs-replay-150k-kernel (retired) |
 
-All five artifacts pass these structural checks: schema `mainnet-prefix-replay-v1`, genesis start hash, positive elapsed time and throughput, non-empty stage list, and `block_count = stop_height - start_height + 1`.
+All five artifacts passed these structural checks when they were in the tree: schema `mainnet-prefix-replay-v1`, genesis start hash, positive elapsed time and throughput, non-empty stage list, and `block_count = stop_height - start_height + 1`.
 
 ## Same-range observations
 
@@ -69,7 +69,7 @@ Later code changed both failed bitcoin-rs paths, but no completed rerun is attac
 
 These historical measurements do not establish a current performance claim.
 
-## Bounded current evidence
+## Bounded 0–150,000 comparator evidence (commit `de8001e`, historical)
 
 A disk-bounded campaign at commit `de8001e83bd4e09077d4cebbbdd23d0cebade194`
 used the exact mainnet range 0–150,000. Both implementations used full validation,
@@ -95,8 +95,8 @@ and 4,000,000-row candidates, plus the Fjall `bytes_1` feature-only and
 Every bitcoin-rs TxIndex run produced the same logical digest.
 
 The full corpus, treatment, binary, timing, memory, free-space, restore, and rejected
-candidate custody is in
-bounded-performance-custody-v1 (retired).
+candidate custody was recorded in `bounded-performance-custody-v1.json` (retired by
+#224; digest below).
 The campaign retained one bounded corpus root with one canonical archive per
 implementation and deleted each disposable fixture before the next run. These bounded
 results do not satisfy the live-IBD or current-tip RSS gates above.
@@ -127,9 +127,11 @@ Every run reached the exact height 150,000 endpoint (block hash `0000000000000a3
 - The PGO (`w128`) candidate measured 89.266232737s (1.003470356× wall ratio vs the 89.576018374s baseline) and was rejected below the 1.05× continuation threshold.
 - The eight-proxy same-seed run measured 115.429379346s (28.861922467% slower than the one-peer median) and was rejected as topology reconnaissance only.
 
-The complete machine-readable custody is in daemon-ibd-custody-v1 (retired).
+The complete machine-readable custody was recorded in `daemon-ibd-custody-v1.json` (retired by #224; digest below).
 
 ## Raw artifact integrity
+
+SHA-256 digests of the retired JSON artifacts, kept so an external copy can be matched to the numbers on this page.
 
 | Artifact | SHA-256 |
 |---|---|
@@ -281,4 +283,4 @@ Artifact: rs-replay-150k-kernel (retired). Stage timers are nested and are not a
 
 ## Harness
 
-The attached JSON was emitted by the former `mainnet_prefix_replay` campaign executable. The artifacts record the range, boundary hashes, backend, index flags, source kind, data directory, elapsed/fetch/decode time, block and transaction counts, peak RSS, commit, and stage timers. They do not capture enough launch or host state to reconstruct the exact original command. The replay executable and G14 artifact adapters have been retired; these files are historical evidence, not inputs to a supported runner.
+The retired JSON was emitted by the former `mainnet_prefix_replay` campaign executable. The artifacts recorded the range, boundary hashes, backend, index flags, source kind, data directory, elapsed/fetch/decode time, block and transaction counts, peak RSS, commit, and stage timers. They did not capture enough launch or host state to reconstruct the exact original command. The replay executable and G14 artifact adapters have been retired; the digests above are historical evidence, not inputs to a supported runner.
