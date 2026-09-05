@@ -375,7 +375,7 @@ impl BlockSync {
                     drop(tree);
                     if let (Some(height), Some(source)) = (announced, source) {
                         if self.peer_table.is_current(source) {
-                            self.peer_table.note_announced_height(source.addr, height);
+                            self.peer_table.note_announced_height(source, height);
                         }
                     }
                     tracing::debug!(
@@ -433,27 +433,26 @@ impl BlockSync {
     /// several sync tests assert. Ordering carries no protocol meaning, but
     /// both messages leave in the same tick either way, so there is no
     /// throughput reason to prefer the other order.
+    fn best_peer_above(&self, our_height: u32) -> Option<SyncPeer> {
+        self.peer_table
+            .infos()
+            .into_iter()
+            .filter_map(|peer| {
+                let height = u32::try_from(peer.best_known_height).ok()?;
+                (height > our_height).then_some(SyncPeer {
+                    addr: peer.addr,
+                    start_height: peer.best_known_height,
+                })
+            })
+            .max_by_key(|peer| peer.start_height)
+    }
+
     fn request_headers_from_best_peer(&self) {
         let applied_tip = self.handles.applied_tip.load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let mut header_peer: Option<SyncPeer> = None;
-        for peer in self.peer_table.infos() {
-            let Ok(height) = u32::try_from(peer.best_known_height) else {
-                continue;
-            };
-            if height <= applied_height {
-                continue;
-            }
-            let candidate = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.best_known_height,
-            };
-            if header_peer.is_none_or(|current| current.start_height < candidate.start_height) {
-                header_peer = Some(candidate);
-            }
-        }
+        let header_peer = self.best_peer_above(applied_height);
         if let Some(peer) = header_peer {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             if peer_best_height > header_height {
@@ -1713,6 +1712,7 @@ mod tests {
 
     #[test]
     fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract P2P-03: demonstrated best-height synchronization.
         // Regression test for the #617 shape: once a node has caught up, no
         // connected peer has a handshake-time start_height above its applied
         // height — every peer connected while the node was at or below the

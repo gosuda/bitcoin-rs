@@ -26,6 +26,13 @@ normative; it places them under the
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
+### `P2P-03`: Demonstrated best-height synchronization
+
+- A peer that demonstrates accepted headers may be selected for synchronization
+  beyond the applied tip, while its session identity remains authoritative.
+- **Proven by**: `crates/node/src/sync.rs` test
+  `tick_fetches_new_tip_headers_from_at_tip_peers`.
+
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.

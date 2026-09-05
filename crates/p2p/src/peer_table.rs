@@ -87,10 +87,10 @@ impl PeerTable {
     /// headers). Monotonic: never lowers, so a stale announcement cannot drag
     /// eligibility below the handshake snapshot. Returns `true` when a live
     /// entry was updated.
-    pub fn note_announced_height(&self, addr: SocketAddr, height: i32) -> bool {
+    pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
         let mut entries = self.entries.write();
-        match entries.get_mut(&addr) {
-            Some(entry) => {
+        match entries.get_mut(&source.addr) {
+            Some(entry) if entry.lease.is_current(source) => {
                 if let Some(info) = entry.info.as_mut() {
                     if height > info.best_known_height {
                         info.best_known_height = height;
@@ -98,7 +98,7 @@ impl PeerTable {
                 }
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
