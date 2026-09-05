@@ -106,7 +106,7 @@ jobs:
       # guaranteed on the runner.
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
       - run: |
-          for target in p2p_message block_decode tx_decode script_eval utxo_snapshot; do
+          for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
             cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -runs=10000
           done
 

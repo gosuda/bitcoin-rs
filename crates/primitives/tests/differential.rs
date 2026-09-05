@@ -137,18 +137,18 @@ fn fixture_blocks_are_byte_identical_with_the_oracle() {
 
 #[test]
 fn tx_corpus_seeds_match_the_oracle() {
-    let Some(seeds) = corpus_seeds("tx_decode") else {
+    let Some(seeds) = corpus_seeds("tx_validate") else {
         // Test-binary runner output (allowed exception: not a library path):
         // an absent corpus must skip loudly, not pass silently.
         eprintln!(
-            "SKIP tx_corpus_seeds_match_the_oracle: fuzz/corpus/tx_decode is entirely \
+            "SKIP tx_corpus_seeds_match_the_oracle: fuzz/corpus/tx_validate is entirely \
              absent (QA corpora land via another track)"
         );
         return;
     };
     assert!(
         !seeds.is_empty(),
-        "fuzz/corpus/tx_decode exists but contains no seeds; gate would be vacuous"
+        "fuzz/corpus/tx_validate exists but contains no seeds; gate would be vacuous"
     );
     let seed_count = seeds.len();
     let mut checked = 0_usize;
@@ -188,25 +188,25 @@ fn tx_corpus_seeds_match_the_oracle() {
     }
     assert!(
         checked > 0,
-        "fuzz/corpus/tx_decode: iterated {seed_count} seed(s) but none parsed by both \
+        "fuzz/corpus/tx_validate: iterated {seed_count} seed(s) but none parsed by both \
          decoders; gate would be vacuous"
     );
 }
 
 #[test]
 fn block_corpus_seeds_match_the_oracle() {
-    let Some(seeds) = corpus_seeds("block_decode") else {
+    let Some(seeds) = corpus_seeds("block_validate") else {
         // Test-binary runner output (allowed exception: not a library path):
         // an absent corpus must skip loudly, not pass silently.
         eprintln!(
-            "SKIP block_corpus_seeds_match_the_oracle: fuzz/corpus/block_decode is \
+            "SKIP block_corpus_seeds_match_the_oracle: fuzz/corpus/block_validate is \
              entirely absent (QA corpora land via another track)"
         );
         return;
     };
     assert!(
         !seeds.is_empty(),
-        "fuzz/corpus/block_decode exists but contains no seeds; gate would be vacuous"
+        "fuzz/corpus/block_validate exists but contains no seeds; gate would be vacuous"
     );
     let seed_count = seeds.len();
     let mut checked = 0_usize;
@@ -241,7 +241,7 @@ fn block_corpus_seeds_match_the_oracle() {
     }
     assert!(
         checked > 0,
-        "fuzz/corpus/block_decode: iterated {seed_count} seed(s) but none parsed by both \
+        "fuzz/corpus/block_validate: iterated {seed_count} seed(s) but none parsed by both \
          decoders; gate would be vacuous"
     );
 }
@@ -443,7 +443,7 @@ fn sighash_matches_oracle_across_corpus() {
     let leafs: [Option<Hash256>; 2] = [None, Some(leaf)];
 
     let mut sources: Vec<(String, Vec<u8>)> = fixture_blocks();
-    if let Some(seeds) = corpus_seeds("block_decode") {
+    if let Some(seeds) = corpus_seeds("block_validate") {
         sources.extend(seeds);
     }
 

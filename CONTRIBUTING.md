@@ -90,8 +90,8 @@ Fuzz targets live under `fuzz/` and run against imported corpora:
 # Install cargo-fuzz if not present
 cargo install cargo-fuzz
 
-# Run a target (options: p2p_message, block_decode, tx_decode, script_eval, utxo_snapshot)
-cargo +nightly fuzz run block_decode -- -runs=10000
+# Run a target (options: p2p_message, block_validate, tx_validate, script_eval, utxo_snapshot)
+cargo +nightly fuzz run block_validate -- -runs=10000
 ```
 
 ### Dependency-range check
