@@ -1589,7 +1589,9 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// A supplied checksum is verified, then the body is analysed. `combo` is
+    /// Exercises contract `API-07` in `docs/contracts/external-api.md`:
+    /// a supplied checksum is verified, then the verified payload is analysed.
+    /// This follows BIP 380 and Bitcoin Core's descriptor contract. `combo` is
     /// not miniscript, so the parser must see `combo(KEY)` and not `combo(KEY)#sum`.
     #[test]
     fn checksummed_combo_is_analysed() {
