@@ -664,7 +664,7 @@ impl P2pService {
                 (height > our_height).then_some(FanoutCandidate {
                     peer: crate::SyncPeer {
                         addr: peer.source.addr,
-                        start_height: peer.info.start_height,
+                        best_known_height: peer.info.start_height,
                     },
                     fanout_eligible: statically_fanout_eligible(&peer.info)
                         && !window.peer_has_expired_pending(peer.source.addr, now)
@@ -679,7 +679,7 @@ impl P2pService {
             header_peer: preferred.or_else(|| {
                 candidates
                     .iter()
-                    .max_by_key(|candidate| candidate.peer.start_height)
+                    .max_by_key(|candidate| candidate.peer.best_known_height)
                     .map(|candidate| candidate.peer)
             }),
             request_peers: candidates
@@ -701,13 +701,13 @@ impl P2pService {
                 let height = u32::try_from(peer.info.start_height).ok()?;
                 (height > our_height).then_some(crate::SyncPeer {
                     addr: peer.source.addr,
-                    start_height: peer.info.start_height,
+                    best_known_height: peer.info.start_height,
                 })
             })
             .fold(None, |best, peer| {
-                if best
-                    .is_none_or(|current: crate::SyncPeer| current.start_height < peer.start_height)
-                {
+                if best.is_none_or(|current: crate::SyncPeer| {
+                    current.best_known_height < peer.best_known_height
+                }) {
                     Some(peer)
                 } else {
                     best
@@ -735,7 +735,7 @@ impl P2pService {
             })
             .map(|peer| crate::SyncPeer {
                 addr: peer.source.addr,
-                start_height: peer.info.start_height,
+                best_known_height: peer.info.start_height,
             });
         let window = self.download_window.lock();
         candidates

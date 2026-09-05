@@ -1,7 +1,7 @@
 # P2P wire contract (pointer)
 
-The peer-wire contract is split across two owners. This page adds nothing
-normative; it places them under the
+The peer-wire contract is split across two owners. This page assigns
+ownership and cites proof under the
 [contracts precedence rule](README.md).
 
 - [`crates/p2p/src/compat.rs`](../../crates/p2p/src/compat.rs) owns the
@@ -30,9 +30,27 @@ normative; it places them under the
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.
 
+### `P2P-03`: Demonstrated best-known-height credit and request eligibility
+
+- **Owner**: `crates/p2p/src/peer_table.rs` owns the per-connection credit
+  record (`PeerInfo.best_known_height`) and its identity-checked monotonic
+  mutation (`PeerTable::note_announced_height`).
+  `crates/node/src/sync.rs` owns the eligibility/ordering consumption
+  (`sync_peer_candidate`, `outranks`) and the active-branch filter that
+  decides which accepted headers establish credit.
+- Credit is initialized from the handshake `start_height`, raised
+  monotonically (never lowered), raisable only by the delivering connection
+  (a same-address replacement never inherits its predecessor's credit), and
+  raised only for accepted headers on the currently selected best chain.
+  Sync request eligibility requires demonstrated height above the applied
+  tip.
+
 ## Live gaps
 
 - **Peer lifecycle boundary**: Moving the remaining P2P scheduling and lifecycle policy out of `crates/node` is tracked under #217 (open).
+- **P2P-internal selector**: `crates/p2p/src/service.rs` still consumes the
+  handshake snapshot (`PeerInfo.start_height`) for its own peer selection;
+  aligning it with P2P-03 is tracked with #217.
 
 ## Proven by
 
@@ -43,3 +61,10 @@ normative; it places them under the
     matrix, and peer-visible reorg/restart behavior.
 - `crates/p2p/tests/core_interop_live.rs`: live interop lane running via
   `scripts/run-p2p-core-interop.sh` when an external `bitcoind` is provided.
+- `crates/p2p/src/peer_table.rs` tests
+  `note_announced_height_credits_only_the_delivering_connection` and
+  `note_announced_height_raises_monotonically_and_reports_actual_updates`
+  pin the identity-checked, monotonic credit mutation (P2P-03).
+- `crates/node/src/sync.rs` test
+  `tick_fetches_new_tip_headers_from_at_tip_peers` pins at-tip request
+  eligibility after catch-up (P2P-03, #617).

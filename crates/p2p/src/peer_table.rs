@@ -82,23 +82,29 @@ impl PeerTable {
         }
     }
 
-    /// Raises the recorded best-known height of the peer at `addr` when the
-    /// peer has demonstrated a higher chain height (it handed us accepted
-    /// headers). Monotonic: never lowers, so a stale announcement cannot drag
-    /// eligibility below the handshake snapshot. Returns `true` when a live
-    /// entry was updated.
-    pub fn note_announced_height(&self, addr: SocketAddr, height: i32) -> bool {
+    /// Raises the demonstrated best-known height of the connection that
+    /// stamped `source` when that same connection is still live at its
+    /// address and has demonstrated a higher chain height (it handed us
+    /// accepted headers). Identity-aware and atomic under the table write
+    /// lock: a same-address replacement never inherits its predecessor's
+    /// credit. Monotonic: never lowers, so a stale announcement cannot drag
+    /// eligibility below the handshake snapshot. Returns `true` only when
+    /// a live, metadata-published entry's height was actually raised.
+    pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
         let mut entries = self.entries.write();
-        match entries.get_mut(&addr) {
-            Some(entry) => {
-                if let Some(info) = entry.info.as_mut() {
-                    if height > info.best_known_height {
-                        info.best_known_height = height;
-                    }
+        match entries.get_mut(&source.addr) {
+            Some(entry) if entry.lease.is_current(source) => {
+                let Some(info) = entry.info.as_mut() else {
+                    return false;
+                };
+                if height > info.best_known_height {
+                    info.best_known_height = height;
+                    true
+                } else {
+                    false
                 }
-                true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -508,5 +514,66 @@ mod tests {
         assert!(b.is_cancelled());
         assert!(!a.is_cancelled());
         assert_eq!(table.len(), 1);
+    }
+
+    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
+    #[test]
+    fn note_announced_height_credits_only_the_delivering_connection() {
+        let table = PeerTable::new();
+        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let stale = PeerLease::new(stale_tx);
+        table.register(addr(1), stale.clone());
+        let stale_source = stale.source(addr(1));
+
+        // Same-address replacement: the stale connection is cancelled and
+        // the new connection takes the slot.
+        let (current_tx, _current_rx) = crossbeam_channel::unbounded();
+        let current = PeerLease::new(current_tx);
+        table.register(addr(1), current.clone());
+        let current_source = current.source(addr(1));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        // The stale source must not inherit the replacement's credit slot.
+        assert!(!table.note_announced_height(stale_source, 42));
+        assert_eq!(table.infos()[0].best_known_height, 10);
+
+        // The live connection raises the entry it owns.
+        assert!(table.note_announced_height(current_source, 42));
+        assert_eq!(table.infos()[0].best_known_height, 42);
+    }
+
+    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
+    #[test]
+    fn note_announced_height_raises_monotonically_and_reports_actual_updates() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        let source = current.source(addr(1));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        // Equal height: no update.
+        assert!(!table.note_announced_height(source, 10));
+        assert_eq!(table.infos()[0].best_known_height, 10);
+
+        // Lower height: no update (monotonic).
+        assert!(!table.note_announced_height(source, 9));
+        assert_eq!(table.infos()[0].best_known_height, 10);
+
+        // Higher height: update.
+        assert!(table.note_announced_height(source, 12));
+        assert_eq!(table.infos()[0].best_known_height, 12);
+
+        // Unknown address: no update.
+        let other = lease();
+        let other_source = other.source(addr(2));
+        assert!(!table.note_announced_height(other_source, 99));
+
+        // Registered but unpublished peer: no update.
+        table.register(addr(3), lease());
+        let Some(unpublished) = table.lease(addr(3)) else {
+            return;
+        };
+        let unpublished_source = unpublished.source(addr(3));
+        assert!(!table.note_announced_height(unpublished_source, 50));
     }
 }

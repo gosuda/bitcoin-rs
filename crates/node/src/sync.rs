@@ -16,7 +16,7 @@ mod stage;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerTable};
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
@@ -124,6 +124,24 @@ fn is_peer_fault(error: &ChainError) -> bool {
         | ChainError::UnknownNode { .. }
         | ChainError::NoCommonAncestor { .. } => false,
     }
+}
+
+/// The one eligibility and ordering rule for demonstrated-best-known
+/// height peer selection (P2P-03): a peer is request-eligible when its
+/// demonstrated height exceeds `floor`, and among eligible peers the
+/// greatest height wins. First-wins on equal heights.
+fn sync_peer_candidate(peer: &PeerInfo, floor: u32) -> Option<SyncPeer> {
+    let height = u32::try_from(peer.best_known_height).ok()?;
+    (height > floor).then_some(SyncPeer {
+        addr: peer.addr,
+        best_known_height: peer.best_known_height,
+    })
+}
+
+/// Whether `candidate` outranks `current`: strictly greater demonstrated
+/// height; first-wins on ties.
+fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
+    candidate.best_known_height > current.best_known_height
 }
 
 impl BlockSync {
@@ -275,7 +293,7 @@ impl BlockSync {
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
         for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
-            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
             let request_outcome = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
                     peer.addr,
@@ -364,19 +382,27 @@ impl BlockSync {
                     // we accepted, so raise its demonstrated best-known
                     // height: at-tip peers stay request-eligible for the
                     // bodies of newly announced blocks even though their
-                    // handshake snapshot went stale the moment we caught up.
-                    let announced = node_ids
-                        .iter()
-                        .filter_map(|id| tree.node(*id).ok())
-                        .map(|node| node.height)
-                        .max()
-                        .and_then(|height| i32::try_from(height).ok());
+                    // handshake snapshot went stale the moment we caught up
+                    // (#617). Only headers on the currently selected best
+                    // chain establish credit — a peer that demonstrated
+                    // only a losing side fork gains no eligibility for
+                    // active-chain bodies; if its fork later wins, those
+                    // headers are then on the best chain and credit follows.
+                    let announced = tree.tip().and_then(|active_tip| {
+                        node_ids
+                            .iter()
+                            .filter_map(|id| tree.node(*id).ok().map(|node| (*id, node.height)))
+                            .filter(|(id, height)| {
+                                tree.node_at_height_from(active_tip.tip_id, *height) == Some(*id)
+                            })
+                            .map(|(_, height)| height)
+                            .max()
+                            .and_then(|height| i32::try_from(height).ok())
+                    });
                     self.handles.assume_valid_gate.evaluate(&tree);
                     drop(tree);
                     if let (Some(height), Some(source)) = (announced, source) {
-                        if self.peer_table.is_current(source) {
-                            self.peer_table.note_announced_height(source.addr, height);
-                        }
+                        self.peer_table.note_announced_height(source, height);
                     }
                     tracing::debug!(
                         accepted = node_ids.len(),
@@ -440,24 +466,17 @@ impl BlockSync {
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let mut header_peer: Option<SyncPeer> = None;
         for peer in self.peer_table.infos() {
-            let Ok(height) = u32::try_from(peer.best_known_height) else {
+            let Some(candidate) = sync_peer_candidate(&peer, applied_height) else {
                 continue;
             };
-            if height <= applied_height {
-                continue;
-            }
-            let candidate = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.best_known_height,
-            };
-            if header_peer.is_none_or(|current| current.start_height < candidate.start_height) {
+            if header_peer.is_none_or(|current| outranks(current, candidate)) {
                 header_peer = Some(candidate);
             }
         }
         if let Some(peer) = header_peer {
-            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
             if peer_best_height > header_height {
-                self.send_getheaders(peer.addr, header_height, peer.start_height);
+                self.send_getheaders(peer.addr, header_height, peer.best_known_height);
             }
         }
     }
@@ -1086,19 +1105,10 @@ impl BlockSync {
             // otherwise become ineligible for every newly announced block
             // (#617). Per-request truncation by `peer_best_height` still
             // bounds the damage of a stale value.
-            if u32::try_from(peer.best_known_height)
-                .ok()
-                .is_none_or(|height| height <= our_height)
-            {
+            let Some(sync_peer) = sync_peer_candidate(&peer, our_height) else {
                 continue;
-            }
-            let sync_peer = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.best_known_height,
             };
-            if header_peer
-                .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
-            {
+            if header_peer.is_none_or(|current| outranks(current, sync_peer)) {
                 header_peer = Some(sync_peer);
             }
             candidates.push(FanoutCandidate {
@@ -1142,17 +1152,16 @@ impl BlockSync {
             // cooldown) fills the window; a soft-blocked peer serves only as
             // the last resort when no alternative exists. Without the
             // preference, a disconnected staller that reconnects with an
-            // inflated start_height would out-sort every honest peer and
-            // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
+            // inflated demonstrated best-known height would out-sort every
+            // honest peer and re-acquire the window front (RE-ADV-2 /
+            // first-audit ADV-2).
             let mut preferred: Option<SyncPeer> = None;
             for candidate in candidates
                 .iter()
                 .filter(|candidate| !candidate.soft_blocked)
             {
                 // First-wins on equal heights, matching the header-peer fold.
-                if preferred
-                    .is_none_or(|current| current.start_height < candidate.peer.start_height)
-                {
+                if preferred.is_none_or(|current| outranks(current, candidate.peer)) {
                     preferred = Some(candidate.peer);
                 }
             }
@@ -1163,7 +1172,7 @@ impl BlockSync {
                 .collect()
         };
         if request_peers.len() > 1 {
-            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.best_known_height));
         }
         request_peers.truncate(request_peer_limit);
         SyncPeerSelection {
@@ -1184,7 +1193,8 @@ impl BlockSync {
         };
         let candidates = probe_peers.iter().filter(|peer| {
             peer.addr != owner
-                && u32::try_from(peer.start_height).is_ok_and(|height| height >= required_height)
+                && u32::try_from(peer.best_known_height)
+                    .is_ok_and(|height| height >= required_height)
         });
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
@@ -1713,6 +1723,7 @@ mod tests {
 
     #[test]
     fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
         // Regression test for the #617 shape: once a node has caught up, no
         // connected peer has a handshake-time start_height above its applied
         // height — every peer connected while the node was at or below the
