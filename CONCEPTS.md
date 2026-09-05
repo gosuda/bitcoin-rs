@@ -123,6 +123,14 @@ The two cost regimes a sync measurement must name before its numbers mean anythi
 
 ## Consensus validation
 
+### Native protocol primitives
+The owned Bitcoin protocol vocabulary in `crates/primitives`: `Tx`, `Block`,
+`Header`, `OutPoint`, hashes, sighash, compact-size encoding, and network
+constants. These types are implemented here; they are not `rust-bitcoin`
+aliases, wrappers, or conversion shims. Durable tests pin Core vectors,
+published genesis hashes, and golden fixtures. RPC address/`asm` rendering
+may still use `rust-bitcoin` at the RPC boundary only.
+
 ### bitcoinkernel
 Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Issue #213 keeps this library default until native wins the signed-spend and full-replay gates (`docs/contracts/validation-default.md`).
 

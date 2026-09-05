@@ -557,15 +557,9 @@ mod tests {
 
     #[test]
     fn bip16_p2sh_exception_matches_core_block_170060() -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin::hashes::Hash as _;
-
-        // Parse Core's BIP16Exception via bitcoin's own type (it handles the reversed
-        // display convention), then convert through the SAME path the call site uses
-        // (`Hash256::from_le_bytes(block.block_hash().as_byte_array())`). This locks the
-        // byte orientation against bitcoin's parser so the constant can't silently drift.
-        let display = "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22";
-        let exception =
-            Hash256::from_le_bytes(display.parse::<bitcoin::BlockHash>()?.as_byte_array());
+        let exception = Hash256::from_str_be(
+            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
+        )?;
 
         assert!(Network::Mainnet.is_bip16_p2sh_exception(exception));
 
@@ -583,16 +577,9 @@ mod tests {
     #[test]
     fn bip16_p2sh_exception_matches_core_testnet3_block_394()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin::hashes::Hash as _;
-
-        // Parse Core's testnet3 BIP16Exception via bitcoin's own type (it handles the
-        // reversed display convention), then convert through the SAME path the call site
-        // uses (`Hash256::from_le_bytes(block.block_hash().as_byte_array())`). This locks
-        // the byte orientation against bitcoin's parser so the constant can't silently
-        // drift.
-        let display = "00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105";
-        let exception =
-            Hash256::from_le_bytes(display.parse::<bitcoin::BlockHash>()?.as_byte_array());
+        let exception = Hash256::from_str_be(
+            "00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105",
+        )?;
 
         assert!(Network::Testnet3.is_bip16_p2sh_exception(exception));
 
@@ -604,12 +591,9 @@ mod tests {
 
         // Cross-network isolation: the mainnet 170060 exception hash must NOT be excepted
         // on testnet3.
-        let mainnet_display = "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22";
-        let mainnet_exception = Hash256::from_le_bytes(
-            mainnet_display
-                .parse::<bitcoin::BlockHash>()?
-                .as_byte_array(),
-        );
+        let mainnet_exception = Hash256::from_str_be(
+            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
+        )?;
         assert!(!Network::Testnet3.is_bip16_p2sh_exception(mainnet_exception));
 
         Ok(())

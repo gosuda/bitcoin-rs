@@ -1,9 +1,8 @@
 //! Consensus encoding and hashing helpers for the native protocol types.
 //!
-//! `ConsensusEncode`/`ConsensusDecode` are the native replacements for
-//! `bitcoin::consensus` serialization: segwit marker/flag handling and witness
-//! serialization follow BIP144, and malformed input always yields a typed
-//! [`DecodeError`].
+//! `ConsensusEncode`/`ConsensusDecode` are the native consensus serialization:
+//! segwit marker/flag handling and witness serialization follow BIP144, and
+//! malformed input always yields a typed [`DecodeError`].
 
 use std::io::{self, Write};
 
@@ -495,10 +494,6 @@ mod tests {
     }
     #[test]
     fn superfluous_segwit_marker_is_rejected() -> Result<()> {
-        use bitcoin::Transaction;
-        use bitcoin::consensus::deserialize as bitcoin_deserialize;
-        use bitcoin::consensus::serialize as bitcoin_serialize;
-
         use crate::{OutPoint, Tx, TxIn, Txid};
 
         let tx = Tx {
@@ -523,25 +518,17 @@ mod tests {
         marked.extend(std::iter::repeat_n(0x00_u8, tx.inputs.len()));
         marked.extend_from_slice(lock_time);
 
-        // Marker+flag with an all-empty witness section: both decoders reject.
+        // Marker+flag with an all-empty witness section: Core rejects this as a
+        // superfluous witness record, and so do we. rust-bitcoin 0.32 also rejects
+        // the non-empty-input form; that crate is not an oracle for this crate.
         assert_eq!(
             deserialize::<Tx>(&marked),
             Err(DecodeError::SuperfluousWitness)
         );
-        let oracle_error = bitcoin_deserialize::<Transaction>(&marked)
-            .expect_err("oracle must reject witness flag with no witnesses");
-        assert!(
-            oracle_error
-                .to_string()
-                .contains("witness flag set but no witnesses present"),
-            "unexpected oracle error: {oracle_error}"
-        );
 
-        // The witness-stripped encoding of the same tx is accepted by both, and the
-        // native round-trip is byte-identical.
+        // The witness-stripped encoding of the same tx is accepted and round-trips.
         assert_eq!(deserialize::<Tx>(&stripped)?, tx);
-        let oracle_tx: Transaction = bitcoin_deserialize(&stripped)?;
-        assert_eq!(bitcoin_serialize(&oracle_tx), stripped);
+        assert_eq!(crate::encode::consensus_bytes(&tx), stripped);
 
         // Degenerate zero-input marker+flag encoding: Core rejects it ("Superfluous
         // witness record") and so do we, since the encoder could never reproduce the
@@ -553,7 +540,6 @@ mod tests {
             deserialize::<Tx>(&zero_input),
             Err(DecodeError::SuperfluousWitness)
         );
-        assert!(bitcoin_deserialize::<Transaction>(&zero_input).is_ok());
         Ok(())
     }
 }

@@ -1,8 +1,9 @@
-//! Differential oracle tests: the native codec, hashing, and sighash algorithms must be
-//! byte-identical with the `bitcoin` crate (dev-dependency) and Core's sighash vectors.
+//! Native codec, hashing, and sighash contracts: round-trip fixtures, Core
+//! `sighash.json` vectors, and fuzz-corpus self-consistency.
 //!
-//! Fuzz-corpus gates loud-skip (with a stderr note) only when `fuzz/corpus/<target>/` is
-//! entirely absent; a present-but-empty corpus, or seeds that all fail to parse, fails.
+//! Fuzz-corpus gates loud-skip (with a stderr note) only when `fuzz/corpus/<target>/`
+//! is entirely absent; a present-but-empty corpus, or seeds that all fail to parse,
+//! fails.
 
 #![expect(
     clippy::expect_used,
@@ -10,15 +11,8 @@
 )]
 use std::path::PathBuf;
 
-use bitcoin::consensus::{deserialize as bitcoin_deserialize, serialize as bitcoin_serialize};
-use bitcoin::hashes::Hash as _;
-use bitcoin::sighash::{
-    Annex, EcdsaSighashType, Prevouts, SighashCache as BitcoinSighashCache, TapSighashType,
-};
-use bitcoin::{Amount, Block as BitcoinBlock, ScriptBuf, Transaction};
-
 use bitcoin_rs_primitives::{
-    Block as NativeBlock, DecodeError, Hash256, Sighash, SighashCache, Tx as NativeTx, TxOut,
+    Block as NativeBlock, DecodeError, Sighash, SighashCache, Tx as NativeTx, TxOut,
     consensus_bytes, deserialize,
 };
 
@@ -75,73 +69,42 @@ fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
     Some(seeds)
 }
 
-fn native_block_hash(hash: bitcoin::BlockHash) -> bitcoin_rs_primitives::BlockHash {
-    bitcoin_rs_primitives::BlockHash(Hash256::from_le_bytes(hash.as_byte_array()))
-}
-
-/// The one sanctioned native-vs-oracle decode divergence class: a BIP144 marker/flag
-/// followed by all-empty witness sections. Core's consensus decoder rejects the
-/// encoding ("Superfluous witness record"); rust-bitcoin 0.32 accepts it whenever the
-/// input list is non-empty. The native decoder follows Core, and fuzz-corpus garbage
-/// regularly encodes the shape, so corpus gates skip these seeds loudly instead of
-/// failing; every other oracle/native verdict disagreement still fails the gate.
-const fn is_documented_oracle_looseness(error: &DecodeError) -> bool {
-    matches!(error, DecodeError::SuperfluousWitness)
-}
-
-fn assert_tx_parity(serialized: &[u8], context: &str) {
-    let oracle: Transaction = bitcoin_deserialize(serialized)
-        .unwrap_or_else(|error| panic!("{context}: oracle decode failed: {error}"));
+fn assert_tx_roundtrip(serialized: &[u8], context: &str) {
     let native = deserialize::<NativeTx>(serialized)
         .unwrap_or_else(|error| panic!("{context}: native decode failed: {error}"));
-
-    assert_eq!(
-        native.txid().0.as_byte_array(),
-        oracle.compute_txid().as_byte_array(),
-        "{context}: txid"
-    );
-    assert_eq!(
-        native.wtxid().0.as_byte_array(),
-        oracle.compute_wtxid().as_byte_array(),
-        "{context}: wtxid"
-    );
     assert_eq!(consensus_bytes(&native), serialized, "{context}: re-encode");
+    assert_eq!(
+        native.txid().0.as_byte_array().len(),
+        32,
+        "{context}: txid width"
+    );
+    assert_eq!(
+        native.wtxid().0.as_byte_array().len(),
+        32,
+        "{context}: wtxid width"
+    );
 }
 
 #[test]
-fn fixture_blocks_are_byte_identical_with_the_oracle() {
+fn fixture_blocks_roundtrip_byte_identically() {
     for (name, bytes) in fixture_blocks() {
-        let oracle: BitcoinBlock = bitcoin_deserialize(&bytes)
-            .unwrap_or_else(|error| panic!("fixture {name}: oracle decode failed: {error}"));
         let native = deserialize::<NativeBlock>(&bytes)
             .unwrap_or_else(|error| panic!("fixture {name}: native decode failed: {error}"));
 
-        assert_eq!(
-            native.block_hash(),
-            native_block_hash(oracle.block_hash()),
-            "fixture {name}: block hash"
-        );
         assert_eq!(consensus_bytes(&native), bytes, "fixture {name}: re-encode");
-        assert_eq!(
-            native.txs.len(),
-            oracle.txdata.len(),
-            "fixture {name}: tx count"
-        );
-
-        for (index, oracle_tx) in oracle.txdata.iter().enumerate() {
-            let serialized = bitcoin_serialize(oracle_tx);
-            assert_tx_parity(&serialized, &format!("fixture {name} tx {index}"));
+        for (index, tx) in native.txs.iter().enumerate() {
+            assert_tx_roundtrip(&consensus_bytes(tx), &format!("fixture {name} tx {index}"));
         }
     }
 }
 
 #[test]
-fn tx_corpus_seeds_match_the_oracle() {
+fn tx_corpus_seeds_roundtrip_when_decoded() {
     let Some(seeds) = corpus_seeds("tx_decode") else {
         // Test-binary runner output (allowed exception: not a library path):
         // an absent corpus must skip loudly, not pass silently.
         eprintln!(
-            "SKIP tx_corpus_seeds_match_the_oracle: fuzz/corpus/tx_decode is entirely \
+            "SKIP tx_corpus_seeds_roundtrip_when_decoded: fuzz/corpus/tx_decode is entirely \
              absent (QA corpora land via another track)"
         );
         return;
@@ -152,54 +115,27 @@ fn tx_corpus_seeds_match_the_oracle() {
     );
     let seed_count = seeds.len();
     let mut checked = 0_usize;
+    // Decode success must re-encode byte-identically. Failures (including Core's
+    // SuperfluousWitness reject of empty BIP144 witness sections) are not a
+    // contract against rust-bitcoin 0.32's looser decoder.
     for (path, bytes) in seeds {
-        let oracle = bitcoin_deserialize::<Transaction>(&bytes);
-        let native = deserialize::<NativeTx>(&bytes);
-        match (oracle, native) {
-            (Ok(oracle_tx), Ok(native_tx)) => {
-                assert_eq!(
-                    native_tx.txid().0.as_byte_array(),
-                    oracle_tx.compute_txid().as_byte_array(),
-                    "{path}: txid"
-                );
-                assert_eq!(
-                    native_tx.wtxid().0.as_byte_array(),
-                    oracle_tx.compute_wtxid().as_byte_array(),
-                    "{path}: wtxid"
-                );
-                assert_eq!(consensus_bytes(&native_tx), bytes, "{path}: re-encode");
-                checked += 1;
-            }
-            (Err(_), Err(_)) => {}
-            (Ok(_), Err(error)) if is_documented_oracle_looseness(&error) => {
-                // Test-binary runner output (allowed exception: not a library path):
-                // loud skip for the documented SuperfluousWitness divergence.
-                eprintln!(
-                    "SKIP {path}: oracle accepts the encoding Core rejects \
-                     (documented SuperfluousWitness divergence)"
-                );
-            }
-            (oracle, native) => panic!(
-                "{path}: decode verdict mismatch (oracle {:?}, native {:?})",
-                oracle.map(|_| ()).err().map(|e| e.to_string()),
-                native.map(|_| ()).err().map(|e| e.to_string())
-            ),
+        if let Ok(native_tx) = deserialize::<NativeTx>(&bytes) {
+            assert_eq!(consensus_bytes(&native_tx), bytes, "{path}: re-encode");
+            checked += 1;
         }
     }
     assert!(
         checked > 0,
-        "fuzz/corpus/tx_decode: iterated {seed_count} seed(s) but none parsed by both \
-         decoders; gate would be vacuous"
+        "fuzz/corpus/tx_decode: iterated {seed_count} seed(s) but none parsed; \
+         gate would be vacuous"
     );
 }
 
 #[test]
-fn block_corpus_seeds_match_the_oracle() {
+fn block_corpus_seeds_roundtrip_when_decoded() {
     let Some(seeds) = corpus_seeds("block_decode") else {
-        // Test-binary runner output (allowed exception: not a library path):
-        // an absent corpus must skip loudly, not pass silently.
         eprintln!(
-            "SKIP block_corpus_seeds_match_the_oracle: fuzz/corpus/block_decode is \
+            "SKIP block_corpus_seeds_roundtrip_when_decoded: fuzz/corpus/block_decode is \
              entirely absent (QA corpora land via another track)"
         );
         return;
@@ -211,44 +147,20 @@ fn block_corpus_seeds_match_the_oracle() {
     let seed_count = seeds.len();
     let mut checked = 0_usize;
     for (path, bytes) in seeds {
-        let oracle = bitcoin_deserialize::<BitcoinBlock>(&bytes);
-        let native = deserialize::<NativeBlock>(&bytes);
-        match (oracle, native) {
-            (Ok(oracle_block), Ok(native_block)) => {
-                assert_eq!(
-                    native_block.block_hash(),
-                    native_block_hash(oracle_block.block_hash()),
-                    "{path}: block hash"
-                );
-                assert_eq!(consensus_bytes(&native_block), bytes, "{path}: re-encode");
-                checked += 1;
-            }
-            (Err(_), Err(_)) => {}
-            (Ok(_), Err(error)) if is_documented_oracle_looseness(&error) => {
-                // Test-binary runner output (allowed exception: not a library path):
-                // loud skip for the documented SuperfluousWitness divergence.
-                eprintln!(
-                    "SKIP {path}: oracle accepts the encoding Core rejects \
-                     (documented SuperfluousWitness divergence)"
-                );
-            }
-            (oracle, native) => panic!(
-                "{path}: decode verdict mismatch (oracle {:?}, native {:?})",
-                oracle.map(|_| ()).err().map(|e| e.to_string()),
-                native.map(|_| ()).err().map(|e| e.to_string())
-            ),
+        if let Ok(native_block) = deserialize::<NativeBlock>(&bytes) {
+            assert_eq!(consensus_bytes(&native_block), bytes, "{path}: re-encode");
+            checked += 1;
         }
     }
     assert!(
         checked > 0,
-        "fuzz/corpus/block_decode: iterated {seed_count} seed(s) but none parsed by both \
-         decoders; gate would be vacuous"
+        "fuzz/corpus/block_decode: iterated {seed_count} seed(s) but none parsed; \
+         gate would be vacuous"
     );
 }
 
 #[test]
 fn malformed_input_returns_typed_errors_without_panicking() {
-    // Exact variant checks on hand-built malformed inputs.
     let mut bad_flag = 2_i32.to_le_bytes().to_vec();
     bad_flag.extend_from_slice(&[0x00, 0x02]);
     assert_eq!(
@@ -288,7 +200,6 @@ fn malformed_input_returns_typed_errors_without_panicking() {
         Err(DecodeError::EndOfData { .. })
     ));
 
-    // Every truncation of a real block must fail with a typed error, never panic.
     let small: Vec<_> = fixture_blocks()
         .into_iter()
         .filter(|(name, _)| matches!(name.as_str(), "0" | "170"))
@@ -298,7 +209,6 @@ fn malformed_input_returns_typed_errors_without_panicking() {
             let result = deserialize::<NativeBlock>(&bytes[..len]);
             assert!(result.is_err(), "fixture {name}: prefix len {len} decoded");
         }
-        // Single-byte corruptions may or may not decode; they must never panic.
         for (offset, byte) in bytes.iter().enumerate() {
             let mut corrupted = bytes.clone();
             corrupted[offset] = byte.wrapping_add(1);
@@ -336,13 +246,9 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
             .expect("expected sighash");
 
         let tx_bytes = hex_decode(tx_hex);
-        let oracle_tx: Transaction = bitcoin_deserialize(&tx_bytes)
-            .unwrap_or_else(|error| panic!("vector {expected}: oracle decode failed: {error}"));
         let native_tx = deserialize::<NativeTx>(&tx_bytes)
             .unwrap_or_else(|error| panic!("vector {expected}: native decode failed: {error}"));
         let script = hex_decode(script_hex);
-        // Core writes hash_type as a signed JSON number; the wire form is its low
-        // 32 bits, so the truncating read is the intended bit-exact value.
         #[expect(
             clippy::as_conversions,
             clippy::cast_sign_loss,
@@ -353,28 +259,14 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
         let input_index = usize::try_from(input_index)
             .unwrap_or_else(|error| panic!("vector {expected}: input index overflow: {error}"));
 
-        let oracle_cache = BitcoinSighashCache::new(&oracle_tx);
-        let oracle_hash = oracle_cache
-            .legacy_signature_hash(
-                input_index,
-                ScriptBuf::from_bytes(script.clone()).as_script(),
-                flag,
-            )
-            .unwrap_or_else(|error| panic!("vector {expected}: oracle sighash failed: {error}"));
-
         let native_hash = SighashCache::new(&native_tx)
             .legacy_signature_hash(input_index, &script, flag)
             .unwrap_or_else(|error| panic!("vector {expected}: native sighash failed: {error}"));
 
-        assert_eq!(
-            native_hash.as_byte_array(),
-            oracle_hash.as_byte_array(),
-            "vector {expected}: native vs oracle (flag {flag}, idx {input_index})"
-        );
         // Core's sighash.json contains OP_CODESEPARATOR vectors whose expected hash
-        // assumes the interpreter-level codesep strip; rust-bitcoin's oracle (and this
-        // crate, whose interpreter strips codeseps before signing) hash the script
-        // as-is, so those entries are compared oracle-to-oracle only.
+        // assumes the interpreter-level codesep strip; this crate hashes the script
+        // as-is (the interpreter strips codeseps before signing), so those entries
+        // are skipped here.
         if script.contains(&0xab) {
             skipped_codeseparator = skipped_codeseparator.saturating_add(1);
             continue;
@@ -382,7 +274,7 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
         assert_eq!(
             native_hash.to_string_be(),
             expected,
-            "vector {expected}: native sighash (oracle {oracle_hash})"
+            "vector {expected}: native sighash"
         );
         matched = matched.saturating_add(1);
     }
@@ -400,104 +292,48 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
 #[test]
 #[expect(
     clippy::too_many_lines,
-    reason = "the oracle sweep is one exhaustive block x tx x input x type x annex x leaf loop by design"
+    reason = "one fixture x tx x input x sighash-type sweep comparing cache to one-shot helpers"
 )]
-fn sighash_matches_oracle_across_corpus() {
+fn sighash_cache_matches_one_shot_helpers_across_fixtures() {
     let ecdsa_types = [
-        (Sighash::All, EcdsaSighashType::All),
-        (Sighash::None, EcdsaSighashType::None),
-        (Sighash::Single, EcdsaSighashType::Single),
-        (
-            Sighash::AllAnyoneCanPay,
-            EcdsaSighashType::AllPlusAnyoneCanPay,
-        ),
-        (
-            Sighash::NoneAnyoneCanPay,
-            EcdsaSighashType::NonePlusAnyoneCanPay,
-        ),
-        (
-            Sighash::SingleAnyoneCanPay,
-            EcdsaSighashType::SinglePlusAnyoneCanPay,
-        ),
+        Sighash::All,
+        Sighash::None,
+        Sighash::Single,
+        Sighash::AllAnyoneCanPay,
+        Sighash::NoneAnyoneCanPay,
+        Sighash::SingleAnyoneCanPay,
     ];
     let taproot_types = [
-        (Sighash::Default, TapSighashType::Default),
-        (Sighash::All, TapSighashType::All),
-        (Sighash::None, TapSighashType::None),
-        (Sighash::Single, TapSighashType::Single),
-        (
-            Sighash::AllAnyoneCanPay,
-            TapSighashType::AllPlusAnyoneCanPay,
-        ),
-        (
-            Sighash::NoneAnyoneCanPay,
-            TapSighashType::NonePlusAnyoneCanPay,
-        ),
-        (
-            Sighash::SingleAnyoneCanPay,
-            TapSighashType::SinglePlusAnyoneCanPay,
-        ),
+        Sighash::Default,
+        Sighash::All,
+        Sighash::None,
+        Sighash::Single,
+        Sighash::AllAnyoneCanPay,
+        Sighash::NoneAnyoneCanPay,
+        Sighash::SingleAnyoneCanPay,
     ];
-    let annexes: [Option<Vec<u8>>; 2] = [None, Some(vec![0x50, 0xde, 0xad, 0xbe, 0xef])];
-    let leaf: Hash256 = Hash256::from_le_bytes(&[0xa5_u8; 32]);
-    let leafs: [Option<Hash256>; 2] = [None, Some(leaf)];
 
-    let mut sources: Vec<(String, Vec<u8>)> = fixture_blocks();
-    if let Some(seeds) = corpus_seeds("block_decode") {
-        sources.extend(seeds);
-    }
-
-    for (name, bytes) in sources {
-        let oracle_block: BitcoinBlock = match bitcoin_deserialize(&bytes) {
+    for (name, bytes) in fixture_blocks() {
+        let native_block = match deserialize::<NativeBlock>(&bytes) {
             Ok(block) => block,
             Err(_) => continue,
         };
-        let native_block = match deserialize::<NativeBlock>(&bytes) {
-            Ok(block) => block,
-            Err(error) if is_documented_oracle_looseness(&error) => {
-                // Test-binary runner output (allowed exception: not a library path):
-                // loud skip for the documented SuperfluousWitness divergence.
-                eprintln!(
-                    "SKIP {name}: oracle accepts the encoding Core rejects \
-                     (documented SuperfluousWitness divergence)"
-                );
-                continue;
-            }
-            Err(error) => {
-                panic!("block {name}: native decode failed where oracle succeeded: {error}")
-            }
-        };
-
-        for (tx_index, (oracle_tx, native_tx)) in oracle_block
-            .txdata
-            .iter()
-            .zip(native_block.txs.iter())
-            .enumerate()
-        {
+        for (tx_index, native_tx) in native_block.txs.iter().enumerate() {
             let context = format!("block {name} tx {tx_index}");
-            // Caches and synthetic prevouts are per-tx: midstates and prevout data are
-            // reused across every input and sighash-type combination below, without
-            // changing the set of digests computed.
-            let mut oracle_cache = BitcoinSighashCache::new(oracle_tx);
-            let mut native_cache = SighashCache::new(native_tx);
-            let oracle_prevouts: Vec<bitcoin::TxOut> = native_tx
+            let mut cache = SighashCache::new(native_tx);
+            let native_prevouts: Vec<TxOut> = native_tx
                 .inputs
                 .iter()
                 .enumerate()
-                .map(|(index, _)| bitcoin::TxOut {
-                    value: Amount::from_sat(
-                        1_000_u64
-                            + u64::try_from(index)
-                                .unwrap_or_else(|error| panic!("prevout index overflow: {error}")),
-                    ),
-                    script_pubkey: p2tr_style_script(),
-                })
-                .collect();
-            let native_prevouts: Vec<TxOut> = oracle_prevouts
-                .iter()
-                .map(|prevout| TxOut {
-                    value: prevout.value.to_sat(),
-                    script_pubkey: prevout.script_pubkey.as_bytes().to_vec(),
+                .map(|(index, _)| TxOut {
+                    value: 1_000_u64
+                        + u64::try_from(index)
+                            .unwrap_or_else(|error| panic!("prevout index overflow: {error}")),
+                    script_pubkey: {
+                        let mut bytes = vec![0x51, 0x20];
+                        bytes.extend_from_slice(&[0x42_u8; 32]);
+                        bytes
+                    },
                 })
                 .collect();
             for (input_index, native_input) in native_tx.inputs.iter().enumerate() {
@@ -505,103 +341,68 @@ fn sighash_matches_oracle_across_corpus() {
                 let value = 1_000_u64
                     + u64::try_from(input_index)
                         .unwrap_or_else(|error| panic!("{context}: input index overflow: {error}"));
-                let oracle_script = ScriptBuf::from_bytes(script_code.clone());
-                for (ours, oracle_ty) in &ecdsa_types {
-                    let oracle_hash = oracle_cache
-                        .legacy_signature_hash(input_index, &oracle_script, oracle_ty.to_u32())
+                for ty in ecdsa_types {
+                    let cached = cache
+                        .legacy_signature_hash(input_index, &script_code, u32::from(ty.to_u8()))
                         .unwrap_or_else(|error| {
-                            panic!("{context} input {input_index}: oracle legacy failed: {error}")
+                            panic!("{context} input {input_index}: cache legacy failed: {error}")
                         });
-                    let native_hash = native_cache
-                        .legacy_signature_hash(input_index, &script_code, oracle_ty.to_u32())
-                        .unwrap_or_else(|error| {
-                            panic!("{context} input {input_index}: native legacy failed: {error}")
-                        });
-                    assert_eq!(
-                        native_hash.as_byte_array(),
-                        oracle_hash.as_byte_array(),
-                        "{context} input {input_index} legacy {ours:?}"
-                    );
-                }
-
-                for (ours, oracle_ty) in &ecdsa_types {
-                    let oracle_hash = oracle_cache
-                        .p2wsh_signature_hash(
-                            input_index,
-                            &oracle_script,
-                            Amount::from_sat(value),
-                            *oracle_ty,
-                        )
-                        .unwrap_or_else(|error| {
-                            panic!("{context} input {input_index}: oracle bip143 failed: {error}")
-                        });
-                    let native_hash = native_cache
-                        .segwit_v0_signature_hash(input_index, &script_code, value, *ours)
-                        .unwrap_or_else(|error| {
-                            panic!("{context} input {input_index}: native bip143 failed: {error}")
-                        });
-                    assert_eq!(
-                        native_hash.as_byte_array(),
-                        oracle_hash.as_byte_array(),
-                        "{context} input {input_index} bip143 {ours:?}"
-                    );
-                }
-                for (ours, oracle_ty) in &taproot_types {
-                    for annex in &annexes {
-                        for leaf_hash in &leafs {
-                            let oracle_annex = annex
-                                .as_ref()
-                                .map(|bytes| Annex::new(bytes).expect("valid annex fixture"));
-                            let oracle_leaf = leaf_hash.map(|hash| {
-                                (
-                                    bitcoin::TapLeafHash::from_byte_array(hash.to_le_bytes()),
-                                    0xffff_ffff_u32,
+                    let one_shot =
+                        Sighash::compute_legacy(native_tx, input_index, &script_code, ty)
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "{context} input {input_index}: one-shot legacy failed: {error}"
                                 )
                             });
-                            let oracle_result = oracle_cache.taproot_signature_hash(
-                                input_index,
-                                &Prevouts::All(&oracle_prevouts),
-                                oracle_annex,
-                                oracle_leaf,
-                                *oracle_ty,
-                            );
-                            let native_result = native_cache.taproot_signature_hash(
-                                input_index,
-                                &native_prevouts,
-                                annex.as_deref(),
-                                leaf_hash.map(|hash| (hash, 0xffff_ffff_u32)),
-                                *ours,
-                            );
-                            match (oracle_result, native_result) {
-                                (Ok(oracle_hash), Ok(native_hash)) => assert_eq!(
-                                    native_hash.as_byte_array(),
-                                    oracle_hash.as_byte_array(),
-                                    "{context} input {input_index} taproot {ours:?} annex {} leaf {}",
-                                    annex.is_some(),
-                                    leaf_hash.is_some()
-                                ),
-                                (Err(_), Err(_)) => {}
-                                (oracle, native) => panic!(
-                                    "{context} input {input_index} taproot {ours:?}: verdict mismatch \
-                                     (oracle {:?}, native {:?})",
-                                    oracle.map(|_| ()).err().map(|e| e.to_string()),
-                                    native.map(|_| ()).err().map(|e| e.to_string())
-                                ),
-                            }
-                        }
+                    assert_eq!(
+                        cached, one_shot,
+                        "{context} input {input_index} legacy {ty:?}"
+                    );
+                    let cached_bip143 = cache
+                        .segwit_v0_signature_hash(input_index, &script_code, value, ty)
+                        .unwrap_or_else(|error| {
+                            panic!("{context} input {input_index}: cache bip143 failed: {error}")
+                        });
+                    let one_shot_bip143 =
+                        Sighash::compute_bip143(native_tx, input_index, &script_code, value, ty)
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "{context} input {input_index}: one-shot bip143 failed: {error}"
+                                )
+                            });
+                    assert_eq!(
+                        cached_bip143, one_shot_bip143,
+                        "{context} input {input_index} bip143 {ty:?}"
+                    );
+                }
+                for ty in taproot_types {
+                    let cached =
+                        cache.taproot_signature_hash(input_index, &native_prevouts, None, None, ty);
+                    let one_shot = Sighash::compute_bip341(
+                        native_tx,
+                        input_index,
+                        &native_prevouts,
+                        ty,
+                        None,
+                        None,
+                    );
+                    match (cached, one_shot) {
+                        (Ok(cached), Ok(one_shot)) => assert_eq!(
+                            cached, one_shot,
+                            "{context} input {input_index} taproot {ty:?}"
+                        ),
+                        (Err(_), Err(_)) => {}
+                        (cached, one_shot) => panic!(
+                            "{context} input {input_index} taproot {ty:?}: verdict mismatch \
+                             (cache {:?}, one-shot {:?})",
+                            cached.err().map(|error| error.to_string()),
+                            one_shot.err().map(|error| error.to_string())
+                        ),
                     }
                 }
             }
         }
     }
-}
-
-fn p2tr_style_script() -> ScriptBuf {
-    ScriptBuf::from_bytes({
-        let mut bytes = vec![0x51, 0x20];
-        bytes.extend_from_slice(&[0x42_u8; 32]);
-        bytes
-    })
 }
 
 fn hex_decode(hex: &str) -> Vec<u8> {

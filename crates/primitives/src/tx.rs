@@ -108,12 +108,10 @@ impl Tx {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use bitcoin::hashes::Hash as _;
+    use std::str::FromStr;
 
     use super::Tx;
-    use crate::{
-        DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, Wtxid, encode::consensus_bytes,
-    };
+    use crate::{DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -135,20 +133,20 @@ mod tests {
     }
 
     #[test]
-    fn txid_and_wtxid_match_bitcoin_crate_for_fixture_transactions() -> Result<()> {
+    fn fixture_txids_match_golden_list_and_reencode() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/363731.bin")?;
-        let block: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
+        let block = crate::Block::consensus_decode(&bytes)?;
+        let golden = std::fs::read_to_string("tests/testdata/363731.txids.txt")?;
+        let expected: Vec<Txid> = golden
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(Txid::from_str)
+            .collect::<Result<_, _>>()?;
 
-        for bitcoin_tx in block.txdata.iter().take(10) {
-            let serialized = bitcoin::consensus::serialize(bitcoin_tx);
-            let tx = Tx::consensus_decode(&serialized)?;
-
-            let expected_txid = Hash256::from_le_bytes(bitcoin_tx.compute_txid().as_byte_array());
-            let expected_wtxid = Hash256::from_le_bytes(bitcoin_tx.compute_wtxid().as_byte_array());
-
-            assert_eq!(tx.txid(), Txid(expected_txid));
-            assert_eq!(tx.wtxid(), Wtxid(expected_wtxid));
-            assert_eq!(consensus_bytes(&tx), serialized);
+        assert_eq!(block.txs.len(), expected.len());
+        for (tx, expected_txid) in block.txs.iter().take(10).zip(expected.iter()) {
+            assert_eq!(tx.txid(), *expected_txid);
+            assert_eq!(Tx::consensus_decode(&consensus_bytes(tx))?, *tx);
         }
         Ok(())
     }

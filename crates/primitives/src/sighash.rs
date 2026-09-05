@@ -2,8 +2,9 @@
 //!
 //! `SighashCache` holds a transaction reference plus lazily computed midstates. The
 //! algorithms are bug-for-bug compatible with Bitcoin Core's `interpreter.cpp`
-//! (`SignatureHash`, `SignatureHashSchnorr`) and byte-identical with the `bitcoin`
-//! crate's `SighashCache`, which this crate's tests use as the differential oracle.
+//! (`SignatureHash`, `SignatureHashSchnorr`). Durable tests pin Core's `sighash.json`
+//! vectors and published hash values; this crate does not take a `rust-bitcoin`
+//! oracle dependency.
 
 use std::io::Write as _;
 
@@ -714,14 +715,6 @@ fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use bitcoin::hashes::Hash as _;
-    use bitcoin::sighash::{
-        EcdsaSighashType, Prevouts, SighashCache as BitcoinCache, TapSighashType,
-    };
-    use bitcoin::{
-        Amount, OutPoint as BitcoinOutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
-        Witness, absolute,
-    };
 
     use super::{
         CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, TAPSCRIPT_LEAF_VERSION,
@@ -729,11 +722,18 @@ mod tests {
     };
     use crate::{Hash256, OutPoint, Tx, Txid};
 
+    /// BIP125 opt-in sequence (`ENABLE_RBF_NO_LOCKTIME`).
+    const RBF_SEQUENCE: u32 = 0xffff_fffd;
+
+    fn pin(hex: &str) -> Hash256 {
+        Hash256::from_str_be(hex).expect("pinned hash hex")
+    }
+
     fn synthetic_tx(output_count: usize) -> Tx {
         let input = crate::TxIn {
             previous_output: OutPoint::new(Txid(Hash256::default()), 0xffff_ffff),
             script_sig: Vec::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME.to_consensus_u32(),
+            sequence: RBF_SEQUENCE,
             witness: Vec::new(),
         };
         let mut outputs = Vec::new();
@@ -751,149 +751,79 @@ mod tests {
         }
     }
 
-    fn synthetic_bitcoin_tx(output_count: usize) -> Transaction {
-        let input = TxIn {
-            previous_output: BitcoinOutPoint::null(),
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        };
-        let mut outputs = Vec::new();
-        for value in 0..output_count {
-            outputs.push(TxOut {
-                value: Amount::from_sat(
-                    1_000
-                        + u64::try_from(value)
-                            .unwrap_or_else(|error| panic!("output count overflow: {error}")),
-                ),
-                script_pubkey: ScriptBuf::new(),
-            });
-        }
-        Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: absolute::LockTime::ZERO,
-            input: vec![input],
-            output: outputs,
-        }
-    }
-
     #[test]
-    fn legacy_sighash_matches_bitcoin_cache_for_all_ecdsa_modes() {
+    fn legacy_sighash_pins_all_ecdsa_modes() {
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8];
-        let modes = [
-            (Sighash::All, EcdsaSighashType::All),
-            (Sighash::None, EcdsaSighashType::None),
-            (Sighash::Single, EcdsaSighashType::Single),
+        let pins = [
+            (
+                Sighash::All,
+                "4127751e4f67b766f2e28b9cb14a0e7dea69ca90f7e41d1290cd1b6b8ba26c13",
+            ),
+            (
+                Sighash::None,
+                "3f42e7611510fd8f5010f0214d2de59b3ffe62b69c9179b6f908620eb0be844c",
+            ),
+            (
+                Sighash::Single,
+                "e142c8e6e225a647d83a45b1b37a9a37a51aecbee8a3ba79932cf093f76bf9ba",
+            ),
             (
                 Sighash::AllAnyoneCanPay,
-                EcdsaSighashType::AllPlusAnyoneCanPay,
+                "d11d53d12184f74612a4496afb3e79c6cb5f162740a55ccc1175c386ffdc6f91",
             ),
             (
                 Sighash::NoneAnyoneCanPay,
-                EcdsaSighashType::NonePlusAnyoneCanPay,
+                "38b9b28bda7132027812bb53b4886b8893151604e85115fb4d029d8ad071c66b",
             ),
             (
                 Sighash::SingleAnyoneCanPay,
-                EcdsaSighashType::SinglePlusAnyoneCanPay,
+                "841875c2ad3cfb401234594333ff42957782a7a81be5ac482067e9e9f9802c36",
             ),
         ];
-        let bitcoin_tx = synthetic_bitcoin_tx(2);
-        let bitcoin_cache = BitcoinCache::new(&bitcoin_tx);
-        for (ours, bitcoin_ty) in modes {
-            let expected = match bitcoin_cache.legacy_signature_hash(
-                0,
-                ScriptBuf::from_bytes(script.clone()).as_script(),
-                bitcoin_ty.to_u32(),
-            ) {
-                Ok(hash) => Hash256::from_le_bytes(hash.as_byte_array()),
-                Err(error) => panic!("fixture legacy sighash failed: {error}"),
-            };
-            assert_eq!(Sighash::compute_legacy(&tx, 0, &script, ours), Ok(expected));
+        for (mode, expected) in pins {
+            assert_eq!(
+                Sighash::compute_legacy(&tx, 0, &script, mode),
+                Ok(pin(expected))
+            );
         }
     }
 
     #[test]
-    fn bip143_sighash_matches_bitcoin_cache() {
+    fn bip143_sighash_pins_single() {
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8, 0x51];
-        let value = 50_000;
-        let bitcoin_tx = synthetic_bitcoin_tx(2);
-        let mut bitcoin_cache = BitcoinCache::new(&bitcoin_tx);
-        let expected = match bitcoin_cache.p2wsh_signature_hash(
-            0,
-            ScriptBuf::from_bytes(script.clone()).as_script(),
-            Amount::from_sat(value),
-            EcdsaSighashType::Single,
-        ) {
-            Ok(hash) => Hash256::from_le_bytes(hash.as_byte_array()),
-            Err(error) => panic!("fixture bip143 sighash failed: {error}"),
-        };
-
         assert_eq!(
-            Sighash::compute_bip143(&tx, 0, &script, value, Sighash::Single),
-            Ok(expected)
+            Sighash::compute_bip143(&tx, 0, &script, 50_000, Sighash::Single),
+            Ok(pin(
+                "c9bb107a16a13d1a8ad4ebc540978164a7d92b4a26d388d26fa8eed79e10ebec"
+            ))
         );
     }
 
     #[test]
-    fn bip341_key_path_and_bip342_script_path_match_bitcoin_cache() {
+    fn bip341_key_path_and_bip342_script_path_pins() {
         let tx = synthetic_tx(2);
-        let prevouts = vec![TxOut {
-            value: Amount::from_sat(50_000),
-            script_pubkey: ScriptBuf::new(),
-        }];
-        let native_prevouts = vec![crate::TxOut {
+        let prevouts = vec![crate::TxOut {
             value: 50_000,
             script_pubkey: Vec::new(),
         }];
-        let script = ScriptBuf::from_bytes(vec![0x51]);
-        let leaf_hash = script.tapscript_leaf_hash();
-
-        let key_tx = synthetic_bitcoin_tx(2);
-        let mut key_cache = BitcoinCache::new(&key_tx);
-        let expected_key = match key_cache.taproot_signature_hash(
-            0,
-            &Prevouts::All(&prevouts),
-            None,
-            None,
-            TapSighashType::AllPlusAnyoneCanPay,
-        ) {
-            Ok(hash) => Hash256::from_le_bytes(hash.as_byte_array()),
-            Err(error) => panic!("fixture taproot key sighash failed: {error}"),
-        };
         assert_eq!(
-            Sighash::compute_bip341(
-                &tx,
-                0,
-                &native_prevouts,
-                Sighash::AllAnyoneCanPay,
-                None,
-                None
-            ),
-            Ok(expected_key)
+            Sighash::compute_bip341(&tx, 0, &prevouts, Sighash::AllAnyoneCanPay, None, None),
+            Ok(pin(
+                "8910eff2c9430e82893c47e1ba29da7ff76285dcb7a386bb9cbdd04fc97b8c8f"
+            ))
         );
-
-        let script_tx = synthetic_bitcoin_tx(2);
-        let mut script_cache = BitcoinCache::new(&script_tx);
-        let expected_script = match script_cache.taproot_script_spend_signature_hash(
-            0,
-            &Prevouts::All(&prevouts),
-            leaf_hash,
-            TapSighashType::Default,
-        ) {
-            Ok(hash) => Hash256::from_le_bytes(hash.as_byte_array()),
-            Err(error) => panic!("fixture tapscript sighash failed: {error}"),
-        };
-        let leaf_hash = Hash256::from_le_bytes(leaf_hash.as_byte_array());
+        let leaf = tapleaf_hash(TAPSCRIPT_LEAF_VERSION, &[0x51]);
         assert_eq!(
-            tapleaf_hash(TAPSCRIPT_LEAF_VERSION, &[0x51]),
-            leaf_hash,
-            "native tapleaf hash must match the bitcoin crate"
+            leaf,
+            pin("75d68237360f5032d84419d0d32e2061cbc7ce286c58e7846ab291f707215ba8")
         );
         assert_eq!(
-            Sighash::compute_bip342(&tx, 0, &native_prevouts, Sighash::Default, leaf_hash, None),
-            Ok(expected_script)
+            Sighash::compute_bip342(&tx, 0, &prevouts, Sighash::Default, leaf, None),
+            Ok(pin(
+                "4cc7918733b1c9abd997206fac92d03183ec712d059dd5da5bd099e39b66a1d6"
+            ))
         );
         let _ = CODESEPARATOR_POSITION;
     }
@@ -955,41 +885,49 @@ mod tests {
     }
 
     #[test]
-    fn legacy_masked_sighash_flags_match_bitcoin_cache() {
+    fn legacy_masked_sighash_flags_pin_raw_wire_patterns() {
         // Stray middle bits are masked away for classification but the raw value is
         // appended to the hash; Core's sighash.json exercises exactly these shapes.
         let tx = synthetic_tx(2);
-        let bitcoin_tx = synthetic_bitcoin_tx(2);
         let script = vec![0x51_u8, 0x52, 0x53];
-        // -1_391_424_484 truncated to its low 32 bits: a deliberately pathological
-        // hash-type pattern (stray high bits set) exercised against the oracle.
         #[expect(
             clippy::as_conversions,
             clippy::cast_sign_loss,
             clippy::cast_possible_truncation,
             reason = "the value is a raw 32-bit wire pattern; the truncating cast is the point"
         )]
-        let flags: [u32; 6] = [
-            (-1_391_424_484_i64) as u32,
-            1_864_164_639,
-            131,
-            0x1f | 0x80 | 0x40, // stray 0x40 bit: classified ACP-ALL, raw appended
-            0xffff_ffbf,        // stray bits, non-ACP: classified ALL
-            0x83 | 0x40,
+        let flags: [(u32, &str); 6] = [
+            (
+                (-1_391_424_484_i64) as u32,
+                "33ed02ca66219e1b2fc5d7f7c0496e1c7792ab8853364a4853327bd13168e8a3",
+            ),
+            (
+                1_864_164_639,
+                "93c71c8d797406ebf8d69105ba692f13ea3a798359daaa5bab9283d8a86a9c92",
+            ),
+            (
+                131,
+                "c0fc189225ee44e546b8b79aade907bd11eabb3bb716b7a66400416de498672b",
+            ),
+            (
+                0x1f | 0x80 | 0x40,
+                "3251b8b07c14f20cbff5a9ad80e7001ad1819fb3ad55403336aeaeb763a8c015",
+            ),
+            (
+                0xffff_ffbf,
+                "e5bf6aaad9765706722d08a3b82cb6eea9f10d0b8acd8f882bf35e96cd1c9476",
+            ),
+            (
+                0x83 | 0x40,
+                "c0a87d511cd13c9346d2113f6b08f152eaa100b1d0b1f48dbc76047d58660d6e",
+            ),
         ];
-        for flag in flags {
-            let bitcoin_cache = BitcoinCache::new(&bitcoin_tx);
-            let expected = bitcoin_cache
-                .legacy_signature_hash(0, ScriptBuf::from_bytes(script.clone()).as_script(), flag)
-                .map_or_else(
-                    |_| panic!("oracle legacy sighash must succeed for valid index"),
-                    |hash| Hash256::from_le_bytes(hash.as_byte_array()),
-                );
+        for (flag, expected) in flags {
             assert_eq!(
                 SighashCache::new(&tx)
                     .legacy_signature_hash(0, &script, flag)
                     .expect("native legacy sighash"),
-                expected
+                pin(expected)
             );
         }
     }
