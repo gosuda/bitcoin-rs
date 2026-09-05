@@ -1,10 +1,10 @@
 # Mempool Policy Compatibility
 
-This document declares bitcoin-rs's mempool/relay policy compatibility contract with Bitcoin Core and the rules for keeping it pinned. It is the transaction-acceptance counterpart to `docs/policies/p2p-compatibility.md` (peer wire) and the RPC compatibility manifest (track 4a). Where this document and prose comments disagree, this document wins; where it and the code disagree, the code is the defect.
+This document declares bitcoin-rs's mempool/relay policy compatibility contract with Bitcoin Core and the rules for keeping it pinned. It is the transaction-acceptance counterpart to `docs/policies/p2p-compatibility.md` (peer wire) and the RPC compatibility manifest (`crates/rpc/src/manifest.rs`, rendered as `docs/rpc-reference.md`). Where this document and prose comments disagree, this document wins; where it and the code disagree, the code is the defect.
 
 ## 1. Scope and Authority
 
-This policy applies to the transaction-acceptance surface of `bitcoin-rs-mempool` (`crates/mempool`: `standardness.rs`, `policy.rs`, `pool.rs`, `rbf.rs`, `eviction.rs`, `accept.rs`, `gateway.rs`) and its two admission outlets — the pool mutation API and the RPC handlers `sendrawtransaction` / `testmempoolaccept` (`crates/rpc/src/handlers/tx.rs`). It covers relay policy and gateway policy script checks: rules a full node enforces before admitting transactions to the mempool or relaying them. `MempoolGateway::admit_transaction` verifies input scripts under Core's standard policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, `validation.cpp::PolicyScriptChecks`) before admission. `testmempoolaccept` uses `evaluate_package_acceptance_all`, which does not run those script checks. Full consensus validation at block application is governed by consensus rules (see `docs/policies/core-compatibility.md` and the consensus tests).
+This policy applies to the transaction-acceptance surface of `bitcoin-rs-mempool` (`crates/mempool`: `standardness.rs`, `policy.rs`, `pool.rs`, `rbf.rs`, `eviction.rs`, `accept.rs`, `gateway.rs`) and its two admission outlets — the pool mutation API and the RPC handlers `sendrawtransaction` / `testmempoolaccept` (`crates/rpc/src/handlers/tx.rs`). It covers relay policy and gateway policy script checks: rules a full node enforces before admitting transactions to the mempool or relaying them. `MempoolGateway::admit_transaction` verifies input scripts under Core's standard policy flags (`STANDARD_SCRIPT_VERIFY_FLAGS`, `validation.cpp::PolicyScriptChecks`) before admission. `testmempoolaccept` uses `evaluate_package_acceptance_all`, which does not run those script checks. Full consensus validation at block application is governed by consensus rules (see `docs/contracts/validation-default.md` and the consensus tests).
 
 Both admission outlets must quote the same verdict for the same transaction and pool state on every policy class this document marks `implemented`. Policy script checks are the recorded exception (ledger §5.2): `sendrawtransaction` verifies scripts through the gateway; `testmempoolaccept` uses `evaluate_package_acceptance_all` and does not. The RPC acceptance evaluator is otherwise plumbing in front of the same policy constants the pool enforces (`crates/mempool/src/eviction.rs::mempool_min_fee_sat_per_kvb`, `crates/mempool/src/rbf.rs::check_replacement`); a disagreement on an `implemented` class is a bug, not a policy.
 
@@ -16,7 +16,7 @@ Both admission outlets must quote the same verdict for the same transaction and 
 | Pinned version | **31.1** (the version already recorded in custody evidence) |
 | Min relay fee default | 1 000 sat/kvB (`MempoolLimits::default`) |
 | Incremental relay fee default | 1 000 sat/kvB (`DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB`) |
-| Dust relay fee default | 3 000 sat/kvB (`FeeRate::DUST`) |
+| Dust relay fee default | 3 000 sat/kvB (`StandardnessPolicy::default().dust_relay_fee`) |
 | Data carrier default | 83 bytes (`max_datacarrier_bytes = Some(83)`) |
 
 ### 2.1 Version-Bump Rules
@@ -74,7 +74,7 @@ Policy rejections reach callers with different envelopes per outlet; the class i
 | Package limits | `PackageLimit(PolicyError)` | internal error containing the pool policy text (e.g. `too many unconfirmed ancestors`, `ancestor package is too large`, `too many unconfirmed descendants`, `too many transactions in cluster`, `cluster is too large`) | `reject-reason` carries the same text | Core: `too-long-mempool-chain` / cluster-limit text, code −26 |
 | Consensus / Script verification | not produced by the preview evaluator | `RpcError::TxRejected("consensus-verification-failed")` | not reported — preview does not run script checks (ledger §5.2) | Core: `mandatory-script-verify-flag-failed`, `non-mandatory-script-verify-flag`, code −26 |
 
-Code values are the node's transaction-rejected code (−26), except `MaxFeeExceeded`, which is `InvalidParams` (−32602). Core uses its transaction error codes (−1/−25/−26/−27) for the same classes; the per-class message strings, not the numeric code, are the compatibility contract here. Aligning numeric codes is deferred to the RPC compatibility manifest (track 4a) so there is one owner for the error-code table.
+Code values are the node's transaction-rejected code (−26), except `MaxFeeExceeded`, which is `InvalidParams` (−32602). Core uses its transaction error codes (−1/−25/−26/−27) for the same classes; the per-class message strings, not the numeric code, are the compatibility contract here. Aligning numeric codes is deferred to the RPC compatibility manifest (`crates/rpc/src/manifest.rs`) so there is one owner for the error-code table.
 
 ## 5. Deviation Ledger
 

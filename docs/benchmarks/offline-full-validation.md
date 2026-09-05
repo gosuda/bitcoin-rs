@@ -121,14 +121,17 @@ python3 -m unittest test_offline_full_validation   # from tools/benchmark-campai
 Tests use a two-block Core-framed archive and deterministic fixture nodes
 that read the archive and write the certified state file. They prove the
 harness, not live node performance. A live seven-pair campaign still needs
-hash-pinned `bitcoind` and bitcoin-rs binaries plus a frozen corpus from
-issue #42.
+hash-pinned `bitcoind` and bitcoin-rs binaries plus an exported archive of
+a corpus frozen by issue #42
+([`docs/contracts/campaign-corpora.md`](../contracts/campaign-corpora.md));
+archive bytes are not stored in git.
 
 ## Limits
 
-Campaign ceilings: archive 1 TiB, manifest 512 MiB, 2 000 000 blocks.
-Those bounds admit a Cmodern prefix; they are not a promise to ingest the
-live full-tip chain (~760 GiB) until issue #42 freezes that corpus.
+Campaign ceilings: archive 1 TiB, manifest 512 MiB, 2 000 000 blocks.
+Those bounds admit the Cmodern corpus (genesis .. 709,635); they are not a
+promise to ingest the live full-tip chain (~760 GiB), which is not a
+product corpus under issue #42.
 
 This is the processing-bound regime in CONCEPTS.md: blocks are local, wall
 is validation plus durable commit. It is not download-bound IBD. Historical

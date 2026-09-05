@@ -9,3 +9,10 @@
 {"description": "Gate each diamond slice run on green main CI plus its per-slice enumerated approval; no slice starts on red or on blanket approval.", "id": "CEO-03", "phase": "ceo"}
 {"description": "Produce per-slice tasty/first-principle specs and diamond inputs (write sets, checks, checkpoint, reviewer) before any worker starts.", "id": "DES-03", "phase": "design"}
 {"description": "Run each approved slice as an isolated diamond DAG: validate diffs in-set, union mechanically, fresh-reviewer approval, verify gates, land atomically.", "id": "ENG-03", "phase": "engineering"}
+{"id":"CEO-01","description":"Classify every glossary entry and unheaded passage against the glossary charter.","phase":"ceo"}
+{"id":"DES-01","description":"Map overlapping definitions without merging distinct ownership or lifecycle concepts.","phase":"design"}
+{"id":"DES-02","description":"Apply justified grouping and definition edits through one CONCEPTS.md owner.","phase":"design"}
+{"id":"DX-01","description":"Repair broken references and validate retained owner links.","phase":"dx"}
+{"id":"DX-02","description":"Ground retained version, default, and runtime claims in the correct authority.","phase":"dx"}
+{"id":"ENG-01","description":"Reconcile campaign-retirement, benchmark-inventory, and CI claims.","phase":"engineering"}
+{"id":"ENG-02","description":"Verify the final glossary for factual support and preserved meaning.","phase":"engineering"}

@@ -91,8 +91,9 @@ The 2.0× speed gate and the 36-cell denominator live in issues #33 and
   with constants, or suppressing checkpoint/recovery/reopen work.
 - A source-level disable experiment must preserve full validation,
   durable checkpoint, reopen, body/undo/index readiness, state
-  commitment, and reorg-readiness. Otherwise the row stays
-  `blocked_pending_safe_probe`.
+  commitment, and reorg-readiness. Otherwise the row's `disable_delta`
+  stays `blocked_pending_safe_probe` and its disposition stays `blocked`
+  (`HPA-07`).
 
 ### `HPA-07`: Disposition enum
 

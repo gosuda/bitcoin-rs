@@ -46,8 +46,8 @@ Verdict artifacts: `~/bench-g14/results/{cross-node-ibd-150k-verdict.md,processi
 guidance point 8 already rejected it as live-IBD evidence (wrong regime); the at-scale run
 shows it is not valid *processing-bound* evidence either — a 1000-block prefix of near-empty
 blocks measures startup costs, not apply architecture. That doc's point 2(b) ("make
-bitcoin-rs's faster processing the deciding factor") relies on the disproven premise and needs
-refresh.
+bitcoin-rs's faster processing the deciding factor") relied on the disproven premise; it has
+since been refreshed in place to cite this measurement.
 
 ## Guidance
 
@@ -102,5 +102,5 @@ entropy.
 ## Related
 
 - [multi-peer-block-download-requires-core-stalling-disconnect](../architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md)
-  — the download-regime analysis this learning's live-IBD numbers confirm; its points 2(b)
-  and 8 are refresh candidates contradicted/superseded by this measurement.
+  — the download-regime analysis this learning's live-IBD numbers confirm; its point 2(b) now
+  carries this measurement's correction, and its point 8 already rejected the 0-1000 figure.

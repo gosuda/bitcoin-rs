@@ -29,10 +29,9 @@ The gateway registers these Core REST prefixes:
 | `/rest/blockhashbyheight/{height}` | JSON, hex, binary | Block hash by height |
 | `/rest/spenttxouts/{hash}` | JSON, hex, binary | Explicitly unavailable: no undo data |
 
-Full-block `/rest/block` and `/rest/blockpart` requests use a two-request
-materialization budget. When it is full, the gateway returns HTTP 503; retry
-the request after a short delay.
-
+Full-block `/rest/block` and `/rest/blockpart` requests share a budget of two
+concurrent materializations. When it is full, the gateway returns HTTP 503;
+retry the request after a short delay.
 
 Header `count` defaults to 5 and must be in the inclusive range 1–2000.
 Out-of-range, negative, non-numeric, and overflowing values return HTTP 400
@@ -56,10 +55,10 @@ bitcoin-rs publishes the Core-compatible `pubsequence` ZMQ topic with block
 connect (`C`) and disconnect (`D`) events. The configured endpoint is reported
 by `getzmqnotifications`, so the unmodified enforcer can discover it through
 its normal startup path rather than requiring an external publisher or an
-explicit `--node-zmq-addr-sequence`. Mempool admissions publish `A` events and removals publish `R` events on the
-same topic, each carrying the txid and the mempool sequence assigned to the
-change. A transaction mined in a connected block emits no `R`: the block's
-`C` event covers it, matching Core.
+explicit `--node-zmq-addr-sequence`. Mempool admissions publish `A` events and
+removals publish `R` events on the same topic, each carrying the txid and the
+mempool sequence assigned to the change. A transaction mined in a connected
+block emits no `R`: the block's `C` event covers it, matching Core.
 
 REST is off by default. With REST disabled, `/rest/*` returns HTTP 404.
 Unknown REST routes return HTTP 404. On endpoints that parse a hash, height, or
@@ -72,10 +71,12 @@ return HTTP 400. Probe a known supported endpoint such as
 `/rest/chaininfo.json` to distinguish a disabled REST gateway from an invalid
 request.
 
-The checked-in default Compose stack supplies the REST, `pubsequence`,
-version-check bypass, and drynet4 network settings required to run the
-unmodified enforcer. With `pubsequence` now carrying transaction `A`/`R`
-events, the stack enables `--enable-mempool` so the enforcer tracks the
-mempool too.
+The checked-in Compose stack (`tools/bip300301-enforcer/docker-compose.yaml`)
+supplies the REST, `pubsequence`, version-check bypass, and drynet4 network
+settings required to run the unmodified enforcer. Because `pubsequence`
+carries transaction `A`/`R` events, the stack enables `--enable-mempool` so
+the enforcer tracks the mempool too.
 
-See also [docs/contracts/external-api.md](contracts/external-api.md) for the API manifest contract and precedence rule.
+See also [docs/contracts/external-api.md](contracts/external-api.md) for the
+API manifest contract and precedence rule, and [rpc-reference.md](rpc-reference.md)
+for the generated per-route status table.

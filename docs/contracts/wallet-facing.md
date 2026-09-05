@@ -55,8 +55,8 @@ electrs/mempool.space base URL. Relative routes below are appended to it.
   `source_does_not_import_node_internals` enforces `WF-01` on uncommented
   proof source, including aliases and fully qualified paths. The test
   depends on rust-bitcoin and speaks only HTTP. It funds a regtest chain
-  through `getblocktemplate` / `submitblock` (this node has no `generate*`
-  RPC), then issues the BDK/esplora-client dialect against `/api` — tip,
+  through `getblocktemplate` / `submitblock`, then issues the
+  BDK/esplora-client dialect against `/api` — tip,
   block height, headers, scripthash UTXOs/history, fee estimates, and
   `POST /api/tx` — the same operations
   [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw -u`)

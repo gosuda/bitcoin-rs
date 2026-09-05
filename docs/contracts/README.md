@@ -11,7 +11,6 @@ comments, and consumer documents that link back to the owning contract.
 Documentation in this repository follows explicit ownership and precedence:
 
 - `docs/contracts/`: current normative behavior, invariants, and ownership rules;
-- `docs/plans/`: implementation planning and history; informative and archivable, never the current contract;
 - `docs/solutions/`: historical decisions, evidence, and failed approaches; informative, not normative;
 - `CONCEPTS.md`: project-specific domain vocabulary only;
 - README/getting-started: user workflows and concise subsystem summaries that link to the owning contract;
@@ -29,7 +28,7 @@ When documents disagree, use this order:
 2. Source comments (rustdoc and inline comments) come next. They explain
    local intent and invariants. They do not override the contract.
 3. Specialized domain policies under `docs/policies/` define detailed wire/parity matrices; pointer pages below fold those policies into this precedence chain.
-4. Everything else is informative context: `docs/plans/`, `docs/solutions/`, `docs/benchmarks/`, `CONCEPTS.md`, and consumer `README.md` files.
+4. Everything else is informative context: `docs/solutions/`, `docs/benchmarks/`, `CONCEPTS.md`, and consumer `README.md` files.
 
 On conflict between a contract page and the code, the drift is a bug. Fix the
 code or amend the contract in the same commit. Never reword the contract to
@@ -52,7 +51,7 @@ match a regression.
 | [qa-corpus.md](qa-corpus.md) | `QAC-01` | Pointer: fuzz seed provenance and refresh rules | `fuzz/fuzz_targets/{p2p_message,block_decode,tx_decode,script_eval}.rs`; CI fuzz lanes | `fuzz/CORPUS_PROVENANCE.md` mapping table; targets run under `cargo fuzz run <target> -- -runs=10000` |
 | [campaign-corpora.md](campaign-corpora.md) | `CORP-01`–`CORP-05` | C150 and Cmodern identities, Core-framed archive/manifest, full-validation posture, script census, and Core 31.1 MuHash oracle | Product-domain campaign cells; `tools/campaign-corpus/corpus.py` | `tools/campaign-corpus/test_corpus.py` (`python3 tools/campaign-corpus/test_corpus.py`) |
 | [muhash-rpc.md](muhash-rpc.md) | `MRPC-01`–`MRPC-03` | Production `gettxoutsetinfo` arity, attested-child ownership of the timed RPC connection, and workspace copies of pinned arm configs | `crates/rpc` `gettxoutsetinfo`; `tools/benchmark-campaign/muhash_rpc.py` | `crates/rpc` `gettxoutsetinfo_rejects_trailing_parameters`; `tools/benchmark-campaign/test_muhash_rpc.py` (`python3.13 tools/benchmark-campaign/test_muhash_rpc.py`) |
-| [embedding.md](embedding.md) | `Node::start`/`shutdown` lifecycle with `TeardownMode`, typed snapshot/progress/capability reads, TxLookup gating, shared gateway admission and the mining generation wake: the embedded-vs-daemon seam | In-process embedders; `crates/node/src/embed.rs`; daemon `run()` (first embedder) | `crates/node/tests/embed.rs` tests `embedded_node_lifecycle_round_trip`, `dropped_node_releases_services_and_datadir_for_reopen`; `crates/node/src/run.rs` test `daemon_and_embedded_paths_share_one_teardown` |
+| [embedding.md](embedding.md) | `EMB-01`–`EMB-08` | `Node::start`/`shutdown` lifecycle with `TeardownMode`, typed snapshot/progress/capability reads, TxLookup gating, shared gateway admission and the mining generation wake: the embedded-vs-daemon seam | In-process embedders; `crates/node/src/embed.rs`; daemon `run()` (first embedder) | `crates/node/tests/embed.rs` tests `embedded_node_lifecycle_round_trip`, `dropped_node_releases_services_and_datadir_for_reopen`; `crates/node/src/run.rs` test `daemon_and_embedded_paths_share_one_teardown` |
 | [storage-footprint.md](storage-footprint.md) | `FP-01`–`FP-04` | Logical and physical data-directory ledgers, custody-grade collection, explicit `--measure-storage` command, default unpruned 1-TB peak budget | `crates/storage/src/footprint.rs`, `crates/node/src/storage_footprint.rs`, `bin/bitcoin-rs --measure-storage` | `crates/storage/tests/storage_footprint.rs`; `crates/node/src/storage_footprint.rs` tests `default_regtest_record_is_inapplicable_to_the_mainnet_budget`, `snapshot_of_default_mainnet_is_insufficient_for_the_peak_gate`; `bin/bitcoin-rs/tests/cli_help.rs` |
 | [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-11` | Frozen 36-cell denominator, attribution noise floor, overlap-aware wall accounting, ledger ownership, forbidden probes, and dispositions | `docs/benchmarks/hot-path-ledger.toml`; product-domain comparators | `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs` (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`) |
 

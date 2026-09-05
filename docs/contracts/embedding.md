@@ -35,8 +35,8 @@ the first embedder — there is one lifecycle implementation, not two.
   concrete-service `CapabilitySnapshot`. Owner: `crates/node/src/embed.rs`;
   wire types: `crates/rpc/src/capabilities.rs`.
 - **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
-  `Context::admit_transaction` — the identical typed admission
-  `sendrawtransaction` runs (crates/rpc/src/handlers/tx_admission.rs):
+  `Context::admit_transaction` (`crates/rpc/src/context.rs`) — the identical
+  typed admission `sendrawtransaction` runs (`crates/rpc/src/handlers/tx.rs`):
   the full policy stack is evaluated under the node's one
   `MempoolGateway` write-lock interval and the authorized mutation
   commits inside it, so no concurrent admission can pass stale policy.
@@ -109,8 +109,8 @@ Errors of the daemon `run()` are the same teardown failures surfaced as
   `teardown_join_failure_completes_cleanup_and_suppresses_checkpoint`
   and `daemon_and_embedded_paths_share_one_teardown` — the failure and
   identity clauses of EMB-01/EMB-07.
-- `bin/bitcoin-rs/tests/gates/g12_graceful_shutdown.rs` — the daemon
-  path over the same lifecycle still shuts down cleanly.
+- `crates/node/tests/shutdown.rs::run_exits_cleanly_after_fast_shutdown_signal`
+  — the daemon path over the same lifecycle still shuts down cleanly.
 
 ## Vocabulary
 

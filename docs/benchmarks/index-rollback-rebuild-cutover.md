@@ -23,17 +23,14 @@ routes to `writer.reset_capabilities(capabilities)`; otherwise the per-block
 
 ## Measured runs (512-block fjall fixture, per-block medians)
 
-`measure_rollback_vs_rebuild_per_block_medians`
-(`crates/node/src/txindex_worker_reconcile_tests.rs`, `#[ignore]`d) builds a
-512-block fjall fixture and prints the per-block forward and rollback medians
-plus the derived clamp value. The current benchmark captures a fresh coherent
-fence before every commit, as required by the ordinary-state revision protocol.
-
-```
-cargo test -p bitcoin-rs-node --lib \
-  txindex_worker::reconcile_tests::measure_rollback_vs_rebuild_per_block_medians \
-  -- --ignored --nocapture
-```
+The numbers below were produced by an `#[ignore]`d measurement test,
+`measure_rollback_vs_rebuild_per_block_medians`, that built a 512-block fjall
+fixture and printed the per-block forward and rollback medians plus the
+derived clamp value. That test was removed in commit `a5e9858b` (durable
+process-epoch fencing); this tree has no in-tree harness that reproduces
+the table. The record is kept as the historical grounding for the default.
+The benchmark as run captured a fresh coherent fence before every commit, as
+required by the ordinary-state revision protocol.
 
 | Run  | t_fw (ns)  | t_rb (ns)  | derived    |
 |------|------------|------------|------------|
@@ -59,13 +56,17 @@ cutover = clamp(100_000 × t_fw / t_rb, 1_000, 100_000)
         → one significant figure = 100_000
 ```
 
-The default is `100_000`. The benchmark proves the
-default rounds to 100,000 and routes the #208 834k-gap incident to rebuild
-while ≤ ~100-block organic reorgs continue to rewind. The per-block ratio does
-not prove rebuild always scales better because total costs depend on tip height
-versus rollback depth.
+The default is `100_000`. The recorded measurement showed the derived value
+rounds to 100,000. With that default, the #208 834k-gap incident shape
+routes to rebuild and ≤ ~100-block organic reorgs continue to rewind. The
+routing rule itself (rewind at or below the cutover, rebuild above it) is
+exercised on small fork fixtures with explicit cutover values in
+`crates/node/src/txindex_worker_recovery_tests.rs`. The per-block ratio does
+not prove rebuild always scales better because total costs depend on tip
+height versus rollback depth.
 
-Status: COMPLETED — three runs, medians of medians, spread recorded.
+Status: measurement COMPLETED (three runs, medians of medians, spread
+recorded, 2026); harness since removed.
 
 ## Notes
 

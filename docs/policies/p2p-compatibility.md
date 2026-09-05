@@ -4,7 +4,7 @@ This document declares bitcoin-rs's peer-wire compatibility contract with Bitcoi
 
 ## 1. Scope and Authority
 
-This policy applies to the P2P transport and peer-protocol surface of `bitcoin-rs-p2p` (`crates/p2p`), including `ActiveChainQuery` (`crates/p2p/src/chain_query.rs`), and the network flags of the node binary. It is the peer-visible counterpart to `docs/policies/source-compatibility.md` (toolchain) and the RPC compatibility manifest (track 4a).
+This policy applies to the P2P transport and peer-protocol surface of `bitcoin-rs-p2p` (`crates/p2p`), including `ActiveChainQuery` (`crates/p2p/src/chain_query.rs`), and the network flags of the node binary. It is the peer-visible counterpart to `docs/policies/source-compatibility.md` (toolchain) and the RPC compatibility manifest (`crates/rpc/src/manifest.rs`, rendered as `docs/rpc-reference.md`).
 
 The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`, `PINNED_CORE_VERSION`). This document owns the handshake fields, the reject-or-ignore matrix, the deviation ledger, and the verification process. Where this document and prose comments disagree, this document wins; where it and the code disagree, the code is the defect. The §5 table is a checked projection of `COMMANDS` (`command_inventory_matches_the_policy_table`).
 
@@ -15,7 +15,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 | Reference implementation | Bitcoin Core |
 | Pinned version | **31.1** (`crates/p2p/src/compat.rs::PINNED_CORE_VERSION`) |
 | Protocol version advertised | `70016` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`) |
-| Transport | BIP324 v1 envelope only |
+| Transport | Legacy v1 envelope only; BIP324 v2 is not implemented (§7) |
 
 ### 2.1 Version-Bump Rules
 
