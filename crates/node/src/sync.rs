@@ -7211,17 +7211,19 @@ mod tests {
         };
         // The freed stripe spreads across remaining capacity (the spare tops
         // up its remainder share while the other peers absorb the rest), so
-        // assert membership in the freed stripe rather than its full extent.
-        // The `pending_len` assert below proves all freed blocks were
-        // re-requested somewhere.
-        let requeued = witness_block_inventory(inventory)?;
-        assert!(
-            !requeued.is_empty()
-                && requeued
-                    .iter()
-                    .all(|hash| expected[cap..2 * cap].contains(hash)),
-            "spare must requeue blocks from the freed stripe"
-        );
+        // prove the union over every remaining peer is exactly the freed
+        // stripe: every freed block re-requested, nothing else.
+        let mut requeued = witness_block_inventory(inventory)?;
+        for (idx, rx) in receivers.iter().enumerate() {
+            if idx == 1 || idx == SELECTED_PEERS {
+                continue; // disconnected peer; spare drained above
+            }
+            requeued.extend(witness_block_inventory(next_getdata(rx)?)?);
+        }
+        requeued.sort();
+        let mut freed = expected[cap..2 * cap].to_vec();
+        freed.sort();
+        assert_eq!(requeued, freed, "every freed block must be re-requested");
         assert_eq!(
             sync.download_window.lock().pending_len(),
             super::PENDING_BUDGET
