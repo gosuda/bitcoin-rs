@@ -16,7 +16,7 @@ mod stage;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerTable};
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerSource, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
@@ -79,6 +79,18 @@ struct ExpectedApplyCache {
     applied_tip_height: u32,
     offset: usize,
     hashes: ExpectedBlockHashes,
+}
+
+/// A header tip that a peer proved during the current synchronization tick.
+///
+/// This is deliberately an event passed through one tick, not peer state. The
+/// hash is checked against the active tree again when candidates are selected,
+/// so a branch switch or invalidation cannot turn an old announcement into
+/// body-fetch credit.
+#[derive(Clone, Copy, Debug)]
+struct AcceptedHeaderAnnouncement {
+    source: PeerSource,
+    tip_hash: Hash256,
 }
 
 /// A contiguous run of expected apply hashes together with the chain/applied
@@ -250,7 +262,7 @@ impl BlockSync {
     /// Runs one orchestrator tick: requests pending blocks from eligible peers
     /// and asks them to extend the header chain.
     pub fn tick(&self) {
-        self.drain_inbound_headers();
+        let accepted_headers = self.drain_inbound_headers();
         self.ensure_genesis_tip();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
@@ -267,11 +279,7 @@ impl BlockSync {
             self.disconnect_timed_out_peer(now);
         }
         self.reconcile_peer_sessions();
-        let sync_peer_selection = self.sync_peer_selection(applied_height, now);
-        if sync_peer_selection.header_peer.is_none() {
-            tracing::trace!(applied_height, "block sync: no peer above current height");
-            return;
-        }
+        let sync_peer_selection = self.sync_peer_selection(applied_height, now, &accepted_headers);
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
         for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
@@ -292,7 +300,7 @@ impl BlockSync {
             }
         }
         self.send_prefix_probes(&sync_peer_selection.probe_peers, now);
-        self.request_headers_from_best_peer();
+        self.request_headers_from_best_peer(sync_peer_selection.header_peer);
         if sent_getdata {
             self.record_pending_sync_metrics();
         }
@@ -333,8 +341,9 @@ impl BlockSync {
         }
     }
     #[allow(clippy::too_many_lines)]
-    fn drain_inbound_headers(&self) {
+    fn drain_inbound_headers(&self) -> SmallVec<[AcceptedHeaderAnnouncement; 4]> {
         let receiver = self.inbound_headers_rx.lock();
+        let mut accepted_headers = SmallVec::new();
         let mut total_headers = 0_usize;
         while let Ok(InboundHeaders { headers, source }) = receiver.try_recv() {
             let batch_len = headers.len();
@@ -361,6 +370,19 @@ impl BlockSync {
             match acceptance {
                 Ok(node_ids) => {
                     self.handles.assume_valid_gate.evaluate(&tree);
+                    if let (Some(source), Some(tip_hash)) = (
+                        source,
+                        node_ids
+                            .last()
+                            .and_then(|node_id| tree.node(*node_id).ok())
+                            .map(|node| node.hash),
+                    ) && self.peer_table.is_current(source)
+                        && tree
+                            .tip_id()
+                            .is_some_and(|tip_id| tree.active_height_of(tip_id, tip_hash).is_some())
+                    {
+                        accepted_headers.push(AcceptedHeaderAnnouncement { source, tip_hash });
+                    }
                     drop(tree);
                     tracing::debug!(
                         accepted = node_ids.len(),
@@ -406,6 +428,7 @@ impl BlockSync {
         if total_headers > 0 {
             tracing::debug!(total_headers, "block sync: drained inbound headers");
         }
+        accepted_headers
     }
 
     /// Requests the next header batch from the highest peer above the applied
@@ -417,27 +440,11 @@ impl BlockSync {
     /// several sync tests assert. Ordering carries no protocol meaning, but
     /// both messages leave in the same tick either way, so there is no
     /// throughput reason to prefer the other order.
-    fn request_headers_from_best_peer(&self) {
+    fn request_headers_from_best_peer(&self, header_peer: Option<SyncPeer>) {
         let applied_tip = self.handles.applied_tip.load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let mut header_peer: Option<SyncPeer> = None;
-        for peer in self.peer_table.infos() {
-            let Ok(height) = u32::try_from(peer.start_height) else {
-                continue;
-            };
-            if height <= applied_height {
-                continue;
-            }
-            let candidate = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.start_height,
-            };
-            if header_peer.is_none_or(|current| current.start_height < candidate.start_height) {
-                header_peer = Some(candidate);
-            }
-        }
         if let Some(peer) = header_peer {
             let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
             if peer_best_height > header_height {
@@ -1056,19 +1063,18 @@ impl BlockSync {
         Some(tree.node(node_id).ok()?.hash)
     }
 
-    fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
-        let mut header_peer: Option<SyncPeer> = None;
+    #[allow(clippy::too_many_lines)]
+    fn sync_peer_selection(
+        &self,
+        our_height: u32,
+        now: Instant,
+        accepted_headers: &[AcceptedHeaderAnnouncement],
+    ) -> SyncPeerSelection {
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        for peer in self.peer_table.infos() {
-            // Height clause of the fan-out eligibility predicate (KTD6) and
-            // the pre-existing candidate filter: the peer's known chain must
-            // reach past our applied tip, i.e. cover the window front being
-            // requested. Delta vs Core: Core tracks a continuously updated
-            // per-peer best header (`pindexBestKnownBlock`, fed by headers/
-            // inv processing); this codebase only has the handshake-time
-            // `start_height`, so that is the proxy used — per-request
-            // truncation by `peer_best_height` bounds the damage of a stale
-            // value.
+        let peer_infos = self.peer_table.infos();
+        for peer in &peer_infos {
+            // The handshake height is only the baseline for peers that have
+            // not proved a newer active tip during this tick.
             if u32::try_from(peer.start_height)
                 .ok()
                 .is_none_or(|height| height <= our_height)
@@ -1079,17 +1085,65 @@ impl BlockSync {
                 addr: peer.addr,
                 start_height: peer.start_height,
             };
-            if header_peer
-                .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
-            {
-                header_peer = Some(sync_peer);
-            }
             candidates.push(FanoutCandidate {
                 peer: sync_peer,
                 fanout_eligible: statically_fanout_eligible(&peer),
                 soft_blocked: false,
             });
         }
+
+        // A peer can learn the active tip after its handshake. Keep that
+        // evidence scoped to this tick and tie it to the exact header hash;
+        // do not turn it into persistent peer knowledge or a height history.
+        let tree = self.handles.block_tree.read();
+        if let Some(active_tip_id) = tree.tip_id() {
+            for announcement in accepted_headers {
+                if !self.peer_table.is_current(announcement.source) {
+                    continue;
+                }
+                let Some(height) = tree.active_height_of(active_tip_id, announcement.tip_hash)
+                else {
+                    continue;
+                };
+                if height <= our_height {
+                    continue;
+                }
+                let Some(peer) = peer_infos
+                    .iter()
+                    .find(|peer| peer.addr == announcement.source.addr)
+                else {
+                    continue;
+                };
+                let sync_peer = SyncPeer {
+                    addr: peer.addr,
+                    start_height: i32::try_from(height).unwrap_or(i32::MAX),
+                };
+                if let Some(candidate) = candidates
+                    .iter_mut()
+                    .find(|candidate| candidate.peer.addr == sync_peer.addr)
+                {
+                    if candidate.peer.start_height < sync_peer.start_height {
+                        candidate.peer = sync_peer;
+                    }
+                } else {
+                    candidates.push(FanoutCandidate {
+                        peer: sync_peer,
+                        fanout_eligible: statically_fanout_eligible(peer),
+                        soft_blocked: false,
+                    });
+                }
+            }
+        }
+        drop(tree);
+
+        let header_peer = candidates.iter().fold(None, |current, candidate| {
+            if current.is_none_or(|peer: SyncPeer| peer.start_height < candidate.peer.start_height)
+            {
+                Some(candidate.peer)
+            } else {
+                current
+            }
+        });
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut window = self.download_window.lock();
             for candidate in &mut candidates {
@@ -2636,6 +2690,48 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("missing accepted header tip"))?;
         assert_eq!(accepted_tip.height, 1);
         assert_ne!(accepted_tip.tip_id, genesis_id);
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_at_tip_header_rearms_body_fetch_for_stale_handshake_peer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let HeaderSyncFixture {
+            sync,
+            inbound_headers_tx,
+            peers,
+            ..
+        } = header_sync_with_genesis()?;
+        install_budget(
+            &sync,
+            super::SyncBudget {
+                max_pending_blocks: 1,
+                getdata_batch_limit: 1,
+                ..super::default_sync_budget()
+            },
+        );
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(peer_addr, 0));
+        let header = test_header(genesis_header().compute_hash(), 1);
+        let expected_hash =
+            BlockHash::from(Hash256::from_le_bytes(header.compute_hash().as_bytes()));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![header],
+            source: Some(current_source(&peers, peer_addr)),
+        })?;
+        sync.tick();
+
+        let Message::GetData(inventory) = rx.try_recv()? else {
+            return Err(
+                std::io::Error::other("accepted at-tip header must rearm body fetch").into(),
+            );
+        };
+        assert_eq!(witness_block_inventory(inventory)?, vec![expected_hash]);
+        assert!(
+            rx.try_recv().is_err(),
+            "current-tick header evidence must not create persistent peer credit"
+        );
         Ok(())
     }
 
