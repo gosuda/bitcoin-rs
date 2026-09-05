@@ -73,17 +73,21 @@ and ties handshake metadata strictly to the live connection identity.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same
-lifecycle the daemon runs: start against a data dir on the caller's
-Tokio runtime, typed snapshot/progress/capability reads, mempool
-statistics, fee estimates, gateway-routed broadcast, and a consuming
-shutdown that publishes the clean checkpoint. No second lifecycle exists —
-the daemon's `run()` is a signal wrapper around the identical start and
-shutdown path (see `docs/contracts/embedding.md`).
+lifecycle the daemon runs: start against a data dir, typed
+snapshot/progress/capability reads, mempool statistics, fee estimates,
+gateway-routed broadcast, and a consuming shutdown that publishes the clean
+checkpoint. `start`, `shutdown`, `broadcast`, and the typed lookups are
+`async fn` by contract with synchronous bodies that drive the node's own
+threads; the node depends on no async runtime and never creates, enters,
+or retains one, so the embedder supplies whatever executor it owns
+(`crates/node/src/embed.rs`, EMB-02 in `docs/contracts/embedding.md`).
+No second lifecycle exists: the daemon's `run()` is a signal wrapper around
+the identical start and shutdown path.
 
 ## Initial Block Download
 
 ### Initial Block Download (IBD)
-The one-time bulk process of downloading and fully validating the chain from the start point (genesis, or a trusted snapshot) up to the network's current best tip. Its dominant cost at high block heights is download bandwidth, not local validation.
+The one-time bulk process of downloading and fully validating the chain from the start point (genesis, or a trusted snapshot) up to the network's current best tip. Live IBD is the download-bound regime (*Sync regimes*); the repository's sync measurements use a local seed and do not measure Internet bandwidth aggregation across peers (`docs/benchmarks/end-to-end-sync.md`, Limitations), so it pins no claim about which cost dominates at high heights.
 
 ### Apply frontier
 The greatest height up to which every block has been validated and committed to the UTXO set in one unbroken run — distinct from the header tip and from blocks downloaded but not yet applied. It advances only over a contiguous run: one missing block at the frontier stalls all apply progress, which is how a slow peer can freeze sync.
@@ -112,17 +116,10 @@ The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194
 The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 256, 16 in-flight per peer once fan-out engages), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
-`BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. See `docs/solutions/architecture-patterns/network-selection-keeps-p2p-identity-atomic.md`.
+`BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. Owner: `apply_network_selection` in `crates/node/src/config.rs`; layering is `ARCH-05` in `docs/contracts/architecture.md`.
 
 ### Sync regimes (download-bound vs processing-bound)
 The two cost regimes a sync measurement must name before its numbers mean anything. **Download-bound:** wall is decided by the network path — live IBD. **Processing-bound:** blocks are local and wall is decided by validation plus storage commit — reindex and replay. A node can rank differently in the two, so a faster-than-X claim needs the regime and validation posture stated.
-
-All benchmark campaign evidence and tooling is retired by #224. The seven
-retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
-(`bitcoin-rs-consensus --bench merkle`, `bitcoin-rs-consensus --bench verify_tx`,
-`bitcoin-rs-storage --bench kvstore_backends`, `bitcoin-rs-utxo --bench record_codec`,
-`bitcoin-rs-utxo --bench utxo_commit`, `bitcoin-rs-mining --bench candidate`,
-`bitcoin-rs-node --bench sync_pipeline`).
 
 ## Consensus validation
 
@@ -149,8 +146,8 @@ the two makes every network report difficulty `1.0` at its easiest target.
 ### Float value/text parity
 Equal IEEE-754 values versus equal serialized spellings. Core's UniValue uses
 `%.16g`; the RPC path's sonic-rs serializer uses shortest round-trip. Compatibility
-means preserving value and operation order, not forcing JSON text to match. See
-`docs/solutions/logic-errors/core-float-parity-is-value-parity-not-json-text-parity.md`.
+means preserving value and operation order, not forcing JSON text to match.
+Owners: `crates/rpc/tests/support/compare.rs` (bitwise numeric comparison) and `crates/rpc/tests/policy_contract.rs`.
 
 ### Provably unspendable outputs (UTXO admission)
 Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change. See `docs/solutions/logic-errors/exclude-provably-unspendable-utxos.md`.
@@ -178,13 +175,13 @@ Verifying the ordered transaction unit of several consecutive blocks in one para
 The failure mode where a batched fast path recomputes the sequential path's preparation instead of replacing it, so the saving is paid straight back. The tell is that the accelerated stage shrinks by roughly what the new stage costs. The fix is splitting the sequential path into a prepare half and a commit half, never a cheaper second pass.
 
 ### Dispatch-bound parallelism
-A stage that is parallel in shape but serial in effect because each dispatch is too small to amortise waking the workers. Diagnose with a scaling sweep (1, 4, 32 threads), not a profiler. Coarsening each dispatch makes it worse; only issuing fewer, larger dispatches fixes it.
+A stage that is parallel in shape but serial in effect because each dispatch is too small to amortise waking the workers. Diagnose with a scaling sweep (1, 4, 32 threads), not a profiler. On the apply path, coarsening each dispatch (`with_min_len`) and bounded splits for small blocks both measured worse; issuing fewer, larger dispatches (*Window script batching*) is what fixed it. See `docs/solutions/performance/script-batching-needs-a-split-apply-path.md`.
 
 ### Parallel granularity (per-item cost rule)
 Whether a fan-out pays is decided by per-item work against dispatch cost, not by how parallelizable the loop looks: ~100 µs script checks want more parallelism (`MIN_PARALLEL_SCRIPT_CHECKS` = 32, `crates/consensus/src/verify_tx.rs`), ~500 ns UTXO lookups want none, ~2.6 µs Merkle nodes gain from SIMD batching rather than task fan-out. Thresholds have an interior optimum in both directions. Gate on **elapsed**, never on the stage being targeted.
 
 ### Global rayon pool cap
-The process-wide rayon pool is capped at `GLOBAL_RAYON_THREADS` by `cap_global_thread_pool` (`crates/node/src/run.rs`). It runs only short coarse jobs while `SCRIPT_VERIFY_POOL` separately holds up to 32 threads; uncapped, its unnamed workers oversubscribe a many-core host and spin, costing CPU without showing in wall time.
+The process-wide rayon pool is capped at `GLOBAL_RAYON_THREADS` (4) by `cap_global_thread_pool` (`crates/node/src/run.rs`). It serves the apply-path parse and non-script checks, UTXO commit, coinstats, and index preparation fan-outs, while `SCRIPT_VERIFY_POOL` separately holds up to 32 threads; uncapped, its workers oversubscribe a many-core host and spin. The cap measured better on both wall and CPU for a loopback sync to height 150,000 and cost a full-verification replay nothing (rationale and table at the constant's doc comment).
 
 ### Chain generation
 The even/odd atomic counter on `MempoolGateway` that fences admission
@@ -222,12 +219,11 @@ reserved the active odd generation (`crates/node/src/apply.rs`). The
 caller-facing mutation capability is `ChainTransition`, which holds that
 proof. Apply-path helpers accept `&ChainChangeProof`, not independent lock
 and guard arguments, so a call without an active odd generation cannot
-compile. The proof's `odd_generation` returns the exact reserved value,
-letting admission checks compare against a specific generation rather than a
-snapshot that may have moved.
+compile. The proof owns the guard, so the reserved generation is fixed for
+the whole transition rather than read from a snapshot that may have moved.
 
 ### Count-and-byte bound
-A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window uses it; the sync staging budget owes the same shape. One item larger than the whole byte cap still goes through alone.
+A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window (`window_len`, `crates/node/src/apply.rs`) and the download window's pending and staging budgets (`SyncBudget` in `crates/p2p/src/download_window.rs`) both use it. In the script window one block larger than the whole byte cap still goes through alone rather than stalling the chain.
 
 ## Chain state and reorg
 
@@ -235,7 +231,7 @@ A window sized by whichever of a count cap and a byte cap binds first, because i
 Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip, loads every body the disconnect/connect plan needs, then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
 
 ### Commit point (multi-store mutation)
-The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` splits `Refused` (nothing touched) from `Fatal` (partly rolled back); `Fatal` closes apply admission and shuts the process down. See `docs/solutions/architecture-patterns/node-reorg-execution-design.md`.
+The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/node/src/state.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start refuses). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down. See `docs/solutions/architecture-patterns/node-reorg-execution-design.md`.
 
 ### Disconnect marker phase
 The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the UTXO mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; a checkpoint must not clear it. `RolledBack`: UTXO set and applied tip moved together and need one clean checkpoint. Startup refuses either. Only the checkpoint that publishes the rolled-back state removes the marker.
@@ -249,7 +245,7 @@ State that connection writes and disconnection must account for. `coin_stats` ne
 ## Derived indexes
 
 ### TxIndex capability watermarks
-Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`); `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement); `ScriptLive` owns compact live-output locators (`--scriptindex=utxo` or `full`) and is rebuilt from the authoritative UTXO set rather than block history. `BlockHeaders` is shared rollback-integrity metadata whose row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch; a lagging cursor moves independently. Height alone cannot prove identity across a reorg. Older or unversioned index formats are deleted and rebuilt on startup; a crash-resumable reset marker makes restart finish deletion before the writer is exposed.
+Versioned durable `(height, block hash)` cursors identifying the exact active-chain prefix each independently ready row family represents. `TxLookup` owns `TxConfirmed` (`--txindex`); `ScriptHistory` owns `Funding` and `Spending` (`--scriptindex=full`, which also builds internal `TxLookup` rows for Esplora without changing Core txindex advertisement); `ScriptLive` owns compact live-output locators (`--scriptindex=utxo` or `full`) and is rebuilt from the authoritative UTXO set rather than block history. `BlockHeaders` is shared rollback-integrity metadata whose row order and count must never be read as the active chain. Equal cursors advance in one body scan and one atomic batch; a lagging cursor moves independently. Height alone cannot prove identity across a reorg. On startup the node keeps the current format, upgrades format 3 in place by resetting `ScriptHistory` only, and fully resets any other version or an unversioned cursorless table for rebuild (`IndexWriter::open` in `crates/index/src/index.rs`, `open_writer` in `crates/node/src/txindex_worker.rs`); a crash-resumable reset marker makes restart finish deletion before the writer is exposed.
 
 ### Coalesced TxIndex wake
 The nonblocking hint published after a committed `applied_tip.store`: an atomic revision incremented with `Release` plus `try_send` on a capacity-one channel. Tokens may coalesce or drop; the worker checks the authoritative revision before sleeping and also wakes on a bounded timeout.
@@ -278,7 +274,8 @@ The node accepts only complete native version-4 snapshots: exact magic and versi
 One logical record has exactly one byte string; `UtxoRecord` compares and hashes by bytes. v5 enforces it with three rules: minimal varints, narrowest directory width, and compact/escape amount forms that are exact complements. The last is a safety rule: `decompress_amount` multiplies by up to a billion, so an unbounded input panics in debug and wraps in release. `decompress_accepts_exactly_the_encoder_image` states the whole rule as one property.
 
 ### Work-count assertion
-Asserting how much of an expensive operation a code path performs, instead of how long it takes. A wall-clock assertion in a test suite is a flake generator, and an assertion that a function merely returns something passes for a stub. `find_output_decompresses_at_most_the_amount_it_returns` counts `decompress_amount` calls behind a `cfg(test)` thread-local and requires one for a hit, none for a miss and none for `max_vout`, at any record size — which is the algorithmic claim the layout rests on, stated deterministically. The counterpart is the case a count cannot make: where the claim really is about elapsed time, the assertion belongs in a paired-arm benchmark, not a test.
+Asserting how much of an expensive operation a code path performs, instead of how long it takes. A wall-clock assertion in a test suite is a flake generator, and an assertion that a function merely returns something passes for a stub. Counting the calls a path makes (for example, how many amounts `find_output` decompresses for a hit, a miss, and `max_vout`) states an algorithmic claim deterministically at any input size. The counterpart is the case a count cannot make: where the claim really is about elapsed time, the assertion belongs in a paired-arm benchmark, not a test.
+
 ### Chain snapshot
 The coherent, non-torn view of the applied tip the chain-event publisher keeps in one `RwLock`ed cell: `{ epoch, sequence, tip_hash, tip_height }` (`crates/node/src/state.rs`). The single writer replaces the whole cell per commit, so a reader never mixes two commit points. `epoch` is a persisted, strictly monotonic per-data-dir counter that makes an old run's cursors stale; `sequence` advances once per committed connect or disconnect and starts at 1. The snapshot is live state, never persisted per-event; readers take `NodeState::active_chain_snapshot`.
 
@@ -340,7 +337,7 @@ exclusive union is subtracted from whole-run wall. Owner:
 `docs/benchmarks/hot-path-ledger.toml`.
 
 ### Retained benchmark contract
-Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained. The retained set: node sync/apply, reduced UTXO commit, end-to-end mempool admission, Merkle dispatch, and the real-file index resolver.
+Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained, and the historical campaign JSON evidence is retired by #224 (`docs/benchmarks/hot-path-attribution.md`). The retained Criterion targets are the `benches/` directories of the owning crates (currently consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write). Which targets CI compiles is owned by the `bench-smoke` jobs in `.github/workflows/ci.yml` and `main.yml`, not by this glossary.
 
 ### C150
 The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
@@ -366,4 +363,4 @@ A throughput change is measured against CPU time as well as wall time, because a
 A parallelism constant tuned while the harness competes with the node for CPU, so the optimum measures the contention. Never tune a parallelism constant against a harness sharing CPU with the node, and never on wall alone.
 
 ### CI lane parity
-A branch is green only against the commands in `.github/workflows/ci.yml`, never a local approximation: `-D warnings` on the `clippy` and `kernel-parity` lanes promotes warnings the workspace lint job merely reports; a virtual workspace drops `--workspace --features`, so the full surface is only reached through the per-crate `-p` invocations; `kernel-parity` adds `--include-ignored`. `cargo deny` failures are bug reports, not lint noise.
+A branch is green only against the commands in the workflows, never a local approximation. `.github/workflows/ci.yml` is the only required PR gate: pure-Rust default features, `-D warnings` clippy without the kernel, per-crate `-p` invocations because a virtual workspace drops `--workspace --features`, bench-smoke compilation, `cargo deny`, and the Python comparator tests. `.github/workflows/main.yml` runs on `main` pushes only: the full-node feature set with the C++ kernel, `--include-ignored` for the consensus fixture corpus, and the `kernel-oracle` parity tests, which are not `#[ignore]` and are skipped if `--ignored` is passed. `cargo deny` failures are bug reports, not lint noise.
