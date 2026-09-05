@@ -1455,10 +1455,13 @@ impl BlockSync {
         now: Instant,
     ) -> Option<SocketAddr> {
         let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
+        // Hedge candidates qualify on the demonstrated best-known height
+        // (P2P-03): an at-tip peer that announced the front block can
+        // serve it even though its handshake snapshot predates the block.
         for peer in self.peer_table.infos() {
             if peer.addr != owner
                 && statically_fanout_eligible(&peer)
-                && u32::try_from(peer.start_height).is_ok_and(|height| height >= front_height)
+                && u32::try_from(peer.best_known_height).is_ok_and(|height| height >= front_height)
             {
                 candidates.push(peer.addr);
             }
@@ -1809,6 +1812,96 @@ mod tests {
             }
             _ => return Err(std::io::Error::other("expected witness block inventory").into()),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md) — the reorg
+        // edge of the branch-aware credit. A winning fork announced at tip
+        // re-selects the tree's best chain during acceptance, and the
+        // announcing peer must earn credit against that POST-reselection
+        // chain. A filter that credited only headers on the pre-insert tip
+        // would leave the peer ineligible and no fork body would be fetched.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let losing1 = test_header(genesis.compute_hash(), 1);
+        let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+        let losing2 = test_header(losing1.compute_hash(), 2);
+        let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+        let applied = {
+            let node = tree.node(losing2_id)?;
+            TipSnapshot {
+                tip_id: losing2_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+
+        let winning1 = test_header(genesis.compute_hash(), 101);
+        let winning2 = test_header(winning1.compute_hash(), 102);
+        let winning3 = test_header(winning2.compute_hash(), 103);
+        let expected: Vec<Hash256> = [&winning1, &winning2, &winning3]
+            .iter()
+            .map(|header| header.compute_hash().into())
+            .collect();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // The peer's handshake height equals the applied height: it
+        // connected at the losing tip, and only the fork announcement it
+        // delivers demonstrates anything beyond that.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(addr, 2));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![winning1, winning2, winning3],
+            source: Some(current_source(&peers, addr)),
+        })?;
+
+        sync.tick();
+
+        // The winning fork's actual tip height is 3 (the fixture's 101..103
+        // only seed merkle/time bytes; tree heights derive from parents).
+        assert_eq!(
+            peers.infos()[0].best_known_height,
+            3,
+            "the announced winning fork must earn credit on the reselected best chain"
+        );
+        let first = rx
+            .try_recv()
+            .map_err(|_| std::io::Error::other("no getdata sent for the announced fork"))?;
+        let Message::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        let requested = inventory
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            requested, expected,
+            "the reorg connect set must be requested after the common ancestor"
+        );
         Ok(())
     }
 

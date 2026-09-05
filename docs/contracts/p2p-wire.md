@@ -41,9 +41,10 @@ ownership and cites proof under the
 - Credit is initialized from the handshake `start_height`, raised
   monotonically (never lowered), raisable only by the delivering connection
   (a same-address replacement never inherits its predecessor's credit), and
-  raised only for accepted headers on the currently selected best chain.
-  Sync request eligibility requires demonstrated height above the applied
-  tip.
+  raised only for accepted headers on the currently selected best chain
+  (the best chain is re-selected during acceptance, so a winning fork
+  announcement earns credit in the same tick). Sync request eligibility
+  requires demonstrated height above the applied tip.
 
 ## Live gaps
 
@@ -65,6 +66,7 @@ ownership and cites proof under the
   `note_announced_height_credits_only_the_delivering_connection` and
   `note_announced_height_raises_monotonically_and_reports_actual_updates`
   pin the identity-checked, monotonic credit mutation (P2P-03).
-- `crates/node/src/sync.rs` test
-  `tick_fetches_new_tip_headers_from_at_tip_peers` pins at-tip request
-  eligibility after catch-up (P2P-03, #617).
+- `crates/node/src/sync.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
+  (at-tip request eligibility after catch-up, P2P-03/#617) and
+  `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
+  earn credit on the reselected best chain).
