@@ -6,14 +6,14 @@ verify progress before moving on.
 ## Prerequisites
 
 - A Rust toolchain for edition 2024 (MSRV 1.95.0 or newer).
-- The default binary build is pure Rust and requires no C++ compiler or system
-  libraries. It uses the native Rust script interpreter, which verifies
-  legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends.
-  Core's committed script and transaction vectors currently pin zero native
-  mismatches. `libbitcoinkernel` remains the library production default and
-  the Compose image engine until issue #213 promotes native
-  (`docs/contracts/validation-default.md`). For that engine, enable the
-  `kernel` feature.
+- No C++ compiler or system libraries for the default binary build. It is
+  pure Rust and uses the native script interpreter, which verifies legacy,
+  P2SH, SegWit v0, and Taproot key-path and script-path spends. Core's
+  committed script and transaction vectors pin zero native mismatches
+  (`crates/script/tests/core_vectors.rs`). `libbitcoinkernel` remains the
+  library default and the Compose image engine until issue #213 promotes
+  native (`docs/contracts/validation-default.md`). To use that engine in the
+  binary, enable the `kernel` feature.
 
 If you plan to compile with the `kernel` feature to run `libbitcoinkernel` as
 an independent verification oracle, install `cmake` and `libboost-dev`:
@@ -31,11 +31,9 @@ Build the node with default features:
 cargo build --release -p bitcoin-rs
 ```
 
-This produces `./target/release/bitcoin-rs`. The default configuration includes
-the `fjall` storage backend, `redb`, and `zmq` sequence publishing. The default
-binary build uses the native Rust script interpreter for every consensus spend
-class. Library crates and the Compose image still default to
-`libbitcoinkernel` (`docs/contracts/validation-default.md`).
+This produces `./target/release/bitcoin-rs`. The default features are the
+`fjall` and `redb` storage backends and `zmq` sequence publishing; `kernel` is
+not among them, so this binary validates with the native interpreter.
 
 To compile with `libbitcoinkernel` as an independent verification oracle:
 
@@ -136,10 +134,12 @@ curl -s --user bitcoin-rs:bitcoin-rs \
   http://127.0.0.1:8332/
 ```
 
-The dispatch table in `crates/rpc/src/handlers.rs` implements supported Core
-methods. There is no internal wallet: private-key and wallet-construction
-methods are absent, while key-free PSBT utilities (`combinepsbt`, `finalizepsbt`)
-and descriptor helpers remain for external signers.
+[rpc-reference.md](rpc-reference.md), generated from `MANIFEST` in
+`crates/rpc/src/manifest.rs`, lists every implemented, deviating, and
+unimplemented Core method. There is no internal wallet: private-key and
+wallet-construction methods are absent, while key-free PSBT utilities
+(`combinepsbt`, `finalizepsbt`) and descriptor helpers (`getdescriptorinfo`,
+`deriveaddresses`) remain for external signers.
 
 ## External wallet
 

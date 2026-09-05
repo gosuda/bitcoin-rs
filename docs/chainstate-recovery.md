@@ -76,6 +76,7 @@ Prometheus names use the `node.chainstate_journal` prefix:
 | `flush_failures` | counter | Idle-timer durability failure |
 | `backpressure_total` | counter | Block applies refused by a journal lag/retention gate |
 | `maintenance_failures` | counter | Journal retention inspection failure in the worker |
+| `reorg_failures` | counter | Fork-head journal rewrite failure during a reorg; the disconnect marker is retained |
 | `storage_flush_seconds` | histogram | Storage-side flush latency at a durability boundary |
 
 Restore logs include `restore_source`, checkpoint generation/height, selected height/hash, transaction count, replayed record count, duration, and fallback reason where applicable.
@@ -97,4 +98,4 @@ cargo bench -p bitcoin-rs-node --no-default-features --features fjall \
   --bench chainstate_journal
 ```
 
-The test enforces 60-second and 256-MiB RSS-delta ceilings and prints its observed values for CI artifacts. Keep machine-specific measurements in CI or pull-request evidence rather than treating one developer host as a permanent performance baseline. This is a bounded regression gate, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.
+The bench enforces 60-second and 256-MiB RSS-delta ceilings and prints its observed values for CI artifacts. Keep machine-specific measurements in CI or pull-request evidence rather than treating one developer host as a permanent performance baseline. This is a bounded regression gate, not a mainnet IBD result or a controlled journaling-on/off apply-throughput comparison.
