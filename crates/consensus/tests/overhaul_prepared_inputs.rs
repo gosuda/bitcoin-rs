@@ -72,10 +72,13 @@ fn two_input_tx() -> (Tx, CountingView) {
             script_pubkey: Vec::new(),
         }],
     };
-    (tx, CountingView {
-        utxos,
-        lookups: std::cell::Cell::new(0),
-    })
+    (
+        tx,
+        CountingView {
+            utxos,
+            lookups: std::cell::Cell::new(0),
+        },
+    )
 }
 
 /// Resolving a multi-input transaction through the prepared path looks each
@@ -152,6 +155,9 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
     let first = total_sigop_cost(&tx, &prevouts);
     let second = total_sigop_cost(&tx, &prevouts);
     assert_eq!(first, second, "deterministic for identical inputs");
+    // Two empty-script inputs carry no legacy sigops: the owner's count is
+    // exactly zero for this fixture, not merely "bounded".
+    assert_eq!(first, 0, "empty scripts count zero sigops");
 
     // Out-of-order prevout slices still resolve every input.
     let mut reversed = prevouts.clone();
@@ -176,8 +182,7 @@ fn sighash_variants_match_reference_oracle() {
     let parsed =
         bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(&bytes).expect("genesis parses");
     let materialized: Block = parsed.materialize();
-    let oracle: bitcoin::Block =
-        bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
+    let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
 
     let native_txid = materialized.txs[0].txid();
     let oracle_txid = oracle.txdata[0].compute_txid();

@@ -721,7 +721,8 @@ fn apply_combined_run(
         // additions: the output dies at birth instead of staying live. An
         // ephemeral same-block output never becomes a live record.
         match fresh.edit_replacement(vouts, &[])? {
-            RemovedRecord::Unchanged => RecordMutation::NoChange,
+            // Nothing of the fresh record was spent: the additions stand.
+            RemovedRecord::Unchanged => RecordMutation::Replace(fresh),
             RemovedRecord::Emptied => RecordMutation::Delete,
             RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
         }
@@ -1015,6 +1016,35 @@ mod tests {
         let shard = Shard::new();
         shard.insert_owned_record(UtxoKey::from_prefix([0; 8]), Hash256::default(), &[])?;
         assert_eq!(shard.record_count(), 0);
+        Ok(())
+    }
+
+    /// A remove run whose vouts match none of a fresh record's additions
+    /// must not drop the additions: the record lands whole and the stray
+    /// spend stays the no-op it always was for a missing record.
+    #[test]
+    fn fresh_record_with_non_matching_remove_keeps_additions() -> Result<(), UtxoError> {
+        let shard = Shard::new();
+        let txid = Hash256::default();
+        let txout = TxOut {
+            value: 7,
+            script_pubkey: vec![0x51],
+        };
+        let add = crate::UtxoAdd::new(
+            OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 0),
+            txout,
+            false,
+            1,
+        );
+        // vout 5 was never created under this txid: the spend no-ops and
+        // the addition still lands.
+        shard.commit_single_shard_batch(
+            &[add],
+            &[OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 5)],
+            0,
+        )?;
+        assert_eq!(shard.record_count(), 1);
+        assert_eq!(shard.output_count(), 1);
         Ok(())
     }
 }
