@@ -68,6 +68,25 @@ download-window scheduling); `PeerTable` and `PeerLease` in
 - Advertised service bits match the node's actual pruning and capability
   state. A disabled feature is never advertised.
 
+### `P2P-03`: Discovery and the persistent address book
+
+- `crates/p2p/src/address_book.rs` owns the bounded persistent address
+  manager: tried and new candidate tables with timestamps and rate
+  bounds, IPv4/IPv6 and selected addrv2 formats, DNS seed and bootstrap
+  policy, `getaddr`/`getaddr_rcv` behavior, per-message and total intake
+  caps, and explicit proxy behavior.
+- Discovery state persists across restart under a discovery-owned
+  version field. A corrupt or unknown discovery version degrades to
+  seeded or empty discovery with a typed reseed status; it never fails
+  authoritative startup. A rejected discovery file stays in place until
+  an authorized rebuild.
+- `P2pService` maintains configured outbound diversity through its
+  reconnect and backoff. No second connection owner appears. Peer
+  status, connect and disconnect, network-active control, manual bans,
+  and declared discouragement live under `P2pService`.
+- Advertised service bits match the node's actual pruning and capability
+  state. A disabled feature is never advertised.
+
 ### `P2P-04`: Compact blocks
 
 - BIP152 v1 and v2 serialization and `sendcmpct` preference negotiation
@@ -120,7 +139,18 @@ download-window scheduling); `PeerTable` and `PeerLease` in
   `crates/p2p/tests/handshake_roundtrip.rs`,
   `crates/p2p/tests/core_interop_live.rs`,
   `crates/node/tests/tx_ingress_e2e.rs`.
-
+- `crates/p2p/src/peer_table.rs` tests
+  `note_announced_height_credits_only_the_delivering_connection` and
+  `note_announced_height_raises_monotonically_and_reports_actual_updates`
+  pin the identity-checked, monotonic credit mutation and retained tip
+  evidence (P2P-03).
+- `crates/node/src/sync.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
+  (at-tip request eligibility after catch-up, P2P-03/#617) and
+  `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
+  earn credit on the reselected best chain),
+  `losing_fork_credit_survives_winner_disconnect` (retained branch evidence),
+  and `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
+  hedge eligibility).
 ## Vocabulary
 
 [PeerLease](../../CONCEPTS.md),
