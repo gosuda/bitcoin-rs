@@ -4,11 +4,11 @@ This document is the T02 product cell catalogue: the cells the collector in `cra
 
 ## Schema
 
-Schema version string: `bitcoin-rs-product-cells-v1`. The T02 gate `bin/bitcoin-rs/tests/overhaul_evidence.rs` rejects a record that lacks a required identity, sums nested or concurrent intervals, or collapses repeated samples. Schema validity never establishes a product result; only an executed scenario with observable state transition does.
+Schema version string: `bitcoin-rs-hot-path-ledger-v2`, owned by `bitcoin_rs_node::metrics::Ledger` and shared with `hot-path-ledger.toml`. The T02 gate `bin/bitcoin-rs/tests/overhaul_evidence.rs` rejects a record that lacks a required identity, sums nested or concurrent intervals, or collapses repeated samples or empty cells. Schema validity never establishes a product result; only an executed scenario with observable state transition does.
 
 ## Identity fields
 
-Every sample record carries: `artifact_sha256`, `source_commit`, `configuration_id` (resolved `NodeConfig` digest, features, allocator, validation mode), `corpus_id` (digest, height range, stop height, stop hash), `durability_id` (backend, batch mode, flush and sync posture), `toolchain_id` (`rustc 1.95.0`, edition 2024, profile, features), `hardware_id` (CPU model, pinned cores, memory, storage device, kernel), `cell`, `interval_parent`, `concurrency_group`, `sample_index`, and the raw observation (`elapsed_ns`, `cpu_ns`, `rss_peak_bytes`, `io_bytes`, `storage_owner_bytes` where the cell defines them).
+Every sample carries `path` (the ledger interval it measures), `owner` (the component whose resources are counted), an `interval` (`inside`, `outside` or `domain_defined`, with `start_ns` and `end_ns` on the run clock) and an `identity`: `binary_sha256` and `version` of the executable, `config_sha256` of the resolved `NodeConfig`, `corpus` (`id` and `manifest_sha256`, mandatory in the ledger), `backend`, `durability` (for example `journal:500b/5s` or `checkpoint-only`) and `hardware` (CPU model and logical core count). A digest is 64 lowercase hex characters; a placeholder cannot parse. The raw observation is `elapsed_ns` plus `cpu_ns`, `rss_peak_bytes`, `io_bytes` and `storage_bytes`, each absent when its owner did not measure it; a sum across samples with different coverage is refused rather than filled. The running node exposes the same identity as Prometheus global labels on every scraped metric, so runtime and ledger evidence share one vocabulary.
 
 ## Cell catalogue
 
