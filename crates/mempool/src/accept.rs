@@ -24,8 +24,7 @@ use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_consensus::{ConsensusError, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::script::{Instruction, instructions, is_p2sh, is_witness_program, opcode};
-use bitcoin_rs_script::sigops::{count_segwit, count_tx_legacy};
+
 use thiserror::Error;
 
 use crate::rbf::{RbfError, ReplacementCandidate};
@@ -253,7 +252,7 @@ where
     // counts it in `PreChecks` rather than in `PolicyScriptChecks`: the sigop
     // limit is a cheap rejection and there is no sense running scripts for a
     // transaction that cannot be relayed anyway.
-    let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
+    let sigop_cost = bitcoin_rs_consensus::total_sigop_cost(tx, &prevouts);
     if sigop_cost > MAX_STANDARD_TX_SIGOPS_COST {
         return Err(AcceptError::TooManySigops {
             cost: sigop_cost,
@@ -374,75 +373,6 @@ fn is_coinbase(tx: &Tx) -> bool {
     tx.inputs.len() == 1
         && tx.inputs[0].previous_output.txid == Txid::default()
         && tx.inputs[0].previous_output.vout == u32::MAX
-}
-
-/// Computes the total sigop cost for a transaction given resolved prevouts.
-///
-/// Mirrors the consensus `total_sigop_cost` using public script-crate counters:
-/// legacy sigops × 4, plus P2SH redeem-script accurate sigops × 4, plus
-/// segwit witness-program sigops.
-fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u64 {
-    let mut cost = u64::from(count_tx_legacy(tx)).saturating_mul(4);
-    for input in &tx.inputs {
-        let prevout = prevouts
-            .iter()
-            .find(|(op, _)| *op == input.previous_output)
-            .map(|(_, txout)| txout);
-        let Some(prevout) = prevout else {
-            continue;
-        };
-        let redeem_script = last_push(&input.script_sig);
-        if is_p2sh(&prevout.script_pubkey) {
-            if let Some(redeem) = redeem_script {
-                cost = cost.saturating_add(u64::from(count_accurate(redeem)).saturating_mul(4));
-            }
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem_script.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(u64::from(count_segwit(program, &input.witness)));
-        }
-    }
-    cost
-}
-
-/// Returns the last data push from a script, or `None`.
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
-}
-
-/// Counts sigops accurately (multisig uses the preceding pushnum value).
-fn count_accurate(script: &[u8]) -> u32 {
-    let mut count = 0_u32;
-    let mut pushed_number = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(op)) => match op {
-                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
-                    count = count.saturating_add(1);
-                    pushed_number = None;
-                }
-                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
-                    count = count.saturating_add(u32::from(pushed_number.unwrap_or(20)));
-                    pushed_number = None;
-                }
-                other => pushed_number = opcode::decode_pushnum(other),
-            },
-            Ok(Instruction::PushBytes(_)) => pushed_number = None,
-            Err(_) => break,
-        }
-    }
-    count
 }
 
 #[cfg(test)]

@@ -127,6 +127,37 @@ impl<'a> TxSignatureChecker<'a> {
             annex: None,
         }
     }
+    /// Builds a checker reusing a caller-owned sighash cache, so one
+    /// transaction's BIP143/BIP341 aggregates are computed once and shared by
+    /// every input check instead of being rebuilt per input.
+    ///
+    /// The cache must be over this same transaction (same lifetime borrow);
+    /// a cache built over a different or grafted transaction produces wrong
+    /// hashes. [`Self::into_cache`] hands the cache back for the next input.
+    #[must_use]
+    pub fn new_with_cache(
+        tx: &'a Tx,
+        input_index: usize,
+        amount: u64,
+        prevouts: &'a [TxOut],
+        cache: SighashCache<'a>,
+    ) -> Self {
+        Self {
+            tx,
+            input_index,
+            amount,
+            prevouts,
+            cache,
+            annex: None,
+        }
+    }
+
+    /// Consumes the checker and returns its sighash cache for reuse by the
+    /// next input of the same transaction.
+    #[must_use]
+    pub fn into_cache(self) -> SighashCache<'a> {
+        self.cache
+    }
 
     /// Sets the taproot annex for BIP341 sighash commitment.
     ///

@@ -18,8 +18,16 @@ use crate::{
     },
     varint,
 };
-
 /// Position marker used when no `OP_CODESEPARATOR` executed before the opcodes being signed.
+///
+/// BIP341/BIP342 sentinel only: taproot commits the *position* of the last
+/// executed code separator into the sighash (`0xFFFF_FFFF` when none ran).
+/// The legacy path never uses this constant — it signs the *subscript from*
+/// the last executed separator to the script end instead, and the caller
+/// strips already-executed separator opcodes out of that subscript
+/// (deletion semantics, `remove_codeseparators` at the checker layer).
+/// `SegWit` v0 has no code-separator handling at all: `BIP143` hashes the
+/// caller's script code verbatim.
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// BIP342 leaf version byte for tapscript leaves.
@@ -196,6 +204,16 @@ impl<'t> SighashCache<'t> {
     /// but the raw value is appended to the hash. The `SIGHASH_SINGLE` bug is reproduced:
     /// when the masked type is SINGLE and `input_index` has no matching output, the
     /// uint256 value 1 is returned.
+    ///
+    /// Legacy-only semantics, deliberately isolated from the other two families
+    /// (T07): `SIGHASH_SINGLE`'s out-of-range uint256-one bug, the
+    /// ANYONECANPAY single-input substitution, the zeroed sibling sequences and
+    /// blanked sibling outputs of NONE/SINGLE, and the code-separator subscript
+    /// deletion performed by the caller before this function, all live here and
+    /// nowhere else. [`Self::segwit_v0_signature_hash`] hashes its script code
+    /// verbatim and zeroes whole fields instead, and
+    /// [`Self::taproot_signature_hash`] commits to field-level aggregates with
+    /// no script-code concept at all — none of the three share a code path.
     pub fn legacy_signature_hash(
         &self,
         input_index: usize,
@@ -271,6 +289,11 @@ impl<'t> SighashCache<'t> {
 
     /// Computes the BIP143 segwit-v0 signature hash (p2wpkh and p2wsh alike: the caller
     /// supplies the witness script / p2wpkh template as `script_code`).
+    ///
+    /// `script_code` is hashed verbatim: BIP143 has no code-separator
+    /// deletion, no SINGLE blanking of individual outputs, and no
+    /// uint256-one bug — those are legacy-only (see
+    /// [`Self::legacy_signature_hash`]).
     pub fn segwit_v0_signature_hash(
         &mut self,
         input_index: usize,
