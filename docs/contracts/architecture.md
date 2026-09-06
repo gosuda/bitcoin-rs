@@ -138,7 +138,17 @@ Owners:
 - Authoritative apply still lives in `crates/chainstate` because it composes `chain`, `consensus`, `utxo`, and `storage`.
 - `Chainstate` does not hold or import RPC, ZMQ, `TxIndex`, mining, or P2P admission types.
 - Apply publishes the tip and returns a `ConnectOutcome` or `DisconnectOutcome`. Capture flags are set at construction so apply can produce `rawtx` bytes and canonical block bytes without holding consumers.
-- The composition root dispatches `ChainFollowers` while the `ChainTransition` is still held, then calls `finish`. Consumer failure cannot invalidate chainstate.
+
+### `ARCH-08`: Single mutation owner and non-alternating projection authority
+
+- `bitcoin-rs-mempool` owns the mempool pool through one `MempoolGateway`; no second production writer holds the pool lock.
+- Mutating `Mempool` methods are reached only through the gateway inside production code. Projections and observers read committed snapshots and never acquire the pool writer.
+- `bitcoin-rs-node` may expose read-only composition handles, but it must not forward a pool writer through a duplicate field or wrapper around another owner.
+- P2P session handles, network controls, and chainstate accessors are owned by their named crates; duplicated fields in `NodeState` that merely clone another owner's handle are forwarding wrappers and must be collapsed or reported as an unapproved public boundary.
+- Current enforcement of this clause is partial and must not be read as proof of it. `bin/bitcoin-rs/tests/overhaul_ownership.rs` runs a lexical source scan that flags two literal raw-write patterns (`.mempool().write(`, `.pool().write(`) and a fixed list of mutating `Mempool` method names whose receiver is not spelled `mempool`, `mempool_gateway`, or `gateway`. This is inventory-level detection, not capability enforcement: it matches receiver identifier spellings rather than resolved types, covers only the enumerated method names and lock patterns, omits `clear`, truncates each line at the first `//` regardless of lexical context, stops scanning a file after the first detected test item, and silently skips unreadable files and directories. A clean scan does not prove the absence of non-owner mutation paths.
+- The raw pool lock is still reachable outside the owner today: `NodeState::mempool()` returns `Arc<RwLock<Mempool>>`, `MempoolGateway::pool()` returns `&Arc<RwLock<Mempool>>`, and `MempoolGateway::new`/`shared`/`shared_with` accept a caller-retained `Arc<RwLock<Mempool>>`. These are known capability gaps to be closed by the approved admission-owner cut (T18); they are not approved long-term exceptions to this clause.
+- The `NodeState` forwarding-wrapper audit is a frozen inventory that fails when a new wrapper appears. It records the current surface; it does not establish that the P2P handle surface has been narrowed. Collapsing the inventoried wrappers remains assigned to the P2P ownership tasks (T24/T26).
+- Gate status: G2 is not yet proven. The dependency-direction and storage-confinement gates hold, but compiler-enforced single-writer capability for the pool and the narrowed handle surfaces required by this clause remain open work under the approved boundary cuts.
 
 ## Coherent view protocol
 
@@ -180,7 +190,7 @@ struct ReadStamp {
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`:
-  - parses `cargo metadata` with `--no-deps`;
+  - parses `cargo metadata` with `--locked --offline --no-deps`;
   - validates every internal workspace dependency edge against the approved layer table;
   - verifies `bitcoin-rs-storage` exclusively owns storage engine dependencies;
   - confirms `bitcoin-rs-rpc` has no dependency on `bitcoin-rs-storage` and forwards no backend features;
@@ -189,7 +199,12 @@ struct ReadStamp {
 - `crates/chainstate/src/transition.rs` (planned): owns `Chainstate`, `ChainTransition`, and the ordered commit protocol.
 - `crates/chainstate/src/recovery.rs` (planned): owns durable root recovery and `CURRENT_SCHEMA` refusal.
 - `crates/node/tests/overhaul_checkpoint_independence.rs` (planned): candidate `chainstate` recovery, retained maintenance, matched startup and replay performance, and full-tip storage checks before complete authority cutover.
+- `bin/bitcoin-rs/tests/overhaul_ownership.rs`:
+  - parses `cargo metadata` with `--locked --offline --no-deps` and validates the five-layer one-way dependency direction;
+  - asserts `bitcoin-rs-storage` is the only crate that names storage-engine dependencies and that `bitcoin-rs-rpc` does not depend on `bitcoin-rs-storage` or forward backend features;
+  - runs a lexical source scan (excluding `tests/`, `benches/`, and `#[cfg(test)]` modules) that flags the enumerated raw pool-write patterns and listed mutating `Mempool` method names on receivers not spelled as the gateway — a bounded inventory check whose limits are recorded under `ARCH-08`, not proof that no non-owner mutation path exists;
+  - audits `NodeState` for forwarding wrappers around `P2pService` handles and fails if a wrapper outside the frozen inventory appears; the inventory records the current surface pending the T24/T26 collapse and does not establish narrowing;
+  - does not discharge G2: the scan and audit are detection aids, and the capability gaps listed under `ARCH-08` remain open.
 
 ## Vocabulary
-
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md): five-layer direction, chainstate owner, coherent view protocol, `ReadStamp`.

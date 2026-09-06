@@ -55,3 +55,8 @@ path = "tests/gates/g18_hot_path_ledger.rs"
 [[test]]
 name = "g19_validation_default"
 path = "tests/gates/g19_validation_default.rs"
+
+[[test]]
+name = "g20_formal_models"
+path = "tests/gates/g20_formal_models.rs"
+
