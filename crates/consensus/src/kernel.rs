@@ -142,7 +142,7 @@ mod enabled {
             Some(flags.kernel_bits()),
             &prepared.precomputed,
         )
-        .map_err(|error| ConsensusError::Script {
+        .map_err(|error| ConsensusError::KernelScript {
             input_index,
             reason: format!("kernel script verification failed: {error}"),
         })?;

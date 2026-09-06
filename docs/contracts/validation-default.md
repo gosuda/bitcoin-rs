@@ -56,6 +56,13 @@ Owners:
 - This split is the C++-free quickstart. Promoting native in `VAL-01`
   does not add `kernel` to the binary default.
 
+### `VAL-04`: Script verifier failures retain their origin
+
+- Kernel script verification failures use the typed
+  `ConsensusError::KernelScript` variant and remain operational/retryable;
+  portable interpreter failures use `ConsensusError::Script` and are
+  permanent block-invalidity errors.
+
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g19_validation_default.rs`:

@@ -2019,8 +2019,8 @@ pub(crate) fn is_permanent_apply_error(error: &ApplyError) -> bool {
             bitcoin_rs_consensus::ConsensusError::PrevoutMatrixSize { .. }
             | bitcoin_rs_consensus::ConsensusError::Kernel(_)
             | bitcoin_rs_consensus::ConsensusError::Encoding(_) => false,
-            bitcoin_rs_consensus::ConsensusError::Script { reason, .. }
-                if reason.starts_with("kernel script verification failed:") =>
+            bitcoin_rs_consensus::ConsensusError::KernelScript { .. }
+                =>
             {
                 false
             }
@@ -10623,7 +10623,7 @@ mod consensus_rule_tests {
         Ok(())
     }
 
-    /// #618 regression: a kernel-backed script verification failure must be
+    /// VAL-04 / #618 regression: a kernel-backed script verification failure must be
     /// classified Operational (retryable), not Permanent, because
     /// `bitcoinkernel` can reject a valid block depending on process state.
     /// The same block applies successfully after restart, so permanently
@@ -10643,7 +10643,7 @@ mod consensus_rule_tests {
         );
     }
 
-    /// A native (non-kernel) script verification failure remains Permanent:
+    /// VAL-04: A native (non-kernel) script verification failure remains Permanent:
     /// the native interpreter is deterministic and not process-state-dependent.
     #[test]
     fn native_script_verification_failure_is_permanent() {

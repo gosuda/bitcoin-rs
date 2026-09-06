@@ -115,9 +115,17 @@ pub enum ConsensusError {
         /// Total output value in satoshis.
         output_value: u64,
     },
-    /// Script verification failed.
+    /// Script verification failed in the portable interpreter.
     #[error("script verification failed at input {input_index}: {reason}")]
     Script {
+        /// Input index that failed script verification.
+        input_index: usize,
+        /// Script failure reason.
+        reason: String,
+    },
+    /// Script verification failed in the kernel engine.
+    #[error("script verification failed at input {input_index}: {reason}")]
+    KernelScript {
         /// Input index that failed script verification.
         input_index: usize,
         /// Script failure reason.
