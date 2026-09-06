@@ -107,23 +107,6 @@ archive_sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f
 bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08"
 version_output = "Bitcoin Core daemon version v31.1.0"
 
-# External consumers, pinned by full identity: "we tested against mempool"
-# without images and a tag commit is a label, not a pin.
-
-[reference.consumers.mempool]
-backend_image = "mempool/backend:v3.3.1"
-frontend_image = "mempool/frontend:v3.3.1"
-tag_commit = "9332d9db97bcc7beed079acc8f79aa21c9b12a3b"
-
-# The wallet consumer. `btcw` is the CLI inside this repository -- part of
-# the identity, never a substitute for it.
-
-[reference.consumers.wallet]
-repository = "gosuda/bitcoin-wallet"
-repository_id = 885198873
-commit = "2fe2af12c721bdf2cd4af7801146bda40fa15429"
-cli = "btcw"
-
 # Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
 # the corpus archive is exported and is deliberately ABSENT until then: a
 # placeholder digest here would be an invented one, so the loader reports the

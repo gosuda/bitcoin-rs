@@ -97,9 +97,7 @@ holds keys. Empty configuration keeps transport-only GBT assembly.
 ### Wallet-facing public surface
 What an external wallet is allowed to call: native Esplora HTTP at `/api` on
 the JSON-RPC listener, address and script lookups, `POST /tx`, and the
-wallet-free RPCs above. The named consumer is `gosuda/bitcoin-wallet`
-(`btcw`), repository id 885198873, commit
-`2fe2af12c721bdf2cd4af7801146bda40fa15429`, run as a separate process. It
+wallet-free RPCs above. The consumer runs as a separate process. It
 does not receive `NodeState`, `UtxoSet`, index, or datadir access. See
 `docs/contracts/wallet-facing.md`.
 
