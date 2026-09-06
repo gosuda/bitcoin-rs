@@ -716,7 +716,15 @@ fn apply_combined_run(
         }
     } else {
         let add_unique = parts_are_increasing_unique(None, parts);
-        RecordMutation::Replace(UtxoRecord::new_add_replacement(txid, parts, add_unique)?)
+        let fresh = UtxoRecord::new_add_replacement(txid, parts, add_unique)?;
+        // A remove against a record born in this same run nets against the
+        // additions: the output dies at birth instead of staying live. An
+        // ephemeral same-block output never becomes a live record.
+        match fresh.edit_replacement(vouts, &[])? {
+            RemovedRecord::Unchanged => RecordMutation::NoChange,
+            RemovedRecord::Emptied => RecordMutation::Delete,
+            RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
+        }
     };
     apply_record_mutation(table, key, txid, mutation);
     Ok(())

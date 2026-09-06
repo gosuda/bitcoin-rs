@@ -1514,20 +1514,8 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
         );
         self.reload_evicted(&affected)?;
         let before = self.snapshot_images(&affected);
-        let canceled = cancel_ephemeral(&changes.adds, &changes.removes);
-        let mut effective = BlockChanges::default();
-        for add in &changes.adds {
-            if !canceled.contains(&add.outpoint) {
-                effective.add(add.clone());
-            }
-        }
-        for outpoint in &changes.removes {
-            if !canceled.contains(outpoint) {
-                effective.remove(*outpoint);
-            }
-        }
         self.set
-            .commit_block(&effective, block_hash)
+            .commit_block(changes, block_hash)
             .map_err(PersistentUtxoError::Utxo)?;
         let after = self.snapshot_after_images(&affected);
         self.persist_changed(&before, &after, mode)?;
@@ -1547,20 +1535,8 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
             Self::affected_txids(undo.restores.iter().map(|r| r.outpoint.txid), &undo.removes);
         self.reload_evicted(&affected)?;
         let before = self.snapshot_images(&affected);
-        let canceled = cancel_ephemeral(&undo.restores, &undo.removes);
-        let mut effective = UndoBatch::default();
-        for restore in &undo.restores {
-            if !canceled.contains(&restore.outpoint) {
-                effective.restore(restore.clone());
-            }
-        }
-        for outpoint in &undo.removes {
-            if !canceled.contains(outpoint) {
-                effective.remove(*outpoint);
-            }
-        }
         self.set
-            .undo_block(&effective)
+            .undo_block(undo)
             .map_err(PersistentUtxoError::Utxo)?;
         let after = self.snapshot_after_images(&affected);
         self.persist_changed(&before, &after, mode)?;
@@ -1821,18 +1797,6 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
         self.resident_order.lock().push_back(*txid);
         Ok(key)
     }
-}
-
-/// The outpoints one change set both creates and spends: same-block
-/// ephemeral outputs. They cancel before either the in-memory commit or the
-/// store sees them - never live, never persisted - while the caller's undo
-/// batch keeps both halves as history.
-fn cancel_ephemeral(adds: &[UtxoAdd], removes: &[OutPoint]) -> hashbrown::HashSet<OutPoint> {
-    removes
-        .iter()
-        .filter(|outpoint| adds.iter().any(|add| add.outpoint == **outpoint))
-        .copied()
-        .collect()
 }
 
 /// The column family for grouped live coin records.
