@@ -76,6 +76,7 @@ version_output = "Bitcoin Core daemon version v31.1.0"
 # the corpus archive is exported and is deliberately ABSENT until then: a
 # placeholder digest here would be an invented one, so the loader reports the
 # corpus as custody-blocked instead.
+
 [[reference.corpora]]
 id = "C150"
 stop_height = 150000
@@ -94,6 +95,45 @@ stop_hash = "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f"
 
 # The formal model checker, pinned by archive and jar digest. Evidence tool
 # only; no checker run is claimed anywhere in this file.
+
+[reference.release]
+# The released product identity. `version_output` is what the pinned
+# `bitcoind -version` prints, checked verbatim.
+core_version = "31.1"
+git_tag = "v31.1"
+source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
+archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"
+archive_sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08"
+version_output = "Bitcoin Core daemon version v31.1.0"
+
+# External consumers, pinned by full identity: "we tested against mempool"
+# without images and a tag commit is a label, not a pin.
+
+[reference.consumers.mempool]
+backend_image = "mempool/backend:v3.3.1"
+frontend_image = "mempool/frontend:v3.3.1"
+tag_commit = "9332d9db97bcc7beed079acc8f79aa21c9b12a3b"
+
+# The wallet consumer. `btcw` is the CLI inside this repository -- part of
+# the identity, never a substitute for it.
+
+[reference.consumers.wallet]
+repository = "gosuda/bitcoin-wallet"
+repository_id = 885198873
+commit = "2fe2af12c721bdf2cd4af7801146bda40fa15429"
+cli = "btcw"
+
+# Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
+# the corpus archive is exported and is deliberately ABSENT until then: a
+# placeholder digest here would be an invented one, so the loader reports the
+# corpus as custody-blocked instead.
+
+[[reference.corpora]]
+id = "C150"
+stop_height = 150000
+stop_hash = "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b"
+
 [reference.formal_tool]
 name = "apalache-mc"
 version = "0.62.2"
