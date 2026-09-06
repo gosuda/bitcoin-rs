@@ -2180,7 +2180,8 @@ fn prove_window<'a>(
             return Vec::new();
         };
         let tx_plan = plan_block_transactions(block, &txids);
-        let view = bitcoin_rs_consensus::BlockView::new(&block.txs, txids);
+        let facts = kernel_block.derive_facts(&block.txs, &txids);
+        let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
         let resolved = Arc::new(ResolvedUtxoView::resolve(&overlay, block, &tx_plan));
         if overlay
             .advance(
@@ -2212,13 +2213,15 @@ fn prove_window<'a>(
     // could send a body with the expected header and one altered witness
     // reserved value, keeping every txid intact, and force a full window of
     // script verification for a block that is rejected immediately either way.
-    // Both checks below depend on nothing but the block, so running them here
-    // costs a hash per block and removes the amplification.
+    // Both checks below depend on nothing but the block, so the window runs
+    // them before any script work. The Merkle verdict is already derived in
+    // the one-pass parse, so this is a comparison, not a hash; a
+    // witness-carrying block hashes its witness IDs exactly once below.
     for ((block, unit), context) in blocks.iter().zip(prepared.iter_mut()).zip(&contexts) {
-        if !bitcoin_rs_consensus::verify_block::block_merkle_root_matches_txids(
-            block,
-            unit.view.txids(),
-        ) {
+        // The one-pass derivation already reduced these txids through the
+        // production walker; comparing the stored root is the same verdict
+        // without a second tree walk.
+        if !unit.view.merkle_root_matches(block.header.merkle_root) {
             return Vec::new();
         }
         // BIP141: a missing commitment is fatal only when the block carries
@@ -2229,7 +2232,7 @@ fn prove_window<'a>(
         if context
             .flags
             .contains(bitcoin_rs_script::VerifyFlags::WITNESS)
-            && bitcoin_rs_consensus::verify_block::block_has_witness(block)
+            && unit.view.facts().has_witness()
         {
             let commitment_matches = {
                 let wtxids = unit.view.witness_ids();
@@ -2491,15 +2494,29 @@ fn parse_block_for_apply(
         let txids = kernel_block.txids().map_err(ApplyError::Consensus)?;
         (kernel_block, txids)
     };
-    // Without the kernel there is no second parse to harvest identities from,
-    // so hash each transaction of the already-decoded block exactly once.
-    // Re-decoding the preserved bytes here would make the native path pay two
-    // full decodes plus one consensus re-serialization per block.
+    // Without the kernel the checked borrowed layout is the one parse: it
+    // derives the txids, witness IDs, weight, byte positions, and the
+    // Merkle verdicts in a single pass, and the decoded block feeds only
+    // the stages that mutate or verify against it. No second transaction
+    // tree decode happens on this path.
     #[cfg(not(feature = "kernel"))]
-    let (kernel_block, txids) = (
-        bitcoin_rs_consensus::kernel::KernelBlock,
-        block_txids(block),
-    );
+    let (kernel_block, txids) = {
+        let raw_block: bytes::Bytes =
+            provided_serialized.unwrap_or_else(|| bytes::Bytes::from(consensus_bytes(block)));
+        let kernel_block = bitcoin_rs_consensus::kernel::KernelBlock::parse(&raw_block)
+            .map_err(ApplyError::Consensus)?;
+        if kernel_block.transaction_count() != block.txs.len() {
+            return Err(ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::Kernel(format!(
+                    "layout parsed {} transactions, decoder produced {}",
+                    kernel_block.transaction_count(),
+                    block.txs.len()
+                )),
+            ));
+        }
+        let txids = kernel_block.txids().to_vec();
+        (kernel_block, txids)
+    };
     Ok((kernel_block, txids))
 }
 
@@ -2508,7 +2525,7 @@ fn parse_block_for_apply(
 /// Blocks beyond the threshold the window verifier uses fan the hashing out;
 /// below it, serial iteration wins because dispatch costs more than the
 /// per-transaction double SHA256.
-#[cfg(any(test, not(feature = "kernel")))]
+#[cfg(test)]
 fn block_txids(block: &Block) -> Vec<Txid> {
     if block.txs.len() > 32 {
         block.txs.par_iter().map(Tx::txid).collect()
@@ -2529,7 +2546,8 @@ fn prepare_apply<'b, S: crate::window_overlay::OutputSource + ?Sized>(
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
     let (kernel_block, txids) = parse_block_for_apply(block, provided_serialized)?;
     let tx_plan = plan_block_transactions(block, &txids);
-    let view = bitcoin_rs_consensus::BlockView::new(&block.txs, txids);
+    let facts = kernel_block.derive_facts(&block.txs, &txids);
+    let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
     Ok(PreparedApply {
         kernel_block,
@@ -2700,6 +2718,8 @@ fn apply_block_admitted<'b>(
     // Witness IDs are needed only for a witness-carrying block under active
     // segwit; the view computes them once and the commitment check consumes
     // the cache, so witness-free blocks never serialize-and-hash for wtxids.
+    // The native one-pass layout already carries them; this only fills the
+    // kernel-build facts, which derive witness IDs lazily.
     let needs_wtxids = softfork_state.segwit_active && tx_plan.witness_presence.is_present();
     if needs_wtxids {
         view.witness_ids();
@@ -2709,9 +2729,7 @@ fn apply_block_admitted<'b>(
         bitcoin_rs_consensus::BlockRuleContext {
             segwit_active: softfork_state.segwit_active,
         },
-        view.txids(),
-        view.computed_witness_ids().unwrap_or(&[]),
-        tx_plan.witness_presence.is_present(),
+        view.facts(),
     );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
