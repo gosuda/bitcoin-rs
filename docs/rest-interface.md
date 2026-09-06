@@ -29,23 +29,46 @@ The gateway registers these Core REST prefixes:
 | `/rest/blockhashbyheight/{height}` | JSON, hex, binary | Block hash by height |
 | `/rest/spenttxouts/{hash}` | JSON, hex, binary | Explicitly unavailable: no undo data |
 
+## Coherent views
+
+Every REST request reads one `ReadStamp` (process epoch, chain generation,
+chain tip, mempool sequence, policy epoch) at entry and assembles its whole
+response from that view. A response never mixes a tip loaded from one commit
+with coins, mempool contents, or index rows from another.
+
+- If the chain generation is odd when the request arrives, or moves before the
+  response is assembled, the gateway returns HTTP 503 with a short retry
+  message. Retry the request; the next attempt reads a fresh view.
+- Routes that combine confirmed and mempool data (`/rest/getutxos/checkmempool`,
+  `/rest/mempool/*`) use a mempool view reconciled to the same chain
+  generation. A stable chain alone is not enough; the reconciled pool is part
+  of the stamp.
+- Routes backed by an optional capability (`/rest/tx` for non-mempool
+  transactions through `TxLookup`) return HTTP 503 with the capability state
+  when that capability is not `Ready` at the requested tip. Unavailable is not
+  empty: a lagging, rebuilding, or disabled index never produces an empty
+  successful body. A well-formed identifier the node has never seen returns
+  HTTP 404 as in Core. A route the manifest declares unavailable
+  (`/rest/spenttxouts`) answers with its declared unavailable response, never
+  an empty success.
+
 Full-block `/rest/block` and `/rest/blockpart` requests share a budget of two
 concurrent materializations. When it is full, the gateway returns HTTP 503;
-retry the request after a short delay.
+retry the request after a short delay. Request bodies, header counts, and
+response assembly are bounded so a public read cannot consume the validation
+CPU and memory budget.
 
 Header `count` defaults to 5 and must be in the inclusive range 1–2000.
 Out-of-range, negative, non-numeric, and overflowing values return HTTP 400
 with Core's invalid-count message. Unknown query parameters are ignored, so
 cache-buster parameters do not affect the response.
 
-Active-chain requests walk forward by height from the applied tip. A
-side-branch, orphaned, or header-only hash above the applied tip returns HTTP
+Active-chain requests walk forward by height from the tip in the request's
+view. A side-branch, orphaned, or header-only hash above that tip returns HTTP
 200 with an empty JSON array (or an empty hex/binary body), just like an
 unknown well-formed hash, because Core only walks hashes contained in its
-active chain. If no applied tip is published, tree-known hashes likewise
-return an empty response. Cache-only records that are not yet represented in
-the tree use the existing singleton fallback because their active-chain
-membership cannot be established from the tree.
+active chain. This empty answer is a chain-membership fact from a coherent
+view, not an unavailable capability.
 
 The REST gateway does not change the reported `getnetworkinfo` version. When
 using the unmodified `bip300301_enforcer`, pass

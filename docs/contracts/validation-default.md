@@ -1,75 +1,71 @@
 # Validation default contract
 
-The owner of which script engine the production path uses, and of the
-recorded #213 promotion verdict that is allowed to change it.
-
-Owners:
-- `crates/consensus/Cargo.toml`, `crates/node/Cargo.toml`,
-  `bin/bitcoin-rs/Cargo.toml`
-- Gate: `bin/bitcoin-rs/tests/gates/g19_validation_default.rs`
-- Decision evidence: `docs/benchmarks/native-validation-default.md`
+The node validates natively by default. `bitcoinkernel` is an explicit
+opt-in oracle and is never a silent fallback.
 
 ## Clauses
 
-### `VAL-01`: Library default stays on `kernel` until promotion
+### `VAL-01`: Native strict-Rust validation is the default
 
-- `bitcoin-rs-consensus` and `bitcoin-rs-node` default features include
-  `kernel` while the recorded verdict in `g19_validation_default.rs` is
-  `KeepKernel`.
-- The verdict may move to `PromoteNative` only together with those two
-  manifests dropping `kernel` from `default`, and only after the
-  measurement gates in
-  [`docs/benchmarks/native-validation-default.md`](../benchmarks/native-validation-default.md)
-  all pass: Core-vector parity, signed-spend **apply-path** native median
-  faster than the pinned kernel median with both arms inside five percent
-  of their own three-run median, and the end-to-end full-mainnet replay
-  wall owned by #34. #42 froze the C150/Cmodern corpus contracts; that
-  freeze does not run the comparator.
-- The signed-spend Criterion target times `NodeState::apply_block`. It is
-  the in-tree engine comparison that can run without the held corpus. It
-  is not a CLI/P2P wall and does not substitute for the missing replay
-  cell. A failed or unstable measurement leaves `KeepKernel` in place.
+- The library, binary, and released image build with native Rust
+  validation by default.
+- `bitcoinkernel` is not built into the default artifact. It is an
+  opt-in feature.
+- Default builds compile with `--no-default-features --features fjall` and
+  carry no kernel dependency in the binary's transitive graph.
+- The default validation path is `crates/consensus` and `crates/script`
+  using the strict-Rust cryptography from `crates/script`.
 
-### `VAL-02`: Native interpreter is the complete portable engine
+### `VAL-02`: `bitcoinkernel` is an explicit oracle
 
-- With `kernel` off, `Interpreter::execute` / `execute_with_prevouts` in
-  `crates/script/src/interpreter.rs` verify every consensus spend class:
-  legacy and P2SH through `eval::eval_script`, SegWit v0 through BIP143,
-  Taproot key-path and script-path through local BIP341/BIP342.
-- `crates/consensus/src/verify_tx.rs` routes that path through
-  `verify_input_script_portable` under `#[cfg(not(feature = "kernel"))]`.
-- Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native
-  columns pin zero mismatches on **runnable** rows in
-  `crates/script/tests/core_vectors.rs`, and pin skip counts **and**
-  skip-reason allow-lists so a silent coverage shrink cannot stay green.
-  The only accepted `script_tests` skip is a one-string prose/section
-  header; the only accepted `tx_invalid` skip is `BADTX` (fails
-  `CheckTransaction` before script verification). `tx_valid` accepts no
-  skips.
+- The `bitcoinkernel` crate is an oracle used only for differential
+  comparison, not for consensus authority.
+- Native and oracle artifacts are built independently, with separate
+  `CARGO_TARGET_DIR` and distinct artifact identities.
+- A kernel result never overrides a native result except in an explicit
+  comparison mode. The kernel result is not published as a chain
+  authority.
+- The kernel feature requires an explicit operator choice. It is not
+  enabled by any default profile.
 
-### `VAL-03`: Default binary stays kernel-free
+### `VAL-03`: Promotion is measured and reversible
 
-- `bin/bitcoin-rs` default features are `fjall`, `redb`, and `zmq`. They
-  never include `kernel`.
-- `--features kernel` remains the opt-in production engine on the binary
-  and the Compose image (`Dockerfile` builds `fjall,kernel`).
-- This split is the C++-free quickstart. Promoting native in `VAL-01`
-  does not add `kernel` to the binary default.
+- The `g19_validation_default` gate flips from kernel to native only after
+  all of the following hold:
+  1. Native parsing, identifier, weight, and Merkle computation match the
+     oracle for the full pinned replay and invalid corpora.
+  2. Full contextual and script parity is achieved against the pinned
+     Core 31.1 reference with zero unexplained mismatches and counted
+     exclusions.
+  3. The strict-Rust cryptographic path passes full signed-spend apply
+     measurement and independent vector verification.
+  4. Stable signed-spend and full-replay evidence is regenerated on the
+     actual final strict artifact; earlier candidate results are not
+     reused.
+- The binary, library, and image defaults flip together with matching
+  manifests and packaging in one changeset.
+- `g19` verdict flips only with evidence recorded in
+  `docs/benchmarks/native-validation-default.md`.
 
 ## Proven by
 
-- `bin/bitcoin-rs/tests/gates/g19_validation_default.rs`:
-  `library_defaults_match_recorded_verdict`,
-  `binary_default_excludes_kernel`,
-  `kernel_feature_exists_on_each_manifest`,
-  `alias_and_dep_forwarding_count_as_kernel`,
-  `crate_feature_forwarding_counts_as_kernel`.
-- `crates/script/tests/core_vectors.rs`: `script_tests_native_column`,
-  `tx_valid_native_column`, `tx_invalid_native_column`
-  (`NATIVE_*_FAILURES = 0`, pinned skip counts and skip-reason allow-lists).
-- `crates/consensus/tests/kernel_block_parity.rs`:
-  `script_verdict_parity` (Taproot key-path differential),
-  `differential_is_non_vacuous` (script-path non-vacuity).
-- Manifests: `crates/consensus/Cargo.toml` `default = ["kernel"]`,
-  `crates/node/Cargo.toml` `default = ["fjall", "kernel", "zmq"]`,
-  `bin/bitcoin-rs/Cargo.toml` `default = ["fjall", "redb", "zmq"]`.
+- `bin/bitcoin-rs/tests/gates/g19_validation_default.rs` (existing): owns
+  the default promotion verdict.
+- `bin/bitcoin-rs/tests/overhaul_default_closure.rs` (planned): proves the
+  default binary, library, and image are transitively kernel-free and that
+  the oracle remains explicitly available.
+- `crates/script/tests/overhaul_native_crypto.rs` (planned): strict-Rust
+  cryptography, including ECDSA, Schnorr, and Taproot boundary vectors.
+- `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): full
+  contextual and script parity against the Core 31.1 reference.
+- `crates/consensus/tests/overhaul_parse_parity.rs` (planned): one-pass
+  native identifier, weight, and Merkle parity with the oracle.
+- `docs/benchmarks/native-crypto-decision.md` (planned): records the T16
+  strict-Rust cryptographic decision and signed-spend measurement.
+- `docs/benchmarks/native-validation-default.md` (planned): records the
+  measured T17 promotion verdict and the kernel-free closure evidence.
+
+## Vocabulary
+
+Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
+strict-Rust validation, oracle, default promotion.

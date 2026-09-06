@@ -1,146 +1,113 @@
 # Mempool mutations contract
 
-The single mutation gateway in front of the mempool, the records it emits,
-and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` in
-`crates/mempool/src/gateway.rs`; `MutationResult`/`MutationOutcome`/
-`RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` in
-`crates/mempool/src/mutation.rs`; the ZMQ sequence observer
-in `crates/node/src/zmq_publisher.rs`.
+The canonical mempool lifecycle, its records, and the observer delivery
+built on them. Owners: `MempoolGateway` in `crates/mempool/src/gateway.rs`;
+`MutationResult`, `MutationOutcome`, `RemovalReason`, and
+`MutationEnvelope` in `crates/mempool/src/mutation.rs`; the orphan owner
+in `crates/mempool/src/orphan.rs`; the fee estimator in
+`crates/mempool/src/fee_estimator.rs`. Mempool owns orphan mechanics.
+The node owns peer-event routing only.
 
 ## Clauses
 
-### `MPL-01`: Single mutation gateway ordering invariant
+### `MPL-01`: Single mutation gateway and canonical lifecycle
 
-- Every production mempool mutation routes through `MempoolGateway`. No
-  production code outside the gateway takes the mempool write lock; lookups
-  go through `MempoolGateway::read`.
-- Every mutating method flows through one path, `commit` (and
-  `admit_transaction`, which enqueues the same way), in this exact order:
-  1. take the pool write lock,
-  2. mutate and assign per-change `mempool_sequence` values,
-  3. while still holding the write lock, enqueue a non-empty
-     `MutationEnvelope` on the publish FIFO and elect a drainer if none
-     exists,
-  4. release the write lock and the publish-state lock,
-  5. the elected drainer pops batches one at a time — releasing the
-     publish-state lock before every observer call — and returns the
-     publish state to idle only once the queue is empty.
-- Commits serialize under the write lock and step 3 enqueues under that
-  same ownership, so the queue order is the commit order and the sequence
-  order. An observer never sees a later-committed batch before, or
-  interleaved with, an earlier one.
-- Publication is eventual, not synchronous. A nested or concurrent
-  mutation enqueues and returns while a drainer exists; its callback may
-  run after that call has returned. A slow observer delays later
-  publications, not the caller. It can never roll anything back or reorder
-  the stream. Sequences were assigned in step 2, so a lagging observer
-  still sees a gap-free, ordered stream.
-- The observer receives a `&MutationEnvelope` — the committed
-  `MutationResult` paired with the `AdmissionOrigin` that identifies how
-  the transaction entered the node (`Rpc`, `Peer`, `Reorg`, or `Block`).
-  The gateway clones one `MutationResult` into the envelope for each
-  committed non-empty batch that has an observer attached, so it can both
-  enqueue publication and return the original result to the caller.
-  Empty results and an absent observer enqueue nothing, allocate nothing,
-  and spawn no thread.
-- Observers are best-effort mirrors. Observer errors and panics never
-  affect the committed mutation. No gateway lock is held across an
-  observer call, so an observer may re-enter the gateway: a nested call
-  commits, enqueues, and returns immediately, and its publication
-  completes after the in-flight callback. The accepted-mutation mining
-  wake threads the last change's sequence into
-  `MempoolSequenceWake::publish_generation_from`, which builds the
-  generation key from `applied_tip` plus that sequence and never touches
-  the mempool read lock (`crates/node/src/mining.rs`); `node` attaches that
-  mining observer at gateway construction and the ZMQ sequence observer as
-  an extra named leg on the gateway's `CompositeObserver`.
+- Every production mempool mutation routes through `MempoolGateway`.
+  Chain confirmations use `remove_for_block`. Reorg reconsideration uses
+  `reconsider_disconnected` through the normal admission pipeline. No
+  production code outside the gateway takes the mempool write lock.
+- On connect, the gateway keeps valid children of mined parents inside
+  the odd-generation window. Those children resolve the parent's outputs
+  from chainstate thereafter. Mined conflicts remove descendants with
+  `MutationOutcome::Removed(RemovalReason::Conflict)`.
+- Estimator confirmation accounting runs inside the same mutation,
+  before removals publish. A bounded observer queue may drop an
+  optional record; it never drops the estimator update.
+- On disconnect, the gateway collects candidates in a bounded
+  topological queue and re-admits them through the admission pipeline
+  under the new branch context. Refused candidates carry typed reasons;
+  descendants of a refused parent stay withheld. The gateway rechecks
+  existing entries for invalidated lock points and spend assumptions,
+  and clears chain-sensitive recent-reject entries on generation change.
+- Publication completes before observer delivery. A slow or blocked
+  observer parks only its own drain path. It never holds the pool write
+  lock and never blocks a chain transition.
 
-### `MPL-02`: Atomic mutation records and sequence assignment
+### `MPL-02`: Mempool-owned orphans
 
-- Every mutating `Mempool` method returns `MutationResult`: an ordered
-  `Vec<MutationChange>`, one change per affected transaction, in commit
-  order. Each change carries the txid and a `MutationOutcome`:
-  `Accepted`, or `Removed(RemovalReason)`.
-- `RemovalReason` is one of `BlockInclusion`, `Conflict`, `Replaced`,
-  `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
-- `Mempool::sequence_number` advances exactly once per emitted change while
-  the write lock is held. A failed insert, a no-op removal, and a clear of
-  an empty pool assign nothing.
+- `crates/mempool/src/orphan.rs` is the sole orphan owner: one orphan
+  map, one missing-parent reverse index, and one bounded recent-reject
+  cache. Two sources for one txid is a defect, not a fallback.
+- `crates/node/src/tx_admission.rs` keeps peer-event routing only: inv
+  filtering, `getdata` body serving, per-peer eviction on disconnect,
+  and forwarding to the gateway. It stores no orphan state.
+- Orphan mutation is a canonical mempool lifecycle operation. The wake
+  path requeues exactly the children a newly available parent unblocks.
+  Count and weight quotas, oldest-first eviction, and expiry follow the
+  owner's declared bounds.
 
-### `MPL-03`: ZeroMQ sequence event payload mapping
+### `MPL-03`: Mutation records, ZMQ mapping, and relay source
 
+- Every mutating method returns `MutationResult`: an ordered
+  `Vec<MutationChange>` with one change per affected transaction, in
+  commit order. `RemovalReason` is one of `BlockInclusion`, `Conflict`,
+  `Replaced`, `Descendant`, `PolicyEviction`, `Expiry`, `Clear`,
+  `Reorg`. `Mempool::sequence_number` advances once per emitted change.
 - `SequenceEvent::Added(Txid, seq)` publishes label `A` (`0x41`);
-  `SequenceEvent::Removed(Txid, seq)` publishes label `R` (`0x52`).
-- Body frame for `A`/`R`: reversed txid (32 bytes) + label byte (1) +
-  mempool sequence as little-endian u64 (8) = 41 bytes. The transport's own
-  4-byte counter stays in its separate trailing frame.
-- `BlockInclusion` emits no `R`: the block `C` event covers it. Every other
-  removal reason emits `R`. Accepted changes emit `A`. One event per change,
-  in commit order.
+  `SequenceEvent::Removed(Txid, seq)` publishes label `R` (`0x52`). The
+  body frame is reversed txid (32 bytes) plus label byte (1) plus
+  little-endian sequence (8), 41 bytes. The transport counter stays in
+  its own trailing frame. `BlockInclusion` emits no `R`; every other
+  removal reason does. One event per change, in commit order.
+- Relay candidates come only from accepted-and-retained committed
+  entries. An entry the same commit evicted is never announced.
 
-### `MPL-04`: Generation-validated admission and chain-change fencing
+### `MPL-04`: Bounded observer delivery with gaps
 
-- `MempoolGateway` carries a `chain_generation` atomic counter. Even values
-  mean the chain is stable and admission is open; odd values mean a chain
-  change (connect, disconnect, or reorg) is in progress and admission is
-  closed. `stable_generation()` returns `Some(even)` when stable, `None`
-  when a chain change is active.
-- `begin_chain_change` takes the pool write lock, stores the next odd value,
-  and returns a `ChainChangeGuard` that owns the reservation. The guard has
-  no `Drop` that changes generation: dropping, unwinding, or an error leaves
-  the generation odd — admission stays closed. Only `finish` may
-  compare-exchange the odd value to the reserved even value, reopening
-  admission. One guard covers one externally coherent chain operation.
-- `admit_transaction` is the one atomic admission operation for RPC
-  `sendrawtransaction`. The caller captures `expected_generation` (an even
-  value from `stable_generation`) and `expected_sequence` (from a read
-  guard), then calls `admit_transaction` with both tokens. The gateway takes
-  the write lock once and checks, in order: (1) exact chain generation
-  equals the request and is even, (2) current pool sequence equals the
-  request, (3) exact transaction identity. A mismatch returns a transient
-  error (`GenerationChanged` or `MempoolChanged`) and the caller retries
-  with fresh facts — it never re-uses a captured even generation.
-- `reconsider_disconnected` re-admits transactions displaced by a reorg
-  through the same `commit` path with `AdmissionOrigin::Reorg`. It processes
-  candidates in order and withholds descendants of a refused or
-  immediately-evicted parent, so a reorg sweep cannot create orphaned
-  ancestry.
+- The publish queue is bounded. Overflow records sticky gap counters and
+  a reconcile signal instead of growing memory. Delivery runs outside
+  all domain locks; observer re-entry stays legal.
+- Canonical estimator accounting and relay accounting are exempt from
+  dropping. Optional consumers detect sequence gaps and reconcile from
+  gateway-owned snapshots. ZMQ high-water marks stay per endpoint
+  (`DEFAULT_ZMQ_HWM = 1_000`).
+
+### `MPL-05`: Generation fencing and estimator persistence
+
+- `MempoolGateway` carries the odd-even `chain_generation` fence.
+  `begin_chain_change` closes admission and mixed reads. Only `finish`
+  reopens them. A guard destructor never reopens the fence after an
+  error. `stable_generation()` returns the even value when stable and
+  `None` during a chain change.
+- The fee estimator owns separate versioned persisted state. Corruption,
+  a missing file, or an unknown version resets estimation to
+  insufficient-data status. The node starts; no default confidence and
+  no zero rate appear. A rejected estimator file stays in place until an
+  authorized rebuild.
+- `mempool.dat` encoding is unchanged for graph or owner refactoring.
+  Loaded entries re-enter through the normal admission pipeline. Only
+  real admission re-feeds the estimator.
 
 ## Proven by
 
-- `crates/mempool/src/gateway.rs` (inline tests):
-  `accepted_and_block_inclusion_events_arrive_in_commit_order`,
-  `remove_for_block_publishes_removals_with_origins`,
-  `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent`,
-  `failed_insert_and_noop_remove_publish_nothing`,
-  `replacement_tags_direct_conflicts_and_descendants`,
-  `observer_panic_does_not_roll_back_the_mutation`,
-  `insert_reports_accepted_then_policy_evictions`,
-  `sequence_base_matches_per_change_assignment`,
-  `stable_generation_reads_even_values`,
-  `reconsider_disconnected_admits_in_order_once_per_candidate`,
-  `reconsider_disconnected_withholds_descendants_of_a_refused_parent`.
-- `crates/node/src/apply.rs` (inline tests, `chain_generation_tests` module):
-  `stable_generation_is_even_before_and_after_connect`,
-  `stable_generation_is_even_after_disconnect`.
-- `crates/rpc/src/handlers/tx.rs` (inline tests):
-  admission retry rebuilds context after a transient rejection.
-- `crates/node/src/zmq_publisher.rs`:
-  `admission_publishes_one_a_frame_with_core_payload_bytes`,
-  `policy_eviction_publishes_r_frames_in_commit_order`,
-  `block_inclusion_suppresses_r_frames`,
-  `policy_eviction_publishes_r_frames_with_contiguous_sequences`,
-  `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`,
-  `sequence_event_payload_uses_core_hash_orientation_and_label`.
-- `crates/node/src/mining.rs`:
-  `attached_signal_forwards_sequence_wake_without_mempool_lock`,
-  `sequence_wake_falls_back_when_not_attached`.
-- `crates/node/tests/mining.rs`:
-  `publish_generation_from_does_not_take_mempool_lock`,
-  `concurrent_publish_generation_paths_do_not_deadlock`,
-  `long_poll_returns_quickly_on_mempool_sequence_wake`.
-- `crates/node/tests/tx_ingress_e2e.rs`:
-  `accepted_peer_tx_is_admitted_and_relayed_excluding_the_source`,
-  `below_min_relay_tx_is_rejected_recorded_and_never_relayed`
-  (peer tx over a real socket: dispatch filter, admission through the
-  observer-installed gateway, source-excluding relay).
+- `crates/node/tests/overhaul_mempool_lifecycle.rs` (planned): mined
+  parent keeps its valid child; mined conflict removes descendants;
+  reconsider refuses nonfinal candidates and withholds children;
+  blocked observers never hold the write lock; queue overflow produces
+  gap counters; estimator accounting precedes observer delivery; orphan
+  wake requeues exactly the unblocked children; recent-reject
+  invalidation on chain change.
+- `crates/mempool/tests/overhaul_admission_owner.rs` (planned): preview
+  purity and sequence accounting.
+- `crates/mempool/tests/overhaul_fee_history.rs` (planned): estimator
+  persistence restart and insufficient-data reset.
+- Existing suites keep their verdicts: `crates/mempool/src/gateway.rs`
+  inline tests (`remove_for_block` ordering, generation fencing),
+  `crates/node/tests/tx_ingress_e2e.rs`, `crates/node/tests/mining.rs`
+  long-poll wake tests, `crates/node/src/zmq_publisher.rs` payload
+  tests, `crates/node/tests/crash_recovery.rs`.
+
+## Vocabulary
+
+[MempoolGateway](../../CONCEPTS.md),
+[MutationEnvelope](../../CONCEPTS.md).
