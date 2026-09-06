@@ -2,14 +2,17 @@
 //! and `overhaul_ownership`.
 //!
 //! The validator enforces the five-layer one-way dependency model, the
-//! storage-engine ownership boundary, and backend feature-forwarding rules
-//! described in `docs/contracts/architecture.md`.
+//! storage-engine ownership boundary, the ZMQ surface ownership boundary,
+//! and backend feature-forwarding rules described in
+//! `docs/contracts/architecture.md`.
 
 use std::collections::BTreeMap;
 use std::process::Command;
 
 /// Storage engine crates. Only `bitcoin-rs-storage` may depend on these.
 pub(crate) const ENGINE_CRATES: [&str; 4] = ["fjall", "redb", "rust-rocksdb", "signet-libmdbx"];
+/// External ZMQ implementation dependency owned by the surface crate.
+pub(crate) const ZMQ_CRATE: &str = "zmq";
 
 /// Backend feature names whose forwarding above storage is forbidden.
 pub(crate) const BACKEND_FEATURES: [&str; 4] = ["rocksdb", "fjall", "redb", "mdbx"];
@@ -54,6 +57,8 @@ pub(crate) struct WorkspaceGraph {
     pub normal_deps: BTreeMap<String, Vec<String>>,
     /// Storage engine dependencies per crate.
     pub engine_deps: BTreeMap<String, Vec<String>>,
+    /// External ZMQ implementation dependencies per crate.
+    pub zmq_deps: BTreeMap<String, Vec<String>>,
     /// Cargo feature implies per crate.
     pub features: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     /// Number of workspace packages seen in the metadata.
@@ -116,6 +121,7 @@ impl WorkspaceGraph {
     pub(crate) fn from_json(metadata: &serde_json::Value) -> Self {
         let mut normal_deps = BTreeMap::new();
         let mut engine_deps = BTreeMap::new();
+        let mut zmq_deps = BTreeMap::new();
         let mut features = BTreeMap::new();
         let mut classified = 0_usize;
 
@@ -126,8 +132,12 @@ impl WorkspaceGraph {
 
             let mut edges = Vec::new();
             let mut engines = Vec::new();
+            let mut zmq = Vec::new();
             for dependency in package["dependencies"].as_array().expect("deps array") {
                 let dep_name = dependency["name"].as_str().expect("dep name").to_owned();
+                if dep_name == ZMQ_CRATE {
+                    zmq.push(dep_name.clone());
+                }
                 if ENGINE_CRATES.contains(&dep_name.as_str()) {
                     engines.push(dep_name);
                     continue;
@@ -141,6 +151,7 @@ impl WorkspaceGraph {
             }
             normal_deps.insert(name.clone(), edges);
             engine_deps.insert(name.clone(), engines);
+            zmq_deps.insert(name.clone(), zmq);
 
             let mut feature_map = BTreeMap::new();
             for (feature, implies) in package["features"].as_object().expect("features object") {
@@ -158,6 +169,7 @@ impl WorkspaceGraph {
         Self {
             normal_deps,
             engine_deps,
+            zmq_deps,
             features,
             classified,
         }
@@ -274,6 +286,48 @@ impl WorkspaceGraph {
                      the services-tier adapters"
                 ));
             }
+        }
+
+        // 5. The external ZMQ dependency is owned by the RPC surface crate.
+        //    Node may forward the surface feature but must not name the
+        //    external dependency directly.
+        for (name, dependencies) in &self.zmq_deps {
+            if name != RPC_CRATE && !dependencies.is_empty() {
+                violations.push(format!(
+                    "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
+                ));
+            }
+            checked_features += dependencies.len();
+        }
+        match self
+            .features
+            .get(RPC_CRATE)
+            .and_then(|feature_map| feature_map.get("zmq"))
+        {
+            Some(implies) if implies.iter().any(|entry| entry == "dep:zmq") => {
+                checked_features += 1;
+            }
+            _ => violations
+                .push("the RPC `zmq` feature must enable its owned external dependency".to_owned()),
+        }
+        let node_zmq = self
+            .features
+            .get(NODE_CRATE)
+            .and_then(|feature_map| feature_map.get("zmq"));
+        match node_zmq {
+            Some(implies) if implies.iter().any(|entry| entry == "bitcoin-rs-rpc/zmq") => {
+                checked_features += 1;
+            }
+            _ => violations
+                .push("the node `zmq` feature must forward the RPC surface feature".to_owned()),
+        }
+        match node_zmq {
+            Some(implies) if implies.iter().all(|entry| entry != "dep:zmq") => {
+                checked_features += 1;
+            }
+            _ => violations.push(
+                "the node `zmq` feature must not enable a direct external dependency".to_owned(),
+            ),
         }
 
         if violations.is_empty() {
