@@ -274,6 +274,30 @@ impl Shard {
         replace_record(&mut table, key, txid, record);
         Ok(())
     }
+
+    /// Reload seam for the persistence layer: inserts an already-validated
+    /// encoded record (the cache-refill path after eviction). The record
+    /// carries its own full-txid identity; the key is the derived
+    /// accelerator, never the identity.
+    pub(crate) fn insert_encoded_record(&self, key: UtxoKey, record: UtxoRecord) {
+        let mut table = self.inner.write();
+        replace_record(&mut table, key, record.txid(), record);
+    }
+
+    /// Eviction seam for the persistence layer: removes the resident record
+    /// with this exact full identity. The caller must have the record
+    /// durably in the backing store; the shard holds no other copy.
+    pub(crate) fn remove_resident_record(&self, key: UtxoKey, txid: Hash256) {
+        let mut table = self.inner.write();
+        remove_record(&mut table, key, txid);
+    }
+
+    /// Snapshot seam for the persistence layer: the record's canonical
+    /// encoded bytes by full identity, for before- and after-images.
+    pub(crate) fn record_bytes(&self, key: UtxoKey, txid: Hash256) -> Option<Vec<u8>> {
+        let table = self.inner.read();
+        find_record(&table, key, txid).map(|record| record.encoded_bytes().to_vec())
+    }
 }
 
 impl Default for Shard {

@@ -947,6 +947,7 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
         ColumnFamily::BlockBodies => TableDefinition::new("block_bodies"),
         ColumnFamily::UndoData => TableDefinition::new("undo_data"),
         ColumnFamily::ScriptLive => TableDefinition::new("script_live"),
+        ColumnFamily::CoinRecords => TableDefinition::new("coin_records"),
     }
 }
 
