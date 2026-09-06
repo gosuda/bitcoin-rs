@@ -3,10 +3,10 @@
 //! The `[reference]` table in `docs/api/core-compat.toml` (embedded as
 //! [`MANIFEST_TOML`]) must load into a full identity record: the released
 //! Core 31.1 product with its binary digests, the 31.99.0 kernel tree as
-//! oracle evidence only, both consumer identities, both corpus stop
-//! identities, and the formal tool pin. Every way a reference can quietly
-//! degrade into a label fails with the exact typed error, and the released
-//! product is never mistaken for the kernel tree.
+//! oracle evidence only, both corpus stop identities, and the formal tool
+//! pin. Every way a reference can quietly degrade into a label fails with the
+//! exact typed error, and the released product is never mistaken for the kernel
+//! tree.
 //!
 //! Variants are string edits of the embedded manifest, never restatements of
 //! it: if the manifest moves, the edits move with it or fail loudly here.
@@ -81,7 +81,7 @@ fn replace_once(haystack: &str, target: &str, replacement: &str) -> (usize, Stri
 
 /// The embedded manifest loads and carries every pinned identity in full:
 /// released product with source commit and both binary digests, the kernel
-/// tree as separate evidence, both consumers, both corpora, and the formal
+/// tree as separate evidence, both corpora, and the formal
 /// tool.
 #[test]
 fn the_embedded_manifest_loads_the_full_reference_set() {
@@ -107,26 +107,6 @@ fn the_embedded_manifest_loads_the_full_reference_set() {
     assert_eq!(set.kernel.kernel_sys_crate, "libbitcoinkernel-sys");
     assert_eq!(set.kernel.kernel_sys_crate_version, "0.3.0");
     assert!(!set.kernel.differential_harness);
-
-    assert_eq!(
-        set.consumers.mempool.backend_image,
-        "mempool/backend:v3.3.1"
-    );
-    assert_eq!(
-        set.consumers.mempool.frontend_image,
-        "mempool/frontend:v3.3.1"
-    );
-    assert_eq!(
-        set.consumers.mempool.tag_commit,
-        "9332d9db97bcc7beed079acc8f79aa21c9b12a3b"
-    );
-    assert_eq!(set.consumers.wallet.repository, "gosuda/bitcoin-wallet");
-    assert_eq!(set.consumers.wallet.repository_id, 885_198_873);
-    assert_eq!(
-        set.consumers.wallet.commit,
-        "2fe2af12c721bdf2cd4af7801146bda40fa15429"
-    );
-    assert_eq!(set.consumers.wallet.cli, "btcw");
 
     assert_eq!(set.corpora.len(), 2);
     let c150 = &set.corpora[0];
@@ -190,19 +170,6 @@ fn a_malformed_release_digest_is_digest_malformed() {
         Err(ReferenceError::DigestMalformed {
             field: "archive_sha256"
         })
-    );
-}
-
-/// A wallet named without its commit is not a consumer identity.
-#[test]
-fn a_wallet_without_its_commit_is_missing_consumer_identity() {
-    let edited = edit_manifest(
-        "commit = \"2fe2af12c721bdf2cd4af7801146bda40fa15429\"\n",
-        "",
-    );
-    assert_eq!(
-        load_reference_set(&edited),
-        Err(ReferenceError::MissingConsumerIdentity { consumer: "wallet" })
     );
 }
 

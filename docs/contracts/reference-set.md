@@ -19,8 +19,8 @@ A version label alone is never custody.
   machine-readable authorities.
 - `docs/contracts/reference-set.md` is a readable projection. It does not
   override the manifest files on conflict.
-- A version label alone is never custody. A reference must carry source,
-  binary, and consumer identities.
+- A version label alone is never custody. A reference must carry source and
+  binary identities.
 
 ### `REF-02`: Core 31.1 product reference
 
@@ -80,19 +80,6 @@ Each corpus archive uses the Core-framed format with a manifest digest
 produced at export time. A length-prefixed diagnostic file is not a product
 corpus.
 
-### `REF-05`: Consumer identities
-
-- mempool/mempool explorer stack, `[reference.consumers.mempool]`:
-  - `backend_image = "mempool/backend:v3.3.1"`
-  - `frontend_image = "mempool/frontend:v3.3.1"`
-  - `tag_commit = "9332d9db97bcc7beed079acc8f79aa21c9b12a3b"`
-  - Published: `2026-04-21T10:15:06Z`
-- Wallet consumer, `[reference.consumers.wallet]`:
-  - `repository = "gosuda/bitcoin-wallet"`
-  - `repository_id = 885198873`
-  - `commit = "2fe2af12c721bdf2cd4af7801146bda40fa15429"`
-  - `cli = "btcw"`: the CLI inside that repository, not a substitute consumer.
-
 ### `REF-06`: Formal tool identity
 
 - `name = "apalache-mc"` at `version = "0.62.2"`
@@ -110,10 +97,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
   floating or unpinned. The 1 TB budget applies only to that pinned default
   lane.
-- A reference with only a version label, a mismatched binary digest, or a
-  missing consumer identity is rejected with a typed `ReferenceError` variant
-  (`VersionLabelOnly`, `DigestMalformed`, `MissingConsumerIdentity`,
-  `IdentityConfusion`, `MissingCorpus`) from
+- A reference with only a version label or a mismatched binary digest is
+  rejected with a typed `ReferenceError` variant (`VersionLabelOnly`,
+  `DigestMalformed`, `IdentityConfusion`, `MissingCorpus`) from
   `crates/rpc/src/compat_manifest.rs`.
 - The 31.1 product reference and the 31.99.0 kernel tree are distinct. No
   test may claim product parity against the kernel tree identity.
@@ -124,9 +110,8 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 - `docs/api/core-compat.toml` and `crates/rpc/src/compat_manifest.rs`
   (existing): the machine-readable reference record.
-- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects
-  label-only, digest-mismatch, and missing-consumer identities, and pins
-  `corpus_custody()` honesty.
+- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
+  digest-mismatch identities, and pins `corpus_custody()` honesty.
 
 ## Vocabulary
 

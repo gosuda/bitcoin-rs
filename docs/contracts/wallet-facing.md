@@ -64,19 +64,6 @@ mixed-tip page.
 
 ### `WF-03`: Proof is a public-process consumer
 
-- The pinned external consumer is `gosuda/bitcoin-wallet`, GitHub
-  repository id 885198873, at commit
-  `2fe2af12c721bdf2cd4af7801146bda40fa15429`
-  (`reference-set.md` `REF-05`). This is the repository the blueprint
-  calls `btctxbuilder`; it was renamed, and its `btcw` CLI inside that
-  commit is the genuine consumer command interface. The in-tree HTTP
-  fixture is not a stand-in.
-- `bin/bitcoin-rs/tests/overhaul_btctxbuilder.rs` (planned) launches the
-  pinned `btcw` as a separate OS process and drives scan by scripthash,
-  UTXO and history lookup with pagination, fee estimation, build,
-  external signing, broadcast, confirmation, replacement, disconnect and
-  reorg observation, and rescan over public transports. The same harness
-  attempts a privileged import or datadir probe and requires it to fail.
 - `bin/bitcoin-rs/tests/wallet_facing.rs` (existing) lives in the binary
   package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. The package `[lib]`
   is process-input adapters (`bitcoin.conf`). The test depends on
@@ -101,9 +88,6 @@ mixed-tip page.
   `esplora_lives_only_under_the_api_prefix`,
   `api_is_the_public_electrs_directory`, and
   `esplora_is_the_mempool_backend_superset` (existing)
-- `bin/bitcoin-rs/tests/overhaul_btctxbuilder.rs` (planned): the pinned
-  `btcw` consumer over public transports, with the privileged-access
-  probe required to fail.
 
 ## Vocabulary
 

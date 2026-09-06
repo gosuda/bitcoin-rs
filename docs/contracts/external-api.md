@@ -154,7 +154,7 @@ Owners:
   work, and long-poll clients are bounded. A public explorer read cannot
   consume the CPU or memory quota needed to validate new blocks.
 
-### `API-09`: Esplora dialects and the pinned backend consumer
+### `API-09`: Esplora dialects
 
 - `/api` exposes the public Esplora (electrs) contract. `/esplora` is the
   versioned mempool-backend superset of that tree. Both project the same
@@ -164,15 +164,12 @@ Owners:
   to JSON-RPC, and unprefixed electrs paths 404 so JSON-RPC keeps `/`.
   `/api/v1` belongs to the external mempool application's own API, not to
   this node.
-- The pinned consumer is `mempool/backend:v3.3.1` with
-  `mempool/frontend:v3.3.1` (tag commit
-  `9332d9db97bcc7beed079acc8f79aa21c9b12a3b`). Beyond the public routes,
-  its backend dialect requires `GET /internal/mempool/txs`,
+- Beyond the public routes, the backend dialect requires `GET /internal/mempool/txs`,
   `GET /internal/block/{hash}/txs`, `POST /internal/txs`,
   `POST /internal/mempool/txs`, the batched outspends
   `POST /internal/txs/outspends/by-txid` and
   `POST /internal/txs/outspends/by-outpoint`, and address summaries.
-  Only routes a pinned consumer calls exist; each backend route is marked
+  Only declared backend-dialect routes exist; each backend route is marked
   as such.
 - History reads use bounded pages and cursors that preserve public
   Esplora cursor semantics. A richer internal revision token stays
@@ -209,12 +206,6 @@ The wallet-facing subset of this surface is owned by
   equality per public and backend route, unavailable states for lag,
   reorg, and disabled capability, broadcast reaching the gateway with the
   Esplora origin, and reorg mid-query.
-- `bin/bitcoin-rs/tests/overhaul_mempool_consumer.rs` (planned): the
-  unmodified `mempool/backend:v3.3.1` and `mempool/frontend:v3.3.1` stack
-  transcript across startup, catch-up, block, reorg, broadcast, fee, and
-  mining pages.
-- `bin/bitcoin-rs/tests/overhaul_btctxbuilder.rs` (planned): the pinned
-  `btcw` consumer over public transports (see `wallet-facing.md`).
 - Existing: `crates/rpc/tests/manifest_coverage.rs` tests
   `rpc_rows_and_the_live_registry_agree_both_ways`,
   `rest_rows_and_router_registrations_agree_both_ways`,

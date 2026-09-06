@@ -97,9 +97,7 @@ holds keys. Empty configuration keeps transport-only GBT assembly.
 ### Wallet-facing public surface
 What an external wallet is allowed to call: native Esplora HTTP at `/api` on
 the JSON-RPC listener, address and script lookups, `POST /tx`, and the
-wallet-free RPCs above. The named consumer is `gosuda/bitcoin-wallet`
-(`btcw`), repository id 885198873, commit
-`2fe2af12c721bdf2cd4af7801146bda40fa15429`, run as a separate process. It
+wallet-free RPCs above. The consumer runs as a separate process. It
 does not receive `NodeState`, `UtxoSet`, index, or datadir access. See
 `docs/contracts/wallet-facing.md`.
 
@@ -635,10 +633,8 @@ The identity record in `docs/api/core-compat.toml` `[reference]` and
 Core 31.1 (tag `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`,
 archive SHA256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`,
 bitcoind SHA256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`)
-and the 31.99.0 kernel tree via `bitcoinkernel 0.2.1`; plus the pinned
-consumers `mempool/backend:v3.3.1` and `mempool/frontend:v3.3.1` (commit
-`9332d9db97bcc7beed079acc8f79aa21c9b12a3b`) and `gosuda/bitcoin-wallet`. A
-version label, digest mismatch, or missing consumer identity is rejected.
+and the 31.99.0 kernel tree via `bitcoinkernel 0.2.1`. A
+version label or digest mismatch is rejected.
 `docs/contracts/reference-set.md` is a readable projection; the manifest files
 govern.
 
@@ -661,7 +657,7 @@ never inside `Next`. A bounded check is evidence for the abstraction, not a
 proof of the implementation.
 
 ### Blocked gate
-A gate whose required binary, corpus, consumer pin, digest, or hardware is
+A gate whose required binary, corpus, digest, or hardware is
 missing. It records the missing identity and stays `BLOCKED`; it never passes
 by skip and never becomes a false verdict.
 

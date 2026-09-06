@@ -32,8 +32,8 @@ precedence rule and the index of contract pages live in
   direction, storage engine confinement, the `chainstate` owner, node
   composition boundary (`ARCH-01`..`ARCH-07`).
 - [reference-set.md](contracts/reference-set.md): the readable projection of
-  the `ReferenceSet` identities (Core 31.1 release, 31.99.0 kernel tree, pinned
-  explorer and wallet consumers). The manifest files govern on conflict.
+  the `ReferenceSet` identities (Core 31.1 release, 31.99.0 kernel tree,
+  corpora and formal tool). The manifest files govern on conflict.
 - [validation-default.md](contracts/validation-default.md): strict-Rust native
   validation as the production default; `kernel` as opt-in oracle only.
 - [recovery.md](contracts/recovery.md): durable root, ordered commit,
@@ -153,7 +153,7 @@ without that evidence is a candidate, not a release.
 | G5 native promotion | `g19` plus full-chain comparator with zero unexplained mismatches; strict-Rust T16 before T17; binary, library, and image kernel-free |
 | G6 mempool and fees | One preview and commit engine for RPC, P2P, Esplora, package, and reorg admission; script verification outside the pool writer; four-attempt retry; stateful Core differential |
 | G7 P2P | Deterministic loopback handshake, download and serving ownership, discovery, fee-filter relay, compact blocks with full-block fallback, and selected v2 behavior |
-| G8 index, API, wallet | Independent index runtime with per-capability watermarks; Core and Esplora dialects from coherent views; unmodified `mempool/mempool` v3.3.1 and actual `btcw` pass over public transports |
+| G8 index, API, wallet | Independent index runtime with per-capability watermarks; Core and Esplora dialects from coherent views |
 | G9 mining | Coherent admitted-pool templates; nonmutating BIP22/BIP23 proposal; long-poll invalidation; external miner end to end with a second P2P node |
 | G10 attributed optimization | One treatment at a time with scalar reference, isolated and full-domain benches, correctness and portability gates; MERKLE-ALL matrix recorded per target |
 | G11 release and storage | Minimal, default, oracle, and optional-on profiles agree; default full-tip physical high-water at or below 1 TB with separate logical ledger; obsolete paths deleted with tests intact; evidence regenerated on the final hash |

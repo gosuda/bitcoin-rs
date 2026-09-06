@@ -25,9 +25,8 @@
 //! The `[reference]` table is checked, not just read: [`ReferenceSet`] (via
 //! [`load_reference_set`] and [`reference_set`]) loads it into typed
 //! identities and rejects a reference that is only a version label, carries a
-//! malformed digest, names a consumer without its identity, drops a required
-//! corpus, or confuses the released product with the 31.99.x kernel tree it
-//! links for oracle evidence.
+//! malformed digest, drops a required corpus, or confuses the released product
+//! with the 31.99.x kernel tree it links for oracle evidence.
 
 /// The manifest source, embedded so it cannot drift from the binary.
 pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
@@ -79,8 +78,8 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 ///
 /// `docs/contracts/reference-set.md` is a readable projection of this record;
 /// on conflict, `docs/api/core-compat.toml` as parsed here governs. A version
-/// label alone is never custody: every identity carries its digest or its
-/// consumer identity, and [`load_reference_set`] rejects anything less.
+/// label alone is never custody: every identity carries its digest, and
+/// [`load_reference_set`] rejects anything less.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReferenceSet {
     /// The released Bitcoin Core product: the behavioral reference.
@@ -88,8 +87,6 @@ pub struct ReferenceSet {
     /// The Core development tree the oracle lane links. Oracle evidence only:
     /// not a release, and never a policy pin.
     pub kernel: KernelIdentity,
-    /// External consumers whose public workflows are part of acceptance.
-    pub consumers: Consumers,
     /// Replay corpora with their pinned stop identities.
     pub corpora: Vec<CorpusPin>,
     /// The formal model checker pin.
@@ -165,40 +162,6 @@ pub struct KernelIdentity {
     pub differential_harness: bool,
 }
 
-/// External consumers pinned by full identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Consumers {
-    /// The unmodified mempool explorer stack.
-    pub mempool: MempoolConsumer,
-    /// The external wallet repository and its CLI.
-    pub wallet: WalletConsumer,
-}
-
-/// The mempool explorer consumer identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MempoolConsumer {
-    /// Backend image reference.
-    pub backend_image: String,
-    /// Frontend image reference.
-    pub frontend_image: String,
-    /// Tag commit the published images were built from.
-    pub tag_commit: String,
-}
-
-/// The wallet consumer identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WalletConsumer {
-    /// Repository in `owner/name` form.
-    pub repository: String,
-    /// GitHub repository id, stable across renames.
-    pub repository_id: u64,
-    /// Pinned commit inside the repository.
-    pub commit: String,
-    /// CLI the repository ships: part of the identity, never a substitute
-    /// for it.
-    pub cli: String,
-}
-
 /// A replay corpus pinned by its stop identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CorpusPin {
@@ -260,12 +223,6 @@ pub enum ReferenceError {
         /// The malformed digest field.
         field: &'static str,
     },
-    /// A consumer is named without the identity that makes the pin real.
-    #[error("the `{consumer}` consumer identity is incomplete")]
-    MissingConsumerIdentity {
-        /// The consumer whose identity is incomplete.
-        consumer: &'static str,
-    },
     /// The released product and the kernel development tree were confused.
     #[error(
         "the released product identity and the 31.99.x kernel tree identity were \
@@ -315,10 +272,6 @@ pub fn load_reference_set(manifest: &str) -> Result<ReferenceSet, ReferenceError
         differential_harness: required_bool(reference, "differential_harness")?,
     };
 
-    let consumers = Consumers {
-        mempool: mempool_consumer(reference)?,
-        wallet: wallet_consumer(reference)?,
-    };
     let corpora = corpora(reference)?;
     let formal_tool = formal_tool(reference)?;
 
@@ -327,7 +280,6 @@ pub fn load_reference_set(manifest: &str) -> Result<ReferenceSet, ReferenceError
     Ok(ReferenceSet {
         release,
         kernel,
-        consumers,
         corpora,
         formal_tool,
     })
@@ -336,56 +288,6 @@ pub fn load_reference_set(manifest: &str) -> Result<ReferenceSet, ReferenceError
 /// Loads the reference set from the manifest embedded at compile time.
 pub fn reference_set() -> Result<ReferenceSet, ReferenceError> {
     load_reference_set(MANIFEST_TOML)
-}
-
-fn mempool_consumer(reference: &toml::Table) -> Result<MempoolConsumer, ReferenceError> {
-    let consumer = "mempool";
-    let section = consumer_section(reference, consumer)?;
-    Ok(MempoolConsumer {
-        backend_image: consumer_str(section, consumer, "backend_image")?,
-        frontend_image: consumer_str(section, consumer, "frontend_image")?,
-        tag_commit: consumer_str(section, consumer, "tag_commit")?,
-    })
-}
-
-fn wallet_consumer(reference: &toml::Table) -> Result<WalletConsumer, ReferenceError> {
-    let consumer = "wallet";
-    let section = consumer_section(reference, consumer)?;
-    let repository_id = section
-        .get("repository_id")
-        .and_then(toml::Value::as_integer)
-        .and_then(|id| u64::try_from(id).ok())
-        .ok_or(ReferenceError::MissingConsumerIdentity { consumer })?;
-    Ok(WalletConsumer {
-        repository: consumer_str(section, consumer, "repository")?,
-        repository_id,
-        commit: consumer_str(section, consumer, "commit")?,
-        cli: consumer_str(section, consumer, "cli")?,
-    })
-}
-
-fn consumer_section<'a>(
-    reference: &'a toml::Table,
-    consumer: &'static str,
-) -> Result<&'a toml::Table, ReferenceError> {
-    reference
-        .get("consumers")
-        .and_then(toml::Value::as_table)
-        .and_then(|consumers| consumers.get(consumer))
-        .and_then(toml::Value::as_table)
-        .ok_or(ReferenceError::MissingConsumerIdentity { consumer })
-}
-
-fn consumer_str(
-    section: &toml::Table,
-    consumer: &'static str,
-    field: &'static str,
-) -> Result<String, ReferenceError> {
-    section
-        .get(field)
-        .and_then(toml::Value::as_str)
-        .map(str::to_owned)
-        .ok_or(ReferenceError::MissingConsumerIdentity { consumer })
 }
 
 fn corpora(reference: &toml::Table) -> Result<Vec<CorpusPin>, ReferenceError> {
