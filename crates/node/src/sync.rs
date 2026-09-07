@@ -254,9 +254,12 @@ impl BlockSync {
                 // transition would leave the gateway generation odd forever, so
                 // every later apply would be refused at the gate with the same
                 // "clean shutdown has begun" text and the node would wedge with
-                // no log line. The failing block was refused before its first
-                // write and the committed prefix is per-block atomic, so
-                // restoring the even generation is safe.
+                // no log line. The committed prefix is per-block atomic; the
+                // failing block was refused before any non-idempotent state for
+                // permanent (consensus) failures, and for transient (operational)
+                // failures the sync loop will retry and overwrite the
+                // idempotent pre-commit writes (undo / body / header tree). So
+                // restoring the even generation is safe for both dispositions.
                 let _ = transition.finish();
                 Err(error)
             }

@@ -667,7 +667,13 @@ fn begin_chain_transition<'a>(
 /// accept `&ChainChangeProof`, not independent `&TransitionLock` and
 /// `&ChainChangeGuard` arguments, so a call without an active odd generation
 /// fails to compile. Build one proof per single operation, whole window, or
-/// whole reorg. Finish only at the outer success boundary.
+/// whole reorg. Finish it once the operation reaches a consistent chainstate:
+/// a successful return, or a clean refusal whose failing block was refused
+/// before its first write and whose committed prefix is already in place. A
+/// drop on panic, crash, or a torn refusal leaves generation odd until an
+/// external recovery path resets it. Callers that own the retry loop (e.g.
+/// [`BlockSync`]) may finish on a clean refusal; convenience entry points
+/// finish on success and drop on refusal so the gateway stays fail-closed.
 pub(crate) struct ChainChangeProof<'a> {
     #[expect(
         dead_code,
@@ -1203,7 +1209,10 @@ impl Chainstate {
         }
     }
 
-    /// Admits a transition, connects `block`, and finishes on success.
+    /// Admits a transition, connects `block`, and finishes on success. On a
+    /// clean refusal the transition is dropped and the gateway generation stays
+    /// odd; callers that need to retry from a refusal should use
+    /// [`ChainTransition`] directly and finish only when the refusal is clean.
     ///
     /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
     /// not invoked. Production paths with followers must dispatch while the
@@ -1238,7 +1247,10 @@ impl Chainstate {
         apply_block_inner(self, block, Some(serialized), BlockProvenance::LocalReplay)
     }
 
-    /// Admits a transition, disconnects `block`, and finishes on success.
+    /// Admits a transition, disconnects `block`, and finishes on success. On a
+    /// clean refusal the transition is dropped and the gateway generation stays
+    /// odd; callers that need to retry from a refusal should use
+    /// [`ChainTransition`] directly.
     ///
     /// Persistence matches [`ChainTransition::disconnect`]. An admission
     /// failure is `DisconnectError::Refused`. Derived consumers are not
@@ -1258,6 +1270,10 @@ impl Chainstate {
     }
 
     /// Admits a transition, applies consecutive blocks, and finishes on success.
+    /// On a clean refusal the transition is dropped and the gateway generation
+    /// stays odd; callers that need to retry from a refusal should use
+    /// [`ChainTransition::connect_window`] directly and finish only when the
+    /// refusal is clean.
     ///
     /// Persistence matches [`ChainTransition::connect_window`].
     #[allow(clippy::result_large_err)]
