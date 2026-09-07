@@ -161,9 +161,8 @@ fn body_capability_height(
     active_tip: Option<NodeId>,
     demonstrated_tips: &[Hash256],
 ) -> Option<u32> {
-    // A session has no branch evidence until its first accepted header batch;
-    // keep the handshake capability during that discovery window. Once it has
-    // evidence, only a tip on the current active chain is usable for bodies.
+    // P2P-03 defines body capability; this helper applies that contract to
+    // the session's retained header evidence and the current active tip.
     if demonstrated_tips.is_empty() {
         return u32::try_from(peer.best_known_height).ok();
     }
@@ -1137,6 +1136,9 @@ impl BlockSync {
     }
 
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
+        // Invalidation can change the active tip without accepting headers;
+        // refresh demonstrated credit before applying the scalar height gate.
+        self.refresh_active_peer_credit();
         let mut header_peer: Option<SyncPeer> = None;
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         let sessions = self.peer_table.sessions();
