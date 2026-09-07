@@ -17,6 +17,8 @@ use parking_lot::RwLock;
 use crate::connection::{ConnectionId, PeerLease, PeerSource};
 use crate::peer_info::PeerInfo;
 
+const MAX_DEMONSTRATED_TIPS: usize = 1024;
+
 /// One live connection joined with its handshake metadata.
 #[derive(Clone, Debug)]
 pub struct PeerSession {
@@ -122,14 +124,23 @@ impl PeerTable {
         };
         if !entry.demonstrated_tips.contains(&tip_hash) {
             entry.demonstrated_tips.push(tip_hash);
+            if entry.demonstrated_tips.len() > MAX_DEMONSTRATED_TIPS {
+                entry.demonstrated_tips.remove(0);
+            }
         }
-        if let Some(height) = height
-            && height > info.best_known_height
-        {
-            info.best_known_height = height;
-            return true;
+        if let Some(height) = height {
+            Self::raise_announced_height(info, height);
         }
         true
+    }
+
+    fn raise_announced_height(info: &mut PeerInfo, height: i32) -> bool {
+        if height > info.best_known_height {
+            info.best_known_height = height;
+            true
+        } else {
+            false
+        }
     }
 
     /// Raises the active-chain credit for `source`. See P2P-03 in
@@ -141,12 +152,7 @@ impl PeerTable {
                 let Some(info) = entry.info.as_mut() else {
                     return false;
                 };
-                if height > info.best_known_height {
-                    info.best_known_height = height;
-                    true
-                } else {
-                    false
-                }
+                Self::raise_announced_height(info, height)
             }
             _ => false,
         }
