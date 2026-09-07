@@ -55,6 +55,7 @@ fn info(addr: SocketAddr) -> PeerInfo {
         services: 1,
         user_agent: String::from("/test/"),
         start_height: 0,
+        best_known_height: 0,
         conn_time: 0,
         addr_bind: addr,
         time_offset: 0,
