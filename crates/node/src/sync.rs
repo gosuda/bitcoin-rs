@@ -250,6 +250,14 @@ impl BlockSync {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
                     self.followers.connected(block, outcome);
                 }
+                // Finish on failure too (#618 follow-up): dropping the
+                // transition would leave the gateway generation odd forever, so
+                // every later apply would be refused at the gate with the same
+                // "clean shutdown has begun" text and the node would wedge with
+                // no log line. The failing block was refused before its first
+                // write and the committed prefix is per-block atomic, so
+                // restoring the even generation is safe.
+                let _ = transition.finish();
                 Err(error)
             }
         }
@@ -6039,27 +6047,32 @@ mod tests {
             sync.block_stager.lock().contains(&block3_hash),
             "tail block must be restored after the mid-batch failure"
         );
-        // G5: the mid-batch failure leaves the gateway generation odd
-        // (fail-closed). Admission stays closed; a retry cannot begin a new
-        // chain change until an external recovery path resets the generation.
+        // The mid-batch failure must hand the gateway generation back so the
+        // retry can begin a new transition. Leaving it odd refused every
+        // later apply at the gate with the same "clean shutdown has begun"
+        // text and no log line — the silent tip wedge observed live on the
+        // explorer node (issue #618 post-#657 field report). The committed
+        // prefix is per-block atomic and the failed block wrote nothing, so
+        // the even generation is safe to restore.
         assert!(
-            sync.handles.mempool_gateway.stable_generation().is_none(),
-            "generation must be odd after mid-batch failure (G5 fail-closed)"
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "generation must be even after mid-batch failure so the retry can begin"
         );
 
-        // Retry is blocked by the odd generation: begin_chain_change rejects
-        // an odd value, so the re-sent block 2 cannot apply.
+        // The retry actually applies: the re-sent block 2 (the fail-once
+        // body store succeeds on its second attempt) must advance the tip
+        // past the failed height instead of being refused at the gate.
         inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.tick();
 
-        assert_eq!(
-            applied_tip.load_full().map(|tip| tip.height),
-            Some(1),
-            "height must not advance while the generation is odd (G5 fail-closed)"
+        let retry_height = applied_tip.load_full().map(|tip| tip.height);
+        assert!(
+            retry_height.is_some_and(|height| height >= 2),
+            "retry must advance past the failed height, got {retry_height:?}"
         );
         assert!(
-            sync.handles.mempool_gateway.stable_generation().is_none(),
-            "generation must remain odd after the blocked retry"
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "generation must stay even after the retry"
         );
         assert!(fail_once_store.persisted_height(1));
         Ok(())
