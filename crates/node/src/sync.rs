@@ -22,7 +22,7 @@ use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-
+use crate::state::ApplyError;
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
 #[cfg(test)]
 pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
@@ -234,6 +234,12 @@ impl BlockSync {
                     applied: 0,
                     committed: Vec::new(),
                     source,
+                    // This is `Operational` because the block was never
+                    // validated: if the gateway is odd because a previous
+                    // transition was dropped on a torn `UtxoCommit`, the sync
+                    // worker will wedge until external recovery. With the
+                    // UtxoCommit finish-gate below, this case should only
+                    // happen during node shutdown or on an `Overflow`.
                     disposition: crate::apply::WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                 })?;
@@ -250,17 +256,17 @@ impl BlockSync {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
                     self.followers.connected(block, outcome);
                 }
-                // Finish on failure too (#618 follow-up): dropping the
-                // transition would leave the gateway generation odd forever, so
-                // every later apply would be refused at the gate with the same
-                // "clean shutdown has begun" text and the node would wedge with
-                // no log line. The committed prefix is per-block atomic; the
-                // failing block was refused before any non-idempotent state for
-                // permanent (consensus) failures, and for transient (operational)
-                // failures the sync loop will retry and overwrite the
-                // idempotent pre-commit writes (undo / body / header tree). So
-                // restoring the even generation is safe for both dispositions.
-                let _ = transition.finish();
+                // Finish on failure too (#618 follow-up), but NOT on UtxoCommit:
+                // `utxo.commit_borrowed_block` is not all-or-nothing across
+                // shards/runs, so a failing commit can tear the UTXO set. A
+                // retry against torn state can mis-spend inputs or trip BIP30.
+                // Every other failure (consensus, storage before the UTXO
+                // commit-of-record, shutdown) leaves the authoritative state
+                // untouched and only touches idempotent derived stores that a
+                // retry can overwrite.
+                if !matches!(error.source, ApplyError::UtxoCommit(_)) {
+                    let _ = transition.finish();
+                }
                 Err(error)
             }
         }

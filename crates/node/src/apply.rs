@@ -669,11 +669,14 @@ fn begin_chain_transition<'a>(
 /// fails to compile. Build one proof per single operation, whole window, or
 /// whole reorg. Finish it once the operation reaches a consistent chainstate:
 /// a successful return, or a clean refusal whose failing block was refused
-/// before its first write and whose committed prefix is already in place. A
-/// drop on panic, crash, or a torn refusal leaves generation odd until an
-/// external recovery path resets it. Callers that own the retry loop (e.g.
-/// [`BlockSync`]) may finish on a clean refusal; convenience entry points
-/// finish on success and drop on refusal so the gateway stays fail-closed.
+/// before the UTXO commit-of-record (`utxo.commit_borrowed_block`). Every
+/// failure before that point touches only idempotent derived state (undo,
+/// block body, header tree) that a retry overwrites; a `UtxoCommit` refusal
+/// may tear the UTXO set, so the transition must be dropped and left odd
+/// until an external recovery path resets it. Callers that own the retry loop
+/// (e.g. [`BlockSync`]) may finish on a clean refusal; convenience entry
+/// points finish on success and drop on refusal so the gateway stays
+/// fail-closed.
 pub(crate) struct ChainChangeProof<'a> {
     #[expect(
         dead_code,
@@ -1003,11 +1006,14 @@ pub struct Chainstate {
 /// [`Self::finish`] stores the reserved even mempool generation. It does not
 /// persist chainstate. Call it once the window attempt concludes on a
 /// consistent chainstate: a successful return, or a failure whose committed
-/// prefix is already in place and whose failing block was refused before its
-/// first write. The generation must return to even before the caller can
-/// retry, or `begin_transition` refuses with "clean shutdown has begun" and
-/// the node wedges (#618). A drop — crash, panic, or torn state — leaves
-/// generation odd until an external recovery path resets it.
+/// prefix is already in place and whose failing block was refused before the
+/// UTXO commit-of-record (`utxo.commit_borrowed_block`). Every failure before
+/// that point touches only idempotent derived state (undo, block body, header
+/// tree) that a retry overwrites. A `UtxoCommit` refusal is different: the
+/// per-shard commit is not all-or-nothing across runs, so the UTXO set may be
+/// torn; drop the transition and let an external recovery path (checkpoint or
+/// journal replay) reset the generation. A drop on crash, panic, or any torn
+/// state leaves generation odd until that recovery path runs.
 pub struct ChainTransition<'a> {
     chainstate: &'a Chainstate,
     proof: ChainChangeProof<'a>,
@@ -1097,8 +1103,10 @@ impl<'a> ChainTransition<'a> {
     /// Consumes the capability so it cannot be used after finish. Does not
     /// persist chainstate. Call it once the attempt has reached a consistent
     /// chainstate — a successful return, or a clean refusal whose committed
-    /// prefix is already in place. A drop on panic or torn state leaves
-    /// generation odd until an external recovery path resets it.
+    /// prefix is already in place and whose failing block was refused before
+    /// the UTXO commit-of-record (`utxo.commit_borrowed_block`). Drop on a
+    /// `UtxoCommit` refusal, panic, or torn state leaves generation odd until
+    /// an external recovery path resets it.
     pub fn finish(self) -> core::result::Result<(), ApplyError> {
         self.proof.finish()
     }
@@ -1157,9 +1165,11 @@ impl Chainstate {
     ///
     /// The returned capability is the only way to connect or disconnect. Finish
     /// it once the attempt reaches a consistent chainstate: a successful
-    /// return, or a clean refusal whose committed prefix is already in place.
-    /// A drop on panic or torn state leaves generation odd until an external
-    /// recovery path resets it.
+    /// return, or a clean refusal whose committed prefix is already in place
+    /// and whose failing block was refused before the UTXO commit-of-record
+    /// (`utxo.commit_borrowed_block`). Drop on a `UtxoCommit` refusal, panic,
+    /// or torn state leaves generation odd until an external recovery path
+    /// resets it.
     pub fn begin_transition(&self) -> core::result::Result<ChainTransition<'_>, ApplyError> {
         let lock = self.lock_transition()?;
         self.begin_transition_locked(lock)
