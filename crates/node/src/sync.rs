@@ -250,14 +250,12 @@ impl BlockSync {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
                     self.followers.connected(block, outcome);
                 }
-                // Finish on failure too (#618 follow-up): dropping the
-                // transition would leave the gateway generation odd forever, so
-                // every later apply would be refused at the gate with the same
-                // "clean shutdown has begun" text and the node would wedge with
-                // no log line. The failing block was refused before its first
-                // write and the committed prefix is per-block atomic, so
-                // restoring the even generation is safe.
-                let _ = transition.finish();
+                // Follow the persistence and retry contract documented on
+                // `ChainTransition`: a UTXO commit error may leave state torn,
+                // so keep admission closed by dropping the transition.
+                if !matches!(&error.source, crate::apply::ApplyError::UtxoCommit(_)) {
+                    let _ = transition.finish();
+                }
                 Err(error)
             }
         }
