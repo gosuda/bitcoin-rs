@@ -13,17 +13,11 @@ use std::time::{Duration, Instant};
 
 mod stage;
 
+use self::stage::{BlockStager, DrainedBlock, StagedBlock};
+use crate::state::ApplyError;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
-use bitcoin_rs_primitives::{Block, Hash256};
-use crossbeam_channel::Receiver;
-use hashbrown::HashMap;
-use parking_lot::Mutex;
-use smallvec::SmallVec;
-use crate::state::ApplyError;
-use self::stage::{BlockStager, DrainedBlock, StagedBlock};
 #[cfg(test)]
 pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
 pub use bitcoin_rs_p2p::download_window::SyncBudget;
@@ -37,6 +31,12 @@ use bitcoin_rs_p2p::download_window::{
     RECEIVED_BLOCK_TIMEOUT, STALLER_COOLDOWN, SyncPeer, SyncPeerSelection, configure_request_mode,
     statically_fanout_eligible,
 };
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
+use bitcoin_rs_primitives::{Block, Hash256};
+use crossbeam_channel::Receiver;
+use hashbrown::HashMap;
+use parking_lot::Mutex;
+use smallvec::SmallVec;
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
