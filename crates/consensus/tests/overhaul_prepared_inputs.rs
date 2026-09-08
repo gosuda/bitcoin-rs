@@ -160,7 +160,7 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
     assert_eq!(first, 0, "empty scripts count zero sigops");
 
     // Out-of-order prevout slices still resolve every input.
-    let mut reversed = prevouts.clone();
+    let mut reversed = prevouts;
     reversed.reverse();
     assert_eq!(
         total_sigop_cost(&tx, &reversed),
@@ -169,7 +169,7 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
     );
 }
 
-/// Legacy, SegWit v0, and Taproot sighash variants agree with the bitcoin
+/// Legacy, `SegWit` v0, and Taproot sighash variants agree with the bitcoin
 /// crate oracle: the shared per-transaction cache computes the same hashes
 /// the oracle computes per input.
 #[test]
