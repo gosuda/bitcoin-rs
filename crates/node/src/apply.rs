@@ -2462,13 +2462,6 @@ pub(crate) fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
     sink.equal && sink.offset == raw.len()
 }
 
-#[cfg_attr(
-    not(feature = "kernel"),
-    expect(
-        clippy::needless_pass_by_value,
-        reason = "the kernel build consumes preserved bytes through this shared signature"
-    )
-)]
 fn parse_block_for_apply(
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
@@ -3561,13 +3554,6 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
-#[cfg_attr(
-    not(feature = "kernel"),
-    expect(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "the kernel build borrows an owning block handle through this shared signature"
-    )
-)]
 #[allow(
     clippy::as_conversions,
     clippy::cast_sign_loss,
