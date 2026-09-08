@@ -622,12 +622,6 @@ impl MempoolGateway {
         if generation != request.expected_generation || !generation.is_multiple_of(2) {
             return Err(AdmitError::GenerationChanged);
         }
-        if request.prevouts.is_empty() {
-            // Coinbase transactions are never admitted via the gateway.
-            // Empty prevouts on a non-coinbase tx means the caller did not
-            // resolve inputs - reject rather than admit unverified.
-            return Err(AdmitError::Consensus);
-        }
         // Finality is evaluated at the height of the next block the
         // transaction could be mined in (`height + 1`), exactly Core's
         // `CheckFinalTxAtTip`. A u32 overflow on the next block height is
