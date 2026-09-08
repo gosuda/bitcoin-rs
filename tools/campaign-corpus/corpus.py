@@ -271,6 +271,16 @@ def iter_rest_blocks(
         yield advertised, payload
 
 
+def _write_all(stream: BinaryIO, data: bytes) -> None:
+    """Write all bytes, tolerating successful short writes."""
+    view = memoryview(data)
+    while view:
+        written = stream.write(view)
+        if written is None or written <= 0:
+            raise OSError("stream made no progress")
+        view = view[written:]
+
+
 class CorpusWriter:
     """One streaming archive/manifest codec over caller-owned binary files.
 
@@ -325,12 +335,12 @@ class CorpusWriter:
                 raise ContractError(f"{self._chosen.corpus_id} stop hash does not match the frozen tip")
         meta = FrameMeta(offset=self._offset, payload_length=len(payload))
         header = self._freeze.network_magic + struct.pack("<I", len(payload))
-        self._archive.write(header)
-        self._archive.write(payload)
+        _write_all(self._archive, header)
+        _write_all(self._archive, payload)
         self._archive_sha.update(header)
         self._archive_sha.update(payload)
         line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
-        self._entries.write(line)
+        _write_all(self._entries, line)
         self._entries_sha.update(line)
         self._count += 1
         self._offset += HEADER_LEN + len(payload)
@@ -364,8 +374,8 @@ class CorpusWriter:
         file_sha = hashlib.sha256()
         for chunk in _manifest_chunks(metadata, self._replay_entries(), manifest_sha):
             file_sha.update(chunk)
-            manifest.write(chunk)
-        manifest.write(b"\n")
+            _write_all(manifest, chunk)
+        _write_all(manifest, b"\n")
         file_sha.update(b"\n")
         return CorpusSummary(
             count=self._count,
