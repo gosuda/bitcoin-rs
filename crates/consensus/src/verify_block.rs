@@ -88,7 +88,19 @@ pub fn verify_block_rules_precomputed(
     if facts.merkle_mutated() {
         return Err(ConsensusError::MerkleMutation);
     }
-    if context.segwit_active && facts.has_witness() {
+    if facts.has_witness() {
+        // Core's `CheckWitnessMalleation`: witness data is only ever
+        // legitimate in a block whose coinbase commits to it under an active
+        // segwit deployment. With the deployment inactive there is no
+        // commitment to check, so any witness data is `unexpected-witness`
+        // malleation and the block is invalid regardless of what the
+        // commitment output contains.
+        if !context.segwit_active {
+            return Err(ConsensusError::Bip {
+                bip: "BIP141",
+                reason: "unexpected witness data without active segwit deployment".to_owned(),
+            });
+        }
         let wtxids = facts.wtxids().unwrap_or(&[]);
         debug_assert_eq!(
             wtxids.len(),
@@ -492,8 +504,26 @@ mod tests {
     }
 
     #[test]
-    fn contextual_rules_skip_bip141_commitment_before_segwit_activation() {
+    fn contextual_rules_reject_witness_data_before_segwit_activation() {
         let block = block_with_transactions(vec![coinbase_tx(), witness_spend_tx()]);
+
+        assert_eq!(
+            check_block_rules(
+                &block,
+                BlockRuleContext {
+                    segwit_active: false,
+                },
+            ),
+            Err(ConsensusError::Bip {
+                bip: "BIP141",
+                reason: "unexpected witness data without active segwit deployment".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn contextual_rules_accept_witness_free_block_before_segwit_activation() {
+        let block = block_with_transactions(vec![coinbase_tx(), spend_tx(3)]);
 
         assert_eq!(
             check_block_rules(
