@@ -146,10 +146,10 @@ pub const fn at_least_one(value: usize) -> usize {
 /// A peer selected for block-header or block-body synchronization.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncPeer {
-    /// Exact connection selected for synchronization.
-    pub source: crate::PeerSource,
+    /// Peer network address.
+    pub addr: SocketAddr,
     /// Best known block height the peer advertises.
-    pub start_height: i32,
+    pub best_known_height: i32,
 }
 
 /// The set of peers chosen for the current sync cycle.
@@ -207,7 +207,7 @@ pub fn configure_request_mode(
     let preferred_candidate = preferred_addr.and_then(|addr| {
         candidates
             .iter()
-            .find(|candidate| candidate.peer.source.addr == addr)
+            .find(|candidate| candidate.peer.addr == addr)
     });
     let preferred = preferred_candidate
         .filter(|candidate| !candidate.soft_blocked)

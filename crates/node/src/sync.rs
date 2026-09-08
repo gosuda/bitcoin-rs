@@ -16,7 +16,7 @@ mod stage;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerSource, PeerTable};
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256};
 use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
@@ -62,7 +62,6 @@ pub struct BlockSync {
     block_stager: Arc<Mutex<BlockStager>>,
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
-    accepted_headers: Mutex<Vec<AcceptedHeaderAnnouncement>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
 }
 
@@ -80,15 +79,6 @@ struct ExpectedApplyCache {
     applied_tip_height: u32,
     offset: usize,
     hashes: ExpectedBlockHashes,
-}
-
-/// Exact header evidence retained only while its active-chain body work remains.
-/// Selection retires it on connection loss, branch change, or apply completion.
-/// At most one active tip per live source survives selection; no fork history is kept.
-#[derive(Clone, Copy, Debug)]
-struct AcceptedHeaderAnnouncement {
-    source: PeerSource,
-    tip_hash: Hash256,
 }
 
 /// A contiguous run of expected apply hashes together with the chain/applied
@@ -136,6 +126,50 @@ fn is_peer_fault(error: &ChainError) -> bool {
     }
 }
 
+/// The one eligibility and ordering rule for demonstrated-best-known
+/// height peer selection (P2P-03): a peer is request-eligible when its
+/// demonstrated height exceeds `floor`, and among eligible peers the
+/// greatest height wins. First-wins on equal heights.
+fn sync_peer_candidate(peer: &PeerInfo, floor: u32) -> Option<SyncPeer> {
+    let height = u32::try_from(peer.best_known_height).ok()?;
+    (height > floor).then_some(SyncPeer {
+        addr: peer.addr,
+        best_known_height: peer.best_known_height,
+    })
+}
+
+/// Whether `candidate` outranks `current`: strictly greater demonstrated
+/// height; first-wins on ties.
+fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
+    candidate.best_known_height > current.best_known_height
+}
+
+fn active_demonstrated_height(
+    tree: &BlockTree,
+    active_tip: NodeId,
+    demonstrated_tips: &[Hash256],
+) -> Option<u32> {
+    demonstrated_tips
+        .iter()
+        .filter_map(|hash| tree.active_height_of(active_tip, *hash))
+        .max()
+}
+
+fn body_capability_height(
+    peer: &PeerInfo,
+    tree: &BlockTree,
+    active_tip: Option<NodeId>,
+    demonstrated_tips: &[Hash256],
+) -> Option<u32> {
+    // A session has no branch evidence until its first accepted header batch;
+    // keep the handshake capability during that discovery window. Once it has
+    // evidence, only a tip on the current active chain is usable for bodies.
+    if demonstrated_tips.is_empty() {
+        return u32::try_from(peer.best_known_height).ok();
+    }
+    active_tip.and_then(|tip| active_demonstrated_height(tree, tip, demonstrated_tips))
+}
+
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
@@ -156,7 +190,6 @@ impl BlockSync {
             block_stager: Arc::new(Mutex::new(BlockStager::new(default_sync_budget()))),
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
-            accepted_headers: Mutex::new(Vec::new()),
             known_sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -279,13 +312,17 @@ impl BlockSync {
         }
         self.reconcile_peer_sessions();
         let sync_peer_selection = self.sync_peer_selection(applied_height, now);
+        if sync_peer_selection.header_peer.is_none() {
+            tracing::trace!(applied_height, "block sync: no peer above current height");
+            return;
+        }
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
         for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
-            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
             let request_outcome = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
-                    peer.source,
+                    peer.addr,
                     peer_idx + 1 == request_peer_count,
                     peer_best_height,
                     chain_tip,
@@ -299,7 +336,7 @@ impl BlockSync {
             }
         }
         self.send_prefix_probes(&sync_peer_selection.probe_peers, now);
-        self.request_headers_from_best_peer(sync_peer_selection.header_peer);
+        self.request_headers_from_best_peer();
         if sent_getdata {
             self.record_pending_sync_metrics();
         }
@@ -342,7 +379,6 @@ impl BlockSync {
     #[allow(clippy::too_many_lines)]
     fn drain_inbound_headers(&self) {
         let receiver = self.inbound_headers_rx.lock();
-        let mut accepted_headers = self.accepted_headers.lock();
         let mut total_headers = 0_usize;
         while let Ok(InboundHeaders { headers, source }) = receiver.try_recv() {
             let batch_len = headers.len();
@@ -368,17 +404,24 @@ impl BlockSync {
             );
             match acceptance {
                 Ok(node_ids) => {
+                    let announced_tip = node_ids
+                        .last()
+                        .and_then(|id| tree.node(*id).ok())
+                        .map(|node| node.hash);
+                    let active_height =
+                        tree.tip()
+                            .zip(announced_tip)
+                            .and_then(|(active_tip, hash)| {
+                                tree.active_height_of(active_tip.tip_id, hash)
+                                    .and_then(|height| i32::try_from(height).ok())
+                            });
                     self.handles.assume_valid_gate.evaluate(&tree);
-                    if let (Some(source), Some(tip_hash)) = (
-                        source,
-                        node_ids
-                            .last()
-                            .and_then(|node_id| tree.node(*node_id).ok())
-                            .map(|node| node.hash),
-                    ) {
-                        accepted_headers.push(AcceptedHeaderAnnouncement { source, tip_hash });
-                    }
                     drop(tree);
+                    if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
+                        self.peer_table
+                            .note_announced_tip(source, tip_hash, active_height);
+                    }
+                    self.refresh_active_peer_credit();
                     tracing::debug!(
                         accepted = node_ids.len(),
                         received = batch_len,
@@ -425,6 +468,33 @@ impl BlockSync {
         }
     }
 
+    fn refresh_active_peer_credit(&self) {
+        let sessions = self.peer_table.sessions();
+        let updates: Vec<(PeerSource, i32)> = {
+            let tree = self.handles.block_tree.read();
+            let Some(active_tip) = tree.tip() else {
+                return;
+            };
+            sessions
+                .into_iter()
+                .filter_map(|session| {
+                    let info = session.info?;
+                    let height = active_demonstrated_height(
+                        &tree,
+                        active_tip.tip_id,
+                        &session.demonstrated_tips,
+                    )?;
+                    let height = i32::try_from(height).ok()?;
+                    (height > info.best_known_height)
+                        .then_some((session.lease.source(session.addr), height))
+                })
+                .collect()
+        };
+        for (source, height) in updates {
+            self.peer_table.note_announced_height(source, height);
+        }
+    }
+
     /// Requests the next header batch from the highest peer above the applied
     /// tip, using a locator taken after `drain_inbound_headers` so it reflects
     /// headers accepted this tick.
@@ -434,15 +504,24 @@ impl BlockSync {
     /// several sync tests assert. Ordering carries no protocol meaning, but
     /// both messages leave in the same tick either way, so there is no
     /// throughput reason to prefer the other order.
-    fn request_headers_from_best_peer(&self, header_peer: Option<SyncPeer>) {
+    fn request_headers_from_best_peer(&self) {
         let applied_tip = self.handles.applied_tip.load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let chain_tip = self.handles.chain_tip.load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
+        let mut header_peer: Option<SyncPeer> = None;
+        for peer in self.peer_table.infos() {
+            let Some(candidate) = sync_peer_candidate(&peer, applied_height) else {
+                continue;
+            };
+            if header_peer.is_none_or(|current| outranks(current, candidate)) {
+                header_peer = Some(candidate);
+            }
+        }
         if let Some(peer) = header_peer {
-            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
             if peer_best_height > header_height {
-                self.send_getheaders(peer.source, header_height, peer.start_height);
+                self.send_getheaders(peer.addr, header_height, peer.best_known_height);
             }
         }
     }
@@ -1057,101 +1136,56 @@ impl BlockSync {
         Some(tree.node(node_id).ok()?.hash)
     }
 
-    #[allow(clippy::too_many_lines)]
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
+        let mut header_peer: Option<SyncPeer> = None;
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        let ready_peers = self.peer_table.ready_peers();
-        for ready in &ready_peers {
-            let peer = &ready.info;
-            // The handshake height is only the baseline for peers that have
-            // not proved a newer active tip for unfinished body work.
-            if u32::try_from(peer.start_height)
-                .ok()
-                .is_none_or(|height| height <= our_height)
-            {
-                continue;
-            }
-            let sync_peer = SyncPeer {
-                source: ready.source,
-                start_height: peer.start_height,
-            };
-            candidates.push(FanoutCandidate {
-                peer: sync_peer,
-                fanout_eligible: statically_fanout_eligible(peer),
-                soft_blocked: false,
-            });
-        }
-
-        // Retain only unfinished work on the final active chain. Filtering here
-        // allows a later batch in the same drain to make a losing fork active.
-        let mut accepted_headers = self.accepted_headers.lock();
+        let sessions = self.peer_table.sessions();
         let tree = self.handles.block_tree.read();
-        accepted_headers.retain(|announcement| {
-            ready_peers
-                .iter()
-                .any(|peer| peer.source == announcement.source)
-                && self.peer_table.is_current(announcement.source)
-                && tree
-                    .tip_id()
-                    .and_then(|tip| tree.active_height_of(tip, announcement.tip_hash))
-                    .is_some_and(|height| height > our_height)
-        });
-        // The highest active hash subsumes earlier announcements by this source.
-        accepted_headers.sort_by_key(|announcement| {
-            std::cmp::Reverse(tree.height_of_hash(announcement.tip_hash).unwrap_or(0))
-        });
-        let mut seen = Vec::new();
-        accepted_headers.retain(|announcement| {
-            if seen.contains(&announcement.source) {
-                return false;
+        let active_tip = tree.tip_id();
+        for session in sessions {
+            let Some(peer) = session.info else {
+                continue;
+            };
+            // Height clause of the fan-out eligibility predicate (KTD6) and
+            // the pre-existing candidate filter: the peer's known chain must
+            // reach past our applied tip, i.e., cover the window front being
+            // requested. Like Core's `pindexBestKnownBlock`, eligibility reads
+            // the demonstrated best-known height (handshake snapshot, raised
+            // as the peer hands us accepted headers) rather than the
+            // handshake value alone — a long-lived at-tip peer would
+            // otherwise become ineligible for every newly announced block
+            // (#617). Per-request truncation by `peer_best_height` still
+            // bounds the damage of a stale value.
+            let Some(sync_peer) = sync_peer_candidate(&peer, our_height) else {
+                continue;
+            };
+            if header_peer.is_none_or(|current| outranks(current, sync_peer)) {
+                header_peer = Some(sync_peer);
             }
-            seen.push(announcement.source);
-            true
-        });
-        for announcement in accepted_headers.iter() {
-            let Some(ready) = ready_peers
-                .iter()
-                .find(|peer| peer.source == announcement.source)
+            let Some(active_height) =
+                body_capability_height(&peer, &tree, active_tip, &session.demonstrated_tips)
             else {
                 continue;
             };
-            let height = tree.height_of_hash(announcement.tip_hash).unwrap_or(0);
-            let sync_peer = SyncPeer {
-                source: announcement.source,
-                start_height: i32::try_from(height).unwrap_or(i32::MAX),
+            if active_height <= our_height {
+                continue;
+            }
+            let body_peer = SyncPeer {
+                addr: peer.addr,
+                best_known_height: i32::try_from(active_height).unwrap_or(i32::MAX),
             };
-            if let Some(candidate) = candidates
-                .iter_mut()
-                .find(|candidate| candidate.peer.source == sync_peer.source)
-            {
-                if candidate.peer.start_height < sync_peer.start_height {
-                    candidate.peer = sync_peer;
-                }
-            } else {
-                candidates.push(FanoutCandidate {
-                    peer: sync_peer,
-                    fanout_eligible: statically_fanout_eligible(&ready.info),
-                    soft_blocked: false,
-                });
-            }
+            candidates.push(FanoutCandidate {
+                peer: body_peer,
+                fanout_eligible: statically_fanout_eligible(&peer),
+                soft_blocked: false,
+            });
         }
-        drop(accepted_headers);
         drop(tree);
-
-        let header_peer = candidates.iter().fold(None, |current, candidate| {
-            if current.is_none_or(|peer: SyncPeer| peer.start_height < candidate.peer.start_height)
-            {
-                Some(candidate.peer)
-            } else {
-                current
-            }
-        });
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut window = self.download_window.lock();
             for candidate in &mut candidates {
-                candidate.soft_blocked = window
-                    .peer_has_expired_pending(candidate.peer.source.addr, now)
-                    || window.peer_in_staller_cooldown(candidate.peer.source.addr, now);
+                candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.addr, now)
+                    || window.peer_in_staller_cooldown(candidate.peer.addr, now);
                 candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
             }
             let cold_preferred = configure_request_mode(&mut window, &candidates, now);
@@ -1182,17 +1216,16 @@ impl BlockSync {
             // cooldown) fills the window; a soft-blocked peer serves only as
             // the last resort when no alternative exists. Without the
             // preference, a disconnected staller that reconnects with an
-            // inflated start_height would out-sort every honest peer and
-            // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
+            // inflated demonstrated best-known height would out-sort every
+            // honest peer and re-acquire the window front (RE-ADV-2 /
+            // first-audit ADV-2).
             let mut preferred: Option<SyncPeer> = None;
             for candidate in candidates
                 .iter()
                 .filter(|candidate| !candidate.soft_blocked)
             {
                 // First-wins on equal heights, matching the header-peer fold.
-                if preferred
-                    .is_none_or(|current| current.start_height < candidate.peer.start_height)
-                {
+                if preferred.is_none_or(|current| outranks(current, candidate.peer)) {
                     preferred = Some(candidate.peer);
                 }
             }
@@ -1203,7 +1236,7 @@ impl BlockSync {
                 .collect()
         };
         if request_peers.len() > 1 {
-            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.best_known_height));
         }
         request_peers.truncate(request_peer_limit);
         SyncPeerSelection {
@@ -1223,13 +1256,14 @@ impl BlockSync {
             return;
         };
         let candidates = probe_peers.iter().filter(|peer| {
-            peer.source.addr != owner
-                && u32::try_from(peer.start_height).is_ok_and(|height| height >= required_height)
+            peer.addr != owner
+                && u32::try_from(peer.best_known_height)
+                    .is_ok_and(|height| height >= required_height)
         });
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
-            let peer_addr = peer.source.addr;
-            let Some(tx) = self.peer_table.lease_source(peer.source) else {
+            let peer_addr = peer.addr;
+            let Some(tx) = self.peer_table.lease(peer_addr) else {
                 continue;
             };
             let inventory = hashes
@@ -1261,7 +1295,7 @@ impl BlockSync {
 
     fn send_getdata_for_pending_blocks(
         &self,
-        source: PeerSource,
+        sync_peer_addr: SocketAddr,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         chain_tip: &TipSnapshot,
@@ -1285,7 +1319,7 @@ impl BlockSync {
 
         let mut window = self.download_window.lock();
         let request = window.next_peer_request(
-            source.addr,
+            sync_peer_addr,
             allow_expired_retry_from_peer,
             chain_tip,
             request_start_height,
@@ -1321,7 +1355,7 @@ impl BlockSync {
         }
         let msg = Message::GetData(inventory);
 
-        let tx = self.peer_table.lease_source(source);
+        let tx = self.peer_table.lease(request.peer_addr());
         let Some(tx) = tx else {
             tracing::trace!(
                 peer_addr = %request.peer_addr(),
@@ -1329,6 +1363,7 @@ impl BlockSync {
             );
             return GetdataRequestOutcome::default();
         };
+        let source = tx.source(request.peer_addr());
         let mut send_ok = false;
         let mut has_request_capacity = false;
         let still_current = self.peer_table.with_current(source, || {
@@ -1370,8 +1405,7 @@ impl BlockSync {
         }
     }
 
-    fn send_getheaders(&self, source: PeerSource, our_height: u32, target_height: i32) {
-        let sync_peer_addr = source.addr;
+    fn send_getheaders(&self, sync_peer_addr: SocketAddr, our_height: u32, target_height: i32) {
         let locator = self.build_locator();
         let Some(locator_tip_hash) = locator.first().copied() else {
             return;
@@ -1396,7 +1430,7 @@ impl BlockSync {
             locator_hashes,
             bitcoin::BlockHash::all_zeros(),
         ));
-        let tx = self.peer_table.lease_source(source);
+        let tx = self.peer_table.lease(sync_peer_addr);
         let Some(tx) = tx else {
             tracing::warn!(
                 peer_addr = %sync_peer_addr,
@@ -1484,15 +1518,29 @@ impl BlockSync {
         front_height: u32,
         now: Instant,
     ) -> Option<SocketAddr> {
+        let sessions = self.peer_table.sessions();
+        let tree = self.handles.block_tree.read();
+        let active_tip = self.handles.chain_tip.load_full()?.tip_id;
+        let active_front_height = tree.active_height_of(active_tip, front_hash)?;
         let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
-        for peer in self.peer_table.infos() {
+        for session in sessions {
+            let Some(peer) = session.info else {
+                continue;
+            };
             if peer.addr != owner
                 && statically_fanout_eligible(&peer)
-                && u32::try_from(peer.start_height).is_ok_and(|height| height >= front_height)
+                && body_capability_height(
+                    &peer,
+                    &tree,
+                    Some(active_tip),
+                    &session.demonstrated_tips,
+                )
+                .is_some_and(|height| height >= active_front_height)
             {
                 candidates.push(peer.addr);
             }
         }
+        drop(tree);
         let candidates: SmallVec<[SocketAddr; 8]> = {
             let window = self.download_window.lock();
             candidates
@@ -1752,6 +1800,289 @@ mod tests {
     }
 
     #[test]
+    fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
+        // Regression test for the #617 shape: once a node has caught up, no
+        // connected peer has a handshake-time start_height above its applied
+        // height — every peer connected while the node was at or below the
+        // tip. When a new header then extends the tip (a sendheaders
+        // announcement), the announcing peer demonstrably has the block, so
+        // its demonstrated best-known height must keep it request-eligible
+        // and tick must fetch the missing body instead of skipping every
+        // peer for a stale handshake snapshot.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        for height in 1_u32..=2 {
+            let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+        }
+        // Applied frontier at height 2; header 3 arrives later, below.
+        let applied = {
+            let node = tree.node(tip_id)?;
+            TipSnapshot {
+                tip_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+        let announced_header = test_header(BlockHash::from(tree.node(tip_id)?.hash), 3);
+        let expected = announced_header.compute_hash();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::for_test(
+            handles,
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // The peer's handshake height equals the applied height: it connected
+        // while the node was at the tip, before the new block existed.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(addr, 2));
+
+        // The peer announces the new tip header; drain accepts it and must
+        // record the demonstrated height on the peer.
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![announced_header],
+            source: Some(current_source(&peers, addr)),
+        })?;
+
+        sync.tick();
+
+        let first = rx
+            .try_recv()
+            .map_err(|_| std::io::Error::other("no getdata sent for the new tip header"))?;
+        let Message::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            inventory.len(),
+            1,
+            "only the unapplied new block is requested"
+        );
+        match &inventory[0] {
+            Inventory::WitnessBlock(hash) => {
+                assert_eq!(
+                    Hash256::from_le_bytes(hash.as_byte_array()),
+                    expected.into()
+                );
+            }
+            _ => return Err(std::io::Error::other("expected witness block inventory").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md) — the reorg
+        // edge of the branch-aware credit. A winning fork announced at tip
+        // re-selects the tree's best chain during acceptance, and the
+        // announcing peer must earn credit against that POST-reselection
+        // chain. A filter that credited only headers on the pre-insert tip
+        // would leave the peer ineligible and no fork body would be fetched.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let losing1 = test_header(genesis.compute_hash(), 1);
+        let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+        let losing2 = test_header(losing1.compute_hash(), 2);
+        let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+        let applied = {
+            let node = tree.node(losing2_id)?;
+            TipSnapshot {
+                tip_id: losing2_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+
+        let winning1 = test_header(genesis.compute_hash(), 101);
+        let winning2 = test_header(winning1.compute_hash(), 102);
+        let winning3 = test_header(winning2.compute_hash(), 103);
+        let expected: Vec<Hash256> = [&winning1, &winning2, &winning3]
+            .iter()
+            .map(|header| header.compute_hash().into())
+            .collect();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // The peer's handshake height equals the applied height: it
+        // connected at the losing tip, and only the fork announcement it
+        // delivers demonstrates anything beyond that.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(addr, 2));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![winning1, winning2, winning3],
+            source: Some(current_source(&peers, addr)),
+        })?;
+
+        sync.tick();
+
+        // The winning fork's actual tip height is 3 (the fixture's 101..103
+        // only seed merkle/time bytes; tree heights derive from parents).
+        assert_eq!(
+            peers.infos()[0].best_known_height,
+            3,
+            "the announced winning fork must earn credit on the reselected best chain"
+        );
+        let first = rx
+            .try_recv()
+            .map_err(|_| std::io::Error::other("no getdata sent for the announced fork"))?;
+        let Message::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        let requested = inventory
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            requested, expected,
+            "the reorg connect set must be requested after the common ancestor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md). Peer A's
+        // accepted fork is initially losing, peer B later extends it so the
+        // fork wins, and B then disconnects. A must retain the accepted tip
+        // evidence and remain eligible for the bodies it demonstrated.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let losing1 = test_header(genesis.compute_hash(), 1);
+        let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+        let losing2 = test_header(losing1.compute_hash(), 2);
+        tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+        let genesis_node = tree.node(genesis_id)?;
+        let applied = TipSnapshot {
+            tip_id: genesis_id,
+            height: genesis_node.height,
+            chainwork: genesis_node.chainwork,
+            hash: genesis_node.hash,
+        };
+
+        let fork1 = test_header(genesis.compute_hash(), 101);
+        let fork2 = test_header(fork1.compute_hash(), 102);
+        let fork3 = test_header(fork2.compute_hash(), 103);
+        let expected = [fork1, fork2, fork3];
+        let expected_hashes: Vec<Hash256> = expected
+            .iter()
+            .map(|header| header.compute_hash().into())
+            .collect();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+
+        let peer_a = test_addr(8333, 0)?;
+        let peer_b = test_addr(8333, 1)?;
+        let rx_a = connect_peer(&peers, synthetic_peer(peer_a, 0));
+        let _rx_b = connect_peer(&peers, synthetic_peer(peer_b, 0));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork1, fork2],
+            source: Some(current_source(&peers, peer_a)),
+        })?;
+        sync.drain_inbound_headers();
+        assert_eq!(
+            peers
+                .infos()
+                .into_iter()
+                .find(|info| info.addr == peer_a)
+                .ok_or("peer A info missing")?
+                .best_known_height,
+            0,
+            "a losing fork must not receive scalar credit yet"
+        );
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork3],
+            source: Some(current_source(&peers, peer_b)),
+        })?;
+        sync.drain_inbound_headers();
+        assert_eq!(
+            peers
+                .infos()
+                .into_iter()
+                .find(|info| info.addr == peer_a)
+                .ok_or("peer A info missing after reorg")?
+                .best_known_height,
+            2,
+            "peer A's retained fork tip must be credited after the fork wins"
+        );
+        assert!(peers.disconnect_source(current_source(&peers, peer_b)));
+
+        sync.tick();
+
+        let requested = next_getdata(&rx_a)?
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            requested,
+            expected_hashes[..2],
+            "the surviving peer must serve the bodies it demonstrated"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = genesis_header();
         let mut tree = BlockTree::new();
@@ -1812,14 +2143,8 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("missing losing applied tip"))?;
 
         assert!(
-            sync.send_getdata_for_pending_blocks(
-                current_source(&peers, peer),
-                false,
-                100,
-                &chain_tip,
-                &applied_tip
-            )
-            .sent
+            sync.send_getdata_for_pending_blocks(peer, false, 100, &chain_tip, &applied_tip)
+                .sent
         );
         assert_eq!(
             witness_block_inventory(next_getdata(&rx)?)?,
@@ -1901,7 +2226,6 @@ mod tests {
         let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
         let (tx, rx) = unbounded::<Message>();
         peers.register(peer, PeerLease::new(tx));
-        let source = current_source(&peers, peer);
         let applied = applied_tip
             .load_full()
             .ok_or_else(|| std::io::Error::other("missing genesis applied tip"))?;
@@ -1910,7 +2234,7 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("missing losing chain tip"))?;
 
         assert!(
-            sync.send_getdata_for_pending_blocks(source, false, 100, &initial, &applied)
+            sync.send_getdata_for_pending_blocks(peer, false, 100, &initial, &applied)
                 .sent
         );
         assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
@@ -1920,7 +2244,7 @@ mod tests {
             .load_full()
             .ok_or_else(|| std::io::Error::other("missing winning chain tip"))?;
         assert!(
-            sync.send_getdata_for_pending_blocks(source, false, 100, &retargeted, &applied)
+            sync.send_getdata_for_pending_blocks(peer, false, 100, &retargeted, &applied)
                 .sent
         );
         let requested = witness_block_inventory(next_getdata(&rx)?)?;
@@ -2704,227 +3028,6 @@ mod tests {
     }
 
     #[test]
-    fn accepted_at_tip_header_rearms_body_fetch_for_stale_handshake_peer()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let HeaderSyncFixture {
-            sync,
-            inbound_headers_tx,
-            peers,
-            ..
-        } = header_sync_with_genesis()?;
-        install_budget(
-            &sync,
-            super::SyncBudget {
-                max_pending_blocks: 1,
-                getdata_batch_limit: 1,
-                ..super::default_sync_budget()
-            },
-        );
-        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-        let rx = connect_peer(&peers, synthetic_peer(peer_addr, 0));
-        let header = test_header(genesis_header().compute_hash(), 1);
-        let expected_hash =
-            BlockHash::from(Hash256::from_le_bytes(header.compute_hash().as_bytes()));
-
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![header],
-            source: Some(current_source(&peers, peer_addr)),
-        })?;
-        sync.tick();
-
-        let Message::GetData(inventory) = rx.try_recv()? else {
-            return Err(
-                std::io::Error::other("accepted at-tip header must rearm body fetch").into(),
-            );
-        };
-        assert_eq!(witness_block_inventory(inventory)?, vec![expected_hash]);
-        assert!(
-            rx.try_recv().is_err(),
-            "accepted tip must not trigger redundant header requests"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn accepted_headers_complete_across_single_slot_ticks() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let HeaderSyncFixture {
-            sync,
-            inbound_headers_tx,
-            inbound_blocks_tx,
-            peers,
-            ..
-        } = header_sync_with_genesis()?;
-        install_budget(
-            &sync,
-            super::SyncBudget {
-                max_pending_blocks: 1,
-                getdata_batch_limit: 1,
-                ..super::default_sync_budget()
-            },
-        );
-        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
-        let rx = connect_peer(&peers, synthetic_peer(addr, 0));
-        let first = mined_block_with_prev_hash(
-            genesis_header().compute_hash(),
-            1,
-            vec![coinbase_transaction(1)],
-        );
-        let second =
-            mined_block_with_prev_hash(first.block_hash(), 2, vec![coinbase_transaction(2)]);
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![first.header, second.header],
-            source: Some(current_source(&peers, addr)),
-        })?;
-        sync.tick();
-        assert_eq!(
-            witness_block_inventory(next_getdata(&rx)?)?,
-            vec![first.block_hash()]
-        );
-        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(first))?;
-        sync.tick();
-        assert_eq!(
-            sync.handles.applied_tip.load_full().map(|tip| tip.height),
-            Some(1)
-        );
-        assert_eq!(
-            witness_block_inventory(next_getdata(&rx)?)?,
-            vec![second.block_hash()]
-        );
-        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(second))?;
-        sync.tick();
-        assert_eq!(
-            sync.handles.applied_tip.load_full().map(|tip| tip.height),
-            Some(2)
-        );
-        assert!(rx.try_recv().is_err());
-        assert!(sync.accepted_headers.lock().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn accepted_header_candidate_cannot_send_to_replacement()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let HeaderSyncFixture {
-            sync,
-            inbound_headers_tx,
-            peers,
-            ..
-        } = header_sync_with_genesis()?;
-        install_budget(&sync, super::default_sync_budget());
-        let addr = SocketAddr::from(([127, 0, 0, 1], 8333));
-        let old_rx = connect_peer(&peers, synthetic_peer(addr, 0));
-        let source = current_source(&peers, addr);
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![test_header(genesis_header().compute_hash(), 1)],
-            source: Some(source),
-        })?;
-        sync.drain_inbound_headers();
-        sync.ensure_genesis_tip();
-        let selection = sync.sync_peer_selection(0, Instant::now());
-        let selected = selection
-            .request_peers
-            .first()
-            .ok_or_else(|| std::io::Error::other("missing candidate"))?;
-        assert_eq!(selected.source, source);
-        let replacement_rx = connect_peer(&peers, synthetic_peer(addr, 0));
-        let chain = sync
-            .handles
-            .chain_tip
-            .load_full()
-            .ok_or_else(|| std::io::Error::other("missing chain tip"))?;
-        let applied = sync
-            .handles
-            .applied_tip
-            .load_full()
-            .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-        assert!(
-            !sync
-                .send_getdata_for_pending_blocks(selected.source, false, 1, &chain, &applied)
-                .sent
-        );
-        assert!(old_rx.try_recv().is_err());
-        assert!(replacement_rx.try_recv().is_err());
-        assert_eq!(sync.download_window.lock().pending_len(), 0);
-        assert!(
-            sync.sync_peer_selection(0, Instant::now())
-                .request_peers
-                .is_empty()
-        );
-        assert!(sync.accepted_headers.lock().is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn accepted_headers_use_final_active_chain_of_drain() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let HeaderSyncFixture {
-            sync,
-            inbound_headers_tx,
-            peers,
-            ..
-        } = header_sync_with_genesis()?;
-        let a = SocketAddr::from(([127, 0, 0, 1], 8333));
-        let b = SocketAddr::from(([127, 0, 0, 1], 8334));
-        let _a_rx = connect_peer(&peers, eligible_peer(a, 0));
-        let _b_rx = connect_peer(&peers, eligible_peer(b, 0));
-        let main1 = test_header(genesis_header().compute_hash(), 1);
-        let main2 = test_header(main1.compute_hash(), 2);
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![main1, main2],
-            source: None,
-        })?;
-        sync.drain_inbound_headers();
-        let fork1 = test_header(genesis_header().compute_hash(), 3);
-        let fork2 = test_header(fork1.compute_hash(), 4);
-        let fork3 = test_header(fork2.compute_hash(), 5);
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![fork1],
-            source: Some(current_source(&peers, a)),
-        })?;
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![fork2, fork3],
-            source: Some(current_source(&peers, b)),
-        })?;
-        sync.drain_inbound_headers();
-        let selection = sync.sync_peer_selection(0, Instant::now());
-        assert!(
-            selection
-                .probe_peers
-                .iter()
-                .any(|peer| peer.source == current_source(&peers, a) && peer.start_height == 1)
-        );
-        assert_eq!(sync.accepted_headers.lock().len(), 2);
-        // A later branch switch retires evidence instead of keeping fork history.
-        let main3 = test_header(main2.compute_hash(), 6);
-        let main4 = test_header(main3.compute_hash(), 7);
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![main3, main4],
-            source: None,
-        })?;
-        sync.drain_inbound_headers();
-        assert!(
-            sync.sync_peer_selection(0, Instant::now())
-                .probe_peers
-                .is_empty()
-        );
-        assert!(sync.accepted_headers.lock().is_empty());
-        let fork4 = test_header(fork3.compute_hash(), 8);
-        let fork5 = test_header(fork4.compute_hash(), 9);
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![fork4, fork5],
-            source: None,
-        })?;
-        sync.drain_inbound_headers();
-        assert!(
-            sync.sync_peer_selection(0, Instant::now())
-                .probe_peers
-                .is_empty()
-        );
-        Ok(())
-    }
-
-    #[test]
     fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
@@ -2992,7 +3095,6 @@ mod tests {
             sync,
             inbound_headers_tx,
             peers,
-            ..
         } = header_sync_with_genesis()?;
         let invalid_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let other_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
@@ -3107,7 +3209,6 @@ mod tests {
             sync,
             inbound_headers_tx,
             peers,
-            ..
         } = header_sync_with_genesis()?;
         let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let _rx = connect_peer(&peers, synthetic_peer(peer_addr, 8));
@@ -4172,6 +4273,27 @@ mod tests {
         };
         let (sync, peers, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
         let owner = test_addr(9320, 0)?;
+        let alternate = test_addr(9320, 1)?;
+
+        // The alternate peer connected at height zero. Its accepted header
+        // announcement proves the active front, which must make it a hedge
+        // candidate even though the handshake snapshot remains at zero.
+        let alternate_lease = peers
+            .lease(alternate)
+            .ok_or_else(|| std::io::Error::other("alternate peer lease missing"))?;
+        let mut alternate_info = peers
+            .infos()
+            .into_iter()
+            .find(|info| info.addr == alternate)
+            .ok_or_else(|| std::io::Error::other("alternate peer info missing"))?;
+        alternate_info.start_height = 0;
+        alternate_info.best_known_height = 0;
+        assert!(peers.publish_info(alternate, &alternate_lease, alternate_info));
+        assert!(peers.note_announced_tip(
+            current_source(&peers, alternate),
+            Hash256::from_le_bytes(expected[0].as_bytes()),
+            Some(1),
+        ));
 
         // The first drain builds the asymmetric wedge and starts the episode.
         sync.tick();
@@ -6912,7 +7034,6 @@ mod tests {
         genesis: Header,
         sync: BlockSync,
         inbound_headers_tx: crossbeam_channel::Sender<InboundHeaders>,
-        inbound_blocks_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::InboundBlock>,
         peers: Arc<PeerTable>,
     }
 
@@ -6926,7 +7047,7 @@ mod tests {
         let peers = Arc::new(PeerTable::new());
         let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
         let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let handles = apply_handles(chain_tip, applied_tip, block_tree);
@@ -6947,7 +7068,6 @@ mod tests {
             genesis,
             sync,
             inbound_headers_tx,
-            inbound_blocks_tx,
             peers,
         })
     }
@@ -7125,6 +7245,7 @@ mod tests {
             services: 0,
             user_agent: String::from("/test/"),
             start_height,
+            best_known_height: start_height,
             conn_time: 0,
             inbound: true,
             addr_bind: addr,
@@ -7171,7 +7292,6 @@ mod tests {
             sync,
             inbound_headers_tx,
             peers,
-            ..
         } = header_sync_with_genesis()?;
         let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
         let (tx, rx) = unbounded::<Message>();

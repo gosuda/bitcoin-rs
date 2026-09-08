@@ -2002,17 +2002,30 @@ fn invalidate_failed_subtree(
 /// republishes the best valid tip rather than retrying the same block.
 /// Operational failures (storage, UTXO commit, undo record, shutdown) are
 /// transient and must not permanently mark a block invalid.
+///
+/// Kernel-backed script verification failures are classified Operational
+/// because `bitcoinkernel` can reject a valid block depending on process
+/// state (issue #618): the same block applies successfully after restart.
+/// Treating these as Permanent would freeze the node at the tip and
+/// invalidate a valid header subtree with no retry path. The native
+/// interpreter path does not produce this spurious failure, so its
+/// `ConsensusError::Script` remains Permanent.
 pub(crate) fn is_permanent_apply_error(error: &ApplyError) -> bool {
     match error {
         ApplyError::ProofOfWork { .. }
         | ApplyError::TargetAboveLimit
         | ApplyError::NbitsNonRetargetMismatch { .. } => true,
-        ApplyError::Consensus(error) => !matches!(
-            error,
+        ApplyError::Consensus(error) => match error {
             bitcoin_rs_consensus::ConsensusError::PrevoutMatrixSize { .. }
-                | bitcoin_rs_consensus::ConsensusError::Kernel(_)
-                | bitcoin_rs_consensus::ConsensusError::Encoding(_)
-        ),
+            | bitcoin_rs_consensus::ConsensusError::Kernel(_)
+            | bitcoin_rs_consensus::ConsensusError::Encoding(_) => false,
+            bitcoin_rs_consensus::ConsensusError::Script { reason, .. }
+                if reason.starts_with("kernel script verification failed:") =>
+            {
+                false
+            }
+            _ => true,
+        },
         _ => false,
     }
 }
@@ -10626,6 +10639,37 @@ mod consensus_rule_tests {
             "fallible tree preparation must precede the first UTXO mutation and stay absent on failure"
         );
         Ok(())
+    }
+
+    /// #618 regression: a kernel-backed script verification failure must be
+    /// classified Operational (retryable), not Permanent, because
+    /// `bitcoinkernel` can reject a valid block depending on process state.
+    /// The same block applies successfully after restart, so permanently
+    /// invalidating its header subtree would freeze the node at the tip.
+    #[test]
+    fn kernel_script_verification_failure_is_operational() {
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "kernel script verification failed: Script verification failed".to_owned(),
+        });
+        assert!(
+            !is_permanent_apply_error(&error),
+            "kernel script verification failures must be Operational (retryable) per #618"
+        );
+    }
+
+    /// A native (non-kernel) script verification failure remains Permanent:
+    /// the native interpreter is deterministic and not process-state-dependent.
+    #[test]
+    fn native_script_verification_failure_is_permanent() {
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "Script verification failed".to_owned(),
+        });
+        assert!(
+            is_permanent_apply_error(&error),
+            "native script verification failures must remain Permanent"
+        );
     }
 }
 

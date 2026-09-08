@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 
+use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -25,12 +26,15 @@ pub struct PeerSession {
     pub lease: PeerLease,
     /// Handshake metadata, `None` while the handshake is still in progress.
     pub info: Option<PeerInfo>,
+    /// Header tips this connection has delivered and the node accepted.
+    pub demonstrated_tips: Vec<Hash256>,
 }
 
 #[derive(Debug)]
 struct Entry {
     lease: PeerLease,
     info: Option<PeerInfo>,
+    demonstrated_tips: Vec<Hash256>,
 }
 
 /// Authoritative table of live peer connections keyed by remote address.
@@ -55,14 +59,28 @@ impl PeerTable {
         match entries.get(&addr) {
             Some(current) if current.lease.same_connection(&lease) => false,
             Some(_) => {
-                let prior = entries.insert(addr, Entry { lease, info: None });
+                let prior = entries.insert(
+                    addr,
+                    Entry {
+                        lease,
+                        info: None,
+                        demonstrated_tips: Vec::new(),
+                    },
+                );
                 if let Some(prior) = prior {
                     prior.lease.cancel();
                 }
                 true
             }
             None => {
-                entries.insert(addr, Entry { lease, info: None });
+                entries.insert(
+                    addr,
+                    Entry {
+                        lease,
+                        info: None,
+                        demonstrated_tips: Vec::new(),
+                    },
+                );
                 false
             }
         }
@@ -77,6 +95,58 @@ impl PeerTable {
             Some(entry) if entry.lease.same_connection(lease) => {
                 entry.info = Some(info);
                 true
+            }
+            _ => false,
+        }
+    }
+
+    /// Records that the live connection accepted `tip_hash` and raises its
+    /// active-chain credit when `height` is supplied. See P2P-03 in
+    /// `docs/contracts/p2p-wire.md`. Returns `false` for a stale or unpublished
+    /// connection and `true` for any live published connection.
+    pub fn note_announced_tip(
+        &self,
+        source: PeerSource,
+        tip_hash: Hash256,
+        height: Option<i32>,
+    ) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source))
+        else {
+            return false;
+        };
+        let Some(info) = entry.info.as_mut() else {
+            return false;
+        };
+        if !entry.demonstrated_tips.contains(&tip_hash) {
+            entry.demonstrated_tips.push(tip_hash);
+        }
+        if let Some(height) = height
+            && height > info.best_known_height
+        {
+            info.best_known_height = height;
+            return true;
+        }
+        true
+    }
+
+    /// Raises the active-chain credit for `source`. See P2P-03 in
+    /// `docs/contracts/p2p-wire.md`.
+    pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
+        let mut entries = self.entries.write();
+        match entries.get_mut(&source.addr) {
+            Some(entry) if entry.lease.is_current(source) => {
+                let Some(info) = entry.info.as_mut() else {
+                    return false;
+                };
+                if height > info.best_known_height {
+                    info.best_known_height = height;
+                    true
+                } else {
+                    false
+                }
             }
             _ => false,
         }
@@ -234,6 +304,7 @@ impl PeerTable {
                 addr: *addr,
                 lease: entry.lease.clone(),
                 info: entry.info.clone(),
+                demonstrated_tips: entry.demonstrated_tips.clone(),
             })
             .collect();
         sessions.sort_unstable_by_key(|session| session.lease.connection_id().get());
@@ -338,6 +409,7 @@ mod tests {
             services: 0,
             user_agent: String::new(),
             start_height,
+            best_known_height: start_height,
             conn_time: 0,
             inbound: false,
             addr_bind: addr,
@@ -487,5 +559,76 @@ mod tests {
         assert!(b.is_cancelled());
         assert!(!a.is_cancelled());
         assert_eq!(table.len(), 1);
+    }
+
+    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
+    #[test]
+    fn note_announced_height_credits_only_the_delivering_connection() {
+        let table = PeerTable::new();
+        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let stale = PeerLease::new(stale_tx);
+        table.register(addr(1), stale.clone());
+        let stale_source = stale.source(addr(1));
+
+        // Same-address replacement: the stale connection is cancelled and
+        // the new connection takes the slot.
+        let (current_tx, _current_rx) = crossbeam_channel::unbounded();
+        let current = PeerLease::new(current_tx);
+        table.register(addr(1), current.clone());
+        let current_source = current.source(addr(1));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        // The stale source must not inherit the replacement's credit slot.
+        assert!(!table.note_announced_height(stale_source, 42));
+        assert_eq!(table.infos()[0].best_known_height, 10);
+
+        // The live connection raises the entry it owns.
+        assert!(table.note_announced_height(current_source, 42));
+        assert_eq!(table.infos()[0].best_known_height, 42);
+    }
+
+    // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
+    #[test]
+    fn note_announced_height_raises_monotonically_and_reports_actual_updates() {
+        let table = PeerTable::new();
+        let current = lease();
+        table.register(addr(1), current.clone());
+        let source = current.source(addr(1));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        // Equal height: no update.
+        assert!(!table.note_announced_height(source, 10));
+        assert_eq!(table.infos()[0].best_known_height, 10);
+
+        // Lower height: no update (monotonic).
+        assert!(!table.note_announced_height(source, 9));
+        assert_eq!(table.infos()[0].best_known_height, 10);
+
+        // Higher height: update.
+        assert!(table.note_announced_height(source, 12));
+        assert_eq!(table.infos()[0].best_known_height, 12);
+
+        // Accepted-tip evidence is retained with the live connection so the
+        // node can re-evaluate it if a later fork becomes active.
+        let demonstrated_tip = Hash256::from_le_bytes(&[7_u8; 32]);
+        assert!(table.note_announced_tip(source, demonstrated_tip, Some(13)));
+        assert_eq!(table.infos()[0].best_known_height, 13);
+        assert_eq!(
+            table.sessions()[0].demonstrated_tips,
+            vec![demonstrated_tip]
+        );
+
+        // Unknown address: no update.
+        let other = lease();
+        let other_source = other.source(addr(2));
+        assert!(!table.note_announced_height(other_source, 99));
+
+        // Registered but unpublished peer: no update.
+        table.register(addr(3), lease());
+        let Some(unpublished) = table.lease(addr(3)) else {
+            return;
+        };
+        let unpublished_source = unpublished.source(addr(3));
+        assert!(!table.note_announced_height(unpublished_source, 50));
     }
 }
