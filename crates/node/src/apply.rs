@@ -10630,13 +10630,10 @@ mod consensus_rule_tests {
     /// invalidating its header subtree would freeze the node at the tip.
     #[test]
     fn kernel_script_verification_failure_is_operational() {
-        let error = ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Script {
-                input_index: 0,
-                reason: "kernel script verification failed: Script verification failed"
-                    .to_owned(),
-            },
-        );
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "kernel script verification failed: Script verification failed".to_owned(),
+        });
         assert!(
             !is_permanent_apply_error(&error),
             "kernel script verification failures must be Operational (retryable) per #618"
@@ -10647,12 +10644,10 @@ mod consensus_rule_tests {
     /// the native interpreter is deterministic and not process-state-dependent.
     #[test]
     fn native_script_verification_failure_is_permanent() {
-        let error = ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Script {
-                input_index: 0,
-                reason: "Script verification failed".to_owned(),
-            },
-        );
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "Script verification failed".to_owned(),
+        });
         assert!(
             is_permanent_apply_error(&error),
             "native script verification failures must remain Permanent"
