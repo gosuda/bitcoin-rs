@@ -1119,6 +1119,16 @@ impl Mempool {
         self.finish_mutation(changes)
     }
 
+    /// Removes policy-invalid transactions named by `txids`, together with
+    /// their descendants, as one ordered mutation.
+    pub(crate) fn remove_policy_txids(&mut self, txids: &[Txid]) -> MutationResult {
+        let mut changes = Vec::new();
+        for txid in txids {
+            self.remove_by_txid_into(txid, RemovalReason::PolicyEviction, &mut changes);
+        }
+        self.finish_mutation(changes)
+    }
+
     pub(crate) fn conflicts_for(&self, tx: &Tx) -> Vec<EntryId> {
         let mut conflicts = Vec::new();
         for input in &tx.inputs {

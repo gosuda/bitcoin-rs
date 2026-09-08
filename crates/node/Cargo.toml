@@ -24,6 +24,10 @@ workspace = true
 # does NOT forward CLI features to library crates; always use -p when features
 # must reach a specific crate.
 default = ["fjall", "kernel", "zmq"]
+# Compiles the native BIP300/301 protocol owner. Activation remains a separate
+# network/runtime decision; code outside `drivechain` must not infer it from
+# P2P transport settings.
+drivechain = ["dep:bitcoin-rs-drivechain", "bitcoin-rs-mempool/drivechain"]
 rocksdb = [
     "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-consensus/rocksdb",
@@ -67,6 +71,7 @@ prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
 hashbrown.workspace = true
+bitcoin-rs-drivechain = { workspace = true, optional = true }
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-consensus.workspace = true

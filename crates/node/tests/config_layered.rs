@@ -17,6 +17,7 @@ fn standard_network_uses_builtin_defaults() -> Result<()> {
         ..Default::default()
     };
     let config = resolve(&[&layer])?;
+    assert_eq!(config.network_selection(), NetworkSelection::Testnet4);
     assert_eq!(config.network, Network::Testnet4);
     assert_eq!(config.p2p.magic, Network::Testnet4.magic());
     assert!(config.p2p.connect.is_empty());
@@ -31,10 +32,49 @@ fn drynet4_network_applies_atomic_p2p_profile() -> Result<()> {
         ..Default::default()
     };
     let config = resolve(&[&layer])?;
+    assert_eq!(config.network_selection(), NetworkSelection::Drynet4);
     assert_eq!(config.network, Network::Mainnet);
     assert_eq!(config.p2p.magic, [0xec, 0xa5, 0xd4, 0x04]);
     assert_eq!(config.p2p.connect, vec!["drynet4.drivechain.dev:8533"]);
     assert!(!config.p2p.dns_seeds_enabled);
+    assert!(config.validation.drivechain);
+    #[cfg(feature = "drivechain")]
+    config.validate()?;
+    #[cfg(not(feature = "drivechain"))]
+    assert!(config.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn bitcoin_networks_reject_drivechain_activation() -> Result<()> {
+    let layer = UserConfig {
+        validation: ValidationOverrides {
+            drivechain: Some(true),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = resolve(&[&layer])?;
+    assert!(config.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn regtest_drivechain_is_an_explicit_feature_gated_opt_in() -> Result<()> {
+    let layer = UserConfig {
+        network: Some(NetworkSelection::Regtest),
+        validation: ValidationOverrides {
+            drivechain: Some(true),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = resolve(&[&layer])?;
+    assert!(config.validation.drivechain);
+    #[cfg(feature = "drivechain")]
+    config.validate()?;
+    #[cfg(not(feature = "drivechain"))]
+    assert!(config.validate().is_err());
     Ok(())
 }
 
@@ -50,10 +90,28 @@ fn p2p_magic_override_preserves_consensus_network() -> Result<()> {
         ..Default::default()
     };
     let config = resolve(&[&layer])?;
+    assert_eq!(config.network_selection(), NetworkSelection::Mainnet);
     assert_eq!(config.network, Network::Mainnet);
     assert_eq!(config.p2p.magic, [0xec, 0xa5, 0xd4, 0x34]);
     assert_eq!(config.p2p.connect, vec!["127.0.0.1:8333"]);
     assert!(!config.p2p.dns_seeds_enabled);
+    Ok(())
+}
+
+#[test]
+fn transport_overrides_cannot_impersonate_a_builtin_network_profile() -> Result<()> {
+    let layer = UserConfig {
+        p2p: P2pOverrides {
+            magic: Some([0xec, 0xa5, 0xd4, 0x04]),
+            dns_seeds: Some(false),
+            connect: Some(vec!["drynet4.drivechain.dev:8533".to_owned()]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config = resolve(&[&layer])?;
+    assert_eq!(config.network_selection(), NetworkSelection::Mainnet);
+    assert_eq!(config.p2p.magic, [0xec, 0xa5, 0xd4, 0x04]);
     Ok(())
 }
 
@@ -278,12 +336,14 @@ fn assume_valid_height_override_has_precedence() -> Result<()> {
     let low = UserConfig {
         validation: ValidationOverrides {
             assume_valid_height: Some(10_000),
+            ..Default::default()
         },
         ..Default::default()
     };
     let high = UserConfig {
         validation: ValidationOverrides {
             assume_valid_height: Some(30_000),
+            ..Default::default()
         },
         ..Default::default()
     };

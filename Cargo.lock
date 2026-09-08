@@ -283,6 +283,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-drivechain"
+version = "0.4.0"
+dependencies = [
+ "bitcoin",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "bitcoin-rs-index"
 version = "0.4.0"
 dependencies = [
@@ -309,7 +319,9 @@ name = "bitcoin-rs-mempool"
 version = "0.4.0"
 dependencies = [
  "arc-swap",
+ "bitcoin",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-drivechain",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bytemuck",
@@ -348,6 +360,7 @@ dependencies = [
  "bitcoin",
  "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-drivechain",
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",
  "bitcoin-rs-mining",

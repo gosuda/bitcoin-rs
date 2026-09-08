@@ -61,6 +61,9 @@ pub(crate) struct CliArgs {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
+    /// Enable native BIP300/301 validation on regtest.
+    #[arg(long)]
+    pub(crate) drivechain: Option<bool>,
     /// Watch-only coinbase payout address for solo mining templates.
     #[arg(long = "mining-payout-address")]
     pub(crate) mining_payout_address: Option<String>,
@@ -116,6 +119,7 @@ impl CliArgs {
             chainstate_journal: None,
             validation: ValidationOverrides {
                 assume_valid_height: self.assume_valid_height,
+                drivechain: self.drivechain,
             },
             mining: MiningOverrides {
                 payout_address: self.mining_payout_address,

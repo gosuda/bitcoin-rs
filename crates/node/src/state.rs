@@ -361,6 +361,18 @@ pub enum ApplyError {
     /// not disconnect it, so the block must not be applied.
     #[error("undo persistence: {0}")]
     UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
+    /// Native Drivechain validation rejected the candidate block.
+    #[cfg(feature = "drivechain")]
+    #[error("drivechain consensus: {0}")]
+    DrivechainConsensus(#[source] bitcoin_rs_drivechain::StateError),
+    /// Native Drivechain state could not be persisted or recovered.
+    #[cfg(feature = "drivechain")]
+    #[error("drivechain persistence: {0}")]
+    DrivechainPersistence(#[source] bitcoin_rs_storage::StorageError),
+    /// The native block could not be converted for the Drivechain validator.
+    #[cfg(feature = "drivechain")]
+    #[error("drivechain block adapter: {0}")]
+    DrivechainBlockAdapter(String),
     /// Journal durability or retention cannot recover within configured bounds.
     ///
     /// Refused before this block mutates chainstate; retry is safe after the
@@ -690,6 +702,35 @@ impl NodeStorage {
             Self::Redb(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
             #[cfg(feature = "mdbx")]
             Self::Mdbx(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
+            #[cfg(not(any(
+                feature = "rocksdb",
+                feature = "fjall",
+                feature = "redb",
+                feature = "mdbx"
+            )))]
+            _ => match *self {},
+        }
+    }
+
+    #[cfg(feature = "drivechain")]
+    fn drivechain_store(&self) -> Arc<dyn crate::drivechain_runtime::DrivechainStore> {
+        match self {
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(store) => Arc::new(crate::drivechain_runtime::KvDrivechainStore::new(
+                Arc::clone(store),
+            )),
+            #[cfg(feature = "fjall")]
+            Self::Fjall(store) => Arc::new(crate::drivechain_runtime::KvDrivechainStore::new(
+                Arc::clone(store),
+            )),
+            #[cfg(feature = "redb")]
+            Self::Redb(store) => Arc::new(crate::drivechain_runtime::KvDrivechainStore::new(
+                Arc::clone(store),
+            )),
+            #[cfg(feature = "mdbx")]
+            Self::Mdbx(store) => Arc::new(crate::drivechain_runtime::KvDrivechainStore::new(
+                Arc::clone(store),
+            )),
             #[cfg(not(any(
                 feature = "rocksdb",
                 feature = "fjall",
@@ -1730,6 +1771,29 @@ impl NodeState {
         if let Some(restored_applied_tip) = restored_applied_tip {
             applied_tip.store(Some(Arc::new(restored_applied_tip)));
         }
+        #[cfg(feature = "drivechain")]
+        let drivechain = if config.validation.drivechain {
+            let (thresholds, activation_height) = match config.network_selection() {
+                crate::config::NetworkSelection::Drynet4 => {
+                    (bitcoin_rs_drivechain::Thresholds::DRYNET4, 961_632)
+                }
+                crate::config::NetworkSelection::Regtest => {
+                    (bitcoin_rs_drivechain::Thresholds::REGTEST, 0)
+                }
+                _ => unreachable!("configuration validation rejects this activation"),
+            };
+            let cursor = applied_tip.load_full().map(|tip| (tip.height, tip.hash));
+            let runtime = crate::drivechain_runtime::DrivechainRuntime::open(
+                storage.drivechain_store(),
+                cursor,
+                thresholds,
+                activation_height,
+            )
+            .map_err(anyhow::Error::new)?;
+            Some(Arc::new(Mutex::new(runtime)))
+        } else {
+            None
+        };
         let blocks = Arc::new(RwLock::new(BlockLog::new()));
         let chain_tx_count = Arc::new(AtomicU64::new(restored_chain_tx_count));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
@@ -1847,6 +1911,10 @@ impl NodeState {
             }
             gateway
         };
+        #[cfg(feature = "drivechain")]
+        if let Some(runtime) = &drivechain {
+            mempool_gateway.set_drivechain_parent(runtime.lock().state.tip());
+        }
         let tx_admission = Arc::new(crate::tx_admission::TxAdmission::new(Arc::clone(
             &mempool_gateway,
         )));
@@ -1884,6 +1952,8 @@ impl NodeState {
             chain_events: Arc::clone(&chain_events),
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
+            #[cfg(feature = "drivechain")]
+            drivechain,
             admission: Arc::new(crate::apply::ApplyAdmission::new()),
             shutdown: Arc::clone(&shutdown),
             chain_transition,

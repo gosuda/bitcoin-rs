@@ -935,6 +935,10 @@ pub struct Chainstate {
     pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn PruneBodyStore>>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
+    /// Native consensus-extension state, absent from ordinary Bitcoin builds
+    /// and from compiled-but-inactive networks.
+    #[cfg(feature = "drivechain")]
+    pub(crate) drivechain: Option<crate::drivechain_runtime::SharedDrivechain>,
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) shutdown: Arc<AtomicBool>,
     /// Serializes whole chain transitions against each other.
@@ -1337,6 +1341,8 @@ impl Chainstate {
             chain_events,
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
+            #[cfg(feature = "drivechain")]
+            drivechain: None,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_transition: Arc::new(parking_lot::Mutex::new(())),
@@ -1373,6 +1379,8 @@ struct DisconnectPlan {
     undo: bitcoin_rs_utxo::UndoBatch,
     height: u32,
     tx_count_delta: u64,
+    #[cfg(feature = "drivechain")]
+    drivechain_parent: Option<bitcoin_rs_drivechain::State>,
 }
 
 fn plan_disconnect(
@@ -1471,6 +1479,31 @@ fn plan_disconnect(
         ));
     }
 
+    #[cfg(feature = "drivechain")]
+    let drivechain_parent = if let Some(runtime) = &handles.drivechain {
+        let runtime = runtime.lock();
+        if runtime.state.tip() != Some(block_hash.to_le_bytes()) {
+            return Err(ApplyError::DrivechainPersistence(
+                StorageError::IncompatibleData(
+                    "Drivechain state tip does not match the block being disconnected".to_owned(),
+                ),
+            ));
+        }
+        Some(
+            runtime
+                .store
+                .load_undo(block_hash.to_le_bytes())
+                .map_err(ApplyError::DrivechainPersistence)?
+                .ok_or_else(|| {
+                    ApplyError::DrivechainPersistence(StorageError::IncompatibleData(
+                        "Drivechain undo state is missing for the applied tip".to_owned(),
+                    ))
+                })?,
+        )
+    } else {
+        None
+    };
+
     Ok(DisconnectPlan {
         parent_tip,
         parent_prev_hash,
@@ -1478,6 +1511,8 @@ fn plan_disconnect(
         undo,
         height,
         tx_count_delta,
+        #[cfg(feature = "drivechain")]
+        drivechain_parent,
     })
 }
 
@@ -1564,6 +1599,8 @@ pub(crate) fn disconnect_block_admitted(
         undo,
         height,
         tx_count_delta,
+        #[cfg(feature = "drivechain")]
+        drivechain_parent,
     } = plan_disconnect(handles, block, block_hash)
         .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
 
@@ -1586,6 +1623,22 @@ pub(crate) fn disconnect_block_admitted(
     // debt — still owed a checkpoint — would be destroyed by the next arm and
     // then cleared by a refusal. Loading the marker first lets a read failure
     // refuse before any mutation.
+    #[cfg(feature = "drivechain")]
+    let mut drivechain_guard = if let (Some(runtime), Some(parent)) =
+        (&handles.drivechain, drivechain_parent.as_ref())
+    {
+        let guard = runtime.lock();
+        guard
+            .store
+            .stage_disconnect(parent, &guard.state)
+            .map_err(|error| {
+                crate::DisconnectError::Refused(Box::new(ApplyError::DrivechainPersistence(error)))
+            })?;
+        Some(guard)
+    } else {
+        None
+    };
+
     handles
         .undo_store
         .load_disconnect_marker()
@@ -1612,6 +1665,14 @@ pub(crate) fn disconnect_block_admitted(
             source: Box::new(ApplyError::UtxoCommit(error)),
         })
     })?;
+
+    #[cfg(feature = "drivechain")]
+    if let (Some(guard), Some(parent)) = (drivechain_guard.as_mut(), drivechain_parent) {
+        guard.state = parent;
+        handles
+            .mempool_gateway
+            .advance_drivechain_parent(guard.state.tip());
+    }
 
     // The per-coin coinstats fields need nothing here: `coin_stats` is the
     // `UtxoSet` change listener, so `undo_block` already drove them in reverse.
@@ -2015,6 +2076,8 @@ pub(crate) fn is_permanent_apply_error(error: &ApplyError) -> bool {
         ApplyError::ProofOfWork { .. }
         | ApplyError::TargetAboveLimit
         | ApplyError::NbitsNonRetargetMismatch { .. } => true,
+        #[cfg(feature = "drivechain")]
+        ApplyError::DrivechainConsensus(_) | ApplyError::DrivechainBlockAdapter(_) => true,
         ApplyError::Consensus(error) => match error {
             bitcoin_rs_consensus::ConsensusError::PrevoutMatrixSize { .. }
             | bitcoin_rs_consensus::ConsensusError::Kernel(_)
@@ -2863,8 +2926,39 @@ fn apply_block_admitted<'b>(
         )?;
     }
 
+    // The optional consensus extension validates from an immutable clone of
+    // its current state. Proposal mode discards that clone. Commit mode first
+    // persists a two-cursor recovery envelope plus the child undo snapshot;
+    // no Bitcoin state has been mutated at this point.
+    #[cfg(feature = "drivechain")]
+    let mut drivechain_guard = handles.drivechain.as_ref().map(|runtime| runtime.lock());
+    #[cfg(feature = "drivechain")]
+    let drivechain_transition = if let Some(runtime) = drivechain_guard.as_ref() {
+        let encoded = bitcoin_rs_primitives::consensus_bytes(block);
+        let adapted: bitcoin::Block = bitcoin::consensus::deserialize(&encoded)
+            .map_err(|error| ApplyError::DrivechainBlockAdapter(error.to_string()))?;
+        Some(
+            runtime
+                .state
+                .validate_block(&adapted, height)
+                .map_err(ApplyError::DrivechainConsensus)?,
+        )
+    } else {
+        None
+    };
+
     if intent == ApplyIntent::Propose {
         return Ok(ApplyFinish::Proposed);
+    }
+
+    #[cfg(feature = "drivechain")]
+    if let (Some(runtime), Some(transition)) =
+        (drivechain_guard.as_ref(), drivechain_transition.as_ref())
+    {
+        runtime
+            .store
+            .stage_connect(transition)
+            .map_err(ApplyError::DrivechainPersistence)?;
     }
 
     // Persist undo before the block body, the index, and the UTXO commit. All
@@ -2941,6 +3035,14 @@ fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.utxo_commit_seconds")
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
+
+    #[cfg(feature = "drivechain")]
+    if let (Some(runtime), Some(transition)) = (drivechain_guard.as_mut(), drivechain_transition) {
+        runtime.state = transition.into_next();
+        handles
+            .mempool_gateway
+            .advance_drivechain_parent(runtime.state.tip());
+    }
 
     // §2.3 linearization point for the chainstate journal (issue #230): the
     // in-memory UTXO commit above is the commit of record; everything the
@@ -10630,13 +10732,10 @@ mod consensus_rule_tests {
     /// invalidating its header subtree would freeze the node at the tip.
     #[test]
     fn kernel_script_verification_failure_is_operational() {
-        let error = ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Script {
-                input_index: 0,
-                reason: "kernel script verification failed: Script verification failed"
-                    .to_owned(),
-            },
-        );
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "kernel script verification failed: Script verification failed".to_owned(),
+        });
         assert!(
             !is_permanent_apply_error(&error),
             "kernel script verification failures must be Operational (retryable) per #618"
@@ -10647,12 +10746,10 @@ mod consensus_rule_tests {
     /// the native interpreter is deterministic and not process-state-dependent.
     #[test]
     fn native_script_verification_failure_is_permanent() {
-        let error = ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Script {
-                input_index: 0,
-                reason: "Script verification failed".to_owned(),
-            },
-        );
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "Script verification failed".to_owned(),
+        });
         assert!(
             is_permanent_apply_error(&error),
             "native script verification failures must remain Permanent"

@@ -17,11 +17,14 @@ rocksdb = []
 fjall = []
 redb = []
 test-seam = []
+drivechain = ["dep:bitcoin", "dep:bitcoin-rs-drivechain"]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-script.workspace = true
+bitcoin = { workspace = true, optional = true }
+bitcoin-rs-drivechain = { workspace = true, optional = true }
 sha2.workspace = true
 hashbrown.workspace = true
 smallvec.workspace = true

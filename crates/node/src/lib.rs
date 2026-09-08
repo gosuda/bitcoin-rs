@@ -22,6 +22,11 @@ mod checkpoint_fs;
 mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
+/// Native BIP300/301 protocol support, compiled only for Drivechain-capable builds.
+#[cfg(feature = "drivechain")]
+pub use bitcoin_rs_drivechain as drivechain;
+#[cfg(feature = "drivechain")]
+mod drivechain_runtime;
 /// Typed in-process node lifecycle: the embedding surface over the same
 /// service graph the daemon wires.
 pub mod embed;

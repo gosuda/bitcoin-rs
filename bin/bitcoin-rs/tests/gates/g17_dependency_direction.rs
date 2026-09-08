@@ -11,7 +11,7 @@
 //! a strictly lower layer):
 //!
 //! ```text
-//!   layer 0  core       consensus, script, primitives
+//!   layer 0  core       consensus, drivechain, script, primitives
 //!   layer 1  storage    storage
 //!   layer 2  services   chain, utxo, p2p, mempool, index, mining
 //!   layer 3  surface    rpc
@@ -73,7 +73,10 @@ fn workspace_root_manifest() -> std::path::PathBuf {
 /// Approved layer for each workspace crate.
 fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
-        "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
+        "bitcoin-rs-primitives"
+        | "bitcoin-rs-script"
+        | "bitcoin-rs-consensus"
+        | "bitcoin-rs-drivechain" => 0,
         STORAGE_CRATE => 1,
         "bitcoin-rs-chain" | "bitcoin-rs-utxo" | "bitcoin-rs-p2p" | "bitcoin-rs-mempool"
         | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,

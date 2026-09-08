@@ -541,7 +541,7 @@ pub(crate) fn admit_transaction(
             Err(AdmitError::Policy(reason)) => {
                 return Err(AdmissionFailure::Policy(reason));
             }
-            Err(AdmitError::Consensus) => {
+            Err(AdmitError::Consensus | AdmitError::Drivechain) => {
                 return Err(AdmissionFailure::Consensus);
             }
         }

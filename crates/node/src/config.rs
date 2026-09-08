@@ -277,6 +277,8 @@ pub struct ObservabilityOverrides {
 pub struct ValidationOverrides {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: Option<u32>,
+    /// Explicit Drivechain activation. Only regtest may opt in; drynet4 is mandatory.
+    pub drivechain: Option<bool>,
 }
 
 /// User-supplied mining overrides.
@@ -500,6 +502,9 @@ impl ValidationOverrides {
         if other.assume_valid_height.is_some() {
             self.assume_valid_height = other.assume_valid_height;
         }
+        if other.drivechain.is_some() {
+            self.drivechain = other.drivechain;
+        }
     }
 }
 
@@ -598,6 +603,8 @@ pub struct ObservabilityConfig {
 pub struct ValidationConfig {
     /// Height through which script verification may be skipped.
     pub assume_valid_height: u32,
+    /// Whether native BIP300/301 consensus is active.
+    pub drivechain: bool,
 }
 
 /// Resolved mining configuration.
@@ -611,6 +618,14 @@ pub struct MiningConfig {
 /// Fully resolved, validated node configuration consumed by the runtime.
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
+    /// Selected built-in network profile.
+    ///
+    /// This remains distinct from [`Self::network`]: profiles such as
+    /// [`NetworkSelection::Drynet4`] deliberately reuse Bitcoin mainnet
+    /// consensus parameters while carrying a different P2P identity. Runtime
+    /// consensus extensions must authorize themselves from this value rather
+    /// than inferring identity from mutable transport settings.
+    pub network_selection: NetworkSelection,
     /// Consensus network.
     pub network: Network,
     /// Node data directory.
@@ -640,6 +655,7 @@ impl NodeConfig {
     #[must_use]
     pub fn default_for_network(network: Network) -> Self {
         let mut config = Self {
+            network_selection: NetworkSelection::Mainnet,
             network: Network::Mainnet,
             data_dir: PathBuf::from(".bitcoin-rs"),
             storage: StorageConfig {
@@ -670,11 +686,21 @@ impl NodeConfig {
             chainstate_journal: ChainstateJournalConfig::default(),
             validation: ValidationConfig {
                 assume_valid_height: 0,
+                drivechain: false,
             },
             mining: MiningConfig::default(),
         };
         config.apply_network_selection(NetworkSelection::from(network));
         config
+    }
+
+    /// Returns the selected built-in network profile.
+    ///
+    /// Unlike [`Self::network`], this distinguishes profiles that share
+    /// Bitcoin consensus parameters, including mainnet and drynet4.
+    #[must_use]
+    pub const fn network_selection(&self) -> NetworkSelection {
+        self.network_selection
     }
 
     /// Resolves one source layer.
@@ -695,6 +721,26 @@ impl NodeConfig {
             "unsupported storage backend {}",
             self.storage.backend
         );
+        match self.network_selection {
+            NetworkSelection::Drynet4 => anyhow::ensure!(
+                self.validation.drivechain,
+                "drynet4 requires native Drivechain validation"
+            ),
+            NetworkSelection::Regtest => {}
+            NetworkSelection::Mainnet
+            | NetworkSelection::Testnet3
+            | NetworkSelection::Testnet4
+            | NetworkSelection::Signet => anyhow::ensure!(
+                !self.validation.drivechain,
+                "native Drivechain validation cannot be enabled on a Bitcoin network"
+            ),
+        }
+        if self.validation.drivechain {
+            anyhow::ensure!(
+                cfg!(feature = "drivechain"),
+                "native Drivechain validation was requested but this binary was built without the `drivechain` feature"
+            );
+        }
         if self.p2p.magic != self.network.magic() {
             anyhow::ensure!(
                 self.network == Network::Mainnet,
@@ -802,10 +848,14 @@ impl NodeConfig {
         if let Some(value) = layer.validation.assume_valid_height {
             self.validation.assume_valid_height = value;
         }
+        if let Some(value) = layer.validation.drivechain {
+            self.validation.drivechain = value;
+        }
     }
 
     fn apply_network_selection(&mut self, selection: NetworkSelection) {
         let network = selection.consensus_network();
+        self.network_selection = selection;
         self.network = network;
         self.p2p.magic = network.magic();
         self.rpc.bind = SocketAddr::from(([127, 0, 0, 1], network.default_rpc_port()));
@@ -815,6 +865,7 @@ impl NodeConfig {
         self.validation.assume_valid_height = network
             .assume_valid_anchor()
             .map_or(0, |(height, _)| height);
+        self.validation.drivechain = selection == NetworkSelection::Drynet4;
         if selection == NetworkSelection::Drynet4 {
             self.p2p.magic = DRYNET4_P2P_MAGIC;
             self.p2p.dns_seeds_enabled = false;

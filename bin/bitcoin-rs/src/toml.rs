@@ -36,6 +36,7 @@ struct TomlFile {
     notifications: Option<NotificationConfig>,
     chainstate_journal: Option<ChainstateJournalOverrides>,
     assume_valid_height: Option<u32>,
+    drivechain: Option<bool>,
     mining_payout_address: Option<String>,
 }
 
@@ -107,6 +108,7 @@ impl TomlFile {
             chainstate_journal: self.chainstate_journal,
             validation: ValidationOverrides {
                 assume_valid_height: self.assume_valid_height,
+                drivechain: self.drivechain,
             },
             mining: MiningOverrides {
                 payout_address: self.mining_payout_address,

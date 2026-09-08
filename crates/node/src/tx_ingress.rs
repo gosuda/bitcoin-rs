@@ -306,7 +306,7 @@ impl TxIngressConsumer {
                     self.tx_admission.record_reject(txid, wtxid);
                     return;
                 }
-                Err(AdmitError::Consensus) => {
+                Err(AdmitError::Consensus | AdmitError::Drivechain) => {
                     tracing::debug!(%txid, "p2p tx failed consensus verification; not relaying");
                     self.tx_admission.record_reject(txid, wtxid);
                     return;

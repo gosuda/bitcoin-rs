@@ -25,6 +25,8 @@ use bitcoin_rs_mining::{
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
+#[cfg(feature = "drivechain")]
+use bitcoin_rs_primitives::TxOut;
 use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
 use compact_str::CompactString;
 use hashbrown::HashMap;
@@ -249,6 +251,75 @@ pub struct MiningCoordinator {
 }
 
 impl MiningCoordinator {
+    #[cfg(feature = "drivechain")]
+    fn add_bmm_accepts(&self, candidate: &mut Candidate) -> Result<(), MiningControlError> {
+        if self.apply_handles.drivechain.is_none() {
+            return Ok(());
+        }
+        let mut accepts = std::collections::BTreeMap::new();
+        for entry in &candidate.transactions {
+            let encoded = consensus_bytes(entry.tx.as_ref());
+            let transaction: bitcoin::Transaction = bitcoin::consensus::deserialize(&encoded)
+                .map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?;
+            let Some(output) = transaction.output.first() else {
+                continue;
+            };
+            let Some(request) = bitcoin_rs_drivechain::parse_bmm_request(&output.script_pubkey)
+                .map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?
+            else {
+                continue;
+            };
+            if request.previous_mainchain_block_hash != candidate.previous_block_hash.to_le_bytes()
+            {
+                return Err(MiningControlError::Failed(CompactString::from(
+                    "expired BMM request reached candidate assembly",
+                )));
+            }
+            if accepts
+                .insert(request.slot, request.sidechain_block_hash)
+                .is_some()
+            {
+                return Err(MiningControlError::Failed(CompactString::from(
+                    "multiple BMM requests for one sidechain reached candidate assembly",
+                )));
+            }
+        }
+        if accepts.is_empty() {
+            return Ok(());
+        }
+        let old_weight = candidate.coinbase.weight();
+        let old_size = u64::try_from(candidate.coinbase.total_size()).unwrap_or(u64::MAX);
+        for (slot, hash) in accepts {
+            let mut script = Vec::with_capacity(39);
+            script.extend_from_slice(&[0x6a, 37]);
+            script.extend_from_slice(&bitcoin_rs_drivechain::M7_TAG);
+            script.push(slot);
+            script.extend_from_slice(&hash);
+            candidate.coinbase.outputs.push(TxOut {
+                value: 0,
+                script_pubkey: script,
+            });
+        }
+        let new_weight = candidate.coinbase.weight();
+        let new_size = u64::try_from(candidate.coinbase.total_size()).unwrap_or(u64::MAX);
+        candidate.weight = candidate
+            .weight
+            .saturating_add(new_weight.saturating_sub(old_weight));
+        candidate.size = candidate
+            .size
+            .saturating_add(new_size.saturating_sub(old_size));
+        if candidate.weight > candidate.max_weight || candidate.size > candidate.max_size {
+            return Err(MiningControlError::Failed(CompactString::from(
+                "BMM coinbase commitments exceed candidate limits",
+            )));
+        }
+        Ok(())
+    }
+
     /// Builds a coordinator over the shared applied-chain and mempool handles.
     ///
     /// `coinbase_script` is required and stored immutably. Pass
@@ -531,8 +602,10 @@ impl MiningCoordinator {
             max_size: MAX_BLOCK_SIZE,
             max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
         };
-        let candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
+        let mut candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        #[cfg(feature = "drivechain")]
+        self.add_bmm_accepts(&mut candidate)?;
         if candidate.template_id != key.template_id() {
             return Err(MiningControlError::Failed(CompactString::from(
                 "assembled candidate template id does not match generation key",
@@ -575,13 +648,16 @@ impl MiningCoordinator {
             max_size: MAX_BLOCK_SIZE,
             max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
         };
-        match selection {
+        let mut candidate = match selection {
             GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
             GenerateSelection::Ordered(_) => {
                 assemble_ordered_candidate(&context, &snapshot, payout)
             }
         }
-        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        #[cfg(feature = "drivechain")]
+        self.add_bmm_accepts(&mut candidate)?;
+        Ok(candidate)
     }
 
     /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).

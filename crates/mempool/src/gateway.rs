@@ -26,6 +26,20 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "drivechain")]
+fn parse_drivechain_request(tx: &Tx) -> Result<Option<bitcoin_rs_drivechain::BmmRequest>, ()> {
+    let encoded = bitcoin_rs_primitives::consensus_bytes(tx);
+    let transaction: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&encoded).map_err(|_| ())?;
+    bitcoin_rs_drivechain::parse_bmm_request(
+        transaction
+            .output
+            .first()
+            .map_or(bitcoin::Script::new(), |output| &output.script_pubkey),
+    )
+    .map_err(|_| ())
+}
+
 /// Adapter that lets the consensus verifier look up prevouts from a
 /// resolved `(OutPoint, TxOut)` slice, layered under the mempool by
 /// `MempoolUtxoView`.
@@ -135,6 +149,9 @@ pub enum AdmitError {
     /// `PolicyScriptChecks`).
     #[error("consensus verification failed")]
     Consensus,
+    /// Native BIP301 policy rejected an expired or malformed BMM request.
+    #[error("BIP301 transaction policy failed")]
+    Drivechain,
 }
 
 /// Interns one [`MempoolGateway`] per pool `Arc` identity.
@@ -307,6 +324,8 @@ pub struct MempoolGateway {
     /// in [`Self::shared`]. Compare only for exact equality — never order or
     /// subtract wrapping counters.
     chain_generation: AtomicU64,
+    #[cfg(feature = "drivechain")]
+    drivechain_parent: RwLock<Option<[u8; 32]>>,
 }
 
 impl core::fmt::Debug for MempoolGateway {
@@ -358,7 +377,35 @@ impl MempoolGateway {
                 draining: false,
             }),
             chain_generation: AtomicU64::new(0),
+            #[cfg(feature = "drivechain")]
+            drivechain_parent: RwLock::new(None),
         }
+    }
+
+    /// Activates BIP301 admission against `parent`, or disables it with `None`.
+    #[cfg(feature = "drivechain")]
+    pub fn set_drivechain_parent(&self, parent: Option<[u8; 32]>) {
+        *self.drivechain_parent.write() = parent;
+    }
+
+    /// Advances BIP301 policy to `parent` and evicts requests tied to the
+    /// previous tip. The parent is published before the sweep, so concurrent
+    /// admission can only add requests valid for the new tip.
+    #[cfg(feature = "drivechain")]
+    pub fn advance_drivechain_parent(&self, parent: Option<[u8; 32]>) -> MutationResult {
+        *self.drivechain_parent.write() = parent;
+        self.commit_infallible(AdmissionOrigin::Block, |pool| {
+            let stale = pool
+                .mining_snapshot()
+                .entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let request = parse_drivechain_request(entry.tx.as_ref()).ok().flatten()?;
+                    (Some(request.previous_mainchain_block_hash) != parent).then_some(entry.txid)
+                })
+                .collect::<Vec<_>>();
+            pool.remove_policy_txids(&stale)
+        })
     }
 
     /// Attaches another named leg to this gateway's observer slot.
@@ -621,6 +668,30 @@ impl MempoolGateway {
         let txid = request.tx.txid();
         if pool.contains_txid(&txid) {
             return Ok(AdmitOutcome::AlreadyKnown);
+        }
+        #[cfg(feature = "drivechain")]
+        if let Some(parent) = *self.drivechain_parent.read() {
+            if let Some(bmm) =
+                parse_drivechain_request(request.tx.as_ref()).map_err(|_| AdmitError::Drivechain)?
+            {
+                if bmm.previous_mainchain_block_hash != parent {
+                    return Err(AdmitError::Drivechain);
+                }
+                let duplicate_slot = pool.mining_snapshot().entries.into_iter().any(|entry| {
+                    parse_drivechain_request(entry.tx.as_ref())
+                        .ok()
+                        .flatten()
+                        .is_some_and(|existing| {
+                            existing.previous_mainchain_block_hash == parent
+                                && existing.slot == bmm.slot
+                        })
+                });
+                if duplicate_slot {
+                    // One request per slot is the authoritative policy. The
+                    // first admitted bid is the deterministic mining winner.
+                    return Err(AdmitError::Drivechain);
+                }
+            }
         }
         // 4. Policy evaluation under the same write guard. `evaluate_one`
         //    checks standardness, missing inputs, coinbase, min-relay,

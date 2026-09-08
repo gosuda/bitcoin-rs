@@ -36,6 +36,7 @@ bitcoin.workspace = true
 
 [features]
 default = ["fjall", "redb", "zmq"]
+drivechain = ["bitcoin-rs-node/drivechain"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]
 fjall = ["bitcoin-rs-node/fjall"]
 redb = ["bitcoin-rs-node/redb"]
