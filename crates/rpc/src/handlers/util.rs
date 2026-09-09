@@ -1204,7 +1204,8 @@ mod tests {
 
     #[cfg(feature = "zmq")]
     #[test]
-    fn getzmqnotifications_returns_active_metadata() {
+    // API-07: preserve the external type/address/hwm metadata contract.
+fn getzmqnotifications_returns_active_metadata() {
         use alloc::sync::Arc;
 
         #[derive(Debug)]

@@ -3008,6 +3008,7 @@ mod tests {
         ];
         let state = NodeState::open(config, None)?;
 
+        // ARCH-05: the live publisher is the authoritative notifier metadata source.
         let notifications = state.zmq_publisher().active_notifiers();
         let notification_types: Vec<_> = notifications
             .iter()

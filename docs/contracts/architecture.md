@@ -236,6 +236,9 @@ Owners:
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
   owned by `ChainEffects`, not by apply.
+- `crates/node/src/state.rs` test `zmq_publisher_handle_reports_active_metadata`:
+  the live publisher is the authoritative source for active notifier metadata
+  (`ARCH-05`).
 - `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`:
   later `UserConfig` layers win on set fields, including nested
   `ChainstateJournalOverrides` (`ARCH-05`).

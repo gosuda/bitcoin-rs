@@ -85,6 +85,14 @@ path. `API-06` is `getnetworkhashps` snapshot consistency.
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
 
+### `API-07`: ZMQ notification metadata projection
+
+- **Owner**: `getzmqnotifications` in `crates/rpc/src/handlers/util.rs`.
+- Each active notifier is projected as an object containing `type` (the
+  notifier topic name), `address` (the configured endpoint), and `hwm` (the
+  configured high-water mark). The response is sourced from the live ZMQ
+  publisher, not a parallel node-side metadata model (`ARCH-05`).
+
 The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
