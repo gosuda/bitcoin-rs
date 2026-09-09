@@ -102,7 +102,7 @@ impl MutationResult {
             return None;
         }
         let offset = u64::try_from(index).ok()?;
-        Some(self.sequence_base.wrapping_add(offset))
+        self.sequence_base.checked_add(offset)
     }
 
     /// The txid of every change that left the pool, in commit order.
@@ -216,11 +216,18 @@ mod tests {
     use super::*;
 
     // MPL-02 (docs/contracts/mempool-mutations.md): each emitted change owns
-    // one wrapping sequence; positions outside the batch own none.
+    // one sequence; a position beyond that batch owns none.
     #[test]
     fn sequence_of_only_returns_sequences_for_committed_changes() {
-        let mut result = MutationResult {
-            changes: vec![change(&Txid::default(), MutationOutcome::Accepted); 3],
+        let result = MutationResult {
+            changes: vec![
+                change(&Txid::default(), MutationOutcome::Accepted),
+                change(
+                    &Txid::default(),
+                    MutationOutcome::Removed(RemovalReason::Replaced),
+                ),
+                change(&Txid::default(), MutationOutcome::Accepted),
+            ],
             sequence_base: 41,
         };
         assert_eq!(result.sequence_of(0), Some(41));
@@ -233,11 +240,6 @@ mod tests {
                 "out-of-bounds index {index}"
             );
         }
-
-        result.sequence_base = u64::MAX;
-        assert_eq!(result.sequence_of(0), Some(u64::MAX));
-        assert_eq!(result.sequence_of(1), Some(0));
-        assert_eq!(result.sequence_of(2), Some(1));
     }
 
     // MPL-02 (docs/contracts/mempool-mutations.md): an empty mutation assigns
