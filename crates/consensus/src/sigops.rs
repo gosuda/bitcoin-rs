@@ -17,14 +17,17 @@ use hashbrown::HashMap;
 /// The counting rules are documented in the repository's
 /// [mempool policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/mempool-policy.md).
 /// This function does not verify scripts or select activation flags. Witness
-/// costs require the caller's active `VerifyFlags::WITNESS`; legacy and P2SH
-/// accounting retain the repository's existing always-on BIP16 policy.
+/// costs use the caller's effective flag set: `CLEANSTACK` implies `WITNESS`,
+/// matching the script interpreter's [`VerifyFlags::filled`] normalization.
+/// Legacy and P2SH accounting retain the repository's existing always-on BIP16
+/// policy.
 ///
 /// Callers may supply incomplete or unordered prevouts and must retain their
 /// own missing-input and validation status. Input order permits a linear pass
 /// without allocation; other input orders build one borrowed lookup index.
 #[must_use]
 pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -> u32 {
+    let flags = flags.filled();
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     // Core's coinbase cost never includes previous-output or witness sigops.
     if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
@@ -323,6 +326,10 @@ mod tests {
                     &prevouts,
                     VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
                 ),
+                active_cost
+            );
+            assert_eq!(
+                transaction_sigop_cost(&tx, &prevouts, VerifyFlags::CLEANSTACK),
                 active_cost
             );
             assert_eq!(
