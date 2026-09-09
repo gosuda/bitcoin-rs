@@ -301,7 +301,9 @@ impl BlockSync {
                     committed: Vec::new(),
                     source,
                     // Admission can also stay closed after a prior torn
-                    // `UtxoCommit`; `ChainTransition` owns that recovery rule.
+                    // `UtxoCommit` or a `Fatal` settlement; recovery must
+                    // reset the gateway generation before a retry can begin
+                    // (`ChainTransition` owns that recovery rule).
                     disposition: crate::apply::WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                 })?;
