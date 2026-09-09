@@ -14,16 +14,16 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 /// label alone is never custody: every identity carries its digest, and
 /// [`load_reference_set`] rejects anything less.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReferenceSet {
+pub(crate) struct ReferenceSet {
     /// The released Bitcoin Core product: the behavioral reference.
-    pub release: ReleaseIdentity,
+    pub(crate) release: ReleaseIdentity,
     /// The Core development tree the oracle lane links. Oracle evidence only:
     /// not a release, and never a policy pin.
-    pub kernel: KernelIdentity,
+    pub(crate) kernel: KernelIdentity,
     /// Replay corpora with their pinned stop identities.
-    pub corpora: Vec<CorpusPin>,
+    pub(crate) corpora: Vec<CorpusPin>,
     /// The formal model checker pin.
-    pub formal_tool: FormalTool,
+    pub(crate) formal_tool: FormalTool,
 }
 
 impl ReferenceSet {
@@ -33,7 +33,7 @@ impl ReferenceSet {
     /// manifest digests are produced at export time and are legitimately
     /// absent until the archive exists.
     #[must_use]
-    pub fn corpus_custody(&self) -> Vec<(String, CorpusCustody)> {
+    pub(crate) fn corpus_custody(&self) -> Vec<(String, CorpusCustody)> {
         self.corpora
             .iter()
             .map(|corpus| {
@@ -55,21 +55,21 @@ impl ReferenceSet {
 /// by source commit and by the digests of the archive and the `bitcoind`
 /// binary inside it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReleaseIdentity {
+pub(crate) struct ReleaseIdentity {
     /// Released product version, `MAJOR.MINOR`.
-    pub core_version: String,
+    pub(crate) core_version: String,
     /// Release tag (e.g. `v31.1`).
-    pub git_tag: String,
+    pub(crate) git_tag: String,
     /// Source commit the release was built from.
-    pub source_commit: String,
+    pub(crate) source_commit: String,
     /// Release archive the binary digest is taken from.
-    pub archive: String,
+    pub(crate) archive: String,
     /// SHA-256 of the release archive.
-    pub archive_sha256: [u8; 32],
+    pub(crate) archive_sha256: [u8; 32],
     /// SHA-256 of the `bitcoind` binary inside the archive.
-    pub bitcoind_sha256: [u8; 32],
+    pub(crate) bitcoind_sha256: [u8; 32],
     /// The exact `bitcoind -version` line the pinned binary must print.
-    pub version_output: String,
+    pub(crate) version_output: String,
 }
 
 /// The Core development tree the oracle lane links.
@@ -79,52 +79,52 @@ pub struct ReleaseIdentity {
 /// evidence about the oracle lane only and must never be read as the product
 /// reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KernelIdentity {
+pub(crate) struct KernelIdentity {
     /// Core tree version (e.g. `31.99.0`).
-    pub core_version: String,
+    pub(crate) core_version: String,
     /// Safe wrapper crate pinned in the manifest.
-    pub kernel_crate: String,
+    pub(crate) kernel_crate: String,
     /// Locked version of the wrapper crate.
-    pub kernel_crate_version: String,
+    pub(crate) kernel_crate_version: String,
     /// `-sys` crate vendoring the Core source.
-    pub kernel_sys_crate: String,
+    pub(crate) kernel_sys_crate: String,
     /// Locked version of the `-sys` crate.
-    pub kernel_sys_crate_version: String,
+    pub(crate) kernel_sys_crate_version: String,
     /// Whether a differential harness compares *values* against a running
     /// reference. `false` means no entry may claim `supported`.
-    pub differential_harness: bool,
+    pub(crate) differential_harness: bool,
 }
 
 /// A replay corpus pinned by its stop identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CorpusPin {
+pub(crate) struct CorpusPin {
     /// Corpus identifier (e.g. `C150`).
-    pub id: String,
+    pub(crate) id: String,
     /// Last mainnet height the corpus covers.
-    pub stop_height: u64,
+    pub(crate) stop_height: u64,
     /// Block hash at `stop_height`.
-    pub stop_hash: String,
+    pub(crate) stop_hash: String,
     /// SHA-256 of the corpus manifest, produced at export time. Absent until
     /// the archive exists; a placeholder here would be an invented digest.
-    pub manifest_sha256: Option<[u8; 32]>,
+    pub(crate) manifest_sha256: Option<[u8; 32]>,
 }
 
 /// The formal model checker pin.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FormalTool {
+pub(crate) struct FormalTool {
     /// Tool name (e.g. `apalache-mc`).
-    pub name: String,
+    pub(crate) name: String,
     /// Released tool version.
-    pub version: String,
+    pub(crate) version: String,
     /// SHA-256 of the release archive.
-    pub archive_sha256: [u8; 32],
+    pub(crate) archive_sha256: [u8; 32],
     /// SHA-256 of the checker jar inside the archive.
-    pub jar_sha256: [u8; 32],
+    pub(crate) jar_sha256: [u8; 32],
 }
 
 /// Custody state of a corpus archive.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CorpusCustody {
+pub(crate) enum CorpusCustody {
     /// The manifest digest is pinned; the corpus is held end to end.
     Pinned,
     /// A required custody artifact is absent, named by `missing`.
@@ -136,7 +136,7 @@ pub enum CorpusCustody {
 
 /// Why a reference identity failed to load.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum ReferenceError {
+pub(crate) enum ReferenceError {
     /// The manifest does not parse as TOML.
     #[error("the compatibility manifest does not parse: {detail}")]
     ManifestUnreadable {
@@ -175,7 +175,7 @@ pub enum ReferenceError {
 ///
 /// Every digest is decoded to bytes and every identity is required in full;
 /// this is where "a version label alone" stops being a reference.
-pub fn load_reference_set(manifest: &str) -> Result<ReferenceSet, ReferenceError> {
+pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, ReferenceError> {
     let table: toml::Table =
         toml::from_str(manifest).map_err(|err| ReferenceError::ManifestUnreadable {
             detail: err.to_string(),
@@ -219,7 +219,7 @@ pub fn load_reference_set(manifest: &str) -> Result<ReferenceSet, ReferenceError
 }
 
 /// Loads the reference set from the manifest embedded at compile time.
-pub fn reference_set() -> Result<ReferenceSet, ReferenceError> {
+pub(crate) fn reference_set() -> Result<ReferenceSet, ReferenceError> {
     load_reference_set(MANIFEST_TOML)
 }
 
