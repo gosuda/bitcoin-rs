@@ -5,8 +5,8 @@
 //! files, per plan appendix FTL-4 and FTL-5.
 //!
 //! A red gate blocks production bodies of the implementer tasks it guards:
-//! ChainAdmission gates T08/T11/T18; PeerLeases gates T24;
-//! ProjectionMining gates T29/T35. The model is checked before the owner cut,
+//! `ChainAdmission` gates T08/T11/T18; `PeerLeases` gates T24;
+//! `ProjectionMining` gates T29/T35. The model is checked before the owner cut,
 //! never the reverse.
 //!
 //! Contract: `CONSTRAINTS.md` §"Proof inventory" and `docs/api/core-compat.toml`
@@ -228,26 +228,20 @@ fn parse_inventory(root: &Path) -> BTreeMap<String, InventoryRow> {
         let k_text = cells[5].trim();
         let tla_sha = parse_sha256_hex(tla_text).unwrap_or_else(|| {
             panic!(
-                "g20: {} row for {model} has unmeasured/malformed .tla sha256 (skill rc 15)",
-                CONSTRAINTS
+                "g20: {CONSTRAINTS} row for {model} has unmeasured/malformed .tla sha256 (skill rc 15)"
             );
         });
         let cfg_sha = parse_sha256_hex(cfg_text).unwrap_or_else(|| {
             panic!(
-                "g20: {} row for {model} has unmeasured/malformed .cfg sha256 (skill rc 15)",
-                CONSTRAINTS
+                "g20: {CONSTRAINTS} row for {model} has unmeasured/malformed .cfg sha256 (skill rc 15)"
             );
         });
         let k = k_text.parse::<u32>().unwrap_or_else(|_| {
-            panic!(
-                "g20: {} row for {model} has unmeasured/malformed K (skill rc 15)",
-                CONSTRAINTS
-            )
+            panic!("g20: {CONSTRAINTS} row for {model} has unmeasured/malformed K (skill rc 15)")
         });
         assert!(
             k == 128,
-            "g20: {} row for {model} has K={k} but 128 required (skill rc 15)",
-            CONSTRAINTS
+            "g20: {CONSTRAINTS} row for {model} has K={k} but 128 required (skill rc 15)",
         );
 
         rows.insert(model.to_string(), InventoryRow { tla_sha, cfg_sha });
@@ -256,8 +250,7 @@ fn parse_inventory(root: &Path) -> BTreeMap<String, InventoryRow> {
     for model in MODELS {
         assert!(
             rows.contains_key(model),
-            "g20: {} proof inventory missing row for {model} (skill rc 15)",
-            CONSTRAINTS
+            "g20: {CONSTRAINTS} proof inventory missing row for {model} (skill rc 15)",
         );
     }
 
@@ -308,11 +301,9 @@ fn verify_proof_inventory() -> BTreeMap<String, InventoryRow> {
 fn skill_rc(native: Option<i32>) -> u8 {
     match native {
         Some(0) => 0,
-        Some(150) | Some(120) => 12,
+        Some(150 | 120) => 12,
         Some(12) => 13,
-        Some(75) | Some(255) => 14,
-        None => 14,
-        Some(_) => 14,
+        None | Some(_) => 14,
     }
 }
 
@@ -367,43 +358,13 @@ fn collect_evidence(root: &Path, out_dir: &Path, n: u8) -> Vec<PathBuf> {
     evidence
 }
 
-fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
-    let mut args = vec![
-        "check".to_string(),
-        format!("--config=docs/models/{model}.cfg"),
-    ];
-    match kind {
-        CheckKind::Safety => args.push(SAFETY_INV.to_string()),
-        CheckKind::Temporal => args.push(TEMPORAL.to_string()),
-    }
-    args.push(LENGTH.to_string());
-    args.push(format!("--out-dir=target/apalache/{model}"));
-    args.push(format!("docs/models/{model}.tla"));
-
-    assert!(
-        args.iter().any(|a| a == SAFETY_INV || a == TEMPORAL),
-        "g20: argv missing expected property list"
-    );
-    assert!(
-        args.iter().any(|a| a == LENGTH),
-        "g20: argv missing --length=128"
-    );
-
-    let jvm_args = std::env::var("JVM_ARGS").unwrap_or_else(|_| JVM_ARGS_DEFAULT.to_string());
-    let smt_solver = std::env::var("SMT_SOLVER").unwrap_or_else(|_| SMT_SOLVER_DEFAULT.to_string());
-
-    let out_dir = root.join("target/apalache").join(model);
-    fs::create_dir_all(&out_dir).expect("create apalache out-dir");
-
-    let mut cmd = Command::new(exe);
-    cmd.args(&args)
-        .current_dir(root)
-        .env("JVM_ARGS", &jvm_args)
-        .env("SMT_SOLVER", &smt_solver)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = match spawn_or_chmod(&mut cmd, exe) {
+fn execute_and_capture(
+    cmd: &mut Command,
+    exe: &Path,
+    model: &str,
+    kind: CheckKind,
+) -> (Option<i32>, Vec<u8>, Vec<u8>) {
+    let mut child = match spawn_or_chmod(cmd, exe) {
         Ok(c) => c,
         Err(e) => panic!("g20: cannot spawn apalache-mc for {model} {kind:?} (skill rc 14): {e}"),
     };
@@ -443,6 +404,46 @@ fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
 
     let stdout = out_thread.join().expect("stdout reader");
     let stderr = err_thread.join().expect("stderr reader");
+    (native_rc, stdout, stderr)
+}
+
+fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
+    let mut args = vec![
+        "check".to_string(),
+        format!("--config=docs/models/{model}.cfg"),
+    ];
+    match kind {
+        CheckKind::Safety => args.push(SAFETY_INV.to_string()),
+        CheckKind::Temporal => args.push(TEMPORAL.to_string()),
+    }
+    args.push(LENGTH.to_string());
+    args.push(format!("--out-dir=target/apalache/{model}"));
+    args.push(format!("docs/models/{model}.tla"));
+
+    assert!(
+        args.iter().any(|a| a == SAFETY_INV || a == TEMPORAL),
+        "g20: argv missing expected property list"
+    );
+    assert!(
+        args.iter().any(|a| a == LENGTH),
+        "g20: argv missing --length=128"
+    );
+
+    let jvm_args = std::env::var("JVM_ARGS").unwrap_or_else(|_| JVM_ARGS_DEFAULT.to_string());
+    let smt_solver = std::env::var("SMT_SOLVER").unwrap_or_else(|_| SMT_SOLVER_DEFAULT.to_string());
+
+    let out_dir = root.join("target/apalache").join(model);
+    fs::create_dir_all(&out_dir).expect("create apalache out-dir");
+
+    let mut cmd = Command::new(exe);
+    cmd.args(&args)
+        .current_dir(root)
+        .env("JVM_ARGS", &jvm_args)
+        .env("SMT_SOLVER", &smt_solver)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let (native_rc, stdout, stderr) = execute_and_capture(&mut cmd, exe, model, kind);
     let skill = skill_rc(native_rc);
 
     let evidence = collect_evidence(root, &out_dir, n);
@@ -453,10 +454,7 @@ fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
     run_text.push_str(&format!(
         "# env: JVM_ARGS={jvm_args} SMT_SOLVER={smt_solver}\n"
     ));
-    run_text.push_str(&format!(
-        "# native rc: {:?}, skill rc: {skill}\n",
-        native_rc
-    ));
+    run_text.push_str(&format!("# native rc: {native_rc:?}, skill rc: {skill}\n"));
     run_text.push_str(&format!(
         "# evidence: {}\n",
         evidence
