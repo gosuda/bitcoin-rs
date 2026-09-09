@@ -1,107 +1,73 @@
-# Source and Toolchain Compatibility Policy
+# Source and toolchain compatibility policy
 
-This document defines the toolchain requirements, dependency management rules, semver commitments, and deprecation policies for `bitcoin-rs`.
+This policy covers workspace toolchains, dependencies, versioning, and compatibility cutovers.
 
-## 1. Scope and Authority
+## 1. Scope and authority
 
-This policy applies to every crate in the `bitcoin-rs` workspace (`crates/*`) and the node binary (`bin/bitcoin-rs`).
+It applies to all workspace crates and `bin/bitcoin-rs`. Root configuration files are authoritative where named below.
 
-## 2. Toolchain and Language Edition
+## 2. Toolchain and language edition
 
-The repository development toolchain is selected by `rust-toolchain.toml`. Language edition and the compatibility floor are owned by the root `Cargo.toml`, with Clippy's compatibility behavior mirrored in `clippy.toml`.
-
-| Setting | Value | Configuration Source |
+| Setting | Value | Source |
 | :--- | :--- | :--- |
-| Development Rust toolchain | `stable` | `rust-toolchain.toml` |
-| Minimum Supported Rust Version (MSRV) | `1.95.0` | `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`) |
-| Rust Language Edition | `2024` | `Cargo.toml` (`workspace.package.edition`) |
-| Strict Workspace Lints | Enabled | `Cargo.toml` (`workspace.lints`) |
+| Development toolchain | `stable` | `rust-toolchain.toml` |
+| MSRV | `1.95.0` | `Cargo.toml`, `clippy.toml` |
+| Rust edition | `2024` | `Cargo.toml` |
+| Workspace lints | enabled | `Cargo.toml` |
 
-### 2.1 MSRV Rules
+### 2.1 MSRV rules
 
-- All crates in the workspace must remain compatible with Rust `1.95.0`.
-- MSRV increases only when a required upstream dependency raises its floor or a newer compiler capability is necessary for correctness or measured performance.
-- An MSRV bump updates root `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`), and workspace documentation together. The ordinary repository development and CI toolchain remains `stable`.
-- Explicit nightly Rust is limited to checks that require unstable Cargo or compiler functionality, such as cargo-fuzz and direct-minimal-version lanes.
+- Workspace crates must compile on Rust `1.95.0`.
+- Raise MSRV only for a required dependency, correctness capability, or measured performance need.
+- Update `Cargo.toml`, `clippy.toml`, and relevant documentation together.
+- Nightly is limited to checks that require unstable Cargo or compiler features.
 
-## 3. Dependency Policy
+## 3. Dependency policy
 
-`bitcoin-rs` maintains a minimal dependency footprint to reduce build times, security surface, and binary size.
+Prefer the standard library and existing workspace crates over new dependencies.
 
-### 3.1 Adding Dependencies
+### 3.1 Adding dependencies
 
-- All `[dependencies]` and `[build-dependencies]` of member crates (`crates/*`) must be defined centrally in `Cargo.toml` under `[workspace.dependencies]`.
-- Member crates inherit those dependencies using `{ workspace = true }`.
-- `[dev-dependencies]` are exempt unless tests exchange a dependency-owned type across crate boundaries and therefore require one version.
-- Do not add dependencies for functionality already available in the Rust standard library or existing workspace crates.
-- `tokio`, `async-std`, and other async runtime dependencies are prohibited. The node uses a synchronous event-loop architecture. The embedding API may expose `async fn` signatures without creating or retaining an executor; the embedder owns execution (`docs/contracts/embedding.md`, `EMB-02`).
+- Member `[dependencies]` and `[build-dependencies]` belong in root `[workspace.dependencies]` and are inherited with `{ workspace = true }`.
+- `[dev-dependencies]` may stay local unless tests exchange dependency-owned types across crate boundaries.
+- Do not add an async runtime. The node uses a synchronous event loop; embedding may expose `async fn` while execution remains embedder-owned (`docs/contracts/embedding.md`, `EMB-02`).
 
-### 3.2 Major Version Bumps
+### 3.2 Major version bumps
 
-Upgrading a workspace dependency to a new major version requires:
+A dependency major-version bump requires upstream API/security review and verification of affected storage backends. Changes that can affect validation also verify the `kernel` feature path.
 
-1. Audit of upstream security, performance, and API changes.
-2. Compilation and verification across all four storage backend features (`fjall`, `rocksdb`, `mdbx`, `redb`).
-3. Verification of the `kernel` consensus feature path when the change can affect validation.
+### 3.3 Consensus and P2P dependency posture
 
-### 3.3 Consensus and P2P Dependency Posture
+- `bitcoinkernel` is an optional oracle dependency behind `kernel`; `docs/contracts/validation-default.md` owns its default-status claim.
+- The workspace currently has no `bip324` dependency or Cargo feature. Transport is v1-only per `docs/policies/p2p-compatibility.md`. BIP324 documentation must land with working dependency and feature wiring.
 
-- `bitcoinkernel` is the optional consensus-oracle dependency behind the `kernel` feature. Whether that feature is in a crate's current default set is owned by `docs/contracts/validation-default.md`; do not describe it as universally opt-in or universally defaulted in other documents.
-- The current workspace has no `bip324` dependency or `bip324` Cargo feature. P2P transport is v1-only as recorded in `docs/policies/p2p-compatibility.md`. Future BIP324 work must land its dependency, feature wiring, transport implementation, and documentation in the same reviewed change instead of documenting an invocation before it exists.
+### 3.4 Lockfile, audit, and TLS rules
 
-### 3.4 Lockfile, Audit, and TLS Rules
+- Update `Cargo.lock` in the same change as the manifest change that requires it.
+- Ordinary CI commands may run Cargo without `--locked`, and the direct-minimal-version lane intentionally rewrites dependency resolution. A normal CI pass therefore does not by itself prove lockfile freshness; use an explicit locked Cargo check when that proof is required.
+- `deny.toml` must match the resolved graph. Do not exempt security-sensitive Bitcoin dependencies merely to pass an audit.
+- Dependency TLS uses Rustls only. `openssl`, `openssl-sys`, and `native-tls` are prohibited.
+- Do not use `--offline` or `--frozen` to hide unresolved dependency changes.
 
-- `Cargo.lock` changes land in the same reviewed change as the manifest change that requires them. CI and release checks use the pinned lockfile; do not use `--offline` or `--frozen` to disguise a missing or stale dependency resolution.
-- `deny.toml` stays aligned with the resolved graph. Security-sensitive Bitcoin dependencies such as `bitcoin`, `secp256k1`, and `secp256k1-sys` are not exempted merely to make an audit pass.
-- TLS, where a dependency requires it, uses the Rustls family only. `openssl`, `openssl-sys`, and `native-tls` are prohibited.
+## 4. Workspace versioning and semver
 
-## 4. Workspace Versioning and Semver Commitment
+All workspace crates inherit the root `[workspace.package]` version, currently `0.5.0`. `Cargo.toml` is the crate-list source of truth.
 
-All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.5.0`). Member crates inherit the workspace version, and internal workspace dependency versions move with it.
+- During `0.x.y`, public API breaks require a minor-version bump.
+- Patch releases contain only compatible fixes, optimizations, and internal refactors.
 
-| Workspace Crate | Path | Description |
-| :--- | :--- | :--- |
-| `bitcoin-rs-primitives` | `crates/primitives` | Core types and byte primitives |
-| `bitcoin-rs-consensus` | `crates/consensus` | Block and transaction verification |
-| `bitcoin-rs-script` | `crates/script` | Script execution and evaluation |
-| `bitcoin-rs-storage` | `crates/storage` | Key-value store abstraction, implementations, and block/undo pruning |
-| `bitcoin-rs-utxo` | `crates/utxo` | In-memory UTXO set management, snapshots, and UTXO statistics / MuHash |
-| `bitcoin-rs-chain` | `crates/chain` | Block tree and chain index tracking |
-| `bitcoin-rs-index` | `crates/index` | Transaction and address indexing |
-| `bitcoin-rs-mempool` | `crates/mempool` | Memory pool transaction storage |
-| `bitcoin-rs-p2p` | `crates/p2p` | Peer-to-peer network protocol |
-| `bitcoin-rs-mining` | `crates/mining` | Block template construction |
-| `bitcoin-rs-rpc` | `crates/rpc` | JSON-RPC HTTP server |
-| `bitcoin-rs-node` | `crates/node` | Full node state machine and event loop |
-| `bitcoin-rs` | `bin/bitcoin-rs` | Command-line node binary |
+## 5. Compatibility cutovers
 
-### 4.1 Semver Rules
+The default is a clean cutover: remove superseded wrappers, aliases, flags, fallback paths, and old representations with their replacement. Keep a compatibility path only when a current public or migration contract explicitly requires one.
 
-- During `0.x.y` releases, public API breaking changes require a minor version bump.
-- Patch updates must contain only non-breaking bug fixes, performance optimizations, or internal refactoring.
+### 5.1 UTXO snapshots
 
-## 5. Anti-Shim Principle and Deprecation Policy
+`read_snapshot_strict_v4` accepts only complete v4 snapshots and rejects v2/v3. A legacy reader requires an explicit migration-policy change.
 
-### 5.1 The Anti-Shim Principle
+### 5.2 RPC
 
-`bitcoin-rs` operates on a strict **clean cutover** principle. The project rejects:
+`bitcoin-rs-rpc` does not keep deprecation shims. RPC compatibility tests define the current Bitcoin Core schema target; incompatible endpoints or fields are updated or removed in one cutover.
 
-- Backward-compatibility shims.
-- Deprecated wrapper functions or type aliases.
-- Transitional configuration flags or legacy fallback paths.
+### 5.3 On-disk formats
 
-When a feature, algorithm, interface, or data layout changes, maintainers remove the old code path in the same change-set.
-
-The UTXO snapshot reader is a clean-cutover boundary: `read_snapshot_strict_v4` accepts only complete version-4 snapshots and rejects versions 2 and 3. The node can rebuild or resynchronize chainstate, so no legacy reader is retained for this format. A future recovery exception requires an explicit maintainer decision and matching migration policy before adding a reader.
-
-### 5.2 RPC Deprecation Policy
-
-- `bitcoin-rs-rpc` does not provide deprecation windows or compatibility shims for RPC endpoints.
-- RPC methods match current Bitcoin Core JSON-RPC schemas directly; the RPC compatibility tests are the proof surface.
-- If an RPC endpoint or field changes upstream or internally, `bitcoin-rs` updates or removes the method in a clean cutover.
-
-### 5.3 On-Disk Format Deprecation Policy
-
-- On-disk storage schemas do not maintain backward-compatibility translation shims.
-- When key-value column families, block file encodings, or checkpoint formats change, the system does not convert old databases in place.
-- Datadir schema markers, resync requirements, and checkpoint commit/recovery semantics are defined by the canonical [datadir migration policy](db-migration.md). This policy does not duplicate those on-disk rules.
+On-disk schemas are not translated in place by default. Datadir markers, replay/resync requirements, and checkpoint recovery are owned by [the datadir migration policy](db-migration.md).
