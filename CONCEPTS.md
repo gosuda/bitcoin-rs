@@ -63,9 +63,9 @@ chain transitions.
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
 ZMQ projections, TxIndex wake, mining generation, and mempool admission-state
 notifications. `ChainFollowers` / `ChainEffects` own dispatch timing after
-the tip is published, while the chain transition is still held. Mempool owns
-the notified orphan/reject state and retry mechanics; P2P owns parent requests
-and transaction relay. Derived work cannot fail the authoritative transition.
+the tip is published, while the chain transition is still held. Transaction
+ownership follows [ARCH-05](docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
+Derived work cannot fail the authoritative transition.
 Index recovery still uses `ChainEventPublisher` hints (`EVT-02`); this is not
 a second event log.
 

@@ -92,10 +92,10 @@ state (`crates/mempool/src/orphan.rs`).
   when a chain change is active.
 - `begin_chain_change` takes the pool write lock, stores the next odd value,
   and returns a `ChainChangeGuard` that owns the reservation. The guard has
-  no `Drop` that changes generation: dropping, unwinding, or an error leaves
-  the generation odd — admission stays closed. Only `finish` may
-  compare-exchange the odd value to the reserved even value, reopening
-  admission. One guard covers one externally coherent chain operation.
+  no `Drop` that changes generation: dropping or unwinding without an
+  explicit `finish` leaves the generation odd — admission stays closed.
+  Only `finish` may compare-exchange the odd value to the reserved even value,
+  reopening admission. One guard covers one externally coherent chain operation.
 - `submit_transaction` owns common preparation and bounded retry for RPC
   and peer submissions in mempool. `admit_transaction` remains their
   atomic admission operation:
@@ -110,7 +110,7 @@ state (`crates/mempool/src/orphan.rs`).
   with fresh facts — it never re-uses a captured even generation.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
-  `crates/rpc/src/context.rs` reads existing coin and transaction handles,
+  `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,
   using one captured applied tip for height and MTP. It takes no additional
   chain-transition lock: a stable reader holding that mutex must not spend
   admission's retry budget. Authoritative chain changes are bracketed by
@@ -119,15 +119,30 @@ state (`crates/mempool/src/orphan.rs`).
   admission or peer lifecycle results. RPC and node's peer ingress use that
   same view, with no gateway ownership, shadow version, or copied chain-state
   model. A provider may return no snapshot to request a transient retry.
+  Peer duplicate suppression uses positive live-coin evidence from
+  `UtxoSet::has_live_outputs_for_txid`; no live output leaves confirmation
+  status unknown. RPC transaction-body cache membership supplies no such
+  evidence.
 - Peer orphan/reject transitions validate the same tokens before changing
   state, under pool-then-lifecycle lock order. An accepted parent cannot
   commit between the missing-input verdict and registration of its child.
   The gateway stores orphan bodies, txid/wtxid indexes, parent indexes,
   and ready IDs as one ownership unit. Retention is count-bounded FIFO
-  without expiry; witness refresh preserves FIFO position. Recent rejects
-  retain both hash forms in a bounded FIFO. These private defaults and
-  indexes have one owner in `orphan.rs`; RPC missing-input rejections do
-  not populate peer orphan state.
+  without expiry; witness refresh preserves FIFO position. These private
+  defaults and indexes have one owner in `orphan.rs`; RPC missing-input
+  rejections do not populate peer orphan state. An out-of-range output index
+  on a resident mempool parent is rejected under the same token and retry-claim
+  checks, rather than retained as an orphan awaiting an impossible parent.
+- Recent rejects use one bounded FIFO with an identity scope for each hash.
+  Witness-scoped refusals suppress only the checked wtxid; transaction-scoped
+  refusals additionally suppress the txid. Legacy inventory does not consult
+  witness-only refusals, including when a stripped body's wtxid equals its
+  txid. A witness-scoped refusal removes only the matching resident orphan
+  variant, preserving a different witness and its source. Invalid output
+  indexes on known mempool parents are transaction-scoped. This distinction
+  prevents a rejected witness from blocking another valid witness for the
+  same transaction, as described by
+  [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
 - `retry_orphans` claims one bounded ready set only while generation is
   stable. Claimed bodies remain resident; transient retry exhaustion marks
   them ready for a later call, without immediately consuming the same work
@@ -145,8 +160,11 @@ state (`crates/mempool/src/orphan.rs`).
   immediately-evicted parent, so a reorg sweep cannot create orphaned
   ancestry.
   `DisconnectedCandidates` in `crates/mempool/src/reconsider.rs` owns
-  candidate pricing and earlier offered outputs; node supplies ordered
-  transactions and its coin view while retaining the chain transition.
+  candidate accounting and an index into earlier offered transaction bodies.
+  It resolves full previous outputs, including scripts, from restored coins
+  or those retained bodies and uses the shared fee/vsize/sigop accounting.
+  Node supplies ordered transactions and its coin view while retaining the
+  chain transition.
   The batch deliberately runs under the reserved odd generation rather
   than ordinary submission. Its existing validation scope is unchanged;
   current-chain revalidation of the reorg batch is tracked by #640.
@@ -176,9 +194,15 @@ state (`crates/mempool/src/orphan.rs`).
   `exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll`,
   `parent_commit_between_resolution_and_hold_cannot_lose_the_only_wake`,
   `rpc_missing_inputs_does_not_create_peer_lifecycle_state`,
-  `coinbase_and_nonstandard_missing_transactions_are_not_held`.
+  `coinbase_and_nonstandard_missing_transactions_are_not_held`,
+  `known_parent_invalid_output_is_rejected_without_orphan_retention`,
+  `orphan_retry_removes_known_invalid_outpoint_after_parent_arrival`,
+  `witness_rejection_preserves_valid_variant_and_legacy_inventory`,
+  `fresh_invalid_witness_preserves_a_different_resident_orphan_variant`.
 - `crates/rpc/src/context.rs` (`admission_chain_tests`):
   `stable_chainstate_reader_does_not_block_transaction_admission`,
+  `cached_unconfirmed_transaction_is_still_admitted_from_a_peer`,
+  `confirmed_hint_requires_live_chain_outputs_and_survives_no_cache`,
   `admission_chain_uses_current_handles_and_one_applied_tip`.
 - `crates/mempool/src/orphan.rs` (inline tests):
   `zero_quota_retains_no_body_or_index`,
@@ -189,7 +213,9 @@ state (`crates/mempool/src/orphan.rs`).
   `restored_coins_and_ordered_candidates_price_the_batch`,
   `unavailable_parent_never_offers_outputs_to_a_child`,
   `restored_coin_takes_precedence_over_an_offered_output`,
-  `coinbase_does_not_become_a_reconsideration_candidate`.
+  `coinbase_does_not_become_a_reconsideration_candidate`,
+  `reconsideration_counts_weighted_p2sh_and_witness_prevouts`,
+  `offered_parent_scripts_are_retained_for_child_accounting`.
 - `crates/node/src/chain_effects.rs` (inline tests):
   `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
   `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`.
