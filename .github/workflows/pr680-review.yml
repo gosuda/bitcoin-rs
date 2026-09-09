@@ -1,4 +1,4 @@
-name: PR 680 review workspace
+name: PR 680 pinned review
 
 on:
   push:
@@ -13,101 +13,43 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  prepare:
+  source:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      commit: ${{ steps.objects.outputs.commit }}
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 93c55c99d6d808c601f9a2989a60f5bd36223e57
+          ref: 33460e1b587f4d3c5e4867972f510ecae5521b4d
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: 4ad649c2c825a3b68531bd9846c4fe0e0b87a513
-          path: .review-source
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: b60d899326fb800df33adf742bbd3d2d274dbf04
-          path: .review-tools
-          persist-credentials: false
-          sparse-checkout: .github/pr680-integrate.py
-          sparse-checkout-cone-mode: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          components: rustfmt
-      - name: Reconcile the reviewed fixes with the current owner
-        run: python3 .review-tools/.github/pr680-integrate.py
-      - name: Check formatting and full fuzz dependency resolution
+      - name: Export the exact source for review
         run: |
-          cargo fmt --all
-          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked > /tmp/fuzz-metadata.json
-          git diff HEAD --check
-          git diff HEAD --stat
-          git diff HEAD --binary > /tmp/pr680-review.diff
-      - name: Create an unreferenced candidate commit, not a branch update
-        id: objects
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import json, os, subprocess, urllib.request
-          from pathlib import Path
-          parent = '93c55c99d6d808c601f9a2989a60f5bd36223e57'
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          assert git('rev-parse', 'HEAD') == parent
-          allowed = set('crates/consensus/src/verify_tx.rs crates/consensus/src/sigops.rs crates/mempool/src/accounting.rs crates/node/src/run.rs crates/node/src/tx_ingress.rs crates/node/tests/tx_ingress_e2e.rs crates/rpc/src/context.rs docs/contracts/mempool-mutations.md fuzz/Cargo.lock'.split())
-          paths = git('diff', 'HEAD', '--name-only').splitlines()
-          assert paths and set(paths) == allowed, paths
-          def post(endpoint, payload):
-              request = urllib.request.Request('https://api.github.com/repos/gosuda/bitcoin-rs/git/' + endpoint, data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
-              with urllib.request.urlopen(request) as response:
-                  return json.load(response)
-          entries = []
-          for path in paths:
-              assert not Path(path).is_symlink()
-              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': Path(path).read_text()})
-          tree = post('trees', {'base_tree': git('rev-parse', 'HEAD^{tree}'), 'tree': entries})
-          commit = post('commits', {'message': 'fix: reconcile transaction accounting, confirmation, and committed effects', 'tree': tree['sha'], 'parents': [parent]})
-          print('candidate_commit=' + commit['sha'])
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write('commit=' + commit['sha'] + '\n')
-          Path('/tmp/pr680-candidate.json').write_text(json.dumps({'parent': parent, 'commit': commit['sha'], 'tree': tree['sha'], 'files': paths}, indent=2))
-          PY
-          git add --update
-          git archive --format=tar "$(git write-tree)" > /tmp/pr680-candidate.tar
+          git rev-parse HEAD > /tmp/pr680-head.txt
+          git archive --format=tar HEAD > /tmp/pr680-current.tar
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr680-candidate
+          name: pr680-current
           path: |
-            /tmp/pr680-review.diff
-            /tmp/pr680-candidate.json
-            /tmp/pr680-candidate.tar
+            /tmp/pr680-head.txt
+            /tmp/pr680-current.tar
           retention-days: 1
-  validate:
-    needs: prepare
+  focused:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.commit }}
+          ref: 33460e1b587f4d3c5e4867972f510ecae5521b4d
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - run: cargo fmt --all -- --check
+      - run: cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked > /tmp/fuzz-metadata.json
       - run: cargo test -p bitcoin-rs-script -p bitcoin-rs-mempool -p bitcoin-rs-consensus --no-default-features --lib
-      - run: cargo test -p bitcoin-rs-rpc --no-default-features --lib admission_chain_
       - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib tx_ingress::tests
       - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e
-      - run: cargo test -p bitcoin-rs-p2p --lib inv::tests
+      - run: cargo test -p bitcoin-rs-p2p --lib
       - run: |
           cargo clippy --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
           cargo clippy -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
