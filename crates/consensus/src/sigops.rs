@@ -4,6 +4,8 @@
 //! by consensus verification and mempool preparation. Script-level counters
 //! remain owned by `bitcoin-rs-script`.
 
+use std::collections::HashMap;
+
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::script::{
     Instruction, instructions, is_p2sh, is_push_only, is_witness_program,
@@ -20,6 +22,8 @@ use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
 ///
 /// Prevouts may be incomplete or unordered. Input order permits a linear pass
 /// without allocation, which is the normal admission/consensus preparation order.
+/// A missing or unordered input builds a borrowed index once rather than
+/// repeatedly scanning the full prevout slice.
 /// The rules follow BIP141 and Core v31.1 `GetTransactionSigOpCost`,
 /// `CScript::GetSigOpCount` and `CountWitnessSigOps`.
 #[must_use]
@@ -30,21 +34,25 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
         return cost;
     }
     let mut cursor = 0;
+    let mut indexed = None;
     for input in &tx.inputs {
         let prevout = if let Some((outpoint, output)) = prevouts.get(cursor)
             && *outpoint == input.previous_output
         {
             cursor += 1;
             output
-        } else if let Some((index, (_, output))) = prevouts
-            .iter()
-            .enumerate()
-            .find(|(_, (outpoint, _))| *outpoint == input.previous_output)
-        {
-            cursor = index + 1;
-            output
         } else {
-            continue;
+            let resolved = indexed.get_or_insert_with(|| {
+                let mut resolved = HashMap::with_capacity(prevouts.len());
+                for (outpoint, output) in prevouts {
+                    resolved.entry(*outpoint).or_insert(output);
+                }
+                resolved
+            });
+            let Some(output) = resolved.get(&input.previous_output) else {
+                continue;
+            };
+            *output
         };
         let redeem = if is_p2sh(&prevout.script_pubkey) && is_push_only(&input.script_sig) {
             last_push(&input.script_sig)
@@ -202,5 +210,42 @@ mod tests {
         ];
         assert_eq!(super::transaction_sigop_cost(&tx, &prevouts), 3);
         assert_eq!(super::transaction_sigop_cost(&tx, &[]), 0);
+    }
+
+    /// BIP141 charges one sigop for each resolved P2WPKH input. Interleaved
+    /// missing inputs and reverse-ordered prevouts must not lose matches.
+    #[test]
+    fn transaction_sigop_cost_resolves_many_interleaved_missing_inputs() {
+        const INPUTS: u32 = 4_096;
+        let tx = Tx {
+            version: 2,
+            inputs: (0..INPUTS)
+                .map(|vout| TxIn {
+                    previous_output: OutPoint::new(Txid::default(), vout),
+                    script_sig: Vec::new(),
+                    sequence: u32::MAX,
+                    witness: Vec::new(),
+                })
+                .collect(),
+            outputs: Vec::new(),
+            lock_time: 0,
+        };
+        let mut prevouts: Vec<_> = tx
+            .inputs
+            .iter()
+            .step_by(2)
+            .map(|input| {
+                (
+                    input.previous_output,
+                    TxOut {
+                        value: 2,
+                        script_pubkey: [vec![0x00, 0x14], vec![4; 20]].concat(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(transaction_sigop_cost(&tx, &prevouts), INPUTS / 2);
+        prevouts.reverse();
+        assert_eq!(transaction_sigop_cost(&tx, &prevouts), INPUTS / 2);
     }
 }
