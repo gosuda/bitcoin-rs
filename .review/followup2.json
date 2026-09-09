@@ -1,0 +1,52 @@
+{
+"docs/contracts/p2p-wire.md":[
+[2,6,"The decoded command inventory belongs to `crates/p2p/src/compat.rs`.\n[The compatibility policy](../policies/p2p-compatibility.md) owns handshake\nfields, reject-or-ignore behavior, and current deviations. Planned clauses\nbelow do not change that inventory or establish implemented support.\n"],
+[9,7,"### `P2P-01`: Wire inventory and framing\n"],
+[17,1,"v1 envelopes, payload bounds, service flags, and network magic follow the\nchecked inventory. Unknown commands are ignored after readiness; before\nreadiness, non-handshake traffic disconnects. Oversized payloads disconnect.\n`core_compat`, `wire_codec`, and `handshake_roundtrip` test these boundaries.\n"],
+[19,1,"### `P2P-02`: Scheduling and session ownership\n"],
+[21,12,"`P2pService` owns sessions; `PeerTable` and `PeerLease` own session identity.\nToday `BlockSyncDownloadWindow` in `crates/node/src/sync.rs` owns download\nscheduling. Moving that window into P2P is a target, not a completed change.\nThe target has one scheduler, exact disconnect requeue, stale-session rejection,\nbyte-bounded buffers, and control traffic that cannot be starved by bulk traffic.\nThe planned `overhaul_download_owner` suite does not yet prove those targets.\n"],
+[34,1,"### `P2P-03`: Identity-checked monotonic height credit\n"],
+[36,15,"Only the delivering connection earns credit for validated header evidence.\nCredit is monotonic and retained branch evidence survives peer loss and chain\nselection changes. Reconnecting at the same address is a new session. This\nclause retains the ID used by the existing peer and node tests; discovery does\nnot reuse it.\n"],
+[52,1,"Evidence: `peer_table.rs` tests\n`note_announced_height_credits_only_the_delivering_connection` and\n`note_announced_height_raises_monotonically_and_reports_actual_updates`;\n`sync.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`,\n`tick_fetches_reorg_fork_announced_by_at_tip_peer`,\n`losing_fork_credit_survives_winner_disconnect`, and\n`cold_start_stall_hedges_front_without_reassigning_owner`.\n"],
+[54,16,"### `P2P-04`: Compact blocks (target)\n"],
+[71,1,"Compact-block messages are decoded and ignored today. No production\n`compact_block.rs` owner exists. Future BIP152 reconstruction must verify full\ntransaction identities after short-ID matching, handle collisions and missing\ntransactions with a full-block fallback, and use ordinary block validation.\nNo partial reconstruction may commit or retain stale request leases.\n`overhaul_compact_blocks` remains a planned suite, not current evidence.\n"],
+[73,13,"### `P2P-05`: v2 transport and compact filters (target)\n"],
+[87,1,"Only v1 transport is implemented. There is no `bip324` Cargo feature, pinned\nBIP324 dependency, or `transport_v2.rs`. Future authenticated transport must\nnot silently downgrade after authentication failure. Compact-filter messages\nare decoded and ignored, and the capability is not advertised. Future serving\nmust use precomputed index-owned bytes and advertise only retained capabilities.\n`overhaul_optional_protocols` is planned and cannot currently be run.\n"],
+[89,12,"### `P2P-06`: Persistent discovery (target)\n"],
+[102,1,"`getaddr`, `addr`, and `addrv2` are decoded and ignored today. A bounded,\nversioned address manager with tried/new tables, validated intake, restart\npersistence, and explicit corrupt-state reseeding is a target. No\n`address_book.rs` owner exists. Discovery recovery must never reset authoritative\nchainstate. `overhaul_peer_contract` is planned, not proof of discovery support.\n"],
+[104,32,"## Existing verification\n"],
+[137,2,"`cargo test -p bitcoin-rs-p2p --test core_compat` checks the command inventory\nand current wire behavior. The live `core_interop_live` lane is environment-gated;\nit must not be reported as run without its Core process and recorded evidence.\n"]],
+"docs/policies/p2p-compatibility.md":[
+[17,1,"| Transport | v1 only; BIP324 is a target with no Cargo feature or dependency today (§7) |\n"],
+[29,1,"- Bitcoin P2P **v1 envelope baseline** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload. BIP324 framing is planned, not implemented; see §7.\n"],
+[38,1,"BIP324 transport negotiation is a target only. No `bip324` feature or\n`transport_v2.rs` exists; the current handshake runs over v1 transport.\n"],
+[45,1,"| `services` | `NETWORK \\| WITNESS` | No pruning, compact-filter serving, or bloom service is advertised (§7). |\n"],
+[70,2,"| `inv` | Accepted transactions are announced to eligible peers other than their source; proactive block announcements are absent. Inbound inventory requests missing objects through `getdata`, with wtxid negotiation and a 50 000-vector bound. |\n| `getdata` | Serves full blocks from the active chain and transactions from the mempool/orphan view. Missing objects produce a trailing `notfound`. Compact-block serving is not implemented. Bound: 50 000 vectors. |\n"],
+[76,1,"| `block` | sink | Forwarded to the node block pipeline with original wire bytes. There is no compact-block reconstruction path. |\n"],
+[79,2,"| `getaddr` | ignored | No persistent address manager or address response is implemented. |\n| `addr` / `addrv2` | ignored | Decoded with a 1 000-entry bound; no persistent intake or discovery table. |\n"],
+[82,2,"| `sendcmpct` | ignored | No production BIP152 relay negotiation. |\n| `cmpctblock` / `getblocktxn` / `blocktxn` | ignored | Decoded, but not reconstructed or served. BIP152 remains a target (§7). |\n"],
+[85,1,"| `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | ignored | Compact-filter serving and advertisement are not implemented. |\n"],
+[121,1,"3. **Proactive block announcements**: absent. Accepted transactions are relayed to eligible peers other than their source; new blocks are not proactively announced through `inv`, `headers`, or compact-block relay.\n"],
+[123,1,"5. **Service bits**: `NETWORK | WITNESS` only. `NETWORK_LIMITED`, `NODE_COMPACT_FILTERS`, and `NODE_BLOOM` stay off; the corresponding services are not implemented.\n"],
+[133,1,"- **Peer contract (planned)**: `crates/p2p/tests/overhaul_peer_contract.rs` (`planned`): handshake exception table, unknown commands ignored after readiness and rejected before readiness, oversized payload disconnects (never hangs), discovery state surviving restart, bounded address intake, outbound diversity, and honest service bits. Each assertion fails pre-change for its intended reason.\n"]],
+"docs/benchmarks/native-validation-default.md":[
+[2,1,"This document is the promotion record for the native strict-Rust validation default. The owner of the default is [`docs/contracts/validation-default.md`](../contracts/validation-default.md), guarded by `g19_validation_default` (feature/default consistency only, not measured promotion proof). The end-state decision is recorded here after T16 and T17 run; until then the recorded verdict stays `KeepKernel` and this page states the contract only.\n"],
+[21,1,"| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | No final strict-artifact signed-spend harness is identified; `overhaul_default_closure` checks dependency closure only | `blocked_missing_harness` |\n"],
+[47,1,"- Promotion of a candidate over its control requires a speed ratio `control_p50 / candidate_p50 >= 1.05` (equivalently `candidate_p50 / control_p50 <= 1 / 1.05`, approximately 0.95238) over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.\n"],
+[63,1,"guarded by `g19_validation_default` (feature/default consistency only, not measured promotion proof). Numbers from a named run live in\n"]],
+"docs/contracts/external-api.md":[
+[74,2,"  unknown block hash returns 404 on block and block-part routes. Header\n  queries may return an empty 200; do not generalize that route's semantics.\n"],
+[83,2,"- `sequence` A/R bodies contain reversed txid (32 bytes), label (1), and\n  little-endian mempool sequence (8): 41 bytes. C/D bodies contain the block\n  hash and label only: 33 bytes. The four-byte transport counter is a separate\n  trailing frame for both forms. `BlockInclusion` emits\n"],
+[188,0,"**Target.** Current Esplora `POST /tx` delegates to `sendrawtransaction`, using\nRPC origin and limits. Preview still uses a separate policy evaluator rather\nthan the gateway verifier. The unified behavior below is not implemented:\n\n"],
+[205,0,"\n**Target, only partially implemented.** In particular, Esplora `script_activity`\ncombines index activity and mempool state without a shared `ReadStamp`; concurrent\ntransitions can mix views. Existing response-shape tests do not prove coherence.\nThe required guarantees are:\n"]],
+"crates/rpc/src/capabilities.rs":[
+[4,3,"//! The runtime revision is a wake counter, not an atomic snapshot token. The\n//! revision and capability row are read separately; consumers must not use it\n//! as a chain/index consistency fence.\n"],
+[70,7,"    /// Runtime wake revision, or zero when the source does not track one.\n    /// This diagnostic value is read separately from the capability row.\n    /// Deserialization defaults to zero for older reports.\n"],
+[88,5,"    /// Diagnostic runtime wake revision, not a coherent-state fence.\n"]],
+"docs/contracts/reference-set.md":[
+[99,4,"- `load_reference_set` checks manifest shape, required identities, digest\n  syntax, distinct release/development versions, and canonical corpus endpoints.\n  It does not open a binary or compare its bytes with a digest. A well-formed\n  but incorrect digest is not detectable by that loader. Artifact attestation\n  belongs to the campaign harness before it launches or trusts a process.\n"],
+[113,1,"  malformed-digest and noncanonical-corpus identities, and pins `corpus_custody()` honesty.\n"]],
+"crates/utxo/tests/overhaul_persistent_coins.rs":[
+[16,1,"    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UndoBatch, UtxoAdd,\n"],
+[583,1,"        coins.undo_block(&UndoBatch::default(), CoinDurability::Durable),\n"]]
+}
