@@ -24,8 +24,8 @@ Checkpoint publication is one serialized operation: pause chain transitions, fre
 | Checkpoint with no journal | Use the checkpoint and initialize an empty journal |
 | Unreadable journal head, committed-range corruption, base mismatch, or rejected header | Discard that journal generation and use the checkpoint |
 | No complete checkpoint | Start cold and initialize a journal |
-| Reorg below the checkpoint base | Persist `chainstate-journal/full-revalidation` and start cold on every restart until a replacement checkpoint publishes |
-| Journal disabled | Use checkpoint-only recovery. A persisted full-revalidation marker still forces cold validation until marker retirement commits |
+| Reorg below the checkpoint base with a journal writer | Invalidate the journal generation, persist `chainstate-journal/full-revalidation`, and start cold on restart until a replacement checkpoint retires the marker |
+| Journal disabled | Use checkpoint-only recovery. An existing full-revalidation marker still forces cold validation. A below-checkpoint disconnect does not create that marker without a writer; its disconnect marker remains until a clean checkpoint, and restart before that checkpoint is refused |
 
 Replay mutates an owned checkpoint state. Any error discards the partially reconstructed state before it can become runtime state. Segment contents are read one frame at a time; memory use is bounded by checkpoint state plus one decoded journal record rather than the complete replay gap.
 
@@ -33,7 +33,7 @@ Replay mutates an owned checkpoint state. Any error discards the partially recon
 
 A reorg whose fork is at or above the checkpoint base rewrites `head.json` to the fork before truncating and deleting old-branch segment tails. The disconnect marker is released only after the new journal frontier is durable. A replacement block can then append to the rewritten frontier and survives another restart.
 
-A fork below the checkpoint base cannot be represented as a suffix of that checkpoint. The writer invalidates the journal generation and publishes the full-revalidation marker. The marker is independent of whether journaling is currently enabled: startup must not restore the invalidated checkpoint. Operators should not delete this marker while the old checkpoint remains.
+A fork below the checkpoint base cannot be represented as a suffix of that checkpoint. When a journal writer is active, it invalidates the journal generation and publishes the full-revalidation marker before returning the below-base error; startup then avoids restoring the invalidated checkpoint. With journaling disabled there is no writer to publish that marker. The completed disconnect marker therefore remains until a clean checkpoint captures the rollback; if the process restarts first, startup refuses the unsettled chainstate rather than silently restoring the old checkpoint.
 
 Marker retirement is a second durability step after checkpoint `CURRENT` publishes. The commit point is `unlink(chainstate-journal/full-revalidation)` plus an `fsync` of that directory. A crash before that directory sync, or an I/O error while unlinking or syncing, leaves the marker in place so the next boot stays on cold validation. Those errors are retryable I/O owned by the checkpoint worker: publication reports failure after `CURRENT` is already durable, and the next tick retries until unlink and directory sync succeed. Journal compaction uses the same unlink-and-directory-sync sequence when a writer is open.
 
