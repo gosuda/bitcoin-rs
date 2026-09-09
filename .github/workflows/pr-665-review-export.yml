@@ -1,23 +1,132 @@
-name: PR 665 isolated review source
+name: PR 665 isolated review verification
 on:
   push:
     branches: [review/pr-665-verification-20260909]
+    paths: [.review/ready]
 permissions:
   contents: read
+concurrency:
+  group: pr665-isolated-review-${{ github.run_id }}
+  cancel-in-progress: false
 jobs:
-  source:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.commit.outputs.candidate }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          fetch-depth: 0
           persist-credentials: false
-      - name: Archive tracked source only
-        run: git archive --format=tar.gz --output=review-source.tar.gz HEAD
+      - name: Apply exact reviewed edits to pinned source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .review/edits*.json "$RUNNER_TEMP/"
+          git checkout --detach f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          seen = set()
+          for source in sorted(Path(os.environ['RUNNER_TEMP']).glob('edits*.json')):
+              for name, edits in json.loads(source.read_text()).items():
+                  path = Path(name)
+                  if path.is_absolute() or '..' in path.parts or name in seen:
+                      raise SystemExit(f'invalid or duplicate edit path: {name}')
+                  seen.add(name)
+                  lines = path.read_text().splitlines(keepends=True)
+                  for start, count, replacement in reversed(edits):
+                      lines[start:start + count] = replacement.splitlines(keepends=True)
+                  path.write_text(''.join(lines))
+          if len(seen) != 18:
+              raise SystemExit(f'expected 18 reviewed source files, got {len(seen)}')
+          PY
+          git diff --check
+          git add -u
+          test "$(git write-tree)" = 2f1d3d359f5087b9e9a99eceb40a0220aad6b44e
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: rustfmt
+      - name: Format only reviewed Rust files
+        run: |
+          git diff --cached --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
+          git diff --check
+          git add -u
+      - name: Publish source-only candidate for verification
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Fix PR 665 persistence, admission and evidence findings; remove duplicate state and branches' -m 'Use exclusive mutable ownership for the not-yet-integrated persistent UTXO cache. Preserve typed storage failures, reject wrong stored identities, fence failed writes, and enforce refill eviction. Reject lost persistence receipts across all routes and assert whole-batch recovery in backend tests. Recheck stale rejected mempool verdicts, share block weight arithmetic, validate evidence/corpus identities, and expose txindex wake revisions. This commit does not promote validation defaults or claim formal or full-product verification.'
+          candidate=$(git rev-parse HEAD)
+          branch="review/pr-665-candidate-${GITHUB_RUN_ID}"
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin "HEAD:refs/heads/$branch"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "Source-only candidate: $candidate on $branch" >> "$GITHUB_STEP_SUMMARY"
+          git diff --binary HEAD^ HEAD > "$RUNNER_TEMP/reviewed.patch"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/reviewed-source.tar.gz" HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr-665-source-f8bb0f8
-          path: review-source.tar.gz
+          name: pr665-reviewed-source
+          path: |
+            ${{ runner.temp }}/reviewed.patch
+            ${{ runner.temp }}/reviewed-source.tar.gz
           retention-days: 1
           if-no-files-found: error
+  rust:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [core, evidence, node, fjall, redb, mdbx, rocksdb]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: pr665-review-${{ matrix.lane }}
+      - name: Run relevant contracts and lints
+        env:
+          LANE: ${{ matrix.lane }}
+          CARGO_INCREMENTAL: 0
+          CARGO_TERM_COLOR: never
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$LANE" in
+            core)
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features --test overhaul_persistent_coins
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features --doc
+              cargo test --locked -p bitcoin-rs-mempool
+              cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs
+              cargo clippy --locked -p bitcoin-rs-utxo -p bitcoin-rs-mempool --no-default-features --all-targets -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity -- -D warnings
+              ;;
+            evidence)
+              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
+              cargo test --locked -p bitcoin-rs-rpc --test handler_smoke --test compat_manifest
+              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set -- -D warnings
+              ;;
+            node)
+              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib capability_revision_tests
+              cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --lib -- -D warnings
+              ;;
+            *)
+              cargo test --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --test overhaul_atomic_durability -- --nocapture
+              cargo clippy --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --all-targets -- -D warnings
+              ;;
+          esac
