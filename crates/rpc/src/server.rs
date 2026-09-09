@@ -157,19 +157,17 @@ fn serve_connection(
                 let response = crate::rest::route(handler.context(), path, query, rest_enabled);
                 write_response(reader.get_mut(), &response, keep_alive)?;
             }
-            HttpRoute::EsploraGet { path, query } => {
-                let response = crate::esplora::route(handler, path, query);
+            HttpRoute::EsploraGet {
+                surface,
+                path,
+                query,
+            } => {
+                let response = crate::esplora::route(handler, surface, path, query);
                 write_response(reader.get_mut(), &response, keep_alive)?;
             }
-            HttpRoute::EsploraPost { path } => {
-                match crate::esplora::route_post(handler, path, &request.body) {
-                    Some(response) => {
-                        write_response(reader.get_mut(), &response, keep_alive)?;
-                    }
-                    None => {
-                        write_not_found(reader.get_mut(), keep_alive)?;
-                    }
-                }
+            HttpRoute::EsploraPost { surface, path } => {
+                let response = crate::esplora::route_post(handler, surface, path, &request.body);
+                write_response(reader.get_mut(), &response, keep_alive)?;
             }
             HttpRoute::NotFound => {
                 write_not_found(reader.get_mut(), keep_alive)?;
@@ -525,21 +523,37 @@ fn split_path_query(path: &str) -> (&str, &str) {
 /// Directory table for this listener. `classify` is the owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
-    Rest { path: &'a str, query: &'a str },
-    EsploraGet { path: &'a str, query: &'a str },
-    EsploraPost { path: &'a str },
+    Rest {
+        path: &'a str,
+        query: &'a str,
+    },
+    EsploraGet {
+        surface: crate::esplora::Surface,
+        path: &'a str,
+        query: &'a str,
+    },
+    EsploraPost {
+        surface: crate::esplora::Surface,
+        path: &'a str,
+    },
     JsonRpc,
     NotFound,
 }
 
 fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
-    let esplora = crate::esplora::namespace(path).is_some();
-    match method {
-        "GET" if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
-        "GET" if esplora => HttpRoute::EsploraGet { path, query },
-        "POST" if esplora => HttpRoute::EsploraPost { path },
-        "POST" => HttpRoute::JsonRpc,
+    match (method, crate::esplora::namespace(path)) {
+        ("GET", _) if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
+        ("GET", Some((surface, rest))) => HttpRoute::EsploraGet {
+            surface,
+            path: rest,
+            query,
+        },
+        ("POST", Some((surface, rest))) => HttpRoute::EsploraPost {
+            surface,
+            path: rest,
+        },
+        ("POST", None) => HttpRoute::JsonRpc,
         _ => HttpRoute::NotFound,
     }
 }
@@ -628,25 +642,31 @@ mod tests {
         assert_eq!(
             classify("GET", "/api/blocks/tip/height"),
             HttpRoute::EsploraGet {
-                path: "/api/blocks/tip/height",
+                surface: crate::esplora::Surface::Public,
+                path: "/blocks/tip/height",
                 query: ""
             }
         );
         assert_eq!(
             classify("GET", "/esplora/internal/mempool/txs?max_txs=1"),
             HttpRoute::EsploraGet {
-                path: "/esplora/internal/mempool/txs",
+                surface: crate::esplora::Surface::Backend,
+                path: "/internal/mempool/txs",
                 query: "max_txs=1"
             }
         );
         assert_eq!(
             classify("POST", "/api/tx"),
-            HttpRoute::EsploraPost { path: "/api/tx" }
+            HttpRoute::EsploraPost {
+                surface: crate::esplora::Surface::Public,
+                path: "/tx"
+            }
         );
         assert_eq!(
             classify("POST", "/esplora/internal/txs"),
             HttpRoute::EsploraPost {
-                path: "/esplora/internal/txs"
+                surface: crate::esplora::Surface::Backend,
+                path: "/internal/txs"
             }
         );
         assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
@@ -669,7 +689,8 @@ mod tests {
         assert_eq!(
             classify("GET", "/api/v1/block-height/0"),
             HttpRoute::EsploraGet {
-                path: "/api/v1/block-height/0",
+                surface: crate::esplora::Surface::Public,
+                path: "/v1/block-height/0",
                 query: ""
             },
             "GET /api/v1 stays in the closed /api directory (404 inside Esplora)"
@@ -677,7 +698,8 @@ mod tests {
         assert_eq!(
             classify("POST", "/api/v1/tx"),
             HttpRoute::EsploraPost {
-                path: "/api/v1/tx"
+                surface: crate::esplora::Surface::Public,
+                path: "/v1/tx"
             }
         );
     }
