@@ -55,6 +55,9 @@ change. A transaction mined in a connected block emits no `R`: the block's `C`
 event covers it, matching Core. Every event concludes with a topic-local
 little-endian `u32` sequence counter frame. Reorg disconnects are emitted
 tip-first before connects on the replacement branch.
+`bitcoin_rs_rpc::zmq` owns the compatibility payload and transport;
+`ChainFollowers` / `ChainEffects` own emission timing relative to committed
+chain transitions.
 
 ### Post-commit chain effects
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,

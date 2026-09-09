@@ -9159,7 +9159,7 @@ mod consensus_rule_tests {
                 crate::SequenceEvent::Connected(hash) => (hash, b'C'),
                 crate::SequenceEvent::Disconnected(hash) => (hash, b'D'),
                 // Test-fake arms for the mempool `A`/`R` events; the
-                // production payload mapping lives in `zmq_publisher`.
+                // production payload mapping lives in `bitcoin_rs_rpc::zmq`.
                 crate::SequenceEvent::Added(txid, _) => (Hash256::from(txid), b'A'),
                 crate::SequenceEvent::Removed(txid, _) => (Hash256::from(txid), b'R'),
             };

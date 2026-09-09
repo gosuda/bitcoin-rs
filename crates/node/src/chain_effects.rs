@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use crate::apply::{ConnectOutcome, DisconnectOutcome};
 use crate::tx_admission::TxAdmission;
 use crate::txindex_worker::TxIndexRuntime;
-use crate::zmq_publisher::{SequenceEvent, ZmqPublisher};
+use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
 /// Post-commit adapters that follow a committed chain transition.
 ///

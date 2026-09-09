@@ -66,7 +66,7 @@ Owners:
     cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
     candidate selection and `chain` for candidate header/work/time context.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
-    handlers.
+    handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
     subsystem lifecycle coordination, and CLI binary entry points.
 - **Explicit non-goal**: Layer numbers do not justify speculative new crates or
@@ -126,6 +126,13 @@ Owners:
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
   TOML parsing. Applied-tip mutation is owned by the chainstate facade
   (`ARCH-07`), not by a public field bag of subsystem handles.
+- `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
+  transport, mempool sequence projection, and live notifier enumeration.
+  `bitcoin-rs-node` constructs and wires the publisher and continues to own when
+  committed chain effects are emitted. The same live publisher is the source for
+  `getzmqnotifications`; node does not keep a parallel notifier metadata model.
+  The `g17_dependency_direction` gate pins the external `zmq` dependency to the
+  surface crate and permits node only to forward `bitcoin-rs-rpc/zmq`.
 - `UserConfig::overlay` applies a later layer field-wise: a set field replaces
   the earlier value; an unset field leaves it. Nested override structs merge
   the same way, including `ChainstateJournalOverrides` and `MiningOverrides`. Proof:
