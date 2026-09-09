@@ -84,8 +84,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - name: Provision pinned Core and Apalache fixtures
-        run: bash scripts/provision-ci-reference-fixtures.sh
       # Pure-Rust test gate: each workspace member tested with its own default
       # features minus kernel. Deliberately no apt step -- the default path
       # needs no CMake/Boost toolchain; the kernel engine is opt-in and

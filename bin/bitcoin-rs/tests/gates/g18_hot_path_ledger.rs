@@ -8,10 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use bitcoin_rs_node::metrics::{Ledger as RuntimeLedger, Sample};
 use serde::Deserialize;
 
-const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";
+const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v1";
 const CONTRACT: &str = "docs/contracts/hot-path-attribution.md";
 const LEDGER: &str = "docs/benchmarks/hot-path-ledger.toml";
 const CELL_COUNT: usize = 36;
@@ -74,7 +73,6 @@ fn workspace_file(relative: &str) -> PathBuf {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Ledger {
     schema: String,
     contract: String,
@@ -84,7 +82,6 @@ struct Ledger {
     candidates: Vec<Candidate>,
     levers: Vec<Lever>,
     forbidden_probes: Vec<ForbiddenProbe>,
-    cells: Vec<Cell>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,20 +99,6 @@ impl Matrix {
             .saturating_mul(self.corpora.len())
             .saturating_mul(self.archs.len())
             .saturating_mul(self.backends.len())
-    }
-
-    fn cell_ids(&self) -> BTreeSet<String> {
-        let mut ids = BTreeSet::new();
-        for domain in &self.domains {
-            for corpus in &self.corpora {
-                for arch in &self.archs {
-                    for backend in &self.backends {
-                        ids.insert(format!("{domain}.{corpus}.{arch}.{backend}"));
-                    }
-                }
-            }
-        }
-        ids
     }
 }
 
@@ -179,20 +162,10 @@ struct ForbiddenProbe {
     reason: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Cell {
-    id: String,
-    samples: Vec<Sample>,
-}
-
 fn load_ledger() -> Ledger {
     let path = workspace_file(LEDGER);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!("read {}: {error}", path.display());
-    });
-    RuntimeLedger::parse(&text).unwrap_or_else(|error| {
-        panic!("runtime ledger validation for {LEDGER}: {error}");
     });
     toml::from_str(&text).unwrap_or_else(|error| {
         panic!("parse {LEDGER}: {error}");
@@ -227,37 +200,6 @@ fn matrix_is_the_frozen_36_cell_denominator() {
     assert_eq!(ledger.matrix.corpora, ["c150", "cmodern"]);
     assert_eq!(ledger.matrix.archs, ["x86_64", "arm64"]);
     assert_eq!(ledger.matrix.backends, ["fjall", "rocksdb", "redb"]);
-}
-
-#[test]
-fn cell_histories_match_the_matrix_and_runtime_schema() {
-    let ledger = load_ledger();
-    let mut actual = BTreeSet::new();
-    for cell in &ledger.cells {
-        assert!(!cell.id.is_empty(), "empty cell id");
-        assert!(
-            actual.insert(cell.id.clone()),
-            "duplicate cell id `{}`",
-            cell.id
-        );
-        for sample in &cell.samples {
-            assert!(
-                !sample.path.is_empty(),
-                "cell `{}` contains an empty sample path",
-                cell.id
-            );
-        }
-    }
-    assert_eq!(
-        ledger.cells.len(),
-        CELL_COUNT,
-        "ledger must declare one history per cell"
-    );
-    assert_eq!(
-        actual,
-        ledger.matrix.cell_ids(),
-        "cell histories must equal the matrix cross-product"
-    );
 }
 
 #[test]

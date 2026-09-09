@@ -1,81 +1,11 @@
-# Storage footprint evidence
-
-This document owns the storage footprint evidence for the target node. The normative contract is [`docs/contracts/storage-footprint.md`](../contracts/storage-footprint.md) (`FP-01` through `FP-04`). The final campaign belongs to T39 and is recorded in `overhaul-full-tip-storage.md` when T39 creates it; this page states the campaign contract and retains the prior synthetic-corpus evidence. Backend comparison and compression evidence below is candidate evidence for the backend choice; it is not full-tip proof.
-
-## Cell it owns
-
-The default-lane physical peak of a data directory during fresh replay to the pinned mainnet stop identity, plus the per-owner logical ledger that explains it.
-
-## Campaign contract (T39, gate G11)
-
-| Field | Required value | Status |
-|---|---|---|
-| Profile | Default unpruned fjall | fixed |
-| Optional indexes | `txindex` off, `scriptindex` off, `blockfilterindex` off | fixed |
-| Stop identity | Pinned mainnet height and block hash, recorded before the run | `UNMEASURED` |
-| Filesystem | Isolated filesystem or project quota; conservative high-water captured by the quota, not by a `du` snapshot | fixed |
-| Lifecycle covered | Sync, compaction, restart, reorg, migration where applicable | fixed |
-| Physical high-water budget | `<= 1_000_000_000_000` decimal bytes (`PhysicalLedger::data_directory_allocated_bytes`, `FP-04`) | required |
-| Logical ledger | Separate per-owner serialized bytes (`FP-01`); never added to the physical ledger | fixed |
-| Baseline | T02 captures the original candidate's physical high-water on the matched workload before the T14 authority cut; T39 compares the final integrated binary against it and must not exceed it | `UNMEASURED` |
-| Verdict | pending | `planned_not_executed` |
-
-A `du`-style snapshot is a lower bound on the peak and cannot prove the peak gate. Snapshot-only, wrong-lane, hidden-migration-file or unpinned-stop evidence cannot pass. If the physical high-water exceeds budget, rank dominant owners from the logical ledger, repair the dominant owner (duplicate retention, stale retention, oversized metadata, excess amplification), and rerun the full campaign. Never discard witness data, silently prune a supposedly unpruned profile or hide temporary files to meet the number. Hard links, sparse files and engine-reserved space are accounted per `FP-02`.
-
-Physical categories: body segments, undo segments, chainstate files, engine WAL, journals, compaction and migration temporaries, optional indexes, logs, residuals. Logical categories: serialized keys and values and framing overhead by owner.
-
-## Verdict machine
-
-`bin/bitcoin-rs/tests/overhaul_storage_evidence.rs` passes only for default-lane unpruned fjall, pinned stop, isolated-filesystem peak and separate logical and physical ledgers; anything else fails closed.
-
-```bash
-cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_storage_evidence -- --nocapture
-```
-
-## Related cells
-
-| Cell | Owner | Status |
-|---|---|---|
-| Backend write amplification on the synthetic ten-family corpus (retained harness `crates/storage/examples/storage_footprint.rs`) | `crates/storage` | prior evidence only, see below |
-| T02 original-candidate physical high-water, matched workload | T02 collector | `UNMEASURED` |
-| T14 candidate full-tip storage check before authority cutover | T14 | `planned_not_executed` |
-| T39 final integrated campaign | T39 | `planned_not_executed` |
-
-## Required identities per sample
-
-Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
-
-| Identity | Content |
-|---|---|
-| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
-| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
-| Corpus | Corpus digest, height range, stop height and stop hash |
-| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
-| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
-| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
-
-## Acceptance rule
-
-- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
-- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
-- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
-- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
-- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
-
-## Status
-
-`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
-
-## Prior candidate evidence (2026-09-02 and 2026-09-04 synthetic corpus)
-
-Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
+# Storage backend on-disk footprint
 
 The compression-fix comparison was measured on 2026-09-02 at branch
 `overhaul/one-session` commit `b0e0935` against the empty-`Spending`
 (`12+0`) corpus. Current-format (`Spending 12+8`) totals were remeasured on
 2026-09-04 from `crates/storage/examples/storage_footprint.rs`.
 
-### What was measured
+## What was measured
 
 The on-disk footprint of each storage backend after writing a fixed synthetic
 corpus across all ten column families, forcing memtable flush to SST files
@@ -87,7 +17,7 @@ The measurement harness is `crates/storage/examples/storage_footprint.rs`:
 cargo run -p bitcoin-rs-storage --example storage_footprint --release --features fjall,redb,rocksdb -- [backend]
 ```
 
-### Corpus
+## Corpus
 
 | Parameter | Value |
 |---|---|
@@ -110,9 +40,9 @@ The historical compression-fix tables below used `Spending 12+0` and a
 logical size of **127,970,000 B (122.04 MiB)**. They are kept so the LZ4
 change stays matched to the corpus it was measured on.
 
-### Results
+## Results
 
-#### Current format (`Spending 12+8`)
+### Current format (`Spending 12+8`)
 
 Remeasured 2026-09-04 with the harness above.
 
@@ -125,9 +55,9 @@ RocksDB was not remeasured here: this environment cannot compile
 `rust-librocksdb-sys` (`cstdint` headers missing). Its last published total
 (134,671,921 B) belongs to the empty-`Spending` corpus below.
 
-#### Historical empty-`Spending` corpus (`12+0`, commit `b0e0935`)
+### Historical empty-`Spending` corpus (`12+0`, commit `b0e0935`)
 
-##### Before compression fix
+#### Before compression fix
 
 | Backend | Total on-disk | Logical | Write amplification |
 |---|---:|---:|---:|
@@ -135,7 +65,7 @@ RocksDB was not remeasured here: this environment cannot compile
 | redb | 269,488,128 B (257.00 MiB) | 127,970,000 B (122.04 MiB) | 2.106x |
 | rocksdb | 134,671,921 B (128.43 MiB) | 127,970,000 B (122.04 MiB) | 1.052x |
 
-##### After compression fix
+#### After compression fix
 
 | Backend | Total on-disk | Logical | Write amplification |
 |---|---:|---:|---:|
@@ -151,7 +81,7 @@ Positioned `Spending` values add 1,600,000 logical bytes. On this hardware
 that raised fjall's after-fix total from 85,858,577 B to 86,728,585 B
 (0.671x → 0.669x). Redb's preallocated file did not grow.
 
-#### Fjall per-column-family breakdown (current `Spending 12+8`)
+### Fjall per-column-family breakdown (current `Spending 12+8`)
 
 | Column family | On-disk (bytes) | On-disk (KiB) |
 |---|---:|---:|
@@ -172,7 +102,7 @@ Keyspace directories are mapped to column-family names by sorted directory
 order, so per-CF attribution is a harness convenience, not a durable
 identity.
 
-### What was wrong
+## What was wrong
 
 Fjall's default `KeyspaceCreateOptions` uses a compression policy of
 `[None, None, Lz4]` — LZ4 compression only on the last level (level 2+). L0
@@ -188,7 +118,7 @@ versus rocksdb's 1.052x was almost entirely due to the missing L0/L1
 compression. The current-format per-CF breakdown shows the `spending` CF
 (12-byte keys, 8-byte values) consuming 2,525,017 bytes for 200k rows.
 
-### What was fixed
+## What was fixed
 
 `FjallStore::open_with_cache` now creates each keyspace with
 `CompressionPolicy::all(CompressionType::Lz4)`, applying LZ4 compression on
@@ -197,7 +127,7 @@ that the workspace already enables.
 
 The fix is in `crates/storage/src/fjall_impl.rs`. No other backend was changed.
 
-### How it was checked
+## How it was checked
 
 - `crates/storage/tests/backend_equivalence.rs`: 2 tests, all green.
 - `crates/storage/tests/backend_metrics.rs`: 2 tests, all green.
@@ -207,7 +137,7 @@ The fix is in `crates/storage/src/fjall_impl.rs`. No other backend was changed.
 - Current-format remeasure: `storage_footprint` release, features `fjall` and
   `fjall,redb` (2026-09-04).
 
-### What is not claimed
+## What is not claimed
 
 - The corpus is synthetic. Real block data (transactions, scripts) has
   different compressibility. The 0.669x amplification is specific to this
