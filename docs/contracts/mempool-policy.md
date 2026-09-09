@@ -31,7 +31,7 @@ holds a second admission evaluator.
   | Max replacement evictions | 100 |
   | Max fee | 0.1 BTC/kvB |
   | Standard transaction sigops | 16_000 |
-| TRUC (v3) transactions | rejected at the version gate (`TX_VERSION_MAX = 2`); standard only after the T21 TRUC policy layer lands |
+| TRUC (v3) transactions | supported |
 
 - `crates/mempool/src/policy.rs` resolves one versioned `AdmissionPolicy`
   from `NodeConfig` at startup. The gateway stamps every verdict with the
