@@ -118,10 +118,9 @@ impl RocksDbStore {
         // the engine write, sync faults drop the durable write options.
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
             return match fault {
-                crate::PersistFault::FailApply | crate::PersistFault::LostApply => {
-                    Err(fault.injected_error())
-                }
-                crate::PersistFault::PartialApply => Err(fault.injected_error()),
+                crate::PersistFault::FailApply
+                | crate::PersistFault::LostApply
+                | crate::PersistFault::PartialApply => Err(fault.injected_error()),
                 _ => unreachable!("take_at only releases Apply-boundary faults"),
             };
         }
@@ -145,9 +144,9 @@ impl RocksDbStore {
         if let Some(fault) = sync_fault {
             return match fault {
                 // Completion never precedes the persisted write.
-                crate::PersistFault::FailSync => Err(fault.injected_error()),
-                // A lost completion cannot acknowledge durability.
-                crate::PersistFault::LostSync => Err(fault.injected_error()),
+                crate::PersistFault::FailSync | crate::PersistFault::LostSync => {
+                    Err(fault.injected_error())
+                }
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }

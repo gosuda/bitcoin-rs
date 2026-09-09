@@ -128,8 +128,9 @@ impl MdbxStore {
         // Sync boundary: the batch is committed; completion faults or is lost.
         if let Some(fault) = sync_fault {
             return match fault {
-                crate::PersistFault::FailSync => Err(fault.injected_error()),
-                crate::PersistFault::LostSync => Err(fault.injected_error()),
+                crate::PersistFault::FailSync | crate::PersistFault::LostSync => {
+                    Err(fault.injected_error())
+                }
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }
@@ -231,8 +232,9 @@ impl KvStore for MdbxStore {
         count_write("durable", encoded_bytes);
         if let Some(fault) = sync_fault {
             return match fault {
-                crate::PersistFault::FailSync => Err(fault.injected_error()),
-                crate::PersistFault::LostSync => Ok(true),
+                crate::PersistFault::FailSync | crate::PersistFault::LostSync => {
+                    Err(fault.injected_error())
+                }
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }

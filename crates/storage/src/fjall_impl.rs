@@ -133,8 +133,9 @@ impl FjallStore {
                 self.stage_ops(&mut fjall_batch, batch.ops)?;
                 fjall_batch.commit().map_err(StorageError::backend)?;
                 return match fault {
-                    crate::PersistFault::FailSync => Err(fault.injected_error()),
-                    crate::PersistFault::LostSync => Err(fault.injected_error()),
+                    crate::PersistFault::FailSync | crate::PersistFault::LostSync => {
+                        Err(fault.injected_error())
+                    }
                     _ => unreachable!("take_at only releases Sync-boundary faults"),
                 };
             }
