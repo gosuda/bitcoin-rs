@@ -1,4 +1,4 @@
-name: PR665 completion verification
+name: PR692 completion verification
 on:
   push:
     branches: [review/pr665-completion-ci-20260910]
@@ -6,111 +6,41 @@ on:
 permissions:
   contents: read
 jobs:
-  prepare:
+  snapshots:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      candidate: ${{ steps.commit.outputs.candidate }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 8d24469b62ae950656ec55f2bd14a41d3029e5cc
+          ref: 7c3558e0d9c1f4afd90696e08d602d0a367e8467
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
-        with:
-          toolchain: stable
-          components: rustfmt
-      - name: Correct the two stale fixture calls and use exact digest byte pairs
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('crates/node/src/metrics.rs')
-          text = p.read_text()
-          old = 'text.as_bytes().chunks_exact(2)'
-          assert text.count(old) == 1
-          p.write_text(text.replace(old, 'text.as_bytes().as_chunks::<2>().0'))
-          p = Path('crates/consensus/tests/overhaul_parse_parity.rs')
-          text = p.read_text()
-          for block, facts in [('mutated', 'facts'), ('base', 'control_facts')]:
-              old = f'verify_block_rules_precomputed(&{block}, BlockRuleContext::non_contextual(), &{facts})'
-              new = f'verify_block_rules_precomputed(&{block}, BlockRuleContext::non_contextual(), {facts}.txids(), {facts}.wtxids().unwrap_or_default(), {facts}.has_witness())'
-              assert text.count(old) == 1
-              text = text.replace(old, new)
-          p.write_text(text)
-          PY
-          rustfmt --edition 2024 --config skip_children=true crates/node/src/metrics.rs crates/consensus/tests/overhaul_parse_parity.rs
-          git diff --check
-      - name: Commit verified-scope corrections to the follow-up branch
-        id: commit
+      - name: Export three exact trees with minimal synthetic ancestry
         env:
-          GH_TOKEN: ${{ github.token }}
+          PR_HEAD: 7c3558e0d9c1f4afd90696e08d602d0a367e8467
+          MAIN_HEAD: b5c321331cedd2491f0f52dff135943280a5af5e
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -u
-          git commit -m 'Update parse fixtures to cached-facts API and use exact digest byte pairs'
-          candidate=$(git rev-parse HEAD)
-          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin HEAD:refs/heads/review/pr665-followup-34373279168
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "$candidate review/pr665-followup-34373279168" > "$RUNNER_TEMP/candidate.txt"
-          git diff --binary 970387318c0e14f93491d0a535b8ec2e0a127825 HEAD > "$RUNNER_TEMP/reviewed.patch"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/reviewed-source.tar.gz" HEAD
+          base=$(git merge-base "$PR_HEAD" "$MAIN_HEAD")
+          b=$(printf 'Synthetic merge base for local analysis only\n' | git commit-tree "$base^{tree}")
+          h=$(printf 'Synthetic PR tree for local analysis only\n' | git commit-tree "$PR_HEAD^{tree}" -p "$b")
+          m=$(printf 'Synthetic main tree for local analysis only\n' | git commit-tree "$MAIN_HEAD^{tree}" -p "$b")
+          git update-ref refs/snapshots/base "$b"
+          git update-ref refs/snapshots/head "$h"
+          git update-ref refs/snapshots/main "$m"
+          git bundle create "$RUNNER_TEMP/pr692-snapshots.bundle" refs/snapshots/base refs/snapshots/head refs/snapshots/main
+          {
+            printf 'base=%s\nhead=%s\nmain=%s\n' "$base" "$PR_HEAD" "$MAIN_HEAD"
+            printf 'base_tree=%s\nhead_tree=%s\nmain_tree=%s\n' "$(git rev-parse "$base^{tree}")" "$(git rev-parse "$PR_HEAD^{tree}")" "$(git rev-parse "$MAIN_HEAD^{tree}")"
+            git diff --stat "$base" "$PR_HEAD"
+          } | tee "$RUNNER_TEMP/pr692-inputs.txt"
+          sha256sum "$RUNNER_TEMP/pr692-snapshots.bundle"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr665-followup-source
+          name: pr692-merge-inputs
           path: |
-            ${{ runner.temp }}/candidate.txt
-            ${{ runner.temp }}/reviewed.patch
-            ${{ runner.temp }}/reviewed-source.tar.gz
-          retention-days: 7
-  verify:
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [coins, evidence]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ needs.prepare.outputs.candidate }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
-        with:
-          toolchain: stable
-          components: clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-        with:
-          key: pr665-review-${{ matrix.lane }}
-          cache-on-failure: true
-      - name: Regressions and warnings-as-errors lint
-        env:
-          LANE: ${{ matrix.lane }}
-          CARGO_INCREMENTAL: 0
-          CARGO_TERM_COLOR: never
-        run: |
-          set -euo pipefail
-          exec > >(tee "$RUNNER_TEMP/verification.log") 2>&1
-          if [ "$LANE" = coins ]; then
-            cargo test --locked -p bitcoin-rs-utxo --no-default-features
-            cargo clippy --locked -p bitcoin-rs-utxo --no-default-features --all-targets -- -D warnings
-            python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
-            cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity
-          else
-            cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
-            cargo test --locked -p bitcoin-rs-rpc --test core_compat --test handler_smoke
-            cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set -- -D warnings
-          fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: pr665-verify-${{ matrix.lane }}
-          path: ${{ runner.temp }}/verification.log
+            ${{ runner.temp }}/pr692-snapshots.bundle
+            ${{ runner.temp }}/pr692-inputs.txt
           retention-days: 7
