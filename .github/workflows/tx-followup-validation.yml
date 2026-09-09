@@ -36,13 +36,33 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: candidate -> target
-      - name: Require failing regression assertions on the original implementation
+      - name: Reconcile workspace-only lock entries without changing external dependencies
         working-directory: candidate
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/tx-evidence"
           rustc --version | tee "$RUNNER_TEMP/tx-evidence/toolchain.txt"
+          cp Cargo.lock "$RUNNER_TEMP/tx-evidence/Cargo.lock.before"
+          cargo metadata --format-version=1 > "$RUNNER_TEMP/cargo-metadata.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, tomllib
+          before = tomllib.loads((Path(os.environ['RUNNER_TEMP']) / 'tx-evidence/Cargo.lock.before').read_text())
+          after = tomllib.loads(Path('Cargo.lock').read_text())
+          def external(lock):
+              return { (p['name'],p['version'],p['source']): p for p in lock['package'] if 'source' in p }
+          def identities(lock):
+              return {(p['name'],p['version'],p.get('source')) for p in lock['package']}
+          if external(before) != external(after) or identities(before) != identities(after) or before['version'] != after['version']:
+              raise SystemExit('lock reconciliation changed a dependency identity or external record')
+          PY
+          git diff -- Cargo.lock | tee "$RUNNER_TEMP/tx-evidence/lock-reconciliation.patch"
+      - name: Require failing regression assertions on the original implementation
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 ../runner/.github/review/structural_rejection.py tests
           set +e
           cargo test --locked -p bitcoin-rs-mempool --lib input_structure_ -- --nocapture > "$RUNNER_TEMP/tx-evidence/red.log" 2>&1
@@ -66,7 +86,7 @@ jobs:
           git diff --check
           python3 - <<'PY'
           import subprocess
-          expected = {'crates/consensus/src/verify_tx.rs', 'crates/mempool/src/gateway.rs', 'crates/mempool/src/admission.rs', 'docs/contracts/mempool-mutations.md'}
+          expected = {'Cargo.lock', 'crates/consensus/src/verify_tx.rs', 'crates/mempool/src/gateway.rs', 'crates/mempool/src/admission.rs', 'docs/contracts/mempool-mutations.md'}
           actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           if actual != expected:
               raise SystemExit(f'unexpected candidate scope: {actual ^ expected}')
@@ -75,10 +95,10 @@ jobs:
           git diff > "$RUNNER_TEMP/tx-evidence/candidate.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md
+          git add Cargo.lock crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md
           git commit -m 'fix(mempool): reject malformed input outpoints before orphan retention'
           git rev-parse HEAD | tee "$RUNNER_TEMP/tx-evidence/candidate-sha.txt"
-          git ls-tree -r HEAD -- crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/tx-evidence/blobs.txt"
+          git ls-tree -r HEAD -- Cargo.lock crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/tx-evidence/blobs.txt"
           git push origin HEAD:refs/heads/followup/structural-rejection-scope
       - name: Native mempool and consensus regression suites
         if: always() && steps.candidate.outcome == 'success'
