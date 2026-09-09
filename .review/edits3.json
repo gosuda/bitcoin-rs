@@ -1,0 +1,49 @@
+{
+  "crates/mempool/src/gateway.rs": [
+    [600, 8, ""],
+    [630, 4, "        let prepared = request.height.checked_add(1)\n            .ok_or(AdmitError::Consensus)\n            .and_then(|height| self.prepare_and_verify(&request, height));\n\n        // POL-03: the test seam runs after every provisional verdict, with\n        // no domain lock held, so stale rejection races are reproducible.\n        #[cfg(any(test, feature = \"test-seam\"))]\n        ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());\n"],
+    [656, 0, "        let Some((policy, fact)) = prepared? else {\n            return Ok(AdmitOutcome::AlreadyKnown);\n        };\n\n"],
+    [969, 7, "/// One-shot admission gate after verification and before the writer recheck.\n"],
+    [1017, 2, "        // No pool lock is held. Dropping the release sender unblocks the test.\n"],
+    [2288, 0, "    /// POL-03: a stale context outranks even a provisional rejection.\n    #[test]\n    fn rejected_verdicts_are_rechecked_after_verification() {\n        for policy_rejection in [false, true] {\n            for change_chain in [false, true] {\n                let gateway = gateway_with(None);\n                let candidate = standard_tx(0x90);\n                let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);\n                if policy_rejection {\n                    request.context.missing_inputs = true;\n                } else {\n                    request.prevouts[0].1.script_pubkey = vec![0x00];\n                }\n                let (parked_tx, parked_rx) = mpsc::channel();\n                let (release_tx, release_rx) = mpsc::channel();\n                super::arm_admission_park(Arc::as_ptr(&gateway).expose_provenance(), parked_tx, release_rx);\n                let worker = Arc::clone(&gateway);\n                let thread = std::thread::spawn(move || worker.admit_transaction(request));\n                parked_rx.recv_timeout(std::time::Duration::from_secs(10)).expect(\"verification finished\");\n                let expected = if change_chain {\n                    gateway.chain_generation.fetch_add(2, Ordering::Release);\n                    AdmitError::GenerationChanged\n                } else {\n                    gateway.insert_entry(AdmissionOrigin::Rpc, entry(&tx(0x91))).expect(\"pool changed\");\n                    AdmitError::MempoolChanged\n                };\n                release_tx.send(()).expect(\"release admission\");\n                assert_eq!(thread.join().expect(\"admission thread\"), Err(expected));\n                assert!(!gateway.read().contains_txid(&candidate.txid()));\n            }\n        }\n    }\n\n"]
+  ],
+  "crates/storage/src/redb_impl.rs": [
+    [96, 22, "            if fault == crate::PersistFault::PartialApply {\n                // A strict prefix of the batch is staged into a\n                // transaction that is dropped uncommitted: no family\n                // observes a partial batch.\n                let write_txn = self.db.begin_write().map_err(StorageError::backend)?;\n                apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;\n                drop(write_txn);\n            }\n            return Err(fault.injected_error());\n"],
+    [131, 5, "                return Err(fault.injected_error());\n"],
+    [243, 11, "            if fault == crate::PersistFault::PartialApply {\n                apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;\n                drop(write_txn);\n            }\n            return Err(fault.injected_error());\n"],
+    [273, 7, "            return Err(fault.injected_error());\n"],
+    [287, 13, "            return Err(fault.injected_error());\n"],
+    [419, 17, "            if fault == crate::PersistFault::PartialApply {\n                let write_txn = self.db.begin_write().map_err(StorageError::backend)?;\n                apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;\n                drop(write_txn);\n            }\n            return Err(fault.injected_error());\n"],
+    [456, 5, "            return Err(fault.injected_error());\n"],
+    [553, 12, "            if fault == crate::PersistFault::PartialApply {\n                apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;\n                drop(write_txn);\n            }\n            return Err(fault.injected_error());\n"],
+    [584, 7, "            return Err(fault.injected_error());\n"],
+    [598, 11, "            return Err(fault.injected_error());\n"]
+  ],
+  "crates/rpc/src/compat_manifest.rs": [
+    [232, 0, "    /// A corpus is duplicated, unknown, or differs from the canonical product registry.\n    #[error(\"corpus {id} does not match tools/campaign-corpus/products.json\")]\n    CorpusIdentityMismatch {\n        /// The unrecognized or inconsistent corpus identifier.\n        id: String,\n    },\n"],
+    [293, 0, "    let registry: serde_json::Value = serde_json::from_str(include_str!(\n        \"../../../tools/campaign-corpus/products.json\"\n    )).map_err(|error| ReferenceError::ManifestUnreadable { detail: error.to_string() })?;\n"],
+    [308, 0, "        let product = &registry[\"products\"][&id];\n        if product[\"stop_height\"].as_u64() != Some(stop_height)\n            || product[\"stop_hash\"].as_str() != Some(stop_hash.as_str())\n            || corpora.iter().any(|corpus: &CorpusPin| corpus.id == id)\n        {\n            return Err(ReferenceError::CorpusIdentityMismatch { id });\n        }\n"],
+    [357, 0, "        .filter(|text| !text.trim().is_empty())\n"],
+    [414, 1, "    let development = kernel.strip_prefix(\"31.99.\")\n        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()));\n    if release == kernel || !released || !development {\n"]
+  ],
+  "bin/bitcoin-rs/tests/overhaul_reference_set.rs": [
+    [293, 0, "\n/// REF-03: product identity comes from the exporter registry, not arbitrary TOML.\n#[test]\nfn noncanonical_corpus_identities_are_rejected() {\n    for (old, new) in [\n        (\"stop_height = 150000\", \"stop_height = 149999\"),\n        (\"0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b\", \"0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884c\"),\n        (\"id = \\\"C150\\\"\", \"id = \\\"unknown\\\"\"),\n        (\"id = \\\"Cmodern\\\"\", \"id = \\\"C150\\\"\"),\n    ] {\n        assert!(matches!(load_reference_set(&edit_manifest(old, new)), Err(ReferenceError::CorpusIdentityMismatch { .. })), \"{new}\");\n    }\n}\n\n/// REF-02: a distinct label is not necessarily a kernel development version.\n#[test]\nfn kernel_identity_requires_a_31_99_patch_version() {\n    for version in [\"nonsense\", \"31.99\", \"31.99.\", \"31.99.x\", \"31.99.0.1\", \"32.0.0\"] {\n        let edited = edit_manifest(\"core_version = \\\"31.99.0\\\"\", &format!(\"core_version = \\\"{version}\\\"\"));\n        assert_eq!(load_reference_set(&edited), Err(ReferenceError::IdentityConfusion));\n    }\n}\n"]
+  ],
+  "crates/storage/src/fjall_impl.rs": [
+    [104, 21, "            if fault == crate::PersistFault::PartialApply {\n                // A strict prefix is staged into the engine batch and the\n                // boundary then faults: the never-committed batch leaves\n                // no family with a partial view.\n                let mut fjall_batch = self.db.batch();\n                self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops))?;\n            }\n            return Err(fault.injected_error());\n"],
+    [134, 5, "                return Err(fault.injected_error());\n"],
+    [257, 5, "            return Err(fault.injected_error());\n"]
+  ],
+  "crates/storage/src/trait_.rs": [
+    [105, 4, "    /// The engine write is dropped before apply. The call returns `Err`:\n    /// even a deferred write must not acknowledge bytes that are not visible.\n"],
+    [119, 3, "    /// Durability completion is lost after apply. The call returns `Err`;\n    /// recovery may observe the whole batch or none, never a cross-family mix.\n"],
+    [126, 2, "    /// The flush sync is dropped. The call returns `Err` rather than\n    /// acknowledging deferred durability that has not completed.\n"]
+  ],
+  "crates/consensus/tests/overhaul_parse_parity.rs": [
+    [213, 0, "        assert_eq!(BlockFacts::block_weight(&materialized.txs), oracle.weight().to_wu());\n        assert_eq!(BlockFacts::from_txids(&materialized.txs, expected_txids.clone()).weight(), oracle.weight().to_wu());\n"]
+  ],
+  "crates/consensus/src/block_view.rs": [
+    [129, 8, "        let weight = Self::block_weight(txs);\n"],
+    [153, 2, "    /// clone and Merkle walk. [`Self::from_txids`] uses this same calculation.\n"]
+  ]
+}
