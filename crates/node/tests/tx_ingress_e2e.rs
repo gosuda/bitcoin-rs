@@ -449,7 +449,7 @@ fn announces_tx(frames: &[Message], txid: &Txid) -> bool {
     })
 }
 
-/// P2P-01 / BIP144: these dialers advertise NODE_WITNESS, so require
+/// P2P-01 / BIP144: these dialers advertise `NODE_WITNESS`, so require
 /// witness-serialized getdata rather than accepting the legacy request.
 fn requests_tx(frames: &[Message], txid: &Txid) -> bool {
     frames.iter().any(|message| match message {
