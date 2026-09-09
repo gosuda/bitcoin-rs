@@ -926,3 +926,39 @@ fn encode_base64(bytes: &[u8]) -> String {
     }
     result
 }
+
+#[test]
+fn getcapabilities_reports_revision_and_disabled_txindex_row()
+-> Result<(), Box<dyn std::error::Error>> {
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let response = handler.dispatch("getcapabilities", &json!([]))?;
+    let revision = response
+        .get("revision")
+        .and_then(JsonValueTrait::as_u64)
+        .ok_or("getcapabilities response must carry a u64 revision")?;
+    assert_eq!(
+        revision, 0,
+        "no worker is attached, so the runtime revision is zero"
+    );
+    let rows = response
+        .get("capabilities")
+        .and_then(|value| value.as_array())
+        .ok_or("getcapabilities response must carry a capabilities array")?;
+    assert_eq!(rows.len(), 1, "one compiled capability row");
+    let row = &rows[0];
+    let id = row
+        .get("id")
+        .and_then(JsonValueTrait::as_str)
+        .ok_or("capability row must carry an id")?;
+    assert_eq!(id, "txindex");
+    assert_eq!(
+        row.get("compiled").and_then(JsonValueTrait::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        row.get("enabled").and_then(JsonValueTrait::as_bool),
+        Some(false)
+    );
+    Ok(())
+}

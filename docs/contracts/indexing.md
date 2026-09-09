@@ -46,6 +46,10 @@ Owners:
   `getindexinfo` and enables historical `getrawtransaction` lookups.
   Internal locators never infer it. `getcapabilities` reports the
   compiled row; a missing worker is `enabled: false` / `Disabled`.
+- `getcapabilities` answers `{"revision", "capabilities"}`: `revision` is
+  the one runtime revision every status adapter projects (`0` with no
+  attached source); `capabilities` lists the compiled rows in stable
+  node order.
 - A truncated script prefix accelerates live lookup only with exact
   script verification. Prefix collisions never remove another script's
   row. History retains provably unspendable outputs even though live
