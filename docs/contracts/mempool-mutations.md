@@ -71,6 +71,9 @@ state (`crates/mempool/src/orphan.rs`).
 - `Mempool::sequence_number` advances exactly once per emitted change while
   the write lock is held. A failed insert, a no-op removal, and a clear of
   an empty pool assign nothing.
+- `MutationResult::sequence_of(index)` returns a sequence only for a change
+  present in that result. Empty results and out-of-range indices return
+  `None`; in-range lookups retain checked sequence arithmetic.
 
 ### `MPL-03`: ZeroMQ sequence event payload mapping
 
@@ -181,6 +184,9 @@ state (`crates/mempool/src/orphan.rs`).
 
 ## Proven by
 
+- `crates/mempool/src/mutation.rs` (inline tests):
+  `sequence_of_only_returns_sequences_for_committed_changes`,
+  `empty_mutation_has_no_sequence_at_any_index`.
 - `crates/mempool/src/gateway.rs` (inline tests):
   `accepted_and_block_inclusion_events_arrive_in_commit_order`,
   `remove_for_block_publishes_removals_with_origins`,
