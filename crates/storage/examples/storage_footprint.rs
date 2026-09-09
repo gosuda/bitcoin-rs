@@ -15,8 +15,7 @@
 //! cargo run -p bitcoin-rs-storage --example storage_footprint --release -- [backend]
 //! ```
 //!
-//! `backend` is one of `fjall` (default), `redb`, `rocksdb`. The corpus is
-//! designed to complete in under a minute on a laptop.
+//! `backend` is one of `fjall` (default), `redb`, `rocksdb`, or `mdbx`. Enable the corresponding Cargo feature.
 #![allow(clippy::print_stdout)]
 #![allow(clippy::expect_used)]
 
@@ -186,6 +185,7 @@ fn dir_size(path: &Path) -> u64 {
 
 /// Measures per-column-family bytes for fjall. Each keyspace is a separate
 /// numbered directory under `keyspaces/`. Also reports the shared journal.
+#[cfg(feature = "fjall")]
 fn fjall_cf_sizes(root: &Path) -> (HashMap<String, u64>, u64) {
     let mut sizes = HashMap::new();
     let cf_names: Vec<&str> = ColumnFamily::ALL.iter().map(|cf| cf.name()).collect();
@@ -344,9 +344,16 @@ fn main() {
             let (cf_sizes, journal) = rocksdb_cf_sizes(path);
             print_results(&backend, total, logical, &cf_sizes, journal);
         }
+        #[cfg(feature = "mdbx")]
+        "mdbx" => {
+            let store = bitcoin_rs_storage::MdbxStore::open(path).expect("open mdbx");
+            write_corpus(&store);
+            drop(store);
+            print_results(&backend, dir_size(path), logical, &HashMap::new(), 0);
+        }
         other => {
             eprintln!("Unknown backend: {other}");
-            eprintln!("Usage: storage_footprint [fjall|redb|rocksdb]");
+            eprintln!("Usage: storage_footprint [fjall|redb|rocksdb|mdbx]");
             std::process::exit(1);
         }
     }

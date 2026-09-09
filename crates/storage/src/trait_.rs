@@ -81,17 +81,20 @@ pub enum PersistBoundary {
 pub enum PersistFault {
     /// Fail before applying the batch.
     FailApply,
-    /// Drop the apply step.
+    /// The engine write is dropped before apply. The call returns `Err`:
+    /// even a deferred write must not acknowledge bytes that are not visible.
     LostApply,
     /// Attempt a partial apply; the backend must expose no partial batch.
     PartialApply,
     /// Fail after apply while completing durability.
     FailSync,
-    /// Drop durability completion after apply.
+    /// Durability completion is lost after apply. The call returns `Err`;
+    /// recovery may observe the whole batch or none, never a cross-family mix.
     LostSync,
     /// Fail while flushing deferred writes.
     FailFlush,
-    /// Return from flush without syncing deferred writes.
+    /// The flush sync is dropped. The call returns `Err` rather than
+    /// acknowledging deferred durability that has not completed.
     LostFlush,
 }
 

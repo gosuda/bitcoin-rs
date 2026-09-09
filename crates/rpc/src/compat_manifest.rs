@@ -230,6 +230,12 @@ pub enum ReferenceError {
          the kernel tree"
     )]
     IdentityConfusion,
+    /// A corpus is duplicated, unknown, or differs from the canonical product registry.
+    #[error("corpus {id} does not match tools/campaign-corpus/products.json")]
+    CorpusIdentityMismatch {
+        /// The unrecognized or inconsistent corpus identifier.
+        id: String,
+    },
     /// A required corpus is absent from the reference set.
     #[error("the `{id}` corpus is missing from the reference set")]
     MissingCorpus {
@@ -291,6 +297,11 @@ pub fn reference_set() -> Result<ReferenceSet, ReferenceError> {
 }
 
 fn corpora(reference: &toml::Table) -> Result<Vec<CorpusPin>, ReferenceError> {
+    let registry: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tools/campaign-corpus/products.json"))
+            .map_err(|error| ReferenceError::ManifestUnreadable {
+                detail: error.to_string(),
+            })?;
     let array = reference
         .get("corpora")
         .and_then(toml::Value::as_array)
@@ -306,6 +317,13 @@ fn corpora(reference: &toml::Table) -> Result<Vec<CorpusPin>, ReferenceError> {
         let id = required_str(entry, "id")?;
         let stop_height = required_u64(entry, "stop_height")?;
         let stop_hash = required_str(entry, "stop_hash")?;
+        let product = &registry["products"][&id];
+        if product["stop_height"].as_u64() != Some(stop_height)
+            || product["stop_hash"].as_str() != Some(stop_hash.as_str())
+            || corpora.iter().any(|corpus: &CorpusPin| corpus.id == id)
+        {
+            return Err(ReferenceError::CorpusIdentityMismatch { id });
+        }
         let manifest_sha256 = match entry.get("manifest_sha256") {
             None => None,
             Some(toml::Value::String(text)) => Some(parse_sha256("manifest_sha256", text)?),
@@ -355,6 +373,7 @@ fn required_str(section: &toml::Table, field: &'static str) -> Result<String, Re
     section
         .get(field)
         .and_then(toml::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .ok_or(ReferenceError::VersionLabelOnly { field })
 }
@@ -412,7 +431,10 @@ fn check_identity_confusion(release: &str, kernel: &str) -> Result<(), Reference
         && release
             .split('.')
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
-    if release == kernel || !released {
+    let development = kernel
+        .strip_prefix("31.99.")
+        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()));
+    if release == kernel || !released || !development {
         return Err(ReferenceError::IdentityConfusion);
     }
     Ok(())

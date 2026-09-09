@@ -1,6 +1,6 @@
 # Native validation default: promotion record
 
-This document is the promotion record for the native strict-Rust validation default. The owner of the default is [`docs/contracts/validation-default.md`](../contracts/validation-default.md), proven by `g19_validation_default`. The end-state decision is recorded here after T16 and T17 run; until then the recorded verdict stays `KeepKernel` and this page states the contract only.
+This document is the promotion record for the native strict-Rust validation default. The owner of the default is [`docs/contracts/validation-default.md`](../contracts/validation-default.md), guarded by `g19_validation_default` (feature/default consistency only, not measured promotion proof). The end-state decision is recorded here after T16 and T17 run; until then the recorded verdict stays `KeepKernel` and this page states the contract only.
 
 ## Decision it owns
 
@@ -19,7 +19,7 @@ Whether `bitcoin-rs-consensus`, `bitcoin-rs-node`, `bin/bitcoin-rs` and the cont
 | Core vector parity | Zero mismatches on runnable rows; pinned skip counts and skip reasons per corpus | `cargo test --locked -p bitcoin-rs-script --test core_vectors` | `planned_not_executed` |
 | Contextual and script matrix (T15) | Every §5.1 family, active and inactive boundaries, mandatory versus policy flags; zero unexplained mismatches; every exclusion counted and classified | `cargo test --locked -p bitcoin-rs-consensus --test overhaul_consensus_matrix -- --nocapture` | `planned_not_executed` |
 | Strict-Rust crypto lane (T16) | Valid and invalid ECDSA, Schnorr and tweak vectors; integer and point boundary cases; independent oracle agreement; audited dependency closure | `cargo test --locked -p bitcoin-rs-script --test overhaul_native_crypto -- --nocapture` | `planned_not_executed` |
-| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | `cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_default_closure -- --nocapture` | `planned_not_executed` |
+| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | No final strict-artifact signed-spend harness is identified; `overhaul_default_closure` checks dependency closure only | `blocked_missing_harness` |
 | Full mainnet replay | Genesis to the pinned stop identity with sampled and exact coin comparison against Core `v31.1` | offline comparator, see [`offline-full-validation.md`](offline-full-validation.md) | `planned_not_executed` |
 | Invalid and contextual corpora | Rejection parity on invalid local corpora; a passing valid chain alone does not prove rejection | T15 matrix | `planned_not_executed` |
 | Kernel-free closure | `cargo --locked tree -p bitcoin-rs --no-default-features --features fjall -e features` shows no `bitcoinkernel` on any transitive path; native and oracle lanes built under separate `CARGO_TARGET_DIR` | `overhaul_default_closure` | `planned_not_executed` |
@@ -45,7 +45,7 @@ Every sample in this cell records six identities. The T02 collector rejects a sa
 
 ## Acceptance rule
 
-- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Promotion of a candidate over its control requires a speed ratio `control_p50 / candidate_p50 >= 1.05` (equivalently `candidate_p50 / control_p50 <= 1 / 1.05`, approximately 0.95238) over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
 - Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
 - Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
 - Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
@@ -61,7 +61,7 @@ Retained verbatim from the pre-rewrite document. Headings are demoted one level.
 
 This note records the #213 measurements. The owner of the default is
 [`docs/contracts/validation-default.md`](../contracts/validation-default.md),
-proven by `g19_validation_default`. Numbers from a named run live in
+guarded by `g19_validation_default` (feature/default consistency only, not measured promotion proof). Numbers from a named run live in
 `docs/benchmarks/data/`.
 
 A **measured observation** copies a field from a cited artifact or an

@@ -1,3 +1,5 @@
+//! CONTRACT: docs/contracts/architecture.md#ARCH-01 (consensus ownership); CONSTRAINTS.md#CL-06.
+//!
 //! Scenario tests for prepared-input resolution and shared sighash facts
 //! (T07).
 //!

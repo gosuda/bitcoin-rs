@@ -50,12 +50,14 @@ mixed-tip page.
   insufficient-data shape, never a fabricated rate.
 - Build and sign outside the node: `combinepsbt`, `finalizepsbt`, and the
   descriptor helpers are key-free. The consumer signs.
-- Broadcast: `POST /tx` (hex body) reaches the shared `MempoolGateway`
-  with the Esplora origin and its own request fee limits.
+- Broadcast: `POST /tx` (hex body) currently delegates to `sendrawtransaction`,
+  using the RPC origin and its fee limits. A distinct Esplora admission origin
+  remains a target, not an implemented guarantee.
 - Confirmation tracking, replacement observation, disconnect and reorg
   observation, and rescan all run over the same public reads.
 - Public `/api` responses, including errors, allow cross-origin reads with
-  `Access-Control-Allow-Origin: *` and expose `X-Total-Results`. `OPTIONS`
+  `Access-Control-Allow-Origin: *`. No pagination-count header is emitted or
+  advertised. `OPTIONS`
   requests under `/api` return a 204 preflight response permitting `GET`,
   `POST`, and the `Content-Type` request header. The mempool backend
   `/esplora` namespace, JSON-RPC, and Core REST do not inherit this policy.

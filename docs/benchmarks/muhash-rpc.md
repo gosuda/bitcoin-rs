@@ -2,6 +2,15 @@
 
 This document owns the MuHash API cell: the production full-UTXO MuHash query (`gettxoutsetinfo` with `hash_type=muhash`) in bitcoin-rs compared with the same JSON-RPC call in Bitcoin Core `v31.1`, driven by the custody controller `tools/benchmark-campaign/muhash_rpc.py`. The controller is a comparator, not a benchmark result; a ratio exists only after every custody gate passes. In the target node the query runs over one coherent chain view (`ReadStamp`), is bounded and cancellable, and its result is an `api.query` cell of [`overhaul-product-cells.md`](overhaul-product-cells.md) and a manifest row of the T31 Core RPC contract.
 
+## Current evidence boundary
+
+The controller checks each reply against the frozen configuration's expected
+values. Configuration is a declared expectation, not an independently certified
+Core oracle: a campaign must separately attest how those values were obtained.
+The production query now uses the existing chain-transition guard for one
+coherent UTXO/tip response. A bounded, cancellable query with isolated resources
+is still a target, not a guarantee.
+
 ## Cell it owns
 
 Wall of exactly one JSON-RPC `gettxoutsetinfo` call per arm at the frozen tip, seven alternating pairs, under one declared cache policy, with receipts binding both binaries, the tip and the reply body.
@@ -19,7 +28,7 @@ Bitcoin Core `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, `bitcoi
 | MuHash query, comparison backends | redb, rocksdb | same; comparison lane only, not the default | `planned_not_executed` |
 | Cancellation | fjall | an aborted scan releases retained snapshots and returns the declared client-visible result | `planned_not_executed` |
 
-The query is a bounded read under the existing read fence; it cannot consume the validation CPU or memory quota. Result rendering keeps integer satoshis internally and Core's exact external units.
+The target query is bounded and isolated from validation resources; quota ownership is not implemented today. Result rendering keeps integer satoshis internally and Core's exact external units.
 
 ## Required identities per sample
 
