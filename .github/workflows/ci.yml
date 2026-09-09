@@ -25,7 +25,8 @@ concurrency:
 
 # Fast PR gate. The ordinary lint and test jobs avoid libbitcoinkernel and do
 # not install CMake/Boost; bench-smoke intentionally compiles the kernel-enabled
-# benchmark surface and installs those prerequisites. Deeper fuzz, nightly,
+# benchmark surface, runs the witness-activation regression, and installs
+# those prerequisites. Deeper fuzz, nightly,
 # feature-matrix, and kernel-oracle lanes live in main.yml and run on `main`.
 env:
   CARGO_TERM_COLOR: never
@@ -82,23 +83,54 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Provision pinned Core and Apalache fixtures
+        id: fixtures
         run: bash scripts/provision-ci-reference-fixtures.sh
-      # Pure-Rust test gate: each workspace member tested with its own default
-      # features minus kernel. Deliberately no apt step -- the default path
-      # needs no CMake/Boost toolchain; the kernel engine is opt-in and
-      # exercised only by the main-only lanes in main.yml. consensus and node
-      # are excluded from the workspace pass (their defaults include kernel)
-      # and tested separately with --no-default-features.
-      - run: |
-          cargo test --workspace --no-fail-fast \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-          cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+      # Each profile must report independently: a failing workspace/formal
+      # test must not hide the native consensus, node, or isolated RPC tests.
+      # Run the smaller profiles before the long fixture-backed binary tests.
+      # Failures still fail the job; cancellation and failed setup stop tests.
+      - name: Native consensus tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+      - name: Native node tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        run: |
           cargo test -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --no-fail-fast
       # Isolated so node's default `zmq` feature cannot unify this package on.
-      - run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+      - name: RPC tests without default features
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+      # consensus and node have kernel-enabled defaults, so the workspace
+      # pass excludes them and the explicit native profiles above cover them.
+      # This pass includes the binary's process and formal gates, unfiltered.
+      - name: Workspace tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        run: |
+          # Never attribute cached or earlier-profile diagnostics to this run.
+          rm -rf -- target/apalache
+          mkdir -p target/apalache
+          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=workspace\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > target/apalache/run-context.txt
+          cargo test --workspace --no-fail-fast \
+            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
+      # Save each profile before the next invocation can replace run-*.txt.
+      # Only formal diagnostics are uploaded, never downloaded executables.
+      - name: Preserve workspace formal evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apalache-workspace-${{ github.run_attempt }}
+          path: |
+            target/apalache/**/run-*.txt
+            target/apalache/**/detailed*.log
+            target/apalache/**/counterexample*
+          if-no-files-found: warn
+          retention-days: 7
       # Node / binary tests run with the full-node backend set, minus the
       # kernel engine: the kernel builds from C++ (cmake + libboost-dev),
       # which this job deliberately does not install. Kernel-gated bin tests
@@ -106,9 +138,28 @@ jobs:
       # the full graph including kernel. -p is required because
       # `--workspace --features` silently ignores --features in a virtual
       # workspace (no root [package] section in the top-level Cargo.toml).
-      - run: |
+      - name: Full-backend native binary tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        run: |
+          # Never attribute cached or earlier-profile diagnostics to this run.
+          rm -rf -- target/apalache
+          mkdir -p target/apalache
+          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-backend-native\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > target/apalache/run-context.txt
           cargo test -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "rocksdb,fjall,redb,mdbx"
+      - name: Preserve full-backend native formal evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apalache-full-backend-native-${{ github.run_attempt }}
+          path: |
+            target/apalache/**/run-*.txt
+            target/apalache/**/detailed*.log
+            target/apalache/**/counterexample*
+          if-no-files-found: warn
+          retention-days: 7
 
   bench-smoke:
     runs-on: ubuntu-latest
@@ -120,6 +171,12 @@ jobs:
       # feature set now includes it, so every production lane installs the
       # prerequisites up front.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # Reuse this lane's C++ prerequisites for the focused kernel regression;
+      # the ordinary test job exercises the same target with the native backend.
+      - name: Witness activation kernel regression
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus \
+            --no-default-features --features kernel --test witness_sigop_activation
       - run: |
           cargo bench -p bitcoin-rs --no-run \
             --no-default-features --features "${FULL_NODE_FEATURES}"
