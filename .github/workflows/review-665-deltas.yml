@@ -1,0 +1,33 @@
+name: Export PR 665 reconciliation inputs
+on:
+  push:
+    branches: [review/pr-665-publish-860f1b93]
+permissions:
+  contents: read
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 860f1b93a1341985562e2bb8787d07642431dc91
+          fetch-depth: 100
+          persist-credentials: false
+      - name: Export exact deltas and identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin 57532f2d4b18d48dac7bb7d450226961f2988bde
+          mkdir -p "$RUNNER_TEMP/review-665"
+          git diff --binary --full-index 1594cd40da24de051ed579493c66db55759e8201 860f1b93a1341985562e2bb8787d07642431dc91 > "$RUNNER_TEMP/review-665/pr-delta.patch"
+          git diff --binary --full-index 052937df6b7615f107529dddc665119bac190010 57532f2d4b18d48dac7bb7d450226961f2988bde > "$RUNNER_TEMP/review-665/main-delta.patch"
+          for sha in 1594cd40da24de051ed579493c66db55759e8201 052937df6b7615f107529dddc665119bac190010 860f1b93a1341985562e2bb8787d07642431dc91 57532f2d4b18d48dac7bb7d450226961f2988bde; do
+            git cat-file commit "$sha" > "$RUNNER_TEMP/review-665/$sha.commit"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: review-665-deltas
+          path: ${{ runner.temp }}/review-665/
+          retention-days: 1
+          if-no-files-found: error
