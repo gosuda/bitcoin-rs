@@ -92,8 +92,11 @@ metadata. A peer that negotiated `wtxidrelay` receives `MSG_WTX` with the
 accepted transaction's actual wtxid; other ready peers receive `MSG_TX` with
 its txid, following [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
 RPC/reorg mutation observers resolve the retained entry's wtxid and skip
-entries removed before observer delivery. Missing-parent requests remain
-txid-typed, which BIP339 permits for unannounced parents. Relay queue
+entries removed before observer delivery. Missing-parent requests use txids,
+which BIP339 permits for unannounced parents. Sources advertising `NODE_WITNESS`
+receive `MSG_WITNESS_TX` requests so the returned parent includes its witness;
+other sources receive `MSG_TX`, following
+[BIP144](https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay). Relay queue
 saturation drops the newest announcement without blocking admission;
 per-peer outbound saturation cancels that connection's lease.
 
@@ -146,6 +149,7 @@ Known deltas from Core 31.1:
   `gateway_inventory_filters_and_serves_txid_and_wtxid` exercises the
   `TxInventory` implementation over the shared gateway. `src/inv.rs` tests
   `missing_parents_use_txids_and_deduplicate_repeated_inputs`,
+  `missing_parents_request_witness_by_service_not_announcement_preference`,
   `stale_missing_parent_source_cannot_send_to_or_cancel_replacement`,
   `cancelled_missing_parent_source_does_not_enqueue_a_request`, and
   `missing_parent_request_keeps_outbound_saturation_policy` cover txid parent

@@ -13,8 +13,10 @@ pub type InventoryVector = Inventory;
 /// Requests the missing parents identified by admission from their delivering
 /// connection. A stale source never sends to a same-address replacement.
 ///
-/// Parent inputs identify transactions by txid, so these requests use `MSG_TX`
-/// even for a wtxid-relay peer, as permitted by BIP339 for unannounced parents.
+/// Parent inputs identify transactions by txid. Witness-capable sources receive
+/// `MSG_WITNESS_TX` so a `SegWit` parent's witness is not stripped; other sources
+/// receive `MSG_TX`. Both identify the parent by txid, as BIP339 permits for
+/// unannounced parents, independently of the peer's announcement preference.
 /// Repeated parents produce one inventory item. Returns whether a non-empty
 /// request was queued; outbound saturation keeps the lease's disconnect policy.
 pub fn request_missing_parents(
@@ -31,18 +33,32 @@ pub fn request_missing_parents(
     if PeerToken::from(connection) != source {
         return false;
     }
+    let mut witness = false;
+    peers.for_each_ready_lease(|addr, current, info| {
+        if addr == source.addr && current.same_connection(&lease) {
+            witness = info.services & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0;
+        }
+    });
     let mut seen = hashbrown::HashSet::new();
     let items: Vec<Inventory> = parents
         .iter()
         .filter(|txid| seen.insert(**txid))
-        .map(|txid| Inventory::Transaction(bitcoin::Txid::from_byte_array(*txid.as_bytes())))
+        .map(|txid| {
+            let txid = bitcoin::Txid::from_byte_array(*txid.as_bytes());
+            if witness {
+                Inventory::WitnessTransaction(txid)
+            } else {
+                Inventory::Transaction(txid)
+            }
+        })
         .collect();
     if items.is_empty() {
         return false;
     }
-    // The snapshot only adapts the opaque admission token. PeerTable owns the
-    // live-identity check and pins it through the nonblocking enqueue. Bytes
-    // already in flight may still finish on a retiring socket.
+    // Capability metadata belongs to the same connection as the token. The
+    // table rechecks that identity and pins it through the nonblocking enqueue,
+    // so a replacement cannot inherit either the request or its service choice.
+    // Bytes already in flight may still finish on a retiring socket.
     if peers.send(connection, Message::GetData(items)).is_err() {
         tracing::debug!(peer_addr = %source.addr, "orphan parent getdata not sent");
         false
@@ -143,6 +159,59 @@ mod tests {
         assert!(!request_missing_parents(&table, source, &[]));
         assert!(receiver.try_recv().is_err());
         assert!(!lease.is_cancelled());
+    }
+
+    /// P2P-01 / BIP144: request witness serialization by txid from `NODE_WITNESS`
+    /// sources. BIP339 announcement preference does not alter this requirement.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
+    #[test]
+    fn missing_parents_request_witness_by_service_not_announcement_preference() {
+        use bitcoin::p2p::ServiceFlags;
+        use std::sync::Arc;
+
+        for witness in [false, true] {
+            for wtxid_relay in [false, true] {
+                let table = PeerTable::new();
+                let (sender, receiver) = crossbeam_channel::bounded(1);
+                let lease = PeerLease::new(sender);
+                let source = source(&lease);
+                table.register(source.addr, lease.clone());
+                let mut version = crate::handshake::version_message(1, 0);
+                version.services = if witness {
+                    ServiceFlags::NETWORK | ServiceFlags::WITNESS
+                } else {
+                    ServiceFlags::NETWORK
+                };
+                let mut info = crate::PeerInfo::inbound_from_version(
+                    source.addr,
+                    source.addr,
+                    &version,
+                    0,
+                    0,
+                    Arc::new(crate::PeerCounters::default()),
+                );
+                info.wtxid_relay = wtxid_relay;
+                assert!(table.publish_info(source.addr, &lease, info));
+
+                assert!(request_missing_parents(
+                    &table,
+                    source,
+                    &[parent(1), parent(1)],
+                ));
+                let txid = bitcoin::Txid::from_byte_array(*parent(1).as_bytes());
+                let expected = if witness {
+                    Inventory::WitnessTransaction(txid)
+                } else {
+                    Inventory::Transaction(txid)
+                };
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Ok(Message::GetData(items)) if items == vec![expected]
+                ));
+                assert!(receiver.try_recv().is_err());
+                assert!(!lease.is_cancelled());
+            }
+        }
     }
 
     // P2P-02: a stale source cannot target or cancel its successor.

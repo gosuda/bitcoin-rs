@@ -4,13 +4,12 @@
 //! by consensus verification and mempool preparation. Script-level counters
 //! remain owned by `bitcoin-rs-script`.
 
-use hashbrown::HashMap;
-
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::script::{
     Instruction, instructions, is_p2sh, is_push_only, is_witness_program,
 };
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
+use hashbrown::HashMap;
 
 /// Counts transaction sigop cost against resolved previous outputs.
 ///
