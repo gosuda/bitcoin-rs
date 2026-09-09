@@ -335,7 +335,7 @@ fn declared_sample_paths_preserve_repetitions_and_empty_cells() {
     }
 }
 
-/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.
+/// HPA-05: the declared inventory may extend REQUIRED_PATHS.
 #[test]
 fn additional_declared_sample_paths_are_allowed() {
     let ledger = ledger_with_sample_paths("p2p.cmodern.arm64.redb", &["p2p.apply_idle"]);
@@ -509,7 +509,7 @@ fn candidate_list_is_ordered_and_points_at_paths() {
 #[test]
 fn levers_and_forbidden_probes_are_complete() {
     let ledger = load_ledger();
-    let ids: BTreeSet<&str> = ledger.paths.iter().map(|row| row.id.clone()).collect();
+    let ids: BTreeSet<&str> = ledger.paths.iter().map(|row| row.id.as_str()).collect();
     let mut lever_ids = BTreeSet::new();
     for lever in &ledger.levers {
         assert!(lever_ids.insert(lever.id.as_str()), "duplicate lever id");
