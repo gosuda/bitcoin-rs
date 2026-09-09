@@ -1,62 +1,49 @@
 # Documentation
 
-## Start here
+## Entry points
 
-- [getting-started.md](getting-started.md): build, configuration, startup, RPC, indexes, and consumers
-- [contracts/README.md](contracts/README.md): normative contract index and precedence
-- [../CONCEPTS.md](../CONCEPTS.md): project vocabulary
-- [../CONSTRAINTS.md](../CONSTRAINTS.md): gate and evidence register
-- [../AGENTS.md](../AGENTS.md): repository-change rules
+| Need | Owner |
+| --- | --- |
+| Build, configure, and run a node | [Getting started](getting-started.md) |
+| Find a normative clause and its tests | [Contract index](contracts/README.md) |
+| Understand project vocabulary | [Concepts](../CONCEPTS.md) |
+| Inspect gate and evidence status | [Constraint register](../CONSTRAINTS.md) |
+| Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
+| Operate recovery or REST | [Recovery summary](chainstate-recovery.md) and [REST guide](rest-interface.md) |
 
-[chainstate-recovery.md](chainstate-recovery.md) and [rest-interface.md](rest-interface.md) are operator summaries. Their linked contract pages remain authoritative.
+The contract index owns the clause/proof map; this page does not maintain a
+second inventory. Contracts take precedence over local source comments,
+detailed policies, and informative guides, in that order. A disagreement
+between code and contract is drift to investigate, not permission to silently
+change either side.
 
-## Authority
+## Detailed policies and generated inputs
 
-Use this order when documents disagree:
+[Source compatibility](policies/source-compatibility.md) owns toolchain,
+dependency, TLS, and versioning policy. [Database migration](policies/db-migration.md)
+owns format changes. Detailed admission and peer matrices live in
+[mempool policy](policies/mempool-policy.md) and
+[P2P compatibility](policies/p2p-compatibility.md).
 
-1. [contracts/](contracts/)
-2. source comments for local invariants
-3. [policies/](policies/) for detailed domain matrices
-4. benchmarks, solutions, concepts, and consumer guides
+Treat [core-compat.toml](api/core-compat.toml),
+[core-rpc-schema.json](api/core-rpc-schema.json), and the
+[hot-path ledger](benchmarks/hot-path-ledger.toml) as machine-consumed inputs.
+[RPC reference](rpc-reference.md) is generated from
+`crates/rpc/src/manifest.rs`; do not edit it by hand.
 
-A code/contract disagreement is drift to fix, not a reason to silently rewrite one side.
+## Evidence and implementation status
 
-## Contracts
+[Benchmarks](benchmarks/) retain methods, measurements, and decisions.
+[Solutions](solutions/) are historical context, not current implementation
+promises. The [hot-path contract](contracts/hot-path-attribution.md) owns ledger
+interpretation. `UNMEASURED`, `planned`, and `BLOCKED` are not successful results.
 
-The complete clause/proof map is in [contracts/README.md](contracts/README.md). Major owners include:
+[Formal models](models/) and their configurations remain subject to the
+[constraint register](../CONSTRAINTS.md). A compiled build is not proof of a
+target design, and this index does not duplicate gate verdicts.
 
-- [architecture.md](contracts/architecture.md): crate layering and mutation ownership
-- [validation-default.md](contracts/validation-default.md): current kernel/native default decision
-- [recovery.md](contracts/recovery.md): durable-root target, crash outcomes, reorg, schema policy
-- [mempool-policy.md](contracts/mempool-policy.md) and [mempool-mutations.md](contracts/mempool-mutations.md): admission and lifecycle
-- [indexing.md](contracts/indexing.md): capability readiness and reconciliation
-- [p2p-wire.md](contracts/p2p-wire.md): current peer-wire contract
-- [external-api.md](contracts/external-api.md), [wallet-facing.md](contracts/wallet-facing.md), [embedding.md](contracts/embedding.md): public surfaces
-- [storage-footprint.md](contracts/storage-footprint.md), [hot-path-attribution.md](contracts/hot-path-attribution.md), [campaign-corpora.md](contracts/campaign-corpora.md): measurement contracts
-- [reference-set.md](contracts/reference-set.md): pinned external identities
-
-## Policies and machine-readable inputs
-
-- [policies/source-compatibility.md](policies/source-compatibility.md): toolchain, dependencies, TLS, versioning
-- [policies/db-migration.md](policies/db-migration.md): authoritative and owner-local format changes
-- [policies/mempool-policy.md](policies/mempool-policy.md): detailed Core 31.1 admission matrix
-- [policies/p2p-compatibility.md](policies/p2p-compatibility.md): detailed peer compatibility matrix
-- [api/core-compat.toml](api/core-compat.toml) and `api/core-rpc-schema.json`: machine-consumed compatibility data; treat as code
-- [rpc-reference.md](rpc-reference.md): generated from `crates/rpc/src/manifest.rs`; do not edit by hand
-- [models/](models/): TLA+ models and Apalache configurations; `CONSTRAINTS.md` records gate status
-
-## Evidence
-
-[benchmarks/](benchmarks/) contains methods, retained measurements, and decision records. A row marked `UNMEASURED`, `planned`, or `BLOCKED` is not a result. The machine ledger is [benchmarks/hot-path-ledger.toml](benchmarks/hot-path-ledger.toml); [contracts/hot-path-attribution.md](contracts/hot-path-attribution.md) owns its interpretation.
-
-[solutions/](solutions/) is historical engineering context. It is informative and may describe code or designs that have since been replaced.
-
-## Current build status
-
-The default `bitcoin-rs` binary is kernel-free; `--features kernel` builds the optional kernel lane. Library default behavior is governed separately by [contracts/validation-default.md](contracts/validation-default.md), which currently keeps `kernel` in the consensus/node library defaults until the recorded promotion gate changes.
-
-BIP324 is target work only in this checkout. There is no `bip324` Cargo feature or dependency, so documentation must not advertise `--features bip324` as a usable lane.
-
-## Release status
-
-Do not duplicate gate tables here. [../CONSTRAINTS.md](../CONSTRAINTS.md) owns current gate state and [contracts/](contracts/) owns required behavior. A build is not evidence merely because it compiles, and a target design is not implemented merely because a contract describes it.
+The default binary is kernel-free; library defaults are governed separately by
+[validation-default.md](contracts/validation-default.md). The optional
+`kernel` lane is not a claim that native-default promotion has passed.
+BIP324 remains target work: there is no usable `bip324` Cargo feature in this
+checkout.
