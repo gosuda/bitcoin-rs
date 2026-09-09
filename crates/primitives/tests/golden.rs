@@ -95,6 +95,7 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn st
             );
         }
         assert_eq!(
+            // VAL-01: compatibility txids are derived from preserved wire bytes.
             bitcoin_rs_primitives::txids_from_serialized_block(&block_bytes)?,
             expected_txids,
             "height {height} wire txids"

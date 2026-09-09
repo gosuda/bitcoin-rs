@@ -208,8 +208,15 @@ mod enabled {
                 continue;
             }
             if let Err(error) = verify_tx_scripts(tx, spent, flags) {
-                kernel_error = Some(error);
-                break;
+                match error {
+                    // A script failure is the oracle's actual reject verdict.
+                    ConsensusError::Script { .. } => {
+                        kernel_error = Some(error);
+                        break;
+                    }
+                    // Kernel errors mean the oracle could not produce a verdict.
+                    error => return Err(error),
+                }
             }
         }
         let kernel_accepted = kernel_error.is_none();
