@@ -377,6 +377,7 @@ fn parse_generateblock_transactions(
         return Err(RpcError::InvalidType("transactions must be an array"));
     };
     let mut transactions = Vec::with_capacity(entries.len());
+    let mut snapshot = None;
     for entry in entries {
         let Some(text) = entry.as_str() else {
             return Err(RpcError::InvalidType(
@@ -385,8 +386,8 @@ fn parse_generateblock_transactions(
         };
         // CONTRACT: docs/contracts/external-api.md#API-24
         if let Ok(txid) = Txid::from_str(text) {
-            let snapshot = ctx.mempool.read().mining_snapshot();
-            let Some(entry) = snapshot.entries.into_iter().find(|entry| entry.txid == txid) else {
+            let snapshot = snapshot.get_or_insert_with(|| ctx.mempool.read().mining_snapshot());
+            let Some(entry) = snapshot.entries.iter().find(|entry| entry.txid == txid).cloned() else {
                 return Err(generateblock_unknown_txid(text));
             };
             transactions.push(GenerateTx::ResolvedMempool(entry));
@@ -2110,10 +2111,15 @@ mod tests {
             .lock()
             .clone()
             .unwrap_or_else(|| panic!("generateblock must call generate"));
-        assert_eq!(
-            request.selection,
-            GenerateSelection::Ordered(vec![GenerateTx::Mempool(txid), GenerateTx::Raw(raw)])
-        );
+        let GenerateSelection::Ordered(transactions) = request.selection else {
+            panic!("generateblock must use ordered transactions");
+        };
+        assert_eq!(transactions.len(), 2);
+        assert!(matches!(
+            &transactions[0],
+            GenerateTx::ResolvedMempool(entry) if entry.txid == txid
+        ));
+        assert!(matches!(&transactions[1], GenerateTx::Raw(tx) if tx == &raw));
     }
 
     // CONTRACT: docs/contracts/external-api.md#API-24
