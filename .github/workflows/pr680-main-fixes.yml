@@ -1,4 +1,4 @@
-name: Prepare and validate PR680 follow-ups
+name: Finalize and validate PR680 follow-ups
 on:
   push:
     branches: [automation/pr680-main-fixes-20260910]
@@ -6,21 +6,16 @@ permissions:
   contents: write
 concurrency:
   group: pr680-publication-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
-  candidate:
+  finalize:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        lane: [p2p, rpc]
     env:
       CARGO_TERM_COLOR: never
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
-      LANE: ${{ matrix.lane }}
-      BASE: 8e1bc07a9648293768ca1109118ba89e87f7b6de
+      MAIN: 6838258a3dbca18e78e1995cd5c274d52460167b
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -28,105 +23,80 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
-      - name: Prepare and publish source-only branch
-        id: prepare
+      - name: Fast-forward both published branches after clean main integration
+        id: publish
         shell: bash
         run: |
           set -euo pipefail
-          work="$RUNNER_TEMP/candidate-$LANE"
-          git worktree add --detach "$work" "$BASE"
-          python3 .github/scripts/pr680_publish.py "$LANE" "$work"
-          cd "$work"
-          if [[ "$LANE" == rpc ]]; then
-            python3 - <<'PY'
-          from pathlib import Path
-          path = Path('crates/rpc/src/handlers/tx.rs')
-          text = path.read_text()
-          old = 'assert_eq!(oracle.total_sigop_cost(|_| Some(oracle_output.clone())), expected);'
-          new = 'assert_eq!(u64::try_from(oracle.total_sigop_cost(|_| Some(oracle_output.clone()))), Ok(expected));'
-          assert text.count(old) == 1
-          path.write_text(text.replace(old, new))
-          PY
-          fi
-          mapfile -t files < <(git diff --name-only -- '*.rs')
-          rustup run stable rustfmt --edition 2024 "${files[@]}"
-          git diff --check
-          git diff --stat
-          git diff
-          if [[ "$LANE" == p2p ]]; then
-            branch=fix/pr680-bip144-transaction-transfer-20260910
-            message='fix(p2p): honor witness serialization in transaction transfer'
-          else
-            branch=fix/pr680-package-prevout-accounting-20260910
-            message='fix(rpc): retain package prevout scripts for sigop accounting'
-          fi
-          if git ls-remote --exit-code origin "refs/heads/$branch"; then
-            echo 'Refusing to overwrite an existing publication branch' >&2
-            exit 1
-          else
-            result=$?
-            [[ "$result" == 2 ]] || exit "$result"
-          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates docs/policies
-          git commit -m "$message"
-          test "$(git rev-parse HEAD^)" = "$BASE"
-          git push origin "HEAD:refs/heads/$branch"
-          echo "CANDIDATE $branch $(git rev-parse HEAD)"
-          printf '## %s\nBase: `%s`\n\nBranch: `%s`\n\nSource commit: `%s`\n' "$LANE" "$BASE" "$branch" "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
-          rustc +stable --version
-          cargo +stable --version
-      - name: Reconcile inherited lockfile for validation only
-        id: lock
+          for lane in p2p rpc; do
+            if [[ "$lane" == p2p ]]; then
+              branch=fix/pr680-bip144-transaction-transfer-20260910
+              expected=06b3a03f49d8d007fbb04431d2f673878e6ea9a5
+            else
+              branch=fix/pr680-package-prevout-accounting-20260910
+              expected=d16a10e9a3112153bef95ee7566e40286601d7fd
+            fi
+            test "$(git rev-parse "origin/$branch")" = "$expected"
+            work="$RUNNER_TEMP/final-$lane"
+            git worktree add --detach "$work" "$expected"
+            (
+              cd "$work"
+              git merge --no-ff "$MAIN" -m 'Merge current main into independent PR680 follow-up'
+              if [[ "$lane" == p2p ]]; then
+                python3 - <<'PY'
+          from pathlib import Path
+          edits = {
+              'crates/p2p/src/dispatch.rs': (
+                  '/// P2P-01 / BIP144: NODE_WITNESS controls getdata serialization, not hashes.',
+                  '/// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not hashes.',
+              ),
+              'crates/node/tests/tx_ingress_e2e.rs': (
+                  '/// P2P-01 / BIP144: these dialers advertise NODE_WITNESS, so require',
+                  '/// P2P-01 / BIP144: these dialers advertise `NODE_WITNESS`, so require',
+              ),
+          }
+          for name, (old, new) in edits.items():
+              path = Path(name)
+              text = path.read_text()
+              assert text.count(old) == 1, name
+              path.write_text(text.replace(old, new))
+          PY
+                rustup run stable rustfmt --edition 2024 crates/p2p/src/dispatch.rs crates/node/tests/tx_ingress_e2e.rs
+                git diff --check
+                git add crates/p2p/src/dispatch.rs crates/node/tests/tx_ingress_e2e.rs
+                git commit -m 'docs(p2p): format witness capability names for strict Clippy'
+              fi
+              git diff --check "$MAIN" HEAD
+              git diff --stat "$MAIN" HEAD
+              git merge-base --is-ancestor "$expected" HEAD
+              git merge-base --is-ancestor "$MAIN" HEAD
+              test -z "$(git status --porcelain)"
+              test -z "$(git diff --name-only "$MAIN" HEAD -- .github Cargo.lock Cargo.toml)"
+              git push origin "HEAD:refs/heads/$branch"
+              printf '## %s\nBranch: `%s`\nCommit: `%s`\nMain: `%s`\n' "$lane" "$branch" "$(git rev-parse HEAD)" "$MAIN" >> "$GITHUB_STEP_SUMMARY"
+            )
+          done
+      - name: P2P tests and strict Clippy
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/candidate-$LANE"
-          cargo +stable metadata --format-version 1 > "$RUNNER_TEMP/pr680-metadata-$LANE.json"
-          python3 - <<'PY'
-          import subprocess, tomllib
-          from pathlib import Path
-          old = tomllib.loads(subprocess.check_output(['git', 'show', 'HEAD:Cargo.lock'], text=True))
-          new = tomllib.loads(Path('Cargo.lock').read_text())
-          external = lambda data: [p for p in data['package'] if 'source' in p]
-          assert external(old) == external(new), 'Refusing external dependency changes'
-          assert old['version'] == new['version'], 'Refusing lock format changes'
-          paths = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
-          assert set(paths) <= {'Cargo.lock'}, paths
-          print('External lockfile package records unchanged; source tree unchanged.')
-          PY
-          git diff -- Cargo.lock
-          echo 'Any lockfile reconciliation above is validation-only and is NOT pushed to either PR.' >> "$GITHUB_STEP_SUMMARY"
-      - name: P2P unit and protocol regressions
-        if: ${{ !cancelled() && matrix.lane == 'p2p' && steps.lock.outcome == 'success' }}
-        run: |
-          cd "$RUNNER_TEMP/candidate-$LANE"
+          cd "$RUNNER_TEMP/final-p2p"
           cargo +stable test --locked -p bitcoin-rs-p2p --lib --test core_compat --no-fail-fast
-      - name: P2P node loopback regressions
-        if: ${{ !cancelled() && matrix.lane == 'p2p' && steps.lock.outcome == 'success' }}
-        run: |
-          cd "$RUNNER_TEMP/candidate-$LANE"
           cargo +stable test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e
-      - name: RPC transaction unit regressions
-        if: ${{ !cancelled() && matrix.lane == 'rpc' && steps.lock.outcome == 'success' }}
-        run: |
-          cd "$RUNNER_TEMP/candidate-$LANE"
-          cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --lib handlers::tx::tests
-      - name: RPC transaction and policy contracts
-        if: ${{ !cancelled() && matrix.lane == 'rpc' && steps.lock.outcome == 'success' }}
-        run: |
-          cd "$RUNNER_TEMP/candidate-$LANE"
-          cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --test transaction_methods --test policy_contract --no-fail-fast
-      - name: Strict affected-crate Clippy
-        if: ${{ !cancelled() && steps.lock.outcome == 'success' }}
-        run: |
-          cd "$RUNNER_TEMP/candidate-$LANE"
-          cargo +stable clippy --locked -p "bitcoin-rs-$LANE" --no-default-features --all-targets -- -D warnings
-      - name: Workspace formatting and source-integrity check
-        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
-        run: |
-          cd "$RUNNER_TEMP/candidate-$LANE"
+          cargo +stable clippy --locked -p bitcoin-rs-p2p --no-default-features --all-targets -- -D warnings
           cargo +stable fmt --all -- --check
-          git diff --check
-          test -z "$(git diff --name-only -- crates docs)"
+          test -z "$(git status --porcelain)"
+      - name: RPC tests and strict Clippy
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/final-rpc"
+          cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --lib handlers::tx::tests
+          cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --test transaction_methods --test policy_contract --no-fail-fast
+          cargo +stable clippy --locked -p bitcoin-rs-rpc --no-default-features --all-targets -- -D warnings
+          cargo +stable fmt --all -- --check
+          test -z "$(git status --porcelain)"
