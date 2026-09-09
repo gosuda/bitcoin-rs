@@ -253,8 +253,8 @@ tests.
 - `crates/node/tests/overhaul_crash_matrix.rs` (planned): exercises the
   `RCV-04` crash and lost-write points, including process kill, lost and
   partial writes, and ambiguous durable completion.
-- `crates/utxo/tests/persistent_transition_regression.rs` (existing): covers
-  the `RCV-04A` metadata-lock, cache-resident progress, and re-entry rules.
+- `crates/utxo/tests/overhaul_persistent_coins.rs` (existing): covers the
+  `RCV-04A` metadata-lock, cache-resident progress, re-entry, and durability-pin rules.
 - `crates/node/tests/overhaul_streaming_reorg.rs` (planned): covers
   `RCV-05`, `RCV-08`, and bounded disconnect and reorg memory.
 - `crates/node/tests/overhaul_checkpoint_independence.rs` (planned):
