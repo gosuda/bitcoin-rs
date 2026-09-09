@@ -73,6 +73,7 @@ fn recovery_checker_rejects_cross_family_mixture() {
 #[derive(Debug)]
 enum Route {
     Write,
+    WriteDeferred,
     WriteDurable,
     WriteDurableIf,
     FlushDeferred,
@@ -87,6 +88,7 @@ impl Route {
     ) -> Result<(), StorageError> {
         match self {
             Self::Write => store.write(batch),
+            Self::WriteDeferred => store.write_deferred(batch),
             Self::WriteDurable => store.write_durable(batch),
             Self::WriteDurableIf => store
                 .write_durable_if(
@@ -106,8 +108,10 @@ impl Route {
             Self::WriteDurable | Self::WriteDurableIf => {
                 matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
             }
-            Self::FlushDeferred => fault == PersistFault::FailFlush,
-            Self::Write => false,
+            Self::FlushDeferred => {
+                matches!(fault, PersistFault::FailFlush | PersistFault::LostFlush)
+            }
+            Self::Write | Self::WriteDeferred => false,
         }
     }
 }
@@ -191,6 +195,7 @@ where
     let proposed = expected_state(rows, b"new");
     for route in [
         Route::Write,
+        Route::WriteDeferred,
         Route::WriteDurable,
         Route::WriteDurableIf,
         Route::FlushDeferred,
@@ -208,10 +213,39 @@ where
             let outcome = {
                 let store = open().expect("reopen to arm");
                 store.arm_persist_fault(fault);
-                route.apply(&store, batch(&store, rows, b"new"), rows[0].0)
+                let outcome = route.apply(&store, batch(&store, rows, b"new"), rows[0].0);
+                let visible = snapshot_all(&store, rows);
+                assert_atomic_recovery(&visible, &old, &proposed, &label);
+                if outcome.is_ok() {
+                    assert_eq!(
+                        visible, proposed,
+                        "{label}: successful write was not visible"
+                    );
+                }
+                if matches!(
+                    fault,
+                    PersistFault::FailApply | PersistFault::LostApply | PersistFault::PartialApply
+                ) {
+                    assert!(outcome.is_err(), "{label}: failed apply reported success");
+                    assert_eq!(visible, old, "{label}: failed apply changed visible rows");
+                }
+                outcome
             };
             let store = open().expect("reopen to inspect");
-            assert_atomic_recovery(&snapshot_all(&store, rows), &old, &proposed, &label);
+            let recovered = snapshot_all(&store, rows);
+            assert_atomic_recovery(&recovered, &old, &proposed, &label);
+            if outcome.is_ok() && !matches!(route, Route::Write | Route::WriteDeferred) {
+                assert_eq!(
+                    recovered, proposed,
+                    "{label}: successful durable write was lost"
+                );
+            }
+            if matches!(
+                fault,
+                PersistFault::FailApply | PersistFault::LostApply | PersistFault::PartialApply
+            ) {
+                assert_eq!(recovered, old, "{label}: aborted apply survived reopen");
+            }
             if route.completion_fault(fault) {
                 assert!(
                     outcome.is_err(),

@@ -91,7 +91,7 @@ pub enum PersistFault {
     LostSync,
     /// Fail while flushing deferred writes.
     FailFlush,
-    /// Return from flush without syncing deferred writes.
+    /// Lose flush completion and return an error without confirming durability.
     LostFlush,
 }
 
