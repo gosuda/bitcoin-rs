@@ -1,0 +1,23 @@
+name: PR 665 isolated review source
+on:
+  push:
+    branches: [review/pr-665-verification-20260909]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=tar.gz --output=review-source.tar.gz HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-665-source-f8bb0f8
+          path: review-source.tar.gz
+          retention-days: 1
+          if-no-files-found: error
