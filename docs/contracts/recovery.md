@@ -9,6 +9,7 @@ Owners:
 - Authoritative durable root and ordered commit protocol:
   `crates/chainstate/src/transition.rs`
 - Recovery and schema admission: `crates/chainstate/src/recovery.rs`
+- Persistent coin transition boundary: `crates/utxo/src/set/persistent.rs`
 - Crash and lost-write fault tests: `crates/node/tests/overhaul_crash_matrix.rs`
 - Reorg and disconnect: `crates/node/tests/overhaul_streaming_reorg.rs`
 - Checkpoint independence: `crates/node/tests/overhaul_checkpoint_independence.rs`
@@ -137,6 +138,35 @@ power loss. Fault-injection storage tests must exercise lost writes, partial
 writes, and failures around sync completion in addition to child-process kill
 tests.
 
+### `RCV-04A`: Persistent coin transition boundary
+
+- `PersistentUtxoSet` serializes refill, mutation, persistence, and flush with
+  an explicit in-flight generation. Its metadata mutex is held only while
+  observing or updating transition and cache bookkeeping; backing-store I/O
+  and UTXO listener callbacks run without that mutex.
+- A mutation transition excludes other persistent operations until it
+  completes, so no concurrent refill or read can cross an unpublished coin
+  generation. During a non-mutating storage transition, a cache-resident
+  `get` may complete immediately; a cache miss joins the serialized
+  transition before consulting storage.
+- A listener running on the active mutation thread must not wait on its own
+  transition. Re-entering a `PersistentUtxoSet` operation from that owner
+  returns `PersistentUtxoError::ReentrantOperation`; no nested persistent
+  transition begins.
+- A deferred mutation retains a pin for its changed transaction, including
+  its latest pending before-image payload, until a durability receipt covers
+  it. A successful explicit `flush`, or a successful non-empty `Durable` or
+  `CasGuarded` persistence operation, covers every earlier completed deferred
+  write and clears all retained pins. An empty or no-op mutation performs no
+  store durability operation and must not clear pins. A failed flush provides
+  no receipt and leaves pins intact; failed persistence or a CAS mismatch
+  never treats retained pins as durably completed and leaves the failed
+  mutation quarantined.
+- Timed concurrency regressions use their finite timeout only as a deadlock
+  detector. The timeout is not a latency target or service-level guarantee;
+  the contract requires progress before the deliberately blocked storage
+  boundary is released.
+
 ### `RCV-05`: Deep rollback and selective rebuild
 
 - A rollback deeper than the configured cutover resets the affected
@@ -232,6 +262,8 @@ tests.
 - `crates/node/tests/overhaul_crash_matrix.rs` (planned): exercises the
   `RCV-04` crash and lost-write points, including process kill, lost and
   partial writes, and ambiguous durable completion.
+- `crates/utxo/tests/overhaul_persistent_coins.rs` (existing): covers the
+  `RCV-04A` metadata-lock, cache-resident progress, re-entry, and durability-pin rules.
 - `crates/node/tests/overhaul_streaming_reorg.rs` (planned): covers
   `RCV-05`, `RCV-08`, and bounded disconnect and reorg memory.
 - `crates/node/tests/overhaul_checkpoint_independence.rs` (planned):
