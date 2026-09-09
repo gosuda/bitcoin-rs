@@ -77,12 +77,14 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   authoritative rollback started and did not report completion; a checkpoint
   must not clear it because that would make a torn UTXO set durable.
   `RolledBack` means the in-memory UTXO set and applied tip moved together
-  and still need one clean checkpoint. Startup refuses either phase and names
-  the directories to remove. Only the checkpoint that publishes the
-  rolled-back authoritative state may remove the marker. The reorg owner
-  (`invalidate_block`, `switch_to_branch`) settles this debt before reporting
-  success; a checkpoint publication failure is `ReorgError::CheckpointSettlement`
-  and leaves the marker in place.
+  and still need one clean checkpoint. Startup accepts and disarms this
+  completed marker when the transition requires full revalidation, then starts
+  cold; it does not require destructive directory removal. A successfully
+  rewound journal also disarms the marker immediately. Otherwise only the
+  checkpoint that publishes the rolled-back authoritative state may remove it.
+  The reorg owner (`invalidate_block`, `switch_to_branch`) settles this debt
+  before reporting success; a checkpoint publication failure is
+  `ReorgError::CheckpointSettlement` and leaves the marker in place.
 - `ChainChangeProof` binds a `TransitionLock` to the `ChainChangeGuard`
   that reserved the active odd generation. The caller-facing mutation
   capability is `ChainTransition`, which holds that proof. Apply-path
@@ -90,10 +92,12 @@ the applied chain. Owners: `ChainSnapshot`, `ChainEventHint`,
   independent lock and guard arguments, so a call without an active odd
   generation cannot compile. The proof's `odd_generation` returns the exact
   reserved value.
-- The `UndoStore` trait (`crates/storage/src/undo.rs`) abstracts the
-  durable marker over all four backends. `KvUndoStore` writes the marker
-  through the `KvStore::write` path; `InMemoryUndoStore` is the test
-  default. The marker lives in the `UndoData` column family.
+- The `UndoStore` trait (`crates/storage/src/undo.rs`) abstracts the marker
+  over all four backends. Persistent implementations provide restart-durable
+  storage; `InMemoryUndoStore` is suitable only for non-restart tests and does
+  not provide crash durability. `KvUndoStore` writes markers with flushed
+  `put` operations in the `UtxoMeta` column family; disarming uses a batched
+  delete.
 
 ### Startup crash recovery
 

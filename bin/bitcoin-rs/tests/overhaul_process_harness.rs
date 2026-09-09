@@ -17,7 +17,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin_rs_rpc::compat_manifest::reference_set;
 use serde_json::json;
 use support::process_node::{
     ClockControl, HarnessError, NodeBinary, ProcessNode, mine_common_chain, verify_reference_binary,
