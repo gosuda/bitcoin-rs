@@ -908,6 +908,15 @@ impl MempoolGateway {
             }
         }
     }
+
+    /// Cross-crate test seam: stores `value` into `chain_generation` with
+    /// `Release` ordering, simulating an external generation move between
+    /// reservation and settlement so `ChainChangeGuard::finish` fails its
+    /// compare-exchange. No production caller.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn force_chain_generation(&self, value: u64) {
+        self.chain_generation.store(value, Ordering::Release);
+    }
 }
 
 /// Owns an active chain-change reservation: the exact odd generation and

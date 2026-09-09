@@ -141,16 +141,17 @@ impl RocksDbStore {
         } else {
             self.db.write(&rocks_batch).map_err(StorageError::backend)
         };
+        outcome?;
         if let Some(fault) = sync_fault {
             return match fault {
                 // Completion never precedes the persisted write.
                 crate::PersistFault::FailSync => Err(fault.injected_error()),
-                // A lost completion may still report success.
-                crate::PersistFault::LostSync => Ok(()),
+                // A lost completion cannot acknowledge durability.
+                crate::PersistFault::LostSync => Err(fault.injected_error()),
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }
-        outcome
+        Ok(())
     }
 }
 

@@ -198,7 +198,9 @@ fn redb_txindex_injected_faults_never_mix_families() {
             );
 
             let completion_fault = match route {
-                Route::WriteDurable | Route::WriteDurableIf => fault == PersistFault::FailSync,
+                Route::WriteDurable | Route::WriteDurableIf => {
+                    matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
+                }
                 Route::FlushDeferred => fault == PersistFault::FailFlush,
                 Route::Write => false,
             };
@@ -299,7 +301,9 @@ where
     // when the durability step faulted.
     let reported_success = outcome.is_ok();
     let completion_fault = match route {
-        Route::WriteDurable | Route::WriteDurableIf => fault == PersistFault::FailSync,
+        Route::WriteDurable | Route::WriteDurableIf => {
+            matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
+        }
         Route::FlushDeferred => fault == PersistFault::FailFlush,
         Route::Write => false,
     };

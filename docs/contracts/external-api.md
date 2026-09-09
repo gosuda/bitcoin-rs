@@ -14,7 +14,7 @@ Owners:
 - `crates/rpc/src/rest.rs`: the REST dialect.
 - `crates/rpc/src/esplora.rs` with `esplora/{public,backend,projection}.rs`:
   the public `/api` dialect and the `/esplora` backend superset.
-- `crates/node/src/zmq_publisher.rs`: ZMQ topics, sequence bytes, and
+- `crates/rpc/src/zmq.rs`: ZMQ topics, sequence bytes, and
   bounded delivery.
 - `crates/mempool/src/gateway.rs`: the admission owner behind every
   broadcast and preview entry point.
@@ -77,7 +77,7 @@ Owners:
 
 ### `API-04`: ZMQ notification contract
 
-- `crates/node/src/zmq_publisher.rs` owns the declared Core topics
+- `crates/rpc/src/zmq.rs` owns the declared Core topics
   `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence`, with Core
   byte order, sequence counters, and connect, disconnect, and mempool
   ordering.
@@ -131,19 +131,26 @@ Owners:
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
 
-### `API-07`: Coherent reads, capability errors, and cancellation
+### `API-07`: RPC fixture reference provenance
 
-- Every mixed chain-and-mempool read carries a `ReadStamp`
-  (`architecture.md`). A caller never composes a view from a separately
-  loaded tip and mutable UTXOs. Height-only caches are invalid.
-- Capability-gated queries ride the index readiness fence
-  (`indexing.md` `IDX-03`). A lagging, rebuilding, or disabled capability
-  returns the declared typed `Unavailable` or `Retry` for that dialect:
-  the typed JSON-RPC error envelope for RPC, the 503 response for REST
-  and Esplora. Unavailable is never an empty successful result.
-- Query cancellation releases retained snapshots. A long index or scan
-  operation returns the declared retry or unavailable result rather than
-  mixing tips.
+- **Owner**: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns
+  `PINNED_CORE_VERSION`, `PINNED_CORE_SHA256`, and their validation. Every
+  fixture records the version and exact binary digest used for its capture;
+  missing, empty, or mismatched values fail loading before replay starts.
+- These pins describe the released Core node used for the recorded RPC
+  responses. They are separate from the `bitcoinkernel` oracle and from the
+  broader API family declared by `MANIFEST` (`API-01`). Changing either of
+  those references cannot relabel existing captures.
+- `core_parity` replays recorded responses against bitcoin-rs. It does not
+  execute or hash a local `bitcoind`, and the fixture metadata does not attest
+  a source commit or build configuration. Verifying process binaries and
+  recording those missing identities remain work under #625 and #626.
+- The loader requires each fixture's version and digest to match the pins,
+  so a reference refresh must update the constants and affected fixtures
+  together. It only checks that `provenance.evidence` is non-empty; it does
+  not retrieve or authenticate the referenced evidence. Reviewing evidence
+  from the selected Core build is a maintainer responsibility outside this
+  automated gate.
 
 ### `API-08`: Bounded public exposure
 
@@ -194,6 +201,20 @@ Owners:
 
 The wallet-facing subset of this surface is owned by
 [wallet-facing.md](wallet-facing.md).
+
+### `API-11`: Coherent reads, capability errors, and cancellation
+
+- Every mixed chain-and-mempool read carries a `ReadStamp`
+  (`architecture.md`). A caller never composes a view from a separately
+  loaded tip and mutable UTXOs. Height-only caches are invalid.
+- Capability-gated queries ride the index readiness fence
+  (`indexing.md` `IDX-03`). A lagging, rebuilding, or disabled capability
+  returns the declared typed `Unavailable` or `Retry` for that dialect:
+  the typed JSON-RPC error envelope for RPC, the 503 response for REST
+  and Esplora. Unavailable is never an empty successful result.
+- Query cancellation releases retained snapshots. A long index or scan
+  operation returns the declared retry or unavailable result rather than
+  mixing tips.
 
 ## Proven by
 
