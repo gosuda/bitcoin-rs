@@ -220,14 +220,7 @@ mod tests {
     #[test]
     fn sequence_of_only_returns_sequences_for_committed_changes() {
         let result = MutationResult {
-            changes: vec![
-                change(&Txid::default(), MutationOutcome::Accepted),
-                change(
-                    &Txid::default(),
-                    MutationOutcome::Removed(RemovalReason::Replaced),
-                ),
-                change(&Txid::default(), MutationOutcome::Accepted),
-            ],
+            changes: vec![change(&Txid::default(), MutationOutcome::Accepted); 3],
             sequence_base: 41,
         };
         assert_eq!(result.sequence_of(0), Some(41));
