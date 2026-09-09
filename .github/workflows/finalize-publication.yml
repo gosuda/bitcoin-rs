@@ -1,0 +1,130 @@
+name: finalize-publication
+
+on:
+  push:
+    branches: [automation/reference-extraction-20260910]
+    paths: [.github/workflows/finalize-publication.yml]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refactor/reference-set-test-support
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - name: Restrict test-support visibility and integrate reviewed main
+        id: prepare
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          def run(*args):
+              return subprocess.run(args, check=True, text=True, capture_output=True).stdout
+
+          expected = 'c930953a98710607fc6b8c1ee65565004062001e'
+          assert run('git', 'rev-parse', 'HEAD').strip() == expected, 'Branch moved; refusing stale edit'
+          run('git', 'config', 'user.name', 'github-actions[bot]')
+          run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
+          main = '7d384289f6d47a6c44705ad05b7aa14926624e4b'
+          run('git', 'fetch', 'origin', main)
+          run('git', 'merge', '--no-edit', main)
+          path = Path('bin/bitcoin-rs/tests/support/reference_set.rs')
+          text = path.read_text()
+          text, count = re.subn(r'(?m)^(\s*)pub ', r'\1pub(crate) ', text)
+          assert count >= 10, count
+          path.write_text(text)
+          run('rustfmt', '--edition', '2024', str(path))
+          run('git', 'diff', '--check')
+          assert run('git', 'diff', '--name-only').splitlines() == [str(path)]
+          run('git', 'add', '--', str(path))
+          run('git', 'commit', '-m', 'fix(test-support): restrict reference APIs to their test crate')
+          run('git', 'push', 'origin', 'HEAD:refs/heads/refactor/reference-set-test-support')
+          print('PUBLISHED_SHA=' + run('git', 'rev-parse', 'HEAD').strip(), flush=True)
+          print('NARROWED_VISIBILITIES=' + str(count), flush=True)
+          PY
+      - name: Reference identity tests
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_reference_set
+      - name: Compile process and formal consumers with warnings denied
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_process_harness --test g20_formal_models --no-run
+      - name: Scoped consumer Clippy
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_reference_set --test overhaul_process_harness --test g20_formal_models --no-deps -- -D warnings
+      - name: Full consumer Clippy including workspace dependencies
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --all-targets -- -D warnings
+
+  verifier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 436beee9c09ba83776d27431ba5fe3c4d35cfe60
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        id: toolchain
+        with:
+          components: rustfmt,clippy
+      - name: Verifier file formatting
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: rustfmt --edition 2024 --check crates/script/tests/verifier_boundaries.rs
+      - name: Boundary and Core-vector tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test --locked -p bitcoin-rs-script --test verifier_boundaries --test core_vectors
+      - name: Strict script all-target Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs-script --all-targets -- -D warnings
+
+  documentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 55da5515fb6c09b31797909949031ea5a915a2ce
+          fetch-depth: 0
+      - name: Check guide links and retained artifacts
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          changed = subprocess.check_output(
+              ['git', 'diff', '--name-only', '7d384289f6d47a6c44705ad05b7aa14926624e4b', 'HEAD'], text=True
+          ).splitlines()
+          assert sorted(changed) == ['docs/README.md', 'docs/getting-started.md'], changed
+          links = 0
+          for name in changed:
+              p = Path(name)
+              for target in re.findall(r'\[[^\]]+\]\(([^)]+)\)', p.read_text()):
+                  if '://' in target or target.startswith('#'):
+                      continue
+                  assert (p.parent / target.split('#')[0]).exists(), (name, target)
+                  links += 1
+          guide = Path('docs/getting-started.md').read_text()
+          assert '`--rest=true`' in guide
+          assert '`--rest` enables' not in guide
+          cli = Path('bin/bitcoin-rs/src/cli.rs').read_text()
+          assert '#[arg(long)]\n    pub(crate) rest: Option<bool>,' in cli
+          print(f'{links} local links resolve; only the two guides changed; REST syntax matches the declared explicit boolean')
+          PY
