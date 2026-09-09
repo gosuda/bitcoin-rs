@@ -10,15 +10,11 @@ pub const MAX_INV_PER_MSG: usize = 50_000;
 /// Inventory item advertised by a peer.
 pub type InventoryVector = Inventory;
 
-/// Requests the missing parents identified by admission from their delivering
-/// connection. A stale source never sends to a same-address replacement.
+/// Requests missing parents from the connection that supplied the child.
 ///
-/// Parent inputs identify transactions by txid. Witness-capable sources receive
-/// `MSG_WITNESS_TX` so a `SegWit` parent's witness is not stripped; other sources
-/// receive `MSG_TX`. Both identify the parent by txid, as BIP339 permits for
-/// unannounced parents, independently of the peer's announcement preference.
-/// Repeated parents produce one inventory item. Returns whether a non-empty
-/// request was queued; outbound saturation keeps the lease's disconnect policy.
+/// Inventory identity, witness serialization, deduplication, and saturation
+/// behavior follow `docs/policies/p2p-compatibility.md` §5; this function
+/// adapts admission's parent txids to the authoritative peer-table enqueue.
 pub fn request_missing_parents(
     peers: &crate::PeerTable,
     source: PeerToken,

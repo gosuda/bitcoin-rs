@@ -52,29 +52,28 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Pure-Rust clippy gate with -D warnings. consensus and node have
-      # `kernel` in their per-crate defaults, which would pull in the C++
-      # libbitcoinkernel build (cmake + libboost-dev); exclude them from the
-      # workspace-wide pass and lint them separately with --no-default-features
-      # so the PR gate needs no C++ toolchain install.
-      - run: |
+      # Keep the three native all-target profiles independent. A lint failure
+      # must not hide later diagnostics, but still fails this job. Do not run
+      # after cancellation or a failed toolchain installation. Kernel and
+      # backend-specific profiles remain in main.yml.
+      - name: Workspace Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
           cargo clippy --workspace --all-targets \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
             -- -D warnings
-          # consensus without kernel: --all-targets compiles its unit tests
-          # (bip30/bip34/bip112/bip113/bip141/bip143 modules in src/),
-          # integration tests (vectors, coinbase_amount), and benches.
-          # Previously invisible to the hook lanes: the workspace-wide pass
-          # would either fail (no cmake for kernel) or the crate was excluded
-          # entirely, leaving its test-target lints unchecked.
+      - name: Native consensus Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
           cargo clippy -p bitcoin-rs-consensus \
             --no-default-features --all-targets -- -D warnings
-          # node without kernel: add back fjall and zmq (the pure-Rust
-          # defaults from bin/bitcoin-rs) so the crate and its test/bench
-          # targets compile and are linted.
+      - name: Native node Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
           cargo clippy -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --all-targets -- -D warnings
 
@@ -84,6 +83,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Provision pinned Core and Apalache fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
       # Pure-Rust test gate: each workspace member tested with its own default
       # features minus kernel. Deliberately no apt step -- the default path
       # needs no CMake/Boost toolchain; the kernel engine is opt-in and

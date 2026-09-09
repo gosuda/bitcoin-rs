@@ -3,9 +3,9 @@
 Fuzz seed provenance is owned by
 [fuzz/CORPUS_PROVENANCE.md](../../fuzz/CORPUS_PROVENANCE.md). That document
 is the owner: it records the upstream corpus, the pinned commit, the
-license, the per-target mapping, and the refresh rule. This page adds
-nothing normative; it places the document under the
-[contracts precedence rule](README.md).
+license, the per-target mapping, and the refresh rule. This page places the
+document under the [contracts precedence rule](README.md) and states the
+end-state evidence roles.
 
 ## Clauses
 
@@ -19,7 +19,30 @@ nothing normative; it places the document under the
 - Provenance rows must be updated in the same commit as any corpus re-import via
   `scripts/import-qa-assets.sh`.
 
+### `QAC-02`: End-state evidence roles
+
+- G0 pins: the pinned `rust-bitcoin/qa-assets` commit and the minimized seed
+  set are recorded in `fuzz/CORPUS_PROVENANCE.md` and mirrored by the
+  reference set. The identity is a commit hash and a manifest digest, not a
+  repository tag alone.
+- G5 replay and parity arms: the QA corpus feeds parser, transaction, block,
+  P2P message, and script-evaluation fuzz targets. Invalid and
+  nonstandard-but-consensus-valid inputs are counted and classified.
+- G6 policy and admission: the `script_eval` and `tx_decode` targets exercise
+  standardness and admission edge cases in addition to consensus decoding.
+
 ## Proven by
 
+- `fuzz/CORPUS_PROVENANCE.md` (existing): records the upstream identity,
+  license, per-target mapping, and refresh rule.
+- `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned): G0 pin; rejects
+  a QA corpus with a missing or mismatched upstream commit.
+- `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
+  counts and classifies invalid corpora with fixed skip reasons.
 - Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see
   [fuzz/README.md](../../fuzz/README.md)).
+
+## Vocabulary
+
+Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
+QA corpus, fuzz target.
