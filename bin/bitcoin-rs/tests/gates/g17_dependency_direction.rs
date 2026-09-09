@@ -48,6 +48,9 @@ use std::process::Command;
 /// Storage engine crates. Only `bitcoin-rs-storage` may depend on these.
 const ENGINE_CRATES: [&str; 4] = ["fjall", "redb", "rust-rocksdb", "signet-libmdbx"];
 
+/// External ZMQ implementation dependency owned by the surface crate.
+const ZMQ_CRATE: &str = "zmq";
+
 /// Backend feature names whose forwarding above storage is forbidden.
 const BACKEND_FEATURES: [&str; 4] = ["rocksdb", "fjall", "redb", "mdbx"];
 
@@ -86,6 +89,7 @@ fn approved_layer(crate_name: &str) -> u8 {
 struct WorkspaceMetadata {
     normal_deps: BTreeMap<String, Vec<String>>,
     engine_deps: BTreeMap<String, Vec<String>>,
+    zmq_deps: BTreeMap<String, Vec<String>>,
     features: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     classified: usize,
 }
@@ -112,6 +116,7 @@ fn workspace_metadata() -> WorkspaceMetadata {
 
     let mut normal_deps = BTreeMap::new();
     let mut engine_deps = BTreeMap::new();
+    let mut zmq_deps = BTreeMap::new();
     let mut features = BTreeMap::new();
     let mut classified = 0_usize;
     for package in metadata["packages"].as_array().expect("packages array") {
@@ -121,8 +126,12 @@ fn workspace_metadata() -> WorkspaceMetadata {
 
         let mut edges = Vec::new();
         let mut engines = Vec::new();
+        let mut zmq = Vec::new();
         for dependency in package["dependencies"].as_array().expect("deps array") {
             let dep_name = dependency["name"].as_str().expect("dep name").to_owned();
+            if dep_name == ZMQ_CRATE {
+                zmq.push(dep_name.clone());
+            }
             if ENGINE_CRATES.contains(&dep_name.as_str()) {
                 engines.push(dep_name);
                 continue;
@@ -136,6 +145,7 @@ fn workspace_metadata() -> WorkspaceMetadata {
         }
         normal_deps.insert(name.clone(), edges);
         engine_deps.insert(name.clone(), engines);
+        zmq_deps.insert(name.clone(), zmq);
 
         let mut feature_map = BTreeMap::new();
         for (feature, implies) in package["features"].as_object().expect("features object") {
@@ -152,6 +162,7 @@ fn workspace_metadata() -> WorkspaceMetadata {
     WorkspaceMetadata {
         normal_deps,
         engine_deps,
+        zmq_deps,
         features,
         classified,
     }
@@ -162,6 +173,7 @@ fn workspace_dependency_direction_is_one_way() {
     let WorkspaceMetadata {
         normal_deps,
         engine_deps,
+        zmq_deps,
         features,
         classified,
     } = workspace_metadata();
@@ -199,6 +211,33 @@ fn workspace_dependency_direction_is_one_way() {
              found on `{name}`"
         );
     }
+
+    // The Surface tier owns the external ZMQ implementation. Node may forward
+    // the surface feature, but must not regain a direct libzmq dependency.
+    for (name, dependencies) in &zmq_deps {
+        assert!(
+            name == RPC_CRATE || dependencies.is_empty(),
+            "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
+        );
+    }
+    assert!(
+        features[RPC_CRATE]["zmq"]
+            .iter()
+            .any(|entry| entry == "dep:zmq"),
+        "the RPC `zmq` feature must enable its owned external dependency"
+    );
+    assert!(
+        features[NODE_CRATE]["zmq"]
+            .iter()
+            .any(|entry| entry == "bitcoin-rs-rpc/zmq"),
+        "the node `zmq` feature must forward the RPC surface feature"
+    );
+    assert!(
+        features[NODE_CRATE]["zmq"]
+            .iter()
+            .all(|entry| entry != "dep:zmq"),
+        "the node `zmq` feature must not enable a direct external dependency"
+    );
 
     // 3. RPC names no storage backend at all: no non-test dependency edge on
     //    the storage crate (the bench-only dev-dependency that feeds the
