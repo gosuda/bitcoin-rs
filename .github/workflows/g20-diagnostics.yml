@@ -1,0 +1,70 @@
+name: g20-diagnostics
+
+on:
+  push:
+    branches: [ci/g20-diagnostics-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g20-diagnostics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chain-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - strategy: baseline
+            encoding: oopsla19
+            discard: false
+          - strategy: discard-disabled
+            encoding: oopsla19
+            discard: true
+          - strategy: function-arrays
+            encoding: funArrays
+            discard: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Provision the exact pinned checker and reference fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      - name: Run the unchanged ChainAdmission safety obligation
+        env:
+          ENCODING: ${{ matrix.encoding }}
+          DISCARD: ${{ matrix.discard }}
+          JVM_ARGS: -Xmx4096m
+          SMT_SOLVER: z3
+        run: |
+          mkdir -p target/g20-diagnostics
+          args=(check --config=docs/models/ChainAdmission.cfg
+            --inv=TypeOK,Safety,TransitionSafety --length=128
+            --smt-encoding="$ENCODING" --smtprof
+            --out-dir=target/g20-diagnostics/ChainAdmission)
+          if [[ "$DISCARD" == true ]]; then
+            args+=(--discard-disabled)
+          fi
+          sha256sum docs/models/ChainAdmission.{tla,cfg}
+          printf 'argv: %q ' target/tools/apalache-0.62.2/bin/apalache-mc "${args[@]}" docs/models/ChainAdmission.tla
+          printf '\n'
+          set +e
+          timeout --signal=TERM --kill-after=10s 300s \
+            target/tools/apalache-0.62.2/bin/apalache-mc \
+            "${args[@]}" docs/models/ChainAdmission.tla 2>&1 \
+            | tee target/g20-diagnostics/checker.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "$rc" > target/g20-diagnostics/native-exit-code.txt
+          echo "checker exit code: $rc (124 is a diagnostic timeout, never a proof pass)"
+          exit "$rc"
+      - name: Preserve diagnostics even on timeout
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g20-${{ matrix.strategy }}-${{ github.run_id }}
+          path: target/g20-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
