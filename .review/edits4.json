@@ -1,0 +1,46 @@
+{
+  "bin/bitcoin-rs/tests/overhaul_evidence.rs": [
+    [180, 0, "\n/// ATTR-01: direct construction and deserialization enforce the same identity.\n#[test]\nfn empty_identity_fields_are_rejected_on_record_and_parse() {\n    for field in [\"path\", \"owner\", \"version\", \"backend\", \"durability\", \"hardware\", \"corpus.id\"] {\n        let mut invalid = sample(0, 10);\n        let text = match field {\n            \"path\" => &mut invalid.path,\n            \"owner\" => &mut invalid.owner,\n            \"version\" => &mut invalid.identity.version,\n            \"backend\" => &mut invalid.identity.backend,\n            \"durability\" => &mut invalid.identity.durability,\n            \"hardware\" => &mut invalid.identity.hardware,\n            _ => &mut invalid.identity.corpus.as_mut().expect(\"corpus\").id,\n        };\n        *text = \" \\t\".into();\n        let mut ledger = Ledger::parse(LEDGER_TOML).expect(\"ledger\");\n        assert_eq!(ledger.record(CELL, invalid.clone()), Err(EvidenceError::MissingIdentityField(field)));\n        ledger.cells[0].samples.push(invalid);\n        assert_eq!(Ledger::parse(&ledger.render().expect(\"serialize invalid fixture\")), Err(EvidenceError::MissingIdentityField(field)));\n    }\n}\n\n/// ATTR-01: a hexadecimal digest cannot contain a numeric sign.\n#[test]\nfn signed_pairs_are_not_hexadecimal_digests() {\n    assert!(\"+1\".repeat(32).parse::<Sha256Hex>().is_err());\n}\n\n/// ATTR-01: aggregation cannot launder invalid identities or mix interval kinds.\n#[test]\nfn aggregation_validates_both_inputs_and_interval_kind() {\n    let left = sample(0, 10);\n    let mut right = sample(10, 20);\n    right.interval.kind = IntervalKind::Outside;\n    assert_eq!(left.sum(&right), Err(EvidenceError::MismatchedTreatment));\n    right.interval.kind = IntervalKind::Inside;\n    right.identity.version.clear();\n    assert_eq!(left.sum(&right), Err(EvidenceError::MissingIdentityField(\"version\")));\n    right = sample(10, 20);\n    right.interval.end_ns = 0;\n    assert_eq!(left.sum(&right), Err(EvidenceError::InvertedInterval(right.interval)));\n}\n"]
+  ],
+  "crates/storage/tests/overhaul_atomic_durability.rs": [
+    [0, 2, "//! RCV-04 fault-injection coverage for the storage ladder.\n//! Contract: `docs/contracts/recovery.md#rcv-04-crash-matrix`.\n//! This exercises backend seams and clean reopen, not simulated power loss.\n"],
+    [43, 6, "            let rows = store\n                .iter_prefix(*cf, b\"\")\n                .expect(\"open family iterator\")\n                .collect::<Result<Vec<_>, _>>()\n                .expect(\"read every family row\");\n"],
+    [80, 0, "\n    fn crosses(&self, boundary: bitcoin_rs_storage::PersistBoundary) -> bool {\n        use bitcoin_rs_storage::PersistBoundary;\n        match boundary {\n            PersistBoundary::Apply => true,\n            PersistBoundary::Sync => matches!(self, Self::WriteDurable | Self::WriteDurableIf),\n            PersistBoundary::Flush => matches!(self, Self::FlushDeferred),\n        }\n    }\n\n"],
+    [175, 1, "                        .map(|committed| assert!(committed, \"seeded condition must match\")),\n"],
+    [199, 7, "            if outcome.is_ok() {\n                assert!(both_new, \"{label}: success acknowledged an absent durable batch\");\n            }\n\n            let completion_fault = route.crosses(fault.boundary());\n"],
+    [270, 1, "                .map(|committed| assert!(committed, \"seeded condition must match\")),\n"],
+    [280, 17, "    let expected_new: Vec<_> = old\n        .iter()\n        .map(|before| FamilyState {\n            rows: before.rows.iter().map(|(key, _)| (key.clone(), b\"new\".to_vec())).collect(),\n        })\n        .collect();\n    assert!(\n        after == old || after == expected_new,\n        \"{label}: cross-family recovery is neither the whole old nor whole new batch: {after:?}\"\n    );\n    if outcome.is_ok() && !matches!(route, Route::Write) {\n        assert_eq!(after, expected_new, \"{label}: success acknowledged an absent durable batch\");\n"],
+    [302, 7, "    let completion_fault = route.crosses(fault.boundary());\n"]
+  ],
+  "crates/storage/src/mdbx_impl.rs": [
+    [104, 3, "            if fault == crate::PersistFault::PartialApply {\n                // A strict prefix is staged into a transaction that is\n                // dropped uncommitted: no family observes a partial batch.\n                let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;\n                let mut partial = MdbxWriteBatch::default();\n                if let Some(first) = batch.ops.into_iter().next() {\n                    partial.ops.push(first);\n"],
+    [108, 14, "                apply_mdbx_ops(self, &txn, partial)?;\n                drop(txn);\n            }\n            return Err(fault.injected_error());\n"],
+    [129, 5, "            return Err(fault.injected_error());\n"],
+    [209, 3, "            if fault == crate::PersistFault::PartialApply {\n                // A strict prefix is staged into the transaction that is\n                // dropped uncommitted: no family observes a partial batch.\n                let mut partial = MdbxWriteBatch::default();\n                if let Some(first) = batch.ops.into_iter().next() {\n                    partial.ops.push(first);\n"],
+    [213, 13, "                apply_mdbx_ops(self, &txn, partial)?;\n                drop(txn);\n            }\n            return Err(fault.injected_error());\n"],
+    [232, 5, "            return Err(fault.injected_error());\n"],
+    [244, 5, "            return Err(fault.injected_error());\n"]
+  ],
+  "crates/node/src/metrics.rs": [
+    [364, 1, "            if text.bytes().any(|c| !c.is_ascii_digit() && !(b'a'..=b'f').contains(&c)) {\n"],
+    [560, 2, "        let corpus = self.identity.corpus.as_ref().ok_or(EvidenceError::MissingCorpus)?;\n        for (field, value) in [\n            (\"path\", self.path.as_str()),\n            (\"owner\", self.owner.as_str()),\n            (\"version\", self.identity.version.as_str()),\n            (\"backend\", self.identity.backend.as_str()),\n            (\"durability\", self.identity.durability.as_str()),\n            (\"hardware\", self.identity.hardware.as_str()),\n            (\"corpus.id\", corpus.id.as_str()),\n        ] {\n            if value.trim().is_empty() {\n                return Err(EvidenceError::MissingIdentityField(field));\n            }\n"],
+    [571, 1, "        self.check()?;\n        other.check()?;\n        if self.path != other.path || self.owner != other.owner || self.identity != other.identity\n            || self.interval.kind != other.interval.kind\n        {\n"],
+    [686, 0, "    /// A required textual identity field is empty or whitespace-only.\n    #[error(\"evidence identity field {0} is empty\")]\n    MissingIdentityField(&'static str),\n"]
+  ],
+  "crates/node/src/txindex_worker.rs": [
+    [3835, 0, "    fn revision(&self) -> u64 {\n        self.runtime.as_ref().map_or(0, |runtime| runtime.revision())\n    }\n\n"],
+    [4091, 0, "\n\n#[cfg(test)]\nmod capability_revision_tests {\n    use super::{IndexCapabilities, TxIndexCapability, TxIndexCapabilitySource, TxIndexRuntime};\n    use std::sync::Arc;\n\n    /// IDX-02: the adapter reports the worker's revision, not the trait default.\n    #[test]\n    fn capability_revision_tracks_runtime_wakes() {\n        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);\n        let runtime = Arc::new(TxIndexRuntime::new(wake_tx));\n        let source = TxIndexCapability::new(None, Some(Arc::clone(&runtime)), IndexCapabilities::NONE);\n        assert_eq!(source.revision(), 0);\n        runtime.wake();\n        assert_eq!(source.revision(), 1);\n        runtime.wake();\n        assert_eq!(source.revision(), 2);\n        assert_eq!(TxIndexCapability::new(None, None, IndexCapabilities::NONE).revision(), 0);\n    }\n}\n"]
+  ],
+  "crates/utxo/src/shard.rs": [
+    [292, 0, "        if table.table.is_empty() {\n            table.table = HashTable::new();\n        }\n"],
+    [298, 1, "        find_record(&table, key, txid)\n            .filter(|record| !record.is_empty())\n            .map(|record| record.encoded_bytes().to_vec())\n"]
+  ],
+  "crates/storage/src/rocksdb_impl.rs": [
+    [119, 7, "            return Err(fault.injected_error());\n"],
+    [145, 7, "            return Err(fault.injected_error());\n"],
+    [239, 5, "            return Err(fault.injected_error());\n"]
+  ],
+  "crates/rpc/tests/handler_smoke.rs": [
+    [930, 0, "// CONTRACT: docs/contracts/indexing.md#IDX-02\n"]
+  ]
+}
