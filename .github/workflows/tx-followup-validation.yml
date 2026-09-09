@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: tx-followup-validation
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: never
@@ -36,6 +36,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: candidate -> target
+          cache-on-failure: true
       - name: Reconcile workspace-only lock entries without changing external dependencies
         working-directory: candidate
         shell: bash
@@ -51,7 +52,7 @@ jobs:
           before = tomllib.loads((Path(os.environ['RUNNER_TEMP']) / 'tx-evidence/Cargo.lock.before').read_text())
           after = tomllib.loads(Path('Cargo.lock').read_text())
           def external(lock):
-              return { (p['name'],p['version'],p['source']): p for p in lock['package'] if 'source' in p }
+              return {(p['name'],p['version'],p['source']):p for p in lock['package'] if 'source' in p}
           def identities(lock):
               return {(p['name'],p['version'],p.get('source')) for p in lock['package']}
           if external(before) != external(after) or identities(before) != identities(after) or before['version'] != after['version']:
@@ -64,30 +65,101 @@ jobs:
         run: |
           set -euo pipefail
           python3 ../runner/.github/review/structural_rejection.py tests
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/mempool/src/gateway.rs')
+          text = p.read_text()
+          assert text.endswith('}\n')
+          extra = '''
+              #[test]
+              fn input_structure_nonstandard_transactions_keep_policy_precedence() {
+                  use crate::standardness::{AcceptanceRejectReason, StandardnessError};
+                  for (version, witness_len, reason) in [
+                      (0, 1, StandardnessError::Version),
+                      (2, 400_001, StandardnessError::Weight),
+                  ] {
+                      let gateway = gateway_with(None);
+                      let mut candidate = standard_tx(95);
+                      candidate.version = version;
+                      candidate.inputs.push(candidate.inputs[0].clone());
+                      candidate.inputs[0].witness = vec![vec![0; witness_len]];
+                      let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+                      assert_eq!(
+                          gateway.admit_transaction(request),
+                          Err(AdmitError::Policy(AcceptanceRejectReason::NonStandard(reason)))
+                      );
+                      assert!(gateway.read().is_empty());
+                      assert_eq!(gateway.read().sequence_number(), 0);
+                  }
+              }
+          '''
+          p.write_text(text[:-2] + extra + '}\n')
+          PY
           set +e
           cargo test --locked -p bitcoin-rs-mempool --lib input_structure_ -- --nocapture > "$RUNNER_TEMP/tx-evidence/red.log" 2>&1
           status=$?
           set -e
           tail -n 130 "$RUNNER_TEMP/tx-evidence/red.log"
-          if [ "$status" -eq 0 ]; then
-            echo 'Regression tests unexpectedly passed before the fix.' >&2
-            exit 1
-          fi
+          test "$status" -ne 0
           grep -q 'test result: FAILED' "$RUNNER_TEMP/tx-evidence/red.log"
-          echo 'Confirmed red regression assertions, not a compilation failure.'
-      - name: Prepare the focused candidate branch without runner files
+          echo 'Confirmed failing regression assertions, not a compilation failure.'
+      - name: Prepare the bounded source-only candidate
         id: candidate
         working-directory: candidate
         shell: bash
         run: |
           set -euo pipefail
           python3 ../runner/.github/review/structural_rejection.py fix
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/mempool/src/gateway.rs')
+          text = p.read_text()
+          old = '''        if bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
+              .is_err()
+          '''
+          # Match using the original script's indentation, not YAML indentation.
+          old = '        if bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)\n            .is_err()\n'
+          new = '''        if crate::standardness::is_standard_tx(
+                      &request.tx,
+                      &pool.policy_snapshot().standardness,
+                  )
+                  .is_ok()
+                  && bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
+                      .is_err()
+          '''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              '        // Keep their one consensus-owned check ahead of missing-input policy,\n',
+              '        // Standardness bounds the scan before it allocates an input set.\n        // Keep the consensus-owned check ahead of missing-input policy,\n',
+              1,
+          )
+          p.write_text(text)
+          p = Path('docs/contracts/mempool-mutations.md')
+          text = p.read_text()
+          text = text.replace(
+              '- Before missing-input policy can retain a peer body, the gateway runs the\n',
+              '- For standard transactions, before missing-input policy can retain a peer\n  body, the gateway runs the\n',
+              1,
+          )
+          text = text.replace(
+              '  RPC failures do not populate peer caches. Coinbase policy remains separate.\n',
+              '  RPC failures do not populate peer caches. Standardness bounds the input\n  scan; nonstandard and oversized transactions keep their existing policy\n  verdicts without allocating its input set. Coinbase policy remains separate.\n',
+              1,
+          )
+          text = text.replace(
+              '  `input_structure_checks_follow_generation_and_sequence_guards`,\n',
+              '  `input_structure_checks_follow_generation_and_sequence_guards`,\n  `input_structure_nonstandard_transactions_keep_policy_precedence`,\n',
+              1,
+          )
+          p.write_text(text)
+          PY
           rustfmt --edition 2024 crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs
           git diff --check
           python3 - <<'PY'
           import subprocess
-          expected = {'Cargo.lock', 'crates/consensus/src/verify_tx.rs', 'crates/mempool/src/gateway.rs', 'crates/mempool/src/admission.rs', 'docs/contracts/mempool-mutations.md'}
-          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          expected = {'Cargo.lock','crates/consensus/src/verify_tx.rs','crates/mempool/src/gateway.rs','crates/mempool/src/admission.rs','docs/contracts/mempool-mutations.md'}
+          actual = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
           if actual != expected:
               raise SystemExit(f'unexpected candidate scope: {actual ^ expected}')
           PY
@@ -101,7 +173,7 @@ jobs:
           git ls-tree -r HEAD -- Cargo.lock crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/tx-evidence/blobs.txt"
           git push origin HEAD:refs/heads/followup/structural-rejection-scope
       - name: Native mempool and consensus regression suites
-        if: always() && steps.candidate.outcome == 'success'
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         working-directory: candidate
         shell: bash
         run: |
@@ -113,7 +185,7 @@ jobs:
           tail -n 30 "$RUNNER_TEMP/tx-evidence/consensus-native.log"
           exit "$status"
       - name: Strict affected-crate Clippy and formatting
-        if: always() && steps.candidate.outcome == 'success'
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         working-directory: candidate
         shell: bash
         run: |
@@ -127,7 +199,7 @@ jobs:
           tail -n 70 "$RUNNER_TEMP/tx-evidence/fmt.log"
           exit "$status"
       - name: Kernel-enabled mempool and consensus regression suites
-        if: always() && steps.candidate.outcome == 'success'
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         working-directory: candidate
         shell: bash
         run: |
