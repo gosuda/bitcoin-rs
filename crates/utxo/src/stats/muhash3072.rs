@@ -76,10 +76,8 @@ impl Num3072 {
 
     fn from_le_bytes(bytes: &[u8; BYTE_LEN]) -> Self {
         let mut limbs = [0_u64; LIMBS];
-        for (idx, chunk) in bytes.chunks_exact(8).enumerate() {
-            let mut limb = [0_u8; 8];
-            limb.copy_from_slice(chunk);
-            limbs[idx] = u64::from_le_bytes(limb);
+        for (idx, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
+            limbs[idx] = u64::from_le_bytes(*chunk);
         }
         Self { limbs }
     }
@@ -114,8 +112,8 @@ impl Num3072 {
 
     fn to_le_bytes(self) -> [u8; BYTE_LEN] {
         let mut out = [0_u8; BYTE_LEN];
-        for (chunk, limb) in out.chunks_exact_mut(8).zip(self.limbs) {
-            chunk.copy_from_slice(&limb.to_le_bytes());
+        for (chunk, limb) in out.as_chunks_mut::<8>().0.iter_mut().zip(self.limbs) {
+            *chunk = limb.to_le_bytes();
         }
         out
     }
@@ -336,7 +334,7 @@ fn element(data: &[u8]) -> Num3072 {
     let base_state = chacha20_base_state(&key_words);
     let mut limbs = [0_u64; LIMBS];
     let mut block_counter = 0_u32;
-    for limb_block in limbs.chunks_exact_mut(8) {
+    for limb_block in limbs.as_chunks_mut::<8>().0 {
         write_chacha_block_as_limbs(limb_block, &base_state, block_counter);
         block_counter = block_counter.wrapping_add(1);
     }
@@ -344,8 +342,7 @@ fn element(data: &[u8]) -> Num3072 {
 }
 
 #[inline(always)]
-fn write_chacha_block_as_limbs(limbs: &mut [u64], base_state: &[u32; 16], counter: u32) {
-    debug_assert_eq!(limbs.len(), 8);
+fn write_chacha_block_as_limbs(limbs: &mut [u64; 8], base_state: &[u32; 16], counter: u32) {
     let mut state = *base_state;
     state[12] = counter;
     let mut working = state;
@@ -469,7 +466,7 @@ fn addnextract2(c0: &mut u64, c1: &mut u64, value: u64) -> u64 {
 fn chacha20_keystream(key: &[u8; 32], out: &mut [u8; BYTE_LEN]) {
     let key_words = chacha20_key_words(key);
     let mut block_counter = 0_u32;
-    for block in out.chunks_exact_mut(64) {
+    for block in out.as_chunks_mut::<64>().0 {
         let words = chacha20_block_words(&key_words, block_counter);
         chacha20_block(&words, block);
         block_counter = block_counter.wrapping_add(1);
@@ -548,9 +545,9 @@ fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
 }
 
 #[cfg(test)]
-fn chacha20_block(words: &[u32; 16], out: &mut [u8]) {
-    for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
-        chunk.copy_from_slice(&word.to_le_bytes());
+fn chacha20_block(words: &[u32; 16], out: &mut [u8; 64]) {
+    for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *chunk = word.to_le_bytes();
     }
 }
 
