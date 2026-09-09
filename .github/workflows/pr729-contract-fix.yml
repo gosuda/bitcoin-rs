@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 6ee5f19f8f293cc96c809ebb62ee4f1c16fbae8a
+          ref: f846c7fbeed40e70431cf83ab4f2cb656bf9ea0b
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -26,8 +26,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          remote_head=$(git ls-remote origin refs/heads/followup/local-relay-admission-identity | cut -f1)
-          test "$remote_head" = 6ee5f19f8f293cc96c809ebb62ee4f1c16fbae8a
+          test "$(git hash-object crates/p2p/src/tx_relay.rs)" = d611034b02d18a559b59467aa68278f14ea8f0ea
+          test "$(git hash-object docs/contracts/mempool-mutations.md)" = d7a4392cd081076c783ec518f2a22eb11f299751
           python3 - <<'PY'
           from pathlib import Path
 
@@ -55,15 +55,16 @@ jobs:
           contract = 'docs/contracts/mempool-mutations.md'
           marker = '  mining observer at gateway construction and the ZMQ sequence observer as\n  an extra named leg on the gateway\'s `CompositeObserver`.\n'
           addition = marker + (
-              '- Local RPC/reorg transaction relay is qualified by the exact accepted\n'
-              '  mempool admission, using that change\'s assigned mempool sequence. A\n'
-              '  delayed callback may relay only while the same admission remains\n'
-              '  resident. Removal and re-admission retire the older callback even when\n'
-              '  the txid, wtxid, or transaction allocation is identical. Unrelated\n'
-              '  mempool mutations and fee prioritisation do not retire the admission.\n'
-              '  The observer resolves admission identity and wtxid under one pool read\n'
-              '  guard, releases it before relay enqueue, and remains a best-effort\n'
-              '  mirror: a removal may still overtake an announcement already queued.\n'
+              '- Local RPC/reorg transaction relay is qualified by the accepted mempool\n'
+              '  admission identified by that change\'s sequence. A delayed callback may\n'
+              '  relay only while that admission remains resident. Removal and\n'
+              '  re-admission retire the older callback even when the txid, wtxid, or\n'
+              '  transaction allocation is identical. Unrelated mempool mutations and fee\n'
+              '  prioritisation do not retire the admission. The observer resolves\n'
+              '  admission identity and wtxid under one pool read guard, releases it before\n'
+              '  relay enqueue, and remains a best-effort mirror: removal may still\n'
+              '  overtake an announcement already queued. Sequence rollover follows\n'
+              '  `MPL-02`; this clause does not create a second identity counter.\n'
           )
           replace_once(contract, marker, addition)
           proof_marker = '## Proven by\n\n'
@@ -81,5 +82,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates/p2p/src/tx_relay.rs docs/contracts/mempool-mutations.md
-          git commit -m 'docs(p2p): bind local relay regressions to MPL-01'
-          git push origin HEAD:refs/heads/followup/local-relay-admission-identity
+          git commit -m 'docs(p2p): define admission-qualified local relay'
+          git push origin HEAD:refs/heads/followup/local-relay-contract
