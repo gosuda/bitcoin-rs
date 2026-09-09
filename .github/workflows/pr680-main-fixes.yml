@@ -1,0 +1,145 @@
+name: Consolidate and validate transaction follow-ups
+on:
+  push:
+    branches: [automation/pr680-main-fixes-20260910]
+permissions:
+  contents: read
+concurrency:
+  group: pr680-publication-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+jobs:
+  consolidate-rpc:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt
+      - name: Resolve duplicate patch onto merged main and publish only test additions
+        id: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN: 5936baddf37442521c142ae2f3be17af4df75f6c
+          OLD: f1d64d79ac27a0ab8b7a55be85aa2a7e5d4cd5ef
+          BRANCH: fix/pr680-package-prevout-accounting-20260910
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/pr710-consolidated"
+          test "$(git rev-parse "origin/$BRANCH")" = "$OLD"
+          git worktree add --detach "$work" "$MAIN"
+          python3 .github/scripts/pr710_consolidate.py "$work"
+          cd "$work"
+          rustup run stable rustfmt --edition 2024 crates/rpc/src/handlers/tx.rs
+          git diff --check
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          path = 'crates/rpc/src/handlers/tx.rs'
+          original = subprocess.check_output(['git', 'show', os.environ['MAIN'] + ':' + path], text=True)
+          current = Path(path).read_text()
+          assert original.split('#[cfg(test)]', 1)[0] == current.split('#[cfg(test)]', 1)[0]
+          paths = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert paths == {path, 'docs/policies/mempool-policy.md'}, paths
+          PY
+          git diff
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/rpc/src/handlers/tx.rs docs/policies/mempool-policy.md
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'test(rpc): consolidate on main and strengthen package prevout coverage' | git commit-tree "$tree" -p "$OLD" -p "$MAIN")
+          git merge-base --is-ancestor "$OLD" "$commit"
+          git merge-base --is-ancestor "$MAIN" "$commit"
+          test -z "$(git diff --name-only "$MAIN" "$commit" -- .github Cargo.lock Cargo.toml)"
+          python3 - <<'PY'
+          import json, os, urllib.request
+          request = urllib.request.Request(
+              'https://api.github.com/repos/gosuda/bitcoin-rs/pulls/710',
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              pr = json.load(response)
+          assert pr['state'] == 'open' and not pr['merged'], 'PR closed or merged; refusing publication'
+          assert pr['head']['sha'] == os.environ['OLD'], 'PR head moved; refusing publication'
+          assert pr['head']['ref'] == os.environ['BRANCH']
+          PY
+          # Both ancestry checks above require a fast-forward. The exact lease
+          # additionally refuses concurrent deletion or replacement of the ref.
+          git push --force-with-lease="refs/heads/$BRANCH:$OLD" origin "$commit:refs/heads/$BRANCH"
+          echo "sha=$commit" >> "$GITHUB_OUTPUT"
+          printf 'PR710 source commit: `%s`\n\nMerged main: `%s`\n\nOnly existing-test and proof-inventory changes remain.\n' "$commit" "$MAIN" >> "$GITHUB_STEP_SUMMARY"
+  p2p:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 2edf1d885e504b31d0560ebc22fd0a9e345771e3
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - name: Record exact source and toolchain
+        run: |
+          git rev-parse HEAD
+          rustc +stable --version
+          cargo +stable --version
+      - name: Strict P2P and node-loopback Clippy
+        run: |
+          cargo +stable clippy --locked -p bitcoin-rs-p2p --no-default-features --all-targets -- -D warnings
+          cargo +stable clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e -- -D warnings
+      - name: P2P and protocol regressions
+        if: ${{ !cancelled() }}
+        run: cargo +stable test --locked -p bitcoin-rs-p2p --lib --test core_compat --no-fail-fast
+      - name: Node loopback regressions
+        if: ${{ !cancelled() }}
+        run: cargo +stable test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e
+      - name: Formatting and clean source
+        if: ${{ !cancelled() }}
+        run: |
+          cargo +stable fmt --all -- --check
+          git diff --check
+          test -z "$(git status --porcelain)"
+  rpc:
+    needs: consolidate-rpc
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.consolidate-rpc.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - name: Record exact source and toolchain
+        run: |
+          git rev-parse HEAD
+          rustc +stable --version
+          cargo +stable --version
+      - name: RPC transaction unit regressions
+        run: cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --lib handlers::tx::tests
+      - name: RPC policy and transaction contracts
+        if: ${{ !cancelled() }}
+        run: cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --test transaction_methods --test policy_contract --no-fail-fast
+      - name: Strict RPC Clippy
+        if: ${{ !cancelled() }}
+        run: cargo +stable clippy --locked -p bitcoin-rs-rpc --no-default-features --all-targets -- -D warnings
+      - name: Formatting and clean source
+        if: ${{ !cancelled() }}
+        run: |
+          cargo +stable fmt --all -- --check
+          git diff --check
+          test -z "$(git status --porcelain)"

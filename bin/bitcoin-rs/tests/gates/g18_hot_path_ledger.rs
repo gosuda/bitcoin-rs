@@ -335,7 +335,7 @@ fn declared_sample_paths_preserve_repetitions_and_empty_cells() {
     }
 }
 
-/// HPA-05: the declared inventory may extend REQUIRED_PATHS.
+/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.
 #[test]
 fn additional_declared_sample_paths_are_allowed() {
     let ledger = ledger_with_sample_paths("p2p.cmodern.arm64.redb", &["p2p.apply_idle"]);
