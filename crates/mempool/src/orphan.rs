@@ -1,7 +1,7 @@
-//! Gateway-owned resident peer transactions awaiting another admission attempt.
-//! Readiness indexes the same bounded store. The live contract is FIFO retention
-//! bounded by both transaction count and aggregate transaction weight; witness
-//! refresh preserves FIFO position.
+//! Gateway-owned peer orphan lifecycle.
+//!
+//! Retention, exact-body identity, and retry invariants are owned by `MPL-04`
+//! in `docs/contracts/mempool-mutations.md`.
 
 use crate::mutation::PeerToken;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
@@ -10,11 +10,6 @@ use hashbrown::{HashMap, HashSet};
 
 const DEFAULT_ORPHAN_QUOTA: usize = 100;
 /// Aggregate BIP141 weight budget for resident orphan bodies.
-///
-/// This preserves the pre-ownership-move hard memory bound while keeping the
-/// new single lifecycle store. Count and weight are independent caps: neither
-/// a few large standard transactions nor many small ones can grow retention
-/// without bound.
 const DEFAULT_MAX_ORPHAN_WEIGHT: u64 = 10_000_000;
 const DEFAULT_REJECT_CAP: usize = 100_000;
 
@@ -293,6 +288,7 @@ mod tests {
         pool.mark_ready(child.txid());
         assert!(pool.ready.is_empty());
     }
+    // MPL-04: aggregate orphan weight is bounded independently of count.
     #[test]
     fn aggregate_weight_evicts_fifo_even_when_count_quota_has_room() {
         let parent = tx(9, Txid::default()).txid();
