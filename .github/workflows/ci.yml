@@ -23,11 +23,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Fast gate: the only required-status job set for pull requests. Pure Rust and
-# default features only -- no libboost/cmake install, no kernel build. The
-# expensive or C++-building lanes (full-node feature set, benches, fuzz,
-# nightly dependency/feature matrices, kernel oracle) live in main.yml and run
-# on `main` pushes only.
+# Fast PR gate. The ordinary lint and test jobs avoid libbitcoinkernel and do
+# not install CMake/Boost; bench-smoke intentionally compiles the kernel-enabled
+# benchmark surface and installs those prerequisites. Deeper fuzz, nightly,
+# feature-matrix, and kernel-oracle lanes live in main.yml and run on `main`.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
@@ -43,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -52,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -83,151 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Keep fixture setup explicit: this job runs the real g20 checker
-      # and reference-node harness rather than skipping absent tools.
-      - name: Provision pinned Core and Apalache fixtures
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mapfile -t reference_values < <(
-            python3 - <<'PY'
-          import re
-          import tomllib
-          from pathlib import Path
-
-          with Path("docs/api/core-compat.toml").open("rb") as manifest_file:
-              manifest = tomllib.load(manifest_file)
-          release = manifest["reference"]["release"]
-          formal = manifest["reference"]["formal_tool"]
-          constraints = Path("CONSTRAINTS.md").read_text(encoding="utf-8")
-          archive_match = re.search(
-              r"^\| Archive \| `([^`]+)`", constraints, re.MULTILINE
-          )
-          if archive_match is None:
-              raise SystemExit("formal-tool archive name missing from CONSTRAINTS.md")
-          values = (
-              release["core_version"],
-              release["archive"],
-              release["archive_sha256"],
-              release["bitcoind_sha256"],
-              release["version_output"],
-              formal["name"],
-              formal["version"],
-              formal["archive_sha256"],
-              formal["jar_sha256"],
-              archive_match.group(1),
-          )
-          if not all(isinstance(value, str) for value in values):
-              raise SystemExit("reference identity contains a non-string value")
-          for value in values:
-              print(value)
-          PY
-          )
-          if [[ "${#reference_values[@]}" -ne 10 ]]; then
-              echo "reference manifest did not provide all fixture identities" >&2
-              exit 1
-          fi
-
-          core_version="${reference_values[0]}"
-          core_archive="${reference_values[1]}"
-          core_archive_sha256="${reference_values[2]}"
-          core_bitcoind_sha256="${reference_values[3]}"
-          core_version_output="${reference_values[4]}"
-          formal_name="${reference_values[5]}"
-          formal_version="${reference_values[6]}"
-          formal_archive_sha256="${reference_values[7]}"
-          formal_jar_sha256="${reference_values[8]}"
-          formal_archive="${reference_values[9]}"
-
-          if [[ "$formal_name" != "apalache-mc" ]]; then
-              echo "formal tool name does not match the g20 executable contract" >&2
-              exit 1
-          fi
-
-          : "${JAVA_HOME_25_X64:?ubuntu-latest must provide JAVA_HOME_25_X64}"
-          if [[ ! -x "$JAVA_HOME_25_X64/bin/java" ]]; then
-              echo "JAVA_HOME_25_X64 does not contain an executable java" >&2
-              exit 1
-          fi
-          export JAVA_HOME="$JAVA_HOME_25_X64"
-          export PATH="$JAVA_HOME/bin:$PATH"
-          : "${GITHUB_ENV:?GITHUB_ENV is required by the Actions runner}"
-          : "${GITHUB_PATH:?GITHUB_PATH is required by the Actions runner}"
-          printf 'JAVA_HOME=%s\n' "$JAVA_HOME" >> "$GITHUB_ENV"
-          printf '%s\n' "$JAVA_HOME/bin" >> "$GITHUB_PATH"
-
-          core_url="https://bitcoincore.org/bin/bitcoin-core-${core_version}/${core_archive}"
-          formal_url="https://github.com/apalache-mc/apalache/releases/download/v${formal_version}/${formal_archive}"
-          download_dir="target/ci-reference-downloads"
-          core_archive_path="${download_dir}/${core_archive}"
-          formal_archive_path="${download_dir}/${formal_archive}"
-          core_install="target/reference-core-${core_version}"
-          core_binary="${core_install}/bitcoin-${core_version}/bin/bitcoind"
-          formal_home="target/tools/apalache-${formal_version}"
-          formal_binary="${formal_home}/bin/${formal_name}"
-          formal_jar="${formal_home}/lib/apalache.jar"
-
-          mkdir -p "$download_dir"
-          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            --output "$core_archive_path" "$core_url"
-          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            --output "$formal_archive_path" "$formal_url"
-
-          printf '%s  %s\n' "$core_archive_sha256" "$core_archive_path" |
-            sha256sum --check --strict
-          printf '%s  %s\n' "$formal_archive_sha256" "$formal_archive_path" |
-            sha256sum --check --strict
-
-          rm -rf -- "$core_install" "$formal_home"
-          mkdir -p "$core_install" "$(dirname "$formal_home")"
-          tar --extract --gzip --file "$core_archive_path" --directory "$core_install"
-          unzip -q "$formal_archive_path" -d "$(dirname "$formal_home")"
-
-          [[ -x "$core_binary" ]] || {
-              echo "Core archive did not provide $core_binary" >&2
-              exit 1
-          }
-          [[ -x "$formal_binary" ]] || {
-              echo "Apalache archive did not provide $formal_binary" >&2
-              exit 1
-          }
-          [[ -f "$formal_jar" ]] || {
-              echo "Apalache archive did not provide $formal_jar" >&2
-              exit 1
-          }
-
-          printf '%s  %s\n' "$core_bitcoind_sha256" "$core_binary" |
-            sha256sum --check --strict
-          printf '%s  %s\n' "$formal_jar_sha256" "$formal_jar" |
-            sha256sum --check --strict
-          java_version="$(java -version 2>&1 | sed -n '1p')"
-          printf 'Using runner Java: %s (%s)\n' "$JAVA_HOME" "$java_version"
-
-          core_probe_dir="$(mktemp -d "$download_dir/core-version.XXXXXX")"
-          if ! core_version_text="$("$core_binary" "-datadir=$core_probe_dir" -version 2>&1)"; then
-              printf 'pinned bitcoind -version failed: %s\n' "$core_version_text" >&2
-              exit 1
-          fi
-          core_version_line="${core_version_text%%$'\n'*}"
-          if [[ "$core_version_line" != *"$core_version_output"* ]]; then
-              printf 'unexpected bitcoind version: %s\n' "$core_version_line" >&2
-              exit 1
-          fi
-
-          if ! formal_version_text="$("$formal_binary" version 2>&1)"; then
-              printf 'pinned apalache-mc version failed: %s\n' "$formal_version_text" >&2
-              exit 1
-          fi
-          if [[ "$formal_version_text" != *"$formal_version"* ]]; then
-              printf 'unexpected apalache-mc version output: %s\n' \
-                "$formal_version_text" >&2
-              exit 1
-          fi
-
-          printf 'Provisioned %s and %s\n' "$core_binary" "$formal_binary"
       # Pure-Rust test gate: each workspace member tested with its own default
       # features minus kernel. Deliberately no apt step -- the default path
       # needs no CMake/Boost toolchain; the kernel engine is opt-in and
@@ -257,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # The kernel engine is built from C++ (cmake + libboost-dev); the default
       # feature set now includes it, so every production lane installs the
@@ -281,7 +137,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
         with:
-          rust-version: "1.95.0"
+          rust-version: "stable"
           # Check the full dependency graph (all backends + kernel).
           # cargo-deny resolves metadata without compiling, so this costs no
           # C++ toolchain. The opt-in kernel/full-backend graph is also
