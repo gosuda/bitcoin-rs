@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: d10455da83725690429d85cd8c184c99a18580e7
+          ref: e7d4b77ea82e5f0c3541edc770a1bad5a60c6288
           path: source
           persist-credentials: false
       - name: Archive pinned inputs
