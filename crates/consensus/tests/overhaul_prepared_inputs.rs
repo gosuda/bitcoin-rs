@@ -152,8 +152,9 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
             (input.previous_output, coin.clone())
         })
         .collect();
-    let first = total_sigop_cost(&tx, &prevouts);
-    let second = total_sigop_cost(&tx, &prevouts);
+    let flags = bitcoin_rs_script::VerifyFlags::STANDARD;
+    let first = total_sigop_cost(&tx, &prevouts, flags);
+    let second = total_sigop_cost(&tx, &prevouts, flags);
     assert_eq!(first, second, "deterministic for identical inputs");
     // Two empty-script inputs carry no legacy sigops: the owner's count is
     // exactly zero for this fixture, not merely "bounded".
@@ -163,7 +164,7 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
     let mut reversed = prevouts;
     reversed.reverse();
     assert_eq!(
-        total_sigop_cost(&tx, &reversed),
+        total_sigop_cost(&tx, &reversed, flags),
         first,
         "out-of-order prevouts resolve identically"
     );
