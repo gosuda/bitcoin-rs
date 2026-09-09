@@ -28,8 +28,10 @@ jobs:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - name: Apply and publish reviewed G18 axis patch
-        run: python3 <(git show origin/automation/g18-axis-publish-20260910:.github/scripts/publish-g18-axis.py)
         shell: bash
+        run: |
+          git fetch origin refs/heads/automation/g18-axis-publish-20260910:refs/remotes/origin/automation/g18-axis-publish-20260910
+          python3 <(git show origin/automation/g18-axis-publish-20260910:.github/scripts/publish-g18-axis.py)
       - name: G18 and evidence tests
         run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test g18_hot_path_ledger --test overhaul_evidence
       - name: Strict workspace Clippy
