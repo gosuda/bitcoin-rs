@@ -14,7 +14,11 @@ violations as `PolicyError` or `MempoolError`; `enforce_size_limit` delegates to
 `remove_for_block` handle removal. `MempoolStats` supplies the aggregate counters
 behind `getmempoolinfo` and Esplora fee estimates. The `rbf` module plans
 replacements as a `ReplacementCandidate` and `ReplacementPlan`, `standardness` holds
-the relay policy, and `orphan` parks transactions whose parents are still missing.
+the relay policy, and the shared `MempoolGateway` owns admission preparation,
+retries, and orphan/recent-reject state. Orphan bodies, transaction indexes,
+parent indexes, and ready work remain with that owner. P2P consumes its query
+and admission results to request parents and relay committed transactions;
+mempool does not own peer connections or transport queues.
 `FeeEstimator` is fed by `tx_entered`, `tx_left`, and `block_connected`, and its
 `estimate` answers a confirmation-target query with a `FeeRate` in sat/kvB, refusing
 rather than fabricating when history is thin.
@@ -22,7 +26,7 @@ rather than fabricating when history is thin.
 
 Mempool behavioral contracts are defined in `docs/contracts/`:
 
-- **Mutation gateway and ordering**: Gateway serialization, atomic `MutationResult` records, and per-change sequence assignments follow [`docs/contracts/mempool-mutations.md`](../../docs/contracts/mempool-mutations.md) (`MPL-01`, `MPL-02`).
+- **Mutation gateway and ordering**: Gateway serialization, atomic `MutationResult` records, per-change sequence assignments, and generation-validated admission/retry follow [`docs/contracts/mempool-mutations.md`](../../docs/contracts/mempool-mutations.md) (`MPL-01`, `MPL-02`, `MPL-04`).
 - **Relay standardness and policy**: Admission checks, limits, BIP125 RBF rules, and eviction ranking follow [`docs/contracts/mempool-policy.md`](../../docs/contracts/mempool-policy.md) (`POL-01`).
 
 ## Features

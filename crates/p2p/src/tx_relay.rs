@@ -13,7 +13,7 @@
 //! must never stall mempool admission.
 //!
 //! [`RelaySink`] is the consumer seam: [`PeerRelaySink`] iterates the live
-//! peer table from [`bitcoin_rs_p2p::PeerTable`] and sends one
+//! peer table from [`crate::PeerTable`] and sends one
 //! `inv` per non-excluded peer. A test fake records announcements without a
 //! real connection, so the exclude/saturation logic is unit-testable without
 //! a running node.
@@ -24,38 +24,30 @@
 //! # Queue saturation
 //!
 //! The relay queue is bounded. When full, the newest announcement is
-//! **dropped** (the producer never blocks): a dropped `inv` is recovered by
-//! the next peer's `inv`/`getdata` exchange, so relay stays best-effort and
-//! admission never stalls. Per-peer outbound saturation follows the existing
-//! p2p disconnect policy on [`bitcoin_rs_p2p::PeerLease::send`]: a peer whose
+//! **dropped** (the producer never blocks). Later inventory exchanges may
+//! advertise it again; relay stays best-effort and admission never stalls.
+//! Per-peer outbound saturation follows the existing
+//! p2p disconnect policy on [`crate::PeerLease::send`]: a peer whose
 //! outbound queue is full is disconnected (its lease is cancelled), never
 //! silently dropped while the connection remains live.
 //!
-//! # Integration one-liner
-//!
-//! The source peer's node id is only in scope at the tx-ingress consumer
-//! (`source.connection_id().get()`), not in the ZMQ surface
-//! (the observer sees [`bitcoin_rs_mempool::MutationResult`] which carries
-//! no per-connection attribution). The relay hook therefore belongs in the
-//! tx-ingress accepted-only branch, replacing the current broadcast
-//! `relay_tx` with:
-//!
-//! ```text
-//! self.relay.announce(txid, tx.wtxid(), Some(source.connection_id().get()));
-//! ```
-//!
-//! The ingress consumer announces peer-origin accepts with the source
-//! excluded. RPC and reorg accepts announce through
-//! [`LocalTxRelayObserver`] on the same queue.
+//! Peer-origin accepts are announced by the ingress caller after the gateway
+//! returns a committed admission. RPC and reorg accepts announce through
+//! [`LocalTxRelayObserver`] on the same queue. These triggers intentionally
+//! retain their separate timing: mutation publication can include an entry
+//! immediately removed by trimming even when admission returns an error.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::Message;
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolObserver, MutationEnvelope, MutationOutcome};
-use bitcoin_rs_p2p::Message;
-use bitcoin_rs_primitives::{Txid, Wtxid};
+use bitcoin_rs_primitives::Txid;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
+
+/// Default maximum pending transaction announcements.
+pub const DEFAULT_TX_RELAY_QUEUE_CAPACITY: usize = 1024;
 
 /// Drain poll interval when the relay queue is empty.
 const RELAY_POLL: Duration = Duration::from_millis(100);
@@ -69,9 +61,6 @@ const RELAY_POLL: Duration = Duration::from_millis(100);
 pub struct RelayRequest {
     /// The transaction id to advertise in the `inv` vector.
     pub txid: Txid,
-    /// The witness transaction id (reserved for BIP339 wtxid-relay; the
-    /// current announcement uses `txid` to match the existing relay path).
-    pub wtxid: Wtxid,
     /// The delivering peer's node id to exclude, or `None` for local
     /// injection.
     pub source: Option<u64>,
@@ -80,12 +69,8 @@ pub struct RelayRequest {
 impl RelayRequest {
     /// Builds a relay request for an accepted transaction.
     #[must_use]
-    pub fn new(txid: Txid, wtxid: Wtxid, source: Option<u64>) -> Self {
-        Self {
-            txid,
-            wtxid,
-            source,
-        }
+    pub fn new(txid: Txid, source: Option<u64>) -> Self {
+        Self { txid, source }
     }
 }
 
@@ -120,8 +105,8 @@ impl TxRelayQueue {
     /// Returns `true` if the request was queued, `false` if the queue was
     /// full (the request is dropped) or the worker receiver has been dropped.
     /// Admission callers ignore the return value: relay is best-effort.
-    pub fn announce(&self, txid: Txid, wtxid: Wtxid, source: Option<u64>) -> bool {
-        let request = RelayRequest::new(txid, wtxid, source);
+    pub fn announce(&self, txid: Txid, source: Option<u64>) -> bool {
+        let request = RelayRequest::new(txid, source);
         match self.tx.try_send(request) {
             Ok(()) => {
                 self.enqueued.fetch_add(1, Ordering::Relaxed);
@@ -151,18 +136,17 @@ impl TxRelayQueue {
 /// Announces locally-injected accepted transactions (`sendrawtransaction`,
 /// reorg re-admission) to every connected peer.
 ///
-/// Peer-origin accepts are announced by the ingress consumer, which is the
-/// only place that still has the delivering connection id in scope at the
-/// moment of evaluation. This observer covers the origins that have no
-/// source peer to exclude.
-pub(crate) struct LocalTxRelayObserver {
+/// Peer-origin accepts are announced by their ingress caller after admission
+/// returns a committed outcome. This observer preserves the existing RPC and
+/// reorg publication trigger, including their lack of a source peer to exclude.
+pub struct LocalTxRelayObserver {
     relay: TxRelayQueue,
 }
 
 impl LocalTxRelayObserver {
     /// Relays accepted local mutations through `relay`.
     #[must_use]
-    pub(crate) fn new(relay: TxRelayQueue) -> Self {
+    pub fn new(relay: TxRelayQueue) -> Self {
         Self { relay }
     }
 }
@@ -180,9 +164,7 @@ impl MempoolObserver for LocalTxRelayObserver {
                 continue;
             }
             let txid = Txid(change.txid);
-            // The mutation record carries txid only; the current `inv` path
-            // announces by txid, so the wtxid field is unused by the sink.
-            self.relay.announce(txid, Wtxid(change.txid), None);
+            self.relay.announce(txid, None);
         }
     }
 }
@@ -216,13 +198,13 @@ pub trait RelaySink: Send + Sync {
 /// Borrows the shared table, so the relay worker sees peer
 /// connect/disconnect/reconnect as the listener mutates sessions.
 pub struct PeerRelaySink {
-    peers: Arc<bitcoin_rs_p2p::PeerTable>,
+    peers: Arc<crate::PeerTable>,
 }
 
 impl PeerRelaySink {
     /// Wraps the shared peer table.
     #[must_use]
-    pub fn new(peers: Arc<bitcoin_rs_p2p::PeerTable>) -> Self {
+    pub fn new(peers: Arc<crate::PeerTable>) -> Self {
         Self { peers }
     }
 }
@@ -300,7 +282,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use bitcoin_rs_p2p::PeerLease;
+    use crate::PeerLease;
     use bitcoin_rs_primitives::Hash256;
     use crossbeam_channel::bounded;
     use parking_lot::Mutex;
@@ -359,10 +341,6 @@ mod tests {
 
     fn dummy_txid(byte: u8) -> Txid {
         Txid::from(Hash256::from_le_bytes(&[byte; 32]))
-    }
-
-    fn dummy_wtxid(byte: u8) -> Wtxid {
-        Wtxid::from(Hash256::from_le_bytes(&[byte; 32]))
     }
 
     /// Allocates a fresh process-unique node id via a throwaway lease.
@@ -468,10 +446,10 @@ mod tests {
     fn relay_queue_saturation_drops_overflow() {
         let (queue, rx) = TxRelayQueue::new(2);
 
-        assert!(queue.announce(dummy_txid(1), dummy_wtxid(1), None));
-        assert!(queue.announce(dummy_txid(2), dummy_wtxid(2), None));
+        assert!(queue.announce(dummy_txid(1), None));
+        assert!(queue.announce(dummy_txid(2), None));
         // Queue is full: the third announcement is dropped, not blocked.
-        assert!(!queue.announce(dummy_txid(3), dummy_wtxid(3), None));
+        assert!(!queue.announce(dummy_txid(3), None));
 
         assert_eq!(queue.enqueued(), 2);
         assert_eq!(queue.dropped(), 1);
@@ -490,9 +468,9 @@ mod tests {
         let (queue, rx) = TxRelayQueue::new(8);
         let sink = FakeSink::new(peers);
 
-        queue.announce(dummy_txid(1), dummy_wtxid(1), Some(ids[0]));
-        queue.announce(dummy_txid(2), dummy_wtxid(2), Some(ids[1]));
-        queue.announce(dummy_txid(3), dummy_wtxid(3), None);
+        queue.announce(dummy_txid(1), Some(ids[0]));
+        queue.announce(dummy_txid(2), Some(ids[1]));
+        queue.announce(dummy_txid(3), None);
 
         let processed = drain_relay_queue(&rx, &sink);
         assert_eq!(processed, 3);
@@ -550,7 +528,7 @@ mod tests {
         let lease_b = PeerLease::new(tx_b);
         let source_id = lease_a.node_id();
 
-        let peers = Arc::new(bitcoin_rs_p2p::PeerTable::new());
+        let peers = Arc::new(crate::PeerTable::new());
         peers.register(addr_a, lease_a);
         peers.register(addr_b, lease_b);
         let sink = PeerRelaySink::new(peers);
@@ -584,12 +562,41 @@ mod tests {
     }
 
     #[test]
-    fn relay_request_new_carries_fields() {
-        let id = fresh_node_id();
-        let req = RelayRequest::new(dummy_txid(1), dummy_wtxid(2), Some(id));
-        assert_eq!(req.txid, dummy_txid(1));
-        assert_eq!(req.wtxid, dummy_wtxid(2));
-        assert_eq!(req.source, Some(id));
+    fn peer_relay_reaches_replacement_and_cancels_only_saturated_peer() {
+        let peers = Arc::new(crate::PeerTable::new());
+        let source_addr = SocketAddr::from(([127, 0, 0, 1], 8333));
+        let saturated_addr = SocketAddr::from(([127, 0, 0, 1], 8334));
+        let (old_sender, old_receiver) = bounded(1);
+        let old = PeerLease::new(old_sender);
+        let stale_source_id = old.node_id();
+        peers.register(source_addr, old);
+        let (current_sender, current_receiver) = bounded(1);
+        let current = PeerLease::new(current_sender);
+        peers.register(source_addr, current.clone());
+        let (saturated_sender, _saturated_receiver) = bounded(1);
+        let saturated = PeerLease::new(saturated_sender);
+        assert!(saturated.send(Message::Ping(1)).is_ok());
+        peers.register(saturated_addr, saturated.clone());
+
+        let outcome = PeerRelaySink::new(peers).announce_inv(dummy_txid(1), Some(stale_source_id));
+
+        assert_eq!(outcome.attempted, 2);
+        assert_eq!(outcome.excluded, 0);
+        assert_eq!(outcome.saturated, 1);
+        assert!(old_receiver.try_recv().is_err());
+        assert!(matches!(current_receiver.try_recv(), Ok(Message::Inv(_))));
+        assert!(!current.is_cancelled());
+        assert!(saturated.is_cancelled());
+    }
+
+    #[test]
+    fn disconnected_relay_worker_does_not_count_queue_saturation() {
+        let (queue, receiver) = TxRelayQueue::new(1);
+        drop(receiver);
+
+        assert!(!queue.announce(dummy_txid(1), None));
+        assert_eq!(queue.enqueued(), 0);
+        assert_eq!(queue.dropped(), 0);
     }
 
     fn mutation_envelope(
@@ -641,7 +648,6 @@ mod tests {
         ));
         let announced = rx.try_recv().expect("RPC accept must announce");
         assert_eq!(announced.txid, Txid(txid_hash));
-        assert_eq!(announced.wtxid, Wtxid(txid_hash));
         assert_eq!(announced.source, None);
 
         observer.on_mutation(&mutation_envelope(

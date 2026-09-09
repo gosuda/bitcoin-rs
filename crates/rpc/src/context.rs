@@ -2,7 +2,10 @@ use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockBodySource, TipSnapshot};
 use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
+use bitcoin_rs_mempool::{
+    AdmissionChain, ChainAdmissionSnapshot, Mempool, MempoolGateway, MempoolLimits,
+    MempoolObserver, MutationResult,
+};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
@@ -682,6 +685,70 @@ pub struct ChainHandles {
     pub chain_network: Network,
 }
 
+/// Borrowed provisional chain facts used by both RPC and P2P admission.
+///
+/// The view contains no gateway or full node/context reference. Height and MTP
+/// use one applied tip; coins are read without taking the chain-transition
+/// mutex. The chain owner brackets authoritative mutations with the gateway's
+/// generation fence, and gateway generation/sequence revalidation discards any
+/// facts collected across such a mutation before they can affect admission.
+pub struct ChainAdmissionView<'a> {
+    utxo: &'a bitcoin_rs_utxo::UtxoSet,
+    applied_tip: &'a ArcSwapOption<TipSnapshot>,
+    block_tree: &'a RwLock<bitcoin_rs_chain::BlockTree>,
+    transactions: &'a RwLock<HashMap<Txid, Tx>>,
+}
+
+impl<'a> ChainAdmissionView<'a> {
+    /// Borrows the chain owner's existing handles without retaining state.
+    #[must_use]
+    pub const fn new(
+        utxo: &'a bitcoin_rs_utxo::UtxoSet,
+        applied_tip: &'a ArcSwapOption<TipSnapshot>,
+        block_tree: &'a RwLock<bitcoin_rs_chain::BlockTree>,
+        transactions: &'a RwLock<HashMap<Txid, Tx>>,
+    ) -> Self {
+        Self {
+            utxo,
+            applied_tip,
+            block_tree,
+            transactions,
+        }
+    }
+}
+
+impl AdmissionChain for ChainAdmissionView<'_> {
+    fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+        let tip = self.applied_tip.load_full();
+        let height = tip.as_ref().map_or(0, |tip| tip.height);
+        let locktime_cutoff = tip.as_ref().map_or(0, |tip| {
+            let tree = self.block_tree.read();
+            tree.lookup(tip.hash)
+                .and_then(|node| tree.median_time_past_at(node, 11))
+                .unwrap_or(0)
+        });
+        let prevouts = tx
+            .inputs
+            .iter()
+            .filter_map(|input| {
+                let outpoint = input.previous_output;
+                self.utxo
+                    .get_entry(&outpoint)
+                    .map(|coin| (outpoint, coin.txout))
+            })
+            .collect();
+        // This preserves the existing peer-side confirmed lookup. RPC ignores
+        // this hint: its transaction lookup cache is not mempool membership.
+        let confirmed = self.transactions.read().contains_key(&tx.txid());
+        Some(ChainAdmissionSnapshot {
+            prevouts,
+            height,
+            locktime_cutoff,
+            confirmed,
+        })
+    }
+}
+
 /// Mempool capability handles.
 #[derive(Clone)]
 pub struct MempoolHandles {
@@ -1120,12 +1187,23 @@ impl Context {
         txid
     }
 
+    /// Borrows the provisional chain capability shared with P2P admission.
+    #[must_use]
+    pub fn admission_chain(&self) -> ChainAdmissionView<'_> {
+        ChainAdmissionView::new(
+            &self.utxo,
+            &self.applied_tip,
+            &self.block_tree,
+            &self.transactions,
+        )
+    }
+
     /// Admits one transaction through the full policy stack, then mutates
     /// the mempool only through the node's one [`MempoolGateway`].
     ///
-    /// This is the shared typed admission operation: `sendrawtransaction`
-    /// and the embedded `Node::broadcast` both run it. The gateway's
-    /// [`MempoolGateway::admit_transaction`] holds the pool write lock
+    /// `sendrawtransaction` and embedded `Node::broadcast` both use the
+    /// gateway's [`MempoolGateway::submit_transaction`] preparation and retry
+    /// boundary. [`MempoolGateway::admit_transaction`] holds the pool write lock
     /// across the entire mempool-dependent policy evaluation — the
     /// already-known check, prevout-resolved fee/vsize/sigop context,
     /// standardness policy, the live min-relay / mempool-min floor, the
@@ -2085,6 +2163,144 @@ mod tests {
         );
         assert!(ctx.block_hash_at_height(2).is_none());
         assert!(ctx.block_by_height(2).is_none());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod admission_chain_tests {
+    use anyhow::Context as _;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_primitives::{Header, TxIn, TxOut};
+    use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
+    use sha2::{Digest as _, Sha256};
+
+    use super::*;
+
+    fn spendable_script() -> Vec<u8> {
+        let mut script = vec![0x00, 0x20];
+        script.extend_from_slice(&Sha256::digest([0x51]));
+        script
+    }
+
+    fn spending(outpoint: OutPoint) -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: vec![vec![0x51]],
+            }],
+            outputs: vec![TxOut {
+                value: 9_000,
+                script_pubkey: spendable_script(),
+            }],
+            lock_time: 0,
+        }
+    }
+
+    fn publish_tip(ctx: &Context, time: u32) -> anyhow::Result<()> {
+        let mut tree = ctx.block_tree.write();
+        let parent = ctx.applied_tip.load_full().map(|tip| tip.tip_id);
+        let previous_hash = match parent {
+            Some(id) => BlockHash::from(tree.node(id)?.hash),
+            None => BlockHash::default(),
+        };
+        let id = tree
+            .insert_node(
+                parent,
+                Header {
+                    version: 1,
+                    prev_blockhash: previous_hash,
+                    merkle_root: Hash256::default(),
+                    time,
+                    bits: 0x207f_ffff,
+                    nonce: time,
+                },
+                NodeStatus::Active,
+            )
+            .context("insert tip node")?;
+        let node = tree.node(id)?;
+        ctx.applied_tip.store(Some(Arc::new(TipSnapshot {
+            tip_id: id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        })));
+        Ok(())
+    }
+
+    #[test]
+    fn stable_chainstate_reader_does_not_block_transaction_admission() -> anyhow::Result<()> {
+        let ctx = Context::new();
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[8; 32])), 0);
+        let tx = spending(outpoint);
+        let txid = tx.txid();
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            outpoint,
+            TxOut {
+                value: 10_000,
+                script_pubkey: spendable_script(),
+            },
+            false,
+            0,
+        ));
+        ctx.utxo.commit_block(&changes, &Hash256::default())?;
+
+        // Stable whole-chain readers hold this mutex without changing the
+        // generation. Admission must succeed through its real RPC path while
+        // such a reader is active, rather than spending its retry budget on
+        // contention that says nothing about stale chain facts.
+        let result = ctx
+            .with_stable_chainstate(|| ctx.admit_transaction(tx, None))
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(result.changes.len(), 1);
+        assert!(ctx.mempool.read().contains_txid(&txid));
+        Ok(())
+    }
+
+    #[test]
+    fn admission_chain_uses_current_handles_and_one_applied_tip() -> anyhow::Result<()> {
+        let mut ctx = Context::new();
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[7; 32])), 0);
+        let tx = spending(outpoint);
+        assert!(
+            ctx.admission_chain()
+                .snapshot(&tx)
+                .context("empty snapshot")?
+                .prevouts
+                .is_empty()
+        );
+
+        // A borrowed capability observes current handles even in isolated
+        // contexts that replace test state after construction.
+        ctx.utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            outpoint,
+            TxOut {
+                value: 10_000,
+                script_pubkey: vec![0x51],
+            },
+            false,
+            0,
+        ));
+        ctx.utxo
+            .commit_block(&changes, &Hash256::default())
+            .context("fund input")?;
+        publish_tip(&ctx, 100)?;
+        publish_tip(&ctx, 200)?;
+        ctx.transactions.write().insert(tx.txid(), tx.clone());
+
+        let snapshot = ctx.admission_chain().snapshot(&tx).context("snapshot")?;
+        assert_eq!(snapshot.height, 1);
+        assert_eq!(snapshot.locktime_cutoff, 200);
+        assert_eq!(snapshot.prevouts.len(), 1);
+        assert_eq!(snapshot.prevouts[0].0, outpoint);
+        assert_eq!(snapshot.prevouts[0].1.value, 10_000);
+        assert!(snapshot.confirmed);
         Ok(())
     }
 }

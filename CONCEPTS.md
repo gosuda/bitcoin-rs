@@ -61,11 +61,13 @@ chain transitions.
 
 ### Post-commit chain effects
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
-ZMQ projections, TxIndex wake, mining generation, and P2P admission. Owned by
-`ChainFollowers` / `ChainEffects`. Dispatched after the tip is published,
-while the chain transition is still held. It cannot fail the authoritative
-transition. Index recovery still uses `ChainEventPublisher` hints (`EVT-02`);
-this is not a second event log.
+ZMQ projections, TxIndex wake, mining generation, and mempool admission-state
+notifications. `ChainFollowers` / `ChainEffects` own dispatch timing after
+the tip is published, while the chain transition is still held. Mempool owns
+the notified orphan/reject state and retry mechanics; P2P owns parent requests
+and transaction relay. Derived work cannot fail the authoritative transition.
+Index recovery still uses `ChainEventPublisher` hints (`EVT-02`); this is not
+a second event log.
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake

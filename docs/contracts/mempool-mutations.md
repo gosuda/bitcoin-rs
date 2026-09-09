@@ -5,7 +5,9 @@ and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` in
 `crates/mempool/src/gateway.rs`; `MutationResult`/`MutationOutcome`/
 `RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` in
 `crates/mempool/src/mutation.rs`; the ZMQ sequence observer
-in `crates/rpc/src/zmq.rs`.
+in `crates/rpc/src/zmq.rs`. The gateway also owns transaction preparation
+and retries (`crates/mempool/src/admission.rs`) and its private orphan/reject
+state (`crates/mempool/src/orphan.rs`).
 
 ## Clauses
 
@@ -17,7 +19,9 @@ in `crates/rpc/src/zmq.rs`.
 - Every mutating method flows through one path, `commit` (and
   `admit_transaction`, which enqueues the same way), in this exact order:
   1. take the pool write lock,
-  2. mutate and assign per-change `mempool_sequence` values,
+  2. mutate and assign per-change `mempool_sequence` values, then update
+     the gateway's orphan state and mark waiting children ready for parents
+     that remain in the committed pool,
   3. while still holding the write lock, enqueue a non-empty
      `MutationEnvelope` on the publish FIFO and elect a drainer if none
      exists,
@@ -41,8 +45,9 @@ in `crates/rpc/src/zmq.rs`.
   The gateway clones one `MutationResult` into the envelope for each
   committed non-empty batch that has an observer attached, so it can both
   enqueue publication and return the original result to the caller.
-  Empty results and an absent observer enqueue nothing, allocate nothing,
-  and spawn no thread.
+  Publication of empty results or with an absent observer enqueues nothing,
+  allocates nothing, and spawns no thread. Internal admission-state updates
+  do not depend on an observer being present or making progress.
 - Observers are best-effort mirrors. Observer errors and panics never
   affect the committed mutation. No gateway lock is held across an
   observer call, so an observer may re-enter the gateway: a nested call
@@ -91,20 +96,60 @@ in `crates/rpc/src/zmq.rs`.
   the generation odd — admission stays closed. Only `finish` may
   compare-exchange the odd value to the reserved even value, reopening
   admission. One guard covers one externally coherent chain operation.
-- `admit_transaction` is the one atomic admission operation for RPC
-  `sendrawtransaction`. The caller captures `expected_generation` (an even
-  value from `stable_generation`) and `expected_sequence` (from a read
-  guard), then calls `admit_transaction` with both tokens. The gateway takes
-  the write lock once and checks, in order: (1) exact chain generation
-  equals the request and is even, (2) current pool sequence equals the
-  request, (3) exact transaction identity. A mismatch returns a transient
-  error (`GenerationChanged` or `MempoolChanged`) and the caller retries
+- `submit_transaction` owns common preparation and bounded retry for RPC
+  and peer submissions in mempool. `admit_transaction` remains their
+  atomic admission operation:
+  capture `expected_generation` (an even value from `stable_generation`)
+  and `expected_sequence` (from a pool read guard), release the pool guard,
+  resolve chain facts, then call `admit_transaction` with both tokens. Chain
+  lookups and external callbacks never run under the admission-state lock.
+  The gateway takes the write lock once and checks, in order: (1) exact
+  chain generation equals the request and is even, (2) current pool sequence
+  equals the request, (3) exact transaction identity. A mismatch returns a
+  transient error (`GenerationChanged` or `MempoolChanged`) and mempool retries
   with fresh facts — it never re-uses a captured even generation.
+- Chain facts come through `AdmissionChain` as provisional inputs for a
+  submission attempt. The shared borrowed `ChainAdmissionView` in
+  `crates/rpc/src/context.rs` reads existing coin and transaction handles,
+  using one captured applied tip for height and MTP. It takes no additional
+  chain-transition lock: a stable reader holding that mutex must not spend
+  admission's retry budget. Authoritative chain changes are bracketed by
+  the gateway's generation fence; exact generation and pool-sequence
+  revalidation discards facts read across a change before they can determine
+  admission or peer lifecycle results. RPC and node's peer ingress use that
+  same view, with no gateway ownership, shadow version, or copied chain-state
+  model. A provider may return no snapshot to request a transient retry.
+- Peer orphan/reject transitions validate the same tokens before changing
+  state, under pool-then-lifecycle lock order. An accepted parent cannot
+  commit between the missing-input verdict and registration of its child.
+  The gateway stores orphan bodies, txid/wtxid indexes, parent indexes,
+  and ready IDs as one ownership unit. Retention is count-bounded FIFO
+  without expiry; witness refresh preserves FIFO position. Recent rejects
+  retain both hash forms in a bounded FIFO. These private defaults and
+  indexes have one owner in `orphan.rs`; RPC missing-input rejections do
+  not populate peer orphan state.
+- `retry_orphans` claims one bounded ready set only while generation is
+  stable. Claimed bodies remain resident; transient retry exhaustion marks
+  them ready for a later call, without immediately consuming the same work
+  again. Ready IDs are deduplicated and retire with their resident entry.
+  Parent readiness is internal commit work, not a best-effort mutation
+  observer or an ingress-channel delivery.
+- Node calls `chain_changed` after each committed connect/disconnect and
+  before releasing the `ChainTransition`, including changes with no mempool
+  mutation. It clears recent rejects and marks children of newly available
+  parents ready. Generation remains odd until the transition finishes, so
+  that notification cannot prematurely consume the ready work.
 - `reconsider_disconnected` re-admits transactions displaced by a reorg
   through the same `commit` path with `AdmissionOrigin::Reorg`. It processes
   candidates in order and withholds descendants of a refused or
   immediately-evicted parent, so a reorg sweep cannot create orphaned
   ancestry.
+  `DisconnectedCandidates` in `crates/mempool/src/reconsider.rs` owns
+  candidate pricing and earlier offered outputs; node supplies ordered
+  transactions and its coin view while retaining the chain transition.
+  The batch deliberately runs under the reserved odd generation rather
+  than ordinary submission. Its existing validation scope is unchanged;
+  current-chain revalidation of the reorg batch is tracked by #640.
 
 ## Proven by
 
@@ -125,6 +170,29 @@ in `crates/rpc/src/zmq.rs`.
   `stable_generation_is_even_after_disconnect`.
 - `crates/rpc/src/handlers/tx.rs` (inline tests):
   admission retry rebuilds context after a transient rejection.
+- `crates/mempool/src/admission.rs` (inline tests):
+  `parent_commit_without_observers_retries_orphan_with_original_source`,
+  `chain_change_with_no_pool_mutation_clears_rejects_and_preserves_odd_ready_work`,
+  `exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll`,
+  `parent_commit_between_resolution_and_hold_cannot_lose_the_only_wake`,
+  `rpc_missing_inputs_does_not_create_peer_lifecycle_state`,
+  `coinbase_and_nonstandard_missing_transactions_are_not_held`.
+- `crates/rpc/src/context.rs` (`admission_chain_tests`):
+  `stable_chainstate_reader_does_not_block_transaction_admission`,
+  `admission_chain_uses_current_handles_and_one_applied_tip`.
+- `crates/mempool/src/orphan.rs` (inline tests):
+  `zero_quota_retains_no_body_or_index`,
+  `witness_refresh_keeps_fifo_position_and_source_identity`,
+  `readiness_is_deduplicated_and_removed_with_eviction`,
+  `rejects_are_bounded_and_chain_reset_clears_both_indexes`.
+- `crates/mempool/src/reconsider.rs` (inline tests):
+  `restored_coins_and_ordered_candidates_price_the_batch`,
+  `unavailable_parent_never_offers_outputs_to_a_child`,
+  `restored_coin_takes_precedence_over_an_offered_output`,
+  `coinbase_does_not_become_a_reconsideration_candidate`.
+- `crates/node/src/chain_effects.rs` (inline tests):
+  `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
+  `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`.
 - `crates/rpc/src/zmq.rs`:
   `admission_publishes_one_a_frame_with_core_payload_bytes`,
   `policy_eviction_publishes_r_frames_in_commit_order`,
@@ -143,4 +211,6 @@ in `crates/rpc/src/zmq.rs`.
   `accepted_peer_tx_is_admitted_and_relayed_excluding_the_source`,
   `below_min_relay_tx_is_rejected_recorded_and_never_relayed`
   (peer tx over a real socket: dispatch filter, admission through the
-  observer-installed gateway, source-excluding relay).
+  observer-installed gateway, source-excluding relay), and
+  `full_relay_queue_does_not_block_peer_admission_or_mining_wake`
+  (actual ingress and gateway with a saturated relay queue).

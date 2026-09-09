@@ -34,6 +34,14 @@ download scheduler, outbound transaction relay, and RPC methods (`getpeerinfo`,
 `getnetworkinfo`, `disconnectnode`) — observe and mutate live connections exclusively
 through `PeerTable`.
 
+Transaction inventory reads the shared `MempoolGateway` through the P2P-owned
+`TxInventory` implementation. Mempool owns orphan bodies, recent rejects, and
+admission retries; P2P turns missing-parent results into requests to the exact
+delivering connection and owns source-excluding announcements, the bounded
+relay queue, and its worker. Node wires and starts those consumers. The
+supported inventory forms and the outbound txid-only relay deviation are
+defined in [P2P compatibility](../../docs/policies/p2p-compatibility.md).
+
 `PeerManager` owns DNS resolver and seed configuration and bootstraps outbound
 addresses. Live session registration, replacement, metadata publication, and
 identity-checked removal go through `PeerTable`, used by the inbound TCP

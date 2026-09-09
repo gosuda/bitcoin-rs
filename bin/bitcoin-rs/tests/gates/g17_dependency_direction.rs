@@ -22,6 +22,9 @@
 //! - `chain` and `utxo` depend on `storage` (undo records, snapshots), so they
 //!   sit in the services layer, not core.
 //! - `mining` depends on `mempool` and `chain`; all three live in services.
+//! - `p2p` depends on `mempool` for transaction inventory and relay consumers.
+//!   `mempool` cannot depend back on p2p, RPC, node, or the binary: admission
+//!   owns transaction state without owning its network or runtime consumers.
 //! - `chain` depends on `consensus` for BIP9 parameters and the BIP113 cutoff.
 //! - `rpc` may consume node capabilities (`index`, `mining`, `mempool`,
 //!   `chain`, `utxo`, `p2p`) but never `node` or the binary, and never names a
@@ -59,6 +62,12 @@ const STORAGE_CRATE: &str = "bitcoin-rs-storage";
 
 /// The RPC surface crate.
 const RPC_CRATE: &str = "bitcoin-rs-rpc";
+
+/// Transaction admission and lifecycle owner.
+const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
+
+/// Peer transaction inventory and relay owner.
+const P2P_CRATE: &str = "bitcoin-rs-p2p";
 
 /// The node composition crate.
 const NODE_CRATE: &str = "bitcoin-rs-node";
@@ -120,6 +129,21 @@ fn assert_storage_owns_engine_dependencies(engine_deps: &BTreeMap<String, Vec<St
             name == STORAGE_CRATE || engines.is_empty(),
             "engine dependencies {engines:?} must be named by `{STORAGE_CRATE}` only; \
              found on `{name}`"
+        );
+    }
+}
+
+fn assert_mempool_is_independent_of_transaction_consumers(
+    normal_deps: &BTreeMap<String, Vec<String>>,
+) {
+    let mempool_edges = normal_deps.get(MEMPOOL_CRATE).expect("mempool in metadata");
+    for consumer in [P2P_CRATE, RPC_CRATE, NODE_CRATE, BIN_CRATE] {
+        assert!(
+            mempool_edges
+                .iter()
+                .all(|dependency| dependency != consumer),
+            "mempool must not depend on transaction consumer `{consumer}`; \
+             p2p, RPC, and node consume mempool admission and lifecycle state"
         );
     }
 }
@@ -305,6 +329,10 @@ fn workspace_dependency_direction_is_one_way() {
     // 1. Every normal bitcoin-rs edge points to the same or a lower layer.
     assert_internal_dependencies_point_down(&normal_deps);
 
+    // Same-layer edges still respect transaction ownership: p2p consumes
+    // mempool queries, never the reverse.
+    assert_mempool_is_independent_of_transaction_consumers(&normal_deps);
+
     // 2. No crate outside storage names a storage-engine dependency (any
     //    dependency kind counts: an engine must not leak in as a dev-dep
     //    either).
@@ -327,4 +355,27 @@ fn workspace_dependency_direction_is_one_way() {
     //    surface forwards none, and workspace-selection marker features that
     //    gate no code are tolerated.
     assert_backend_feature_forwarding_is_confined(&features);
+}
+
+#[test]
+fn transaction_consumers_can_depend_on_mempool() {
+    let dependencies = BTreeMap::from([
+        (MEMPOOL_CRATE.to_owned(), Vec::new()),
+        (P2P_CRATE.to_owned(), vec![MEMPOOL_CRATE.to_owned()]),
+        (RPC_CRATE.to_owned(), vec![MEMPOOL_CRATE.to_owned()]),
+        (NODE_CRATE.to_owned(), vec![MEMPOOL_CRATE.to_owned()]),
+    ]);
+    assert_internal_dependencies_point_down(&dependencies);
+    assert_mempool_is_independent_of_transaction_consumers(&dependencies);
+}
+
+#[test]
+fn mempool_cannot_depend_on_transaction_consumers() {
+    for consumer in [P2P_CRATE, RPC_CRATE, NODE_CRATE, BIN_CRATE] {
+        let dependencies = BTreeMap::from([(MEMPOOL_CRATE.to_owned(), vec![consumer.to_owned()])]);
+        let result = std::panic::catch_unwind(|| {
+            assert_mempool_is_independent_of_transaction_consumers(&dependencies);
+        });
+        assert!(result.is_err(), "mempool dependency on {consumer} passed");
+    }
 }

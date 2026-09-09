@@ -836,31 +836,35 @@ pub(crate) fn start_node(
     // coordinator's lifetime: the RPC context owns the coordinator, and an
     // owned reference here would cycle through `apply_handles`.
     state.mining_generation_signal().attach(&mining_control);
-    let tx_admission = state.tx_admission();
-    let cloned_admission = Arc::clone(&tx_admission);
-    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = cloned_admission;
+    let gateway = state.mempool_gateway();
+    let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         inbound_tx: Some(state.inbound_tx_sender()),
     };
-    let ingress = crate::tx_ingress::spawn_tx_ingress_consumer(
+    let (relay_queue, relay_rx) =
+        bitcoin_rs_p2p::TxRelayQueue::new(bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);
+    // Register each successfully started worker immediately. Startup rollback
+    // joins the relay even if creating the ingress worker subsequently fails.
+    guard.services.tx_relay = Some(bitcoin_rs_p2p::spawn_tx_relay_worker(
+        bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table()),
+        relay_rx,
+        Arc::clone(&shutdown),
+    )?);
+    guard.services.tx_ingress = Some(crate::tx_ingress::spawn_tx_ingress_consumer(
         state,
-        state.mempool_gateway(),
+        Arc::clone(&gateway),
         Arc::clone(&mining_control),
         Arc::clone(&shutdown),
         state.inbound_tx_rx_handle(),
-        Arc::clone(&tx_admission),
-    )?;
-    if let Err(error) = state.mempool_gateway().attach_observer_leg(
-        "tx-relay",
-        Arc::new(crate::tx_relay::LocalTxRelayObserver::new(
-            ingress.queue.clone(),
-        )),
-    ) {
-        tracing::error!(error, "failed to attach local tx-relay observer");
-    }
-    guard.services.tx_ingress = Some(ingress.ingress);
-    guard.services.tx_relay = Some(ingress.relay);
+        relay_queue.clone(),
+    )?);
+    gateway
+        .attach_observer_leg(
+            "tx-relay",
+            Arc::new(bitcoin_rs_p2p::LocalTxRelayObserver::new(relay_queue)),
+        )
+        .map_err(anyhow::Error::msg)?;
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc.auth)?);
     let mut rpc_context =
         bitcoin_rs_rpc::context::Context::from_handles(bitcoin_rs_rpc::context::ContextHandles {

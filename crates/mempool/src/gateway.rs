@@ -65,7 +65,7 @@ pub enum ChainChangeError {
 
 /// Resolved context and exact state tokens for one admission attempt.
 ///
-/// The caller captures `expected_generation` (an even value read from
+/// Shared submission preparation captures `expected_generation` (an even value read from
 /// [`MempoolGateway::stable_generation`]) and `expected_sequence` (read from
 /// the pool under a read guard) **before** resolving UTXO data. The gateway
 /// re-checks both under the write lock so a chain change or mempool mutation
@@ -296,7 +296,10 @@ struct PublishState {
 /// an absent observer enqueue nothing, allocate nothing, and spawn no
 /// thread.
 pub struct MempoolGateway {
-    pool: Arc<RwLock<Mempool>>,
+    pub(crate) pool: Arc<RwLock<Mempool>>,
+    /// Pool guards precede this lock. Never held during observer calls,
+    /// script verification, or chain/transport access.
+    pub(crate) lifecycle: Mutex<crate::orphan::AdmissionLifecycle>,
     /// The one observer slot, held as the composite so a second subsystem
     /// can attach its own named leg after construction. An absent composite
     /// means nobody is listening and the publish path stays allocation-free.
@@ -352,6 +355,7 @@ impl MempoolGateway {
         });
         Self {
             pool,
+            lifecycle: Mutex::new(crate::orphan::AdmissionLifecycle::default()),
             observer: composite,
             publish: Mutex::new(PublishState {
                 queue: VecDeque::new(),
@@ -592,10 +596,26 @@ impl MempoolGateway {
     /// committed removals and then rejects with the same
     /// [`AdmitError::Policy`] the pre-commit refusal produced.
     ///
-    /// Any mismatch or rejection returns before publish-mutex acquisition and
-    /// before mutation.
+    /// A token mismatch changes no state. Pre-commit rejection changes no pool
+    /// membership or sequence; peer hold/reject state is finalized under the
+    /// same guard. Shed-after-commit failures still publish as described above.
+    // The public atomic API consumes its prepared request; the private path
+    // borrows it so the shared retry owner can recover the Arc after a mismatch.
     #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
+        self.admit_transaction_claimed(&request, None)
+    }
+
+    /// A private resident-body claim joins generation/sequence validation.
+    /// Evicted or refreshed retry bodies may not mutate pool or lifecycle.
+    // Keep token checks, mutation, lifecycle finalization and FIFO publication
+    // in one auditable write-lock interval instead of splitting the commit.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn admit_transaction_claimed(
+        &self,
+        request: &AdmissionRequest,
+        claim: Option<&crate::orphan::HeldOrphan>,
+    ) -> Result<AdmitOutcome, AdmitError> {
         // Test-only causal seam: parks the first admission BEFORE acquiring
         // the write lock so a cross-crate test can mutate the pool and
         // generation between the caller's capture and the gateway's
@@ -616,10 +636,14 @@ impl MempoolGateway {
         if pool.sequence_number() != request.expected_sequence {
             return Err(AdmitError::MempoolChanged);
         }
+        if claim.is_some_and(|claim| !self.lifecycle.lock().orphans.is_current(claim)) {
+            return Ok(AdmitOutcome::AlreadyKnown);
+        }
         // 3. Exact duplicate → AlreadyKnown (no envelope, no sequence, no
         //    publication).
         let txid = request.tx.txid();
         if pool.contains_txid(&txid) {
+            self.lifecycle.lock().orphans.remove(txid);
             return Ok(AdmitOutcome::AlreadyKnown);
         }
         // 4. Policy evaluation under the same write guard. `evaluate_one`
@@ -641,7 +665,9 @@ impl MempoolGateway {
             policy.incremental_relay_fee_sat_per_kvb,
         );
         if let Some(reason) = fact.reject_reason {
-            return Err(AdmitError::Policy(reason));
+            let error = AdmitError::Policy(reason);
+            self.record_peer_failure(&pool, request, error);
+            return Err(error);
         }
 
         // 4b. Consensus verification (finality, duplicate inputs, overspend,
@@ -658,6 +684,7 @@ impl MempoolGateway {
             // Coinbase transactions are never admitted via the gateway.
             // Empty prevouts on a non-coinbase tx means the caller did not
             // resolve inputs — reject rather than admit unverified.
+            self.record_peer_failure(&pool, request, AdmitError::Consensus);
             return Err(AdmitError::Consensus);
         }
         let chain_view = PrevoutMap(&request.prevouts);
@@ -668,7 +695,10 @@ impl MempoolGateway {
         // A u32 overflow on the next block height is not a valid chain
         // state, but failing closed here matches the conservative choice:
         // nothing is admitted when the finality question is unanswerable.
-        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
+        let Some(finality_height) = request.height.checked_add(1) else {
+            self.record_peer_failure(&pool, request, AdmitError::Consensus);
+            return Err(AdmitError::Consensus);
+        };
         if let Err(_err) = verify_transaction(
             &request.tx,
             &view,
@@ -676,6 +706,7 @@ impl MempoolGateway {
             request.locktime_cutoff,
             VerifyFlags::STANDARD,
         ) {
+            self.record_peer_failure(&pool, request, AdmitError::Consensus);
             return Err(AdmitError::Consensus);
         }
 
@@ -704,13 +735,30 @@ impl MempoolGateway {
                         crate::standardness::AcceptanceRejectReason::Replacement(other),
                     ),
                 }
-            })?;
+            });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.record_peer_failure(&pool, request, error);
+                return Err(error);
+            }
+        };
 
         // 6. Enqueue for publication and elect a drainer if needed. Both
         //    outcome variants carry a committed mutation: a replacement the
         //    trim shed publishes its conflict removals like any other commit.
         let shed = outcome.is_shed();
         let result = outcome.into_mutation();
+        self.update_admission_lifecycle(&pool, &result);
+        if shed {
+            self.record_peer_failure(
+                &pool,
+                request,
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::Replacement(
+                    RbfError::Mempool(crate::pool::MempoolError::Full),
+                )),
+            );
+        }
         let mut elected = false;
         if !result.changes.is_empty() && self.observer.is_some() {
             let mut publish = self.publish.lock();
@@ -802,6 +850,7 @@ impl MempoolGateway {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
             let result = outcome.committed();
+            self.update_admission_lifecycle(&pool, result);
             if !result.changes.is_empty() && self.observer.is_some() {
                 let mut publish = self.publish.lock();
                 publish.queue.push_back(MutationEnvelope {
@@ -817,6 +866,42 @@ impl MempoolGateway {
             self.drain();
         }
         Ok(outcome)
+    }
+
+    /// Finalizes peer-only holding/rejection while the exact admission state
+    /// remains locked. Thus a parent commit or chain reset cannot pass between
+    /// the verdict and registration of its lifecycle consequences.
+    fn record_peer_failure(&self, pool: &Mempool, request: &AdmissionRequest, error: AdmitError) {
+        let AdmissionOrigin::Peer(source) = request.origin else {
+            return;
+        };
+        let hold = error
+            == AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MissingInputs)
+            && crate::admission::can_hold_orphan(&request.tx, &pool.policy_snapshot().standardness);
+        let mut lifecycle = self.lifecycle.lock();
+        if hold {
+            lifecycle.orphans.insert(Arc::clone(&request.tx), source);
+        } else {
+            lifecycle.reject(&request.tx);
+        }
+    }
+
+    /// Required internal lifecycle work is independent of fallible observers.
+    /// A ready marker authorizes re-preparation only, never admission itself.
+    fn update_admission_lifecycle(&self, pool: &Mempool, result: &MutationResult) {
+        if result.changes.is_empty() {
+            return;
+        }
+        let mut lifecycle = self.lifecycle.lock();
+        for change in &result.changes {
+            if matches!(change.outcome, crate::mutation::MutationOutcome::Accepted) {
+                let txid = Txid::from(change.txid);
+                lifecycle.orphans.remove(txid);
+                if pool.contains_txid(&txid) {
+                    lifecycle.orphans.parent_ready(txid);
+                }
+            }
+        }
     }
 
     /// The same path for pool methods that cannot fail.
