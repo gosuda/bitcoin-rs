@@ -24,14 +24,8 @@ pub fn request_missing_parents(
 ) -> bool {
     use bitcoin::hashes::Hash as _;
 
-    let Some(lease) = peers.lease(source.addr) else {
-        return false;
-    };
-    if lease.connection_id().get() != source.connection_id {
-        return false;
-    }
     let mut seen = hashbrown::HashSet::new();
-    let items: Vec<Inventory> = parents
+    let mut items: Vec<Inventory> = parents
         .iter()
         .filter(|txid| seen.insert(**txid))
         .map(|txid| Inventory::Transaction(bitcoin::Txid::from_byte_array(*txid.as_bytes())))
@@ -39,15 +33,24 @@ pub fn request_missing_parents(
     if items.is_empty() {
         return false;
     }
-    if let Err(error) = lease.send(Message::GetData(items)) {
-        tracing::debug!(
-            peer_addr = %source.addr,
-            %error,
-            "orphan parent getdata not sent"
-        );
-        return false;
-    }
-    true
+    // Identity validation and the nonblocking enqueue share the table's read
+    // guard, so registration cannot supersede this connection between them.
+    let mut queued = false;
+    peers.for_each_lease(|addr, lease| {
+        if addr != source.addr || lease.connection_id().get() != source.connection_id {
+            return;
+        }
+        if let Err(error) = lease.send(Message::GetData(std::mem::take(&mut items))) {
+            tracing::debug!(
+                peer_addr = %source.addr,
+                %error,
+                "orphan parent getdata not sent"
+            );
+        } else {
+            queued = true;
+        }
+    });
+    queued
 }
 
 /// Classify an inbound inventory announcement into a getdata request.
@@ -183,5 +186,18 @@ mod tests {
 
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
         assert!(lease.is_cancelled());
+    }
+
+    #[test]
+    fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
+        let table = PeerTable::new();
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let lease = PeerLease::new(sender);
+        let source = source(&lease);
+        table.register(source.addr, lease.clone());
+        lease.cancel();
+
+        assert!(!request_missing_parents(&table, source, &[parent(1)]));
+        assert!(receiver.try_recv().is_err());
     }
 }
