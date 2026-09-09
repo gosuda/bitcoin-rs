@@ -16,32 +16,61 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: e222fc1fccd2792bf26fdf4e4f9ffb42879093a5
+          ref: afaae9dcf6df65fd241e910a7dc896d0cfe692dc
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
           toolchain: stable
           components: rustfmt
-      - name: Reconcile workspace lockfile without upgrading registry packages
+      - name: Apply regression and feature-build corrections
         run: |
           set -euo pipefail
-          cp Cargo.lock "$RUNNER_TEMP/old.lock"
-          cargo metadata --format-version 1 > /dev/null
           python3 - <<'PY'
-          import os, pathlib, tomllib
-          old = tomllib.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'old.lock').read_text())
-          new = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
-          def external(doc):
-              return {(p['name'], p['version'], p['source']) for p in doc['package'] if 'source' in p}
-          added = external(new) - external(old)
-          if added:
-              raise SystemExit(f'Unexpected dependency additions/upgrades require review: {sorted(added)}')
+          from pathlib import Path
+          def replace(name, old, new):
+              p = Path(name)
+              text = p.read_text()
+              assert text.count(old) == 1, (name, text.count(old))
+              p.write_text(text.replace(old, new))
+          replace('crates/utxo/tests/overhaul_persistent_coins.rs',
+              '// A mutation under Deferred retains the prior version\'s bytes.',
+              '// Finish the creation window before retaining an existing row.\n    set.flush().expect("commit initial creation");\n\n    // A mutation under Deferred retains the prior version\'s bytes.')
+          replace('crates/storage/tests/backend_metrics.rs', 'fn put_one_row(store:',
+              '#[cfg(any(feature = "fjall", feature = "rocksdb", feature = "mdbx"))]\nfn put_one_row(store:')
+          replace('crates/consensus/src/verify_block.rs', 'fn merkle_root_and_mutation_borrowed(txids:',
+              'pub(crate) fn merkle_root_and_mutation_borrowed(txids:')
+          p = Path('crates/consensus/tests/overhaul_parse_parity.rs')
+          p.write_text('//! CONTRACT: docs/contracts/validation-default.md#VAL-01 (fixture parity only).\n' + p.read_text())
+          p = Path('crates/storage/examples/storage_footprint.rs')
+          text = p.read_text().replace('`redb`, `rocksdb`.', '`redb`, `rocksdb`, `mdbx`.')
+          text = text.replace('fn fjall_cf_sizes(', '#[cfg(feature = "fjall")]\nfn fjall_cf_sizes(')
+          marker = '        other => {'
+          assert text.count(marker) == 1
+          text = text.replace(marker, '        #[cfg(feature = "mdbx")]\n        "mdbx" => {\n            let store = bitcoin_rs_storage::MdbxStore::open(path).expect("open mdbx");\n            write_corpus(&store);\n            drop(store);\n            (HashMap::new(), 0)\n        }\n' + marker)
+          text = text.replace('    match backend.as_str() {', '    let (cf_sizes, journal) = match backend.as_str() {')
+          for backend in ['fjall', 'redb', 'rocksdb']:
+              old = f'            let total = dir_size(path);\n            let (cf_sizes, journal) = {backend}_cf_sizes(path);\n            print_results(&backend, total, logical, &cf_sizes, journal);'
+              assert old in text, backend
+              text = text.replace(old, f'            {backend}_cf_sizes(path)')
+          text = text.replace('Usage: storage_footprint [fjall|redb|rocksdb]', 'Usage: storage_footprint [fjall|redb|rocksdb|mdbx]')
+          marker = '    }\n}\n\nfn print_results('
+          assert marker in text
+          text = text.replace(marker, '    };\n    print_results(&backend, dir_size(path), logical, &cf_sizes, journal);\n}\n\nfn print_results(')
+          start = text.index('    let index_cfs: &[(ColumnFamily, usize, usize)] = &[')
+          end = text.index('    ];', start) + len('    ];')
+          declaration = text[start:end]
+          assert text.count(declaration) == 2
+          constant = declaration.replace('    let index_cfs:', 'const INDEX_CFS:').replace('\n        ', '\n    ').replace('\n    ];', '\n];')
+          text = text.replace(declaration, '').replace(' in index_cfs {', ' in INDEX_CFS {')
+          marker = '/// Computes the logical (raw key + value) bytes written across all CFs.'
+          text = text.replace(marker, constant + '\n\n' + marker)
+          p.write_text(text)
           PY
-          git diff -- Cargo.lock | tee "$RUNNER_TEMP/lockfile.patch"
-          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
           git diff --check
-      - name: Commit lockfile repair on the source-only follow-up branch
+          cargo metadata --locked --format-version 1 > /dev/null
+      - name: Publish corrections on the existing follow-up branch
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,8 +78,8 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock
-          git commit -m 'Synchronize workspace lockfile without upgrading external dependencies'
+          git add -u
+          git commit -m 'Fix feature-matrix builds and durability-window fixture; share footprint corpus and reporting' -m 'Carry the crate-visible Merkle helper repair already present on main. Label the parse fixture evidence without claiming the full promotion campaign.'
           candidate=$(git rev-parse HEAD)
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin HEAD:refs/heads/review/pr665-followup-34373279168
@@ -59,14 +88,12 @@ jobs:
           git diff --binary 970387318c0e14f93491d0a535b8ec2e0a127825 HEAD > "$RUNNER_TEMP/reviewed.patch"
           git archive --format=tar.gz -o "$RUNNER_TEMP/reviewed-source.tar.gz" HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
           name: pr665-followup-source
           path: |
             ${{ runner.temp }}/candidate.txt
             ${{ runner.temp }}/reviewed.patch
             ${{ runner.temp }}/reviewed-source.tar.gz
-            ${{ runner.temp }}/lockfile.patch
           retention-days: 7
   verify:
     needs: prepare
@@ -103,6 +130,7 @@ jobs:
               cargo test --locked -p bitcoin-rs-utxo --no-default-features
               cargo clippy --locked -p bitcoin-rs-utxo --no-default-features --all-targets -- -D warnings
               python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
+              cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity
               ;;
             evidence)
               cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
