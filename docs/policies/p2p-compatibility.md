@@ -91,8 +91,12 @@ Transaction announcements target only connections with published handshake
 metadata. A peer that negotiated `wtxidrelay` receives `MSG_WTX` with the
 accepted transaction's actual wtxid; other ready peers receive `MSG_TX` with
 its txid, following [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
-RPC/reorg mutation observers resolve the retained entry's wtxid and skip
-entries removed before observer delivery. Missing-parent requests use txids,
+RPC/reorg mutation observers resolve the retained entry's wtxid only when
+its acceptance sequence matches the committed event. Removal and re-admission
+invalidate older callbacks, including reinsertion of an identical body;
+unrelated mutations and fee prioritisation do not. Identity and body are read
+under one pool guard, released before relay enqueue. A later removal can still
+overtake an already queued best-effort announcement. Missing-parent requests use txids,
 which BIP339 permits for unannounced parents. Sources advertising `NODE_WITNESS`
 receive `MSG_WITNESS_TX` requests so the returned parent includes its witness;
 other sources receive `MSG_TX`, following
@@ -160,6 +164,10 @@ Known deltas from Core 31.1:
   `relay_waits_for_handshake_and_selects_the_peers_inventory_type` and
   `local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries`
   cover negotiated announcements and actual retained witness identity.
+  `delayed_local_relay_does_not_adopt_a_reinserted_body`,
+  `delayed_local_relay_survives_unrelated_mutations`, and
+  `local_replacement_relay_uses_the_accepted_change_sequence` cover delayed
+  callback identity and per-change sequence selection.
   Run with `cargo test -p bitcoin-rs-p2p --lib`.
 - **Fuzz**: `fuzz/fuzz_targets/p2p_message.rs` drives every payload decoder named by `COMMANDS` (a missing inventory row is a decoder no fuzz input can reach).
 - **Live lane (cut, env-gated)**: `scripts/run-p2p-core-interop.sh --bitcoind-command <cmd>` drives a real Bitcoin Core 31.x (regtest) plus a bitcoin-rs node through the initial sync, mines extra blocks after the handshake to prove the node follows Core's announcements while connected (bitcoin-rs itself sends no proactive block announcements; see the deviation ledger), records Core's own `getpeerinfo` view of us (services bits, subver) into an evidence JSON, and runs the `#[ignore]`d verifier `crates/p2p/tests/core_interop_live.rs`. The lane is never run in CI (no bitcoind on CI hosts); its evidence belongs under `docs/benchmarks/` when a Core bump is pinned.
