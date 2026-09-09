@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: fd0d37ae7b2dc0b80b741f3d481c2e8caa88be2c
+          ref: f211c2f99174cdc41ffac0a6cc5d15013a1eb961
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -31,7 +31,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           cache-on-failure: true
-      - name: Apply the two diagnostics without changing test semantics
+      - name: Prepare test-only corrections on the merged baseline
         id: candidate
         shell: bash
         run: |
@@ -52,30 +52,90 @@ jobs:
                'assert_eq!(parsed.facts().transaction_spans().len(), parsed.transaction_count());'),
           ]
           for path, sha, old, new in edits:
-              actual = subprocess.check_output(['git','hash-object',path],text=True).strip()
-              if actual != sha:
-                  raise SystemExit(f'preimage changed: {path}: {actual}')
+              if subprocess.check_output(['git','hash-object',path],text=True).strip() != sha:
+                  raise SystemExit(f'preimage changed: {path}')
               p = Path(path)
               text = p.read_text()
               if text.count(old) != 1:
                   raise SystemExit(f'expected one edit target: {path}')
               p.write_text(text.replace(old,new,1))
+          p = Path('crates/node/src/metrics.rs')
+          if subprocess.check_output(['git','hash-object',str(p)],text=True).strip() != 'ab998373fbd7e7fbf385ad2673214e1306f77bd8':
+              raise SystemExit('metrics preimage changed')
+          text = p.read_text()
+          anchor = '    fn occupied_address_bind_errors_and_in_process_retry_succeeds() {\n'
+          prefix = '''        const CHILD: &str = "BITCOIN_RS_METRICS_BIND_CHILD";
+                  const FINISHED: &str = "fresh-recorder-bind-probe-finished";
+                  // Recorder installation is process-global and cannot be reset.
+                  // A fresh process makes this probe independent of test order and
+                  // keeps the empty-slot assertion meaningful, not merely race-free.
+                  if std::env::var_os(CHILD).is_none() {
+                      let executable = std::env::current_exe()
+                          .unwrap_or_else(|error| panic!("locate metrics test executable: {error}"));
+                      let output = std::process::Command::new(executable)
+                          .args([
+                              "--exact",
+                              "metrics::tests::occupied_address_bind_errors_and_in_process_retry_succeeds",
+                              "--nocapture",
+                          ])
+                          .env(CHILD, "1")
+                          .output()
+                          .unwrap_or_else(|error| panic!("run isolated metrics probe: {error}"));
+                      let stdout = String::from_utf8_lossy(&output.stdout);
+                      assert!(
+                          output.status.success(),
+                          "isolated metrics probe failed: {stdout}\\n{}",
+                          String::from_utf8_lossy(&output.stderr)
+                      );
+                      assert!(stdout.contains(FINISHED), "isolated probe did not execute: {stdout}");
+                      return;
+                  }
+          '''
+          if text.count(anchor) != 1:
+              raise SystemExit('metrics probe anchor changed')
+          text = text.replace(anchor,anchor+prefix,1)
+          old = '        let installed_before = PROMETHEUS_HANDLE.lock().is_some();'
+          new = '        assert!(PROMETHEUS_HANDLE.lock().is_none(), "probe requires a fresh recorder slot");'
+          if text.count(old) != 1:
+              raise SystemExit('metrics precondition changed')
+          text = text.replace(old,new,1)
+          old = '''        assert_eq!(
+                      PROMETHEUS_HANDLE.lock().is_some(),
+                      installed_before,
+                      "failed bind must not install the process recorder"
+                  );'''
+          old = '\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())
+          # Use the exact original formatting rather than indentation of this runner.
+          old = '        assert_eq!(\n            PROMETHEUS_HANDLE.lock().is_some(),\n            installed_before,\n            "failed bind must not install the process recorder"\n        );'
+          new = '        assert!(\n            PROMETHEUS_HANDLE.lock().is_none(),\n            "failed bind must not install the process recorder"\n        );'
+          if text.count(old) != 1:
+              raise SystemExit('metrics assertion changed')
+          text = text.replace(old,new,1)
+          end = '        server.join();\n    }\n\n    #[test]\n    fn scrape_returns_prometheus_text_with_recorded_metrics()'
+          if text.count(end) != 1:
+              raise SystemExit('metrics probe end changed')
+          text = text.replace(end, '        server.join();\n        println!("{FINISHED}");\n    }\n\n    #[test]\n    fn scrape_returns_prometheus_text_with_recorded_metrics()',1)
+          p.write_text(text)
           PY
-          rustfmt --edition 2024 bin/bitcoin-rs/tests/overhaul_reference_set.rs crates/consensus/tests/overhaul_parse_parity.rs
+          rustfmt --edition 2024 bin/bitcoin-rs/tests/overhaul_reference_set.rs crates/consensus/tests/overhaul_parse_parity.rs crates/node/src/metrics.rs
           git diff --check
           python3 - <<'PY'
           import subprocess
           paths = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
-          if paths != {'bin/bitcoin-rs/tests/overhaul_reference_set.rs','crates/consensus/tests/overhaul_parse_parity.rs'}:
+          if paths != {'bin/bitcoin-rs/tests/overhaul_reference_set.rs','crates/consensus/tests/overhaul_parse_parity.rs','crates/node/src/metrics.rs'}:
               raise SystemExit(f'unexpected scope: {paths}')
+          before = subprocess.check_output(['git','show','HEAD:crates/node/src/metrics.rs'],text=True).split('#[cfg(test)]')[0]
+          after = open('crates/node/src/metrics.rs').read().split('#[cfg(test)]')[0]
+          if before != after:
+              raise SystemExit('production metrics code changed')
           PY
-          git diff | tee "$RUNNER_TEMP/clippy-evidence/correction.patch"
+          git diff | tee "$RUNNER_TEMP/clippy-evidence/candidate.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add bin/bitcoin-rs/tests/overhaul_reference_set.rs crates/consensus/tests/overhaul_parse_parity.rs
-          git commit -m 'fix(tests): satisfy newly exposed strict Clippy diagnostics'
+          git add bin/bitcoin-rs/tests/overhaul_reference_set.rs crates/consensus/tests/overhaul_parse_parity.rs crates/node/src/metrics.rs
+          git commit -m 'test: fix strict Clippy diagnostics and isolate first-recorder initialization'
           git rev-parse HEAD | tee "$RUNNER_TEMP/clippy-evidence/candidate-sha.txt"
-          git push origin HEAD:refs/heads/followup/stable-clippy-cleanup
+          git push origin HEAD:refs/heads/followup/test-lints-recorder-isolation
           git archive --format=tar.gz HEAD > "$RUNNER_TEMP/clippy-evidence/source.tar.gz"
       - name: Workspace Clippy
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
@@ -102,19 +162,49 @@ jobs:
           set -uo pipefail
           status=0
           cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity > "$RUNNER_TEMP/clippy-evidence/parity-tests.log" 2>&1 || status=1
-          tail -n 60 "$RUNNER_TEMP/clippy-evidence/parity-tests.log"
+          tail -n 50 "$RUNNER_TEMP/clippy-evidence/parity-tests.log"
           cargo test --locked -p bitcoin-rs --test overhaul_reference_set > "$RUNNER_TEMP/clippy-evidence/reference-tests.log" 2>&1 || status=1
-          tail -n 60 "$RUNNER_TEMP/clippy-evidence/reference-tests.log"
+          tail -n 50 "$RUNNER_TEMP/clippy-evidence/reference-tests.log"
           cargo fmt --all -- --check > "$RUNNER_TEMP/clippy-evidence/fmt.log" 2>&1 || status=1
-          tail -n 60 "$RUNNER_TEMP/clippy-evidence/fmt.log"
+          tail -n 50 "$RUNNER_TEMP/clippy-evidence/fmt.log"
           exit "$status"
-      - name: Preserve the unresolved metrics test result
+      - name: Repeated parallel metrics tests and complete native node library
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         shell: bash
         run: |
-          set -o pipefail
-          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: 2>&1 | tee "$RUNNER_TEMP/clippy-evidence/metrics-tests.log"
-      - name: Preserve candidate and all profile results
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=8 > "$RUNNER_TEMP/clippy-evidence/metrics-$attempt.log" 2>&1
+          done
+          tail -n 25 "$RUNNER_TEMP/clippy-evidence/metrics-20.log"
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib > "$RUNNER_TEMP/clippy-evidence/node-tests.log" 2>&1
+          tail -n 40 "$RUNNER_TEMP/clippy-evidence/node-tests.log"
+      - name: Mutation-test listener-before-recorder ordering
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/node/src/metrics.rs')
+          text = p.read_text()
+          old = '        let listener = TcpListener::bind(addr)?;\n        let local_addr = listener.local_addr()?;\n        let handle = prometheus_handle(identity)?;'
+          new = '        let handle = prometheus_handle(identity)?;\n        let listener = TcpListener::bind(addr)?;\n        let local_addr = listener.local_addr()?;'
+          if text.count(old) != 1:
+              raise SystemExit('ordering mutation preimage changed')
+          p.write_text(text.replace(old,new,1))
+          PY
+          set +e
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics::tests::occupied_address_bind_errors_and_in_process_retry_succeeds -- --exact --nocapture > "$RUNNER_TEMP/clippy-evidence/ordering-mutant.log" 2>&1
+          status=$?
+          set -e
+          git restore crates/node/src/metrics.rs
+          tail -n 70 "$RUNNER_TEMP/clippy-evidence/ordering-mutant.log"
+          test "$status" -ne 0
+          grep -q 'failed bind must not install the process recorder' "$RUNNER_TEMP/clippy-evidence/ordering-mutant.log"
+          grep -q 'test result: FAILED' "$RUNNER_TEMP/clippy-evidence/ordering-mutant.log"
+          git diff --exit-code
+      - name: Preserve exact source and all validation results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
