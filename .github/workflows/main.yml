@@ -36,40 +36,60 @@ jobs:
       # full-node feature set includes it, so this lane installs the
       # prerequisites up front.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+        id: native_deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: toolchain
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Node / binary tests run with the full-node feature set. -p is
-      # required because `--workspace --features` silently ignores --features
-      # in a virtual workspace (no root [package] section in the top-level
-      # Cargo.toml).
-      - run: |
-          cargo test -p bitcoin-rs --no-fail-fast \
-            --no-default-features --features "${FULL_NODE_FEATURES}"
-      # Consensus fixture corpus: committed tests that are --ignored by
-      # design (large deterministic vectors), so the workspace run never
-      # picks them up.
-      - run: cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
-      # Full-node feature lint surface (the default-feature lint runs in
-      # ci.yml). In a virtual workspace (no root [package]), `--features`
-      # flags are not forwarded to library crates; use `-p bitcoin-rs` so the
-      # binary's feature table propagates all backends and the kernel to
-      # bitcoin-rs-node and its deps.
-      - run: |
+      - name: Provision pinned Core and Apalache fixtures
+        id: fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      # Keep checks independent and run them before the long binary/formal
+      # suite. No failure is tolerated, but one must not conceal later ones.
+      # Consensus fixture corpus includes the large deterministic vectors.
+      - name: Kernel consensus tests including ignored vectors
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
+      # -p bitcoin-rs propagates all backends and kernel through the binary's
+      # feature table; virtual-workspace --features would not do so.
+      - name: Full-node binary Clippy
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: |
           cargo clippy -p bitcoin-rs --all-targets \
             --no-default-features --features "${FULL_NODE_FEATURES}" \
             -- -D warnings
-          # -p bitcoin-rs-node catches test-target lints invisible to the line above
-          # (virtual workspace: -p bitcoin-rs does not forward features to node's own
-          # test targets, so their lints are silently skipped without this step).
-          cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
-          # -p bitcoin-rs-consensus lints consensus's own test targets with
-          # kernel enabled (the PR-gate clippy lane lints them without kernel).
-          # Without this step, consensus's kernel-gated integration tests
-          # (kernel_block_parity, kernel_vector_parity) and the
-          # kernel_verify_spike example would never be linted.
-          cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings
+      # The binary's all-target pass does not lint dependency test targets.
+      - name: Kernel node Clippy
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
+      # Include consensus's kernel-gated tests and kernel_verify_spike example.
+      - name: Kernel consensus Clippy
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings
+      # Run every binary test, including the pinned process and formal gates.
+      - name: Full-node binary tests
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        run: |
+          # Never attribute cached or earlier-profile diagnostics to this run.
+          rm -rf -- target/apalache
+          mkdir -p target/apalache
+          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-node\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > target/apalache/run-context.txt
+          cargo test -p bitcoin-rs --no-fail-fast \
+            --no-default-features --features "${FULL_NODE_FEATURES}"
+      - name: Preserve full-node formal evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apalache-full-node-${{ github.run_attempt }}
+          path: |
+            target/apalache/**/run-*.txt
+            target/apalache/**/detailed*.log
+            target/apalache/**/counterexample*
+          if-no-files-found: warn
+          retention-days: 7
 
   bench-smoke:
     runs-on: ubuntu-latest

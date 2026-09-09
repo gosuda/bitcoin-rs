@@ -449,11 +449,12 @@ fn announces_tx(frames: &[Message], txid: &Txid) -> bool {
     })
 }
 
-/// True when one of `frames` requests `txid` with `getdata`.
+/// P2P-01 / BIP144: these dialers advertise `NODE_WITNESS`, so require
+/// witness-serialized getdata rather than accepting the legacy request.
 fn requests_tx(frames: &[Message], txid: &Txid) -> bool {
     frames.iter().any(|message| match message {
         Message::GetData(items) => items.iter().any(|item| match item {
-            Inventory::Transaction(hash) => hash.as_byte_array() == txid.as_bytes(),
+            Inventory::WitnessTransaction(hash) => hash.as_byte_array() == txid.as_bytes(),
             _ => false,
         }),
         _ => false,
