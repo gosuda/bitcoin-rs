@@ -1,0 +1,26 @@
+name: PR 680 review workspace
+
+on:
+  push:
+    branches: [review/pr-680-0008b76]
+    paths: [.github/workflows/pr680-review.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 0008b76c168956e00bee115463ceccde60337790
+          persist-credentials: false
+      - name: Archive the reviewed source
+        run: git archive --format=tar HEAD > /tmp/pr-680-source.tar
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-680-source
+          path: /tmp/pr-680-source.tar
+          retention-days: 1
