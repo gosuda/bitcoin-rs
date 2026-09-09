@@ -36,21 +36,15 @@ pub fn request_missing_parents(
         }
     });
     let mut seen = hashbrown::HashSet::new();
-    let items: Vec<Inventory> = parents
+    let mut items: Vec<Inventory> = parents
         .iter()
         .filter(|txid| seen.insert(**txid))
-        .map(|txid| {
-            let txid = bitcoin::Txid::from_byte_array(*txid.as_bytes());
-            if witness {
-                Inventory::WitnessTransaction(txid)
-            } else {
-                Inventory::Transaction(txid)
-            }
-        })
+        .map(|txid| Inventory::Transaction(bitcoin::Txid::from_byte_array(*txid.as_bytes())))
         .collect();
     if items.is_empty() {
         return false;
     }
+    request_transaction_witness(&mut items, witness);
     // Capability metadata belongs to the same connection as the token. The
     // table rechecks that identity and pins it through the nonblocking enqueue,
     // so a replacement cannot inherit either the request or its service choice.
@@ -60,6 +54,19 @@ pub fn request_missing_parents(
         false
     } else {
         true
+    }
+}
+
+/// Applies BIP144's transaction witness request flag without changing hashes.
+/// Only getdata requests use this flag; announcements retain their own types.
+pub(crate) fn request_transaction_witness(items: &mut [Inventory], witness: bool) {
+    if !witness {
+        return;
+    }
+    for item in items {
+        if let Inventory::Transaction(txid) = item {
+            *item = Inventory::WitnessTransaction(*txid);
+        }
     }
 }
 

@@ -6,6 +6,7 @@
 
 use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
+use bitcoin_rs_script::VerifyFlags;
 
 use crate::standardness::PackageTxContext;
 
@@ -31,7 +32,7 @@ pub fn prepared_context(
     PackageTxContext {
         fee: input_value.saturating_sub(output_value),
         vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
-        sigop_cost: transaction_sigop_cost(tx, prevouts),
+        sigop_cost: transaction_sigop_cost(tx, prevouts, VerifyFlags::STANDARD),
         missing_inputs,
     }
 }
@@ -101,7 +102,10 @@ mod tests {
             Ok(expected),
             "independent rust-bitcoin oracle"
         );
-        assert_eq!(transaction_sigop_cost(tx, &prevouts), expected);
+        assert_eq!(
+            transaction_sigop_cost(tx, &prevouts, VerifyFlags::STANDARD),
+            expected
+        );
         let context = prepared_context(tx, &prevouts, false);
         assert_eq!(context.fee, 1_000);
         assert_eq!(u32::try_from(oracle.vsize()), Ok(context.vsize));
@@ -170,7 +174,10 @@ mod tests {
         // enforce that precondition, so Core supplies this malformed-input
         // expectation rather than the library oracle used for valid shapes.
         // https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp#L170-L189
-        assert_eq!(transaction_sigop_cost(&tx, &prevouts), 0);
+        assert_eq!(
+            transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
+            0
+        );
     }
 
     #[test]
