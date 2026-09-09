@@ -145,11 +145,22 @@ impl Default for AdmissionLifecycle {
 }
 impl AdmissionLifecycle {
     pub(crate) fn reject(&mut self, tx: &Tx) {
-        self.orphans.remove(tx.txid());
-        for hash in [Hash256::from(tx.txid()), Hash256::from(tx.wtxid())] {
-            if self.rejects.insert(hash) {
-                self.reject_order.push_back(hash);
-            }
+        let txid = tx.txid();
+        let wtxid = tx.wtxid();
+        // A witness-specific failure must not retire another resident body
+        // with the same txid, including its pending parent-ready retry.
+        if self
+            .orphans
+            .get(&txid)
+            .is_some_and(|held| held.tx.wtxid() == wtxid)
+        {
+            self.orphans.remove(txid);
+        }
+        // Cache the exact body only. For non-witness transactions this is
+        // also the txid, but it must not suppress a later witness variant.
+        let hash = Hash256::from(wtxid);
+        if self.rejects.insert(hash) {
+            self.reject_order.push_back(hash);
         }
         while self.reject_order.len() > self.reject_cap {
             if let Some(oldest) = self.reject_order.pop_front() {
@@ -259,5 +270,32 @@ mod tests {
         state.clear_rejects();
         assert!(state.rejects.is_empty());
         assert!(state.reject_order.is_empty());
+    }
+    #[test]
+    fn rejecting_another_witness_preserves_the_resident_body_and_ready_work() {
+        let parent = tx(9, Txid::default()).txid();
+        let resident = tx(1, parent);
+        let mut rejected = (*resident).clone();
+        rejected.inputs[0].witness = vec![vec![1]];
+        assert_eq!(resident.txid(), rejected.txid());
+        assert_ne!(resident.wtxid(), rejected.wtxid());
+
+        let mut state = AdmissionLifecycle::default();
+        state.orphans.insert(Arc::clone(&resident), source(1));
+        state.orphans.parent_ready(parent);
+        state.reject(&rejected);
+        assert!(state.is_rejected(Hash256::from(rejected.wtxid())));
+        assert!(!state.is_rejected(Hash256::from(resident.wtxid())));
+        let ready = state.orphans.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert!(Arc::ptr_eq(&ready[0].tx, &resident));
+        assert_eq!(ready[0].source, source(1));
+
+        state.reject(&resident);
+        assert_eq!(state.orphans.len(), 0);
+        assert!(state.orphans.by_wtxid.is_empty());
+        assert!(state.orphans.by_parent.is_empty());
+        assert!(state.orphans.order.is_empty());
+        assert_eq!(state.rejects_len(), 2);
     }
 }
