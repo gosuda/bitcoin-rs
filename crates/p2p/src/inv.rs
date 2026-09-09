@@ -27,7 +27,8 @@ pub fn request_missing_parents(
     let Some(lease) = peers.lease(source.addr) else {
         return false;
     };
-    if lease.connection_id().get() != source.connection_id {
+    let connection = lease.source(source.addr);
+    if PeerToken::from(connection) != source {
         return false;
     }
     let mut seen = hashbrown::HashSet::new();
@@ -39,20 +40,15 @@ pub fn request_missing_parents(
     if items.is_empty() {
         return false;
     }
-    let mut queued = false;
-    // Revalidate and enqueue under the same authority as replacement. Bytes
-    // already in flight may still finish on a retiring socket; this boundary
-    // prevents a new enqueue after its replacement becomes authoritative.
-    peers.with_current(lease.source(source.addr), || {
-        match lease.send(Message::GetData(items)) {
-            Ok(()) => queued = true,
-            Err(error) => tracing::debug!(
-                peer_addr = %source.addr,
-                %error,
-                "orphan parent getdata not sent"
-            ),
-        }
-    }) && queued
+    // The snapshot only adapts the opaque admission token. PeerTable owns the
+    // live-identity check and pins it through the nonblocking enqueue. Bytes
+    // already in flight may still finish on a retiring socket.
+    if peers.send(connection, Message::GetData(items)).is_err() {
+        tracing::debug!(peer_addr = %source.addr, "orphan parent getdata not sent");
+        false
+    } else {
+        true
+    }
 }
 
 /// Classify an inbound inventory announcement into a getdata request.
@@ -125,7 +121,7 @@ mod tests {
             .into()
     }
 
-    // BIP339 permits MSG_TX getdata for parents not announced by the peer.
+    // P2P-01 / BIP339: unannounced parents may be requested by txid.
     #[test]
     fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
         let table = PeerTable::new();
@@ -149,6 +145,7 @@ mod tests {
         assert!(!lease.is_cancelled());
     }
 
+    // P2P-02: a stale source cannot target or cancel its successor.
     #[test]
     fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
         let table = PeerTable::new();
@@ -176,6 +173,7 @@ mod tests {
         assert!(matches!(new_receiver.try_recv(), Ok(Message::GetData(_))));
     }
 
+    // P2P-02: only the saturated delivering connection is cancelled.
     #[test]
     fn missing_parent_request_keeps_outbound_saturation_policy() {
         let table = PeerTable::new();
@@ -190,6 +188,7 @@ mod tests {
         assert!(lease.is_cancelled());
     }
 
+    // P2P-02: cancellation prevents subsequent parent-request enqueue.
     #[test]
     fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
         let table = PeerTable::new();

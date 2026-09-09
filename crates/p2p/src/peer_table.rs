@@ -336,14 +336,14 @@ impl PeerTable {
         Some(entry.lease.source(addr))
     }
 
-    /// Runs `operation` while `source` remains the live connection. The table
+    /// Starts `operation` only for a current, uncancelled source. The table
     /// read lock is held for the whole operation so a same-address replacement
     /// cannot register until the caller finishes.
     pub fn with_current(&self, source: PeerSource, operation: impl FnOnce()) -> bool {
         let entries = self.entries.read();
         if !entries
             .get(&source.addr)
-            .is_some_and(|entry| entry.lease.is_current(source))
+            .is_some_and(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
         {
             return false;
         }
@@ -362,13 +362,19 @@ impl PeerTable {
             .map(|entry| entry.lease.clone())
     }
 
-    /// Sends a message only while `source` remains the current connection.
+    /// Sends only to the current connection, holding its identity through the
+    /// nonblocking enqueue. A replacement cannot register between validation
+    /// and enqueue; saturation retains the lease's cancellation policy.
     #[allow(clippy::result_large_err)]
     pub fn send(&self, source: PeerSource, message: crate::Message) -> Result<(), crate::Message> {
-        let Some(lease) = self.lease_source(source) else {
+        let entries = self.entries.read();
+        let Some(entry) = entries
+            .get(&source.addr)
+            .filter(|entry| entry.lease.is_current(source))
+        else {
             return Err(message);
         };
-        lease.send(message).map_err(|error| error.0)
+        entry.lease.send(message).map_err(|error| error.0)
     }
 
     /// Snapshots handshake-complete peers together with the connection that
@@ -540,10 +546,11 @@ mod tests {
         assert_eq!(session_ports, ports);
     }
 
+    // P2P-02: source-checked operations reject replacements and already-cancelled leases.
     #[test]
     fn with_current_rejects_stale_source_and_holds_live_identity() {
         let table = PeerTable::new();
-        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let (stale_tx, stale_rx) = crossbeam_channel::unbounded();
         let (current_tx, current_rx) = crossbeam_channel::unbounded();
         let stale = PeerLease::new(stale_tx);
         let current = PeerLease::new(current_tx);
@@ -565,8 +572,14 @@ mod tests {
         assert!(called);
         assert!(matches!(current_rx.try_recv(), Ok(crate::Message::Ping(1))));
         assert!(table.send(stale_source, crate::Message::Ping(1)).is_err());
+        assert!(stale_rx.try_recv().is_err());
         assert!(table.send(current_source, crate::Message::Ping(2)).is_ok());
         assert!(matches!(current_rx.try_recv(), Ok(crate::Message::Ping(2))));
+
+        current.cancel();
+        assert!(table.send(current_source, crate::Message::Ping(3)).is_err());
+        assert!(current_rx.try_recv().is_err());
+        assert!(!table.with_current(current_source, || panic!("cancelled source")));
     }
 
     #[test]
