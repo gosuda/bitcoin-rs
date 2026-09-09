@@ -24,25 +24,21 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: refactor/architectural-excellence
+          ref: e7d4b77ea82e5f0c3541edc770a1bad5a60c6288
           path: source
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
-          toolchain: stable
+          toolchain: 1.95.0
           components: rustfmt
-      - name: Apply review fixes
-        run: |
-          set -euo pipefail
-          for script in review-tools/.review/apply*.py; do
-            python3 "$script" source
-          done
+      - name: Apply exact reviewed fixes
+        run: python3 review-tools/.review/final.py source
       - name: Format and capture exact candidate
         id: patch
         working-directory: source
         run: |
           set -euo pipefail
-          cargo fmt --all
+          cargo +1.95.0 fmt --all
           git diff --check
           git add -A
           mkdir -p ../candidate
@@ -76,7 +72,7 @@ jobs:
           test "$(git write-tree)" = "$(cat "$RUNNER_TEMP/candidate/REVIEW_TREE")"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
-          toolchain: stable
+          toolchain: 1.95.0
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
@@ -87,9 +83,11 @@ jobs:
       - name: UTXO tests
         if: always()
         run: cargo test --locked -p bitcoin-rs-utxo
-      - name: Native consensus regressions
+      - name: Native consensus and layout regressions
         if: always()
-        run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib --test overhaul_parse_parity --test overhaul_prepared_inputs
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib --test overhaul_parse_parity --test overhaul_prepared_inputs
+          cargo test --locked -p bitcoin-rs-primitives --test overhaul_layout
       - name: Storage, UTXO, and consensus lints
         if: always()
         run: |
@@ -101,13 +99,23 @@ jobs:
           exit "$status"
       - name: Evidence and ledger validation
         if: always()
-        run: cargo test --locked -p bitcoin-rs --no-default-features --test overhaul_evidence --test g18_hot_path_ledger
+        run: |
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test gates g18_hot_path_ledger
       - name: Bounded formal-runner capture
         if: always()
-        run: cargo test --locked -p bitcoin-rs --no-default-features --test g20_formal_models bounded_capture
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test gates g20_formal_models::bounded_capture
       - name: Evidence and gate lints
         if: always()
-        run: cargo clippy --locked -p bitcoin-rs --no-default-features --test overhaul_evidence --test g18_hot_path_ledger --test g20_formal_models -- -D warnings
+        run: cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test gates -- -D warnings
+      - name: RPC tests and lints
+        if: always()
+        run: |
+          cargo test --locked -p bitcoin-rs-rpc
+          cargo clippy --locked -p bitcoin-rs-rpc --all-targets -- -D warnings
+      - name: Offline comparator regressions
+        if: always()
+        run: python3 -m unittest discover -s tools/benchmark-campaign -p test_offline_full_validation.py
   stage:
     needs: prepare
     runs-on: ubuntu-latest
@@ -133,6 +141,6 @@ jobs:
           git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: PR 665 review candidate'
+          git commit -m 'fix: serialize coin persistence and remove misleading review surfaces'
           git push origin "HEAD:refs/heads/review/pr-665-fixes-$GITHUB_RUN_NUMBER"
           git rev-parse HEAD
