@@ -101,9 +101,10 @@ pub(crate) fn can_hold_orphan(tx: &Tx, policy: &StandardnessPolicy) -> bool {
 fn resolve_mempool_inputs(
     pool: &crate::Mempool,
     tx: &Tx,
-) -> (HashMap<OutPoint, TxOut>, HashSet<Txid>) {
+) -> (HashMap<OutPoint, TxOut>, HashSet<Txid>, bool) {
     let mut prevouts = HashMap::new();
     let mut parents = HashSet::new();
+    let mut unavailable_output = false;
     for input in &tx.inputs {
         let outpoint = input.previous_output;
         if outpoint.is_null() || outpoint == OutPoint::default() {
@@ -115,10 +116,12 @@ fn resolve_mempool_inputs(
                 && let Some(output) = parent.outputs.get(index)
             {
                 prevouts.insert(outpoint, output.clone());
+            } else {
+                unavailable_output = true;
             }
         }
     }
-    (prevouts, parents)
+    (prevouts, parents, unavailable_output)
 }
 
 impl MempoolGateway {
@@ -150,7 +153,7 @@ impl MempoolGateway {
             let Some(generation) = self.stable_generation() else {
                 continue;
             };
-            let (sequence, mempool_prevouts, known_parents, holdable) = {
+            let (sequence, mempool_prevouts, known_parents, unavailable_output, holdable) = {
                 let pool = self.pool.read();
                 if self.stable_generation() != Some(generation) {
                     continue;
@@ -166,12 +169,13 @@ impl MempoolGateway {
                         return Ok(SubmitOutcome::AlreadyKnown);
                     }
                 }
-                let (prevouts, parents) = resolve_mempool_inputs(&pool, &tx);
+                let (prevouts, parents, unavailable_output) = resolve_mempool_inputs(&pool, &tx);
                 (
                     pool.sequence_number(),
                     prevouts,
                     parents,
-                    peer && can_hold_orphan(&tx, &pool.policy_snapshot().standardness),
+                    unavailable_output,
+                      peer && can_hold_orphan(&tx, &pool.policy_snapshot().standardness),
                 )
             };
             let Some(snapshot) = chain.snapshot(&tx) else {
@@ -213,7 +217,10 @@ impl MempoolGateway {
                     }
                 }
             }
-            let context = crate::accounting::prepared_context(&tx, &prevouts, missing_inputs);
+            if unavailable_output {
+                  return Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs));
+              }
+              let context = crate::accounting::prepared_context(&tx, &prevouts, missing_inputs);
             let request = AdmissionRequest {
                 tx,
                 context,
