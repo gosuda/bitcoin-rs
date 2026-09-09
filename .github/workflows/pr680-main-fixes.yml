@@ -6,7 +6,7 @@ permissions:
   contents: write
 concurrency:
   group: pr680-publication-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   finalize:
     runs-on: ubuntu-latest
@@ -23,7 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
-      - name: Fast-forward both published branches after clean main integration
+      - name: Preserve concurrent main integration and correct witness documentation
         id: publish
         shell: bash
         run: |
@@ -33,17 +33,18 @@ jobs:
           for lane in p2p rpc; do
             if [[ "$lane" == p2p ]]; then
               branch=fix/pr680-bip144-transaction-transfer-20260910
-              expected=06b3a03f49d8d007fbb04431d2f673878e6ea9a5
+              published=06b3a03f49d8d007fbb04431d2f673878e6ea9a5
             else
               branch=fix/pr680-package-prevout-accounting-20260910
-              expected=d16a10e9a3112153bef95ee7566e40286601d7fd
+              published=d16a10e9a3112153bef95ee7566e40286601d7fd
             fi
-            test "$(git rev-parse "origin/$branch")" = "$expected"
+            head=$(git rev-parse "origin/$branch")
+            git merge-base --is-ancestor "$published" "$head"
+            git merge-base --is-ancestor "$MAIN" "$head"
             work="$RUNNER_TEMP/final-$lane"
-            git worktree add --detach "$work" "$expected"
+            git worktree add --detach "$work" "$head"
             (
               cd "$work"
-              git merge --no-ff "$MAIN" -m 'Merge current main into independent PR680 follow-up'
               if [[ "$lane" == p2p ]]; then
                 python3 - <<'PY'
           from pathlib import Path
@@ -60,21 +61,28 @@ jobs:
           for name, (old, new) in edits.items():
               path = Path(name)
               text = path.read_text()
-              assert text.count(old) == 1, name
-              path.write_text(text.replace(old, new))
+              if text.count(old) == 1 and new not in text:
+                  path.write_text(text.replace(old, new))
+              else:
+                  assert old not in text and text.count(new) == 1, name
           PY
                 rustup run stable rustfmt --edition 2024 crates/p2p/src/dispatch.rs crates/node/tests/tx_ingress_e2e.rs
                 git diff --check
-                git add crates/p2p/src/dispatch.rs crates/node/tests/tx_ingress_e2e.rs
-                git commit -m 'docs(p2p): format witness capability names for strict Clippy'
+                if ! git diff --quiet; then
+                  python3 - <<'PY'
+          import subprocess
+          paths = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert paths <= {'crates/p2p/src/dispatch.rs', 'crates/node/tests/tx_ingress_e2e.rs'}, paths
+          PY
+                  git diff
+                  git add crates/p2p/src/dispatch.rs crates/node/tests/tx_ingress_e2e.rs
+                  git commit -m 'docs(p2p): format witness capability names for strict Clippy'
+                  git push origin "HEAD:refs/heads/$branch"
+                fi
               fi
-              git diff --check "$MAIN" HEAD
-              git diff --stat "$MAIN" HEAD
-              git merge-base --is-ancestor "$expected" HEAD
-              git merge-base --is-ancestor "$MAIN" HEAD
               test -z "$(git status --porcelain)"
               test -z "$(git diff --name-only "$MAIN" HEAD -- .github Cargo.lock Cargo.toml)"
-              git push origin "HEAD:refs/heads/$branch"
+              git diff --stat "$MAIN" HEAD
               printf '## %s\nBranch: `%s`\nCommit: `%s`\nMain: `%s`\n' "$lane" "$branch" "$(git rev-parse HEAD)" "$MAIN" >> "$GITHUB_STEP_SUMMARY"
             )
           done
