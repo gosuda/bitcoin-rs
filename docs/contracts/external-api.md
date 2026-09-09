@@ -146,8 +146,12 @@ Owners:
   execute or hash a local `bitcoind`, and the fixture metadata does not attest
   a source commit or build configuration. Verifying process binaries and
   recording those missing identities remain work under #625 and #626.
-- A reference refresh must update the capture provenance and affected
-  fixtures together, with evidence from the selected Core build.
+- The loader requires each fixture's version and digest to match the pins,
+  so a reference refresh must update the constants and affected fixtures
+  together. It only checks that `provenance.evidence` is non-empty; it does
+  not retrieve or authenticate the referenced evidence. Reviewing evidence
+  from the selected Core build is a maintainer responsibility outside this
+  automated gate.
 
 ## Live gaps
 
@@ -207,7 +211,7 @@ The wallet-facing subset of this surface is owned by
   `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:
   - `copied_fixture_preserves_core_reference`
   - `corpus_rejects_missing_core_reference_fields`
-  - `corpus_rejects_stale_or_empty_core_version`
+  - `corpus_rejects_non_pinned_core_version`
   - `corpus_rejects_mismatched_or_empty_core_digest`
 - `bin/bitcoin-rs/tests/overhaul_core_api.rs` (planned): every required
   manifest row driven statefully against the pinned reference, including
