@@ -170,6 +170,18 @@ fn body_capability_height(
     active_tip.and_then(|tip| active_demonstrated_height(tree, tip, demonstrated_tips))
 }
 
+fn settle_window_failure(
+    transition: crate::apply::ChainTransition<'_>,
+    mut error: crate::apply::WindowApplyError,
+) -> crate::apply::WindowApplyError {
+    if !matches!(error.source, ApplyError::UtxoCommit(_)) {
+        if let Err(source) = transition.finish() {
+            error.source = source;
+        }
+    }
+    error
+}
+
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
@@ -234,12 +246,8 @@ impl BlockSync {
                     applied: 0,
                     committed: Vec::new(),
                     source,
-                    // This is `Operational` because the block was never
-                    // validated: if the gateway is odd because a previous
-                    // transition was dropped on a torn `UtxoCommit`, the sync
-                    // worker will wedge until external recovery. With the
-                    // UtxoCommit finish-gate below, this case should only
-                    // happen during node shutdown or on an `Overflow`.
+                    // Admission can also stay closed after a prior torn
+                    // `UtxoCommit`; `ChainTransition` owns that recovery rule.
                     disposition: crate::apply::WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                 })?;
@@ -249,25 +257,24 @@ impl BlockSync {
                     self.followers.connected(block, outcome);
                 }
                 let applied = outcomes.len();
-                let _ = transition.finish();
+                transition
+                    .finish()
+                    .map_err(|source| crate::apply::WindowApplyError {
+                        applied,
+                        committed: outcomes,
+                        source,
+                        disposition: crate::apply::WindowApplyDisposition::Operational,
+                        invalidated: Box::default(),
+                    })?;
                 Ok(applied)
             }
             Err(error) => {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
                     self.followers.connected(block, outcome);
                 }
-                // Finish on failure too (#618 follow-up), but NOT on UtxoCommit:
-                // `utxo.commit_borrowed_block` is not all-or-nothing across
-                // shards/runs, so a failing commit can tear the UTXO set. A
-                // retry against torn state can mis-spend inputs or trip BIP30.
-                // Every other failure (consensus, storage before the UTXO
-                // commit-of-record, shutdown) leaves the authoritative state
-                // untouched and only touches idempotent derived stores that a
-                // retry can overwrite.
-                if !matches!(error.source, ApplyError::UtxoCommit(_)) {
-                    let _ = transition.finish();
-                }
-                Err(error)
+                // `ChainTransition` documents which failures may safely
+                // publish the reserved even generation.
+                Err(settle_window_failure(transition, error))
             }
         }
     }
@@ -6061,8 +6068,9 @@ mod tests {
         // later apply at the gate with the same "clean shutdown has begun"
         // text and no log line — the silent tip wedge observed live on the
         // explorer node (issue #618 post-#657 field report). The committed
-        // prefix is per-block atomic and the failed block wrote nothing, so
-        // the even generation is safe to restore.
+        // prefix is per-block atomic and no authoritative UTXO mutation
+        // occurred for the failed block, so the even generation is safe to
+        // restore.
         assert!(
             sync.handles.mempool_gateway.stable_generation().is_some(),
             "generation must be even after mid-batch failure so the retry can begin"
@@ -6084,6 +6092,33 @@ mod tests {
             "generation must stay even after the retry"
         );
         assert!(fail_once_store.persisted_height(1));
+        Ok(())
+    }
+
+    #[test]
+    fn utxo_commit_failure_keeps_mempool_generation_odd() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        let error = crate::apply::WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            disposition: crate::apply::WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        };
+
+        let error = super::settle_window_failure(transition, error);
+
+        assert!(matches!(
+            error.source,
+            crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+        ));
+        assert_eq!(
+            sync.handles.mempool_gateway.stable_generation(),
+            None,
+            "a possibly torn UTXO commit must keep admission closed"
+        );
         Ok(())
     }
 

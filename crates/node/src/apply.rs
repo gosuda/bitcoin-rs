@@ -673,9 +673,9 @@ fn begin_chain_transition<'a>(
 /// failure before that point touches only idempotent derived state (undo,
 /// block body, header tree) that a retry overwrites; a `UtxoCommit` refusal
 /// may tear the UTXO set, so the transition must be dropped and left odd
-/// until an external recovery path resets it. Callers that own the retry loop
-/// (e.g. [`BlockSync`]) may finish on a clean refusal; convenience entry
-/// points finish on success and drop on refusal so the gateway stays
+/// until recovery establishes a consistent chainstate. Callers that own the
+/// retry loop (e.g. [`BlockSync`]) may finish on a clean refusal; convenience
+/// entry points finish on success and drop on refusal so the gateway stays
 /// fail-closed.
 pub(crate) struct ChainChangeProof<'a> {
     #[expect(
@@ -1011,9 +1011,9 @@ pub struct Chainstate {
 /// that point touches only idempotent derived state (undo, block body, header
 /// tree) that a retry overwrites. A `UtxoCommit` refusal is different: the
 /// per-shard commit is not all-or-nothing across runs, so the UTXO set may be
-/// torn; drop the transition and let an external recovery path (checkpoint or
-/// journal replay) reset the generation. A drop on crash, panic, or any torn
-/// state leaves generation odd until that recovery path runs.
+/// torn; drop the transition and leave generation odd until recovery
+/// establishes a consistent chainstate. A drop on crash, panic, or any torn
+/// state does the same.
 pub struct ChainTransition<'a> {
     chainstate: &'a Chainstate,
     proof: ChainChangeProof<'a>,
@@ -1106,7 +1106,7 @@ impl<'a> ChainTransition<'a> {
     /// prefix is already in place and whose failing block was refused before
     /// the UTXO commit-of-record (`utxo.commit_borrowed_block`). Drop on a
     /// `UtxoCommit` refusal, panic, or torn state leaves generation odd until
-    /// an external recovery path resets it.
+    /// recovery establishes a consistent chainstate.
     pub fn finish(self) -> core::result::Result<(), ApplyError> {
         self.proof.finish()
     }
@@ -1168,8 +1168,9 @@ impl Chainstate {
     /// return, or a clean refusal whose committed prefix is already in place
     /// and whose failing block was refused before the UTXO commit-of-record
     /// (`utxo.commit_borrowed_block`). Drop on a `UtxoCommit` refusal, panic,
-    /// or torn state leaves generation odd until an external recovery path
-    /// resets it.
+    /// or torn state leaves generation odd until recovery establishes a
+    /// consistent chainstate. Failure before this method returns a capability
+    /// acquires no transition and therefore makes no generation postcondition.
     pub fn begin_transition(&self) -> core::result::Result<ChainTransition<'_>, ApplyError> {
         let lock = self.lock_transition()?;
         self.begin_transition_locked(lock)
@@ -1219,10 +1220,11 @@ impl Chainstate {
         }
     }
 
-    /// Admits a transition, connects `block`, and finishes on success. On a
-    /// clean refusal the transition is dropped and the gateway generation stays
-    /// odd; callers that need to retry from a refusal should use
-    /// [`ChainTransition`] directly and finish only when the refusal is clean.
+    /// Admits a transition, connects `block`, and finishes on success. Failure
+    /// before admission acquires no transition and does not change generation.
+    /// A refusal after admission drops the transition and leaves generation
+    /// odd; callers that need to retry a clean refusal should use
+    /// [`ChainTransition`] directly and finish it explicitly.
     ///
     /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
     /// not invoked. Production paths with followers must dispatch while the
@@ -1257,10 +1259,11 @@ impl Chainstate {
         apply_block_inner(self, block, Some(serialized), BlockProvenance::LocalReplay)
     }
 
-    /// Admits a transition, disconnects `block`, and finishes on success. On a
-    /// clean refusal the transition is dropped and the gateway generation stays
-    /// odd; callers that need to retry from a refusal should use
-    /// [`ChainTransition`] directly.
+    /// Admits a transition, disconnects `block`, and finishes on success.
+    /// Failure before admission acquires no transition and does not change
+    /// generation. A refusal after admission drops the transition and leaves
+    /// generation odd; callers that need to retry should use [`ChainTransition`]
+    /// directly.
     ///
     /// Persistence matches [`ChainTransition::disconnect`]. An admission
     /// failure is `DisconnectError::Refused`. Derived consumers are not
@@ -1280,10 +1283,10 @@ impl Chainstate {
     }
 
     /// Admits a transition, applies consecutive blocks, and finishes on success.
-    /// On a clean refusal the transition is dropped and the gateway generation
-    /// stays odd; callers that need to retry from a refusal should use
-    /// [`ChainTransition::connect_window`] directly and finish only when the
-    /// refusal is clean.
+    /// Failure before admission acquires no transition and does not change
+    /// generation. A refusal after admission drops the transition and leaves
+    /// generation odd; callers that need to retry a clean refusal should use
+    /// [`ChainTransition::connect_window`] directly and finish explicitly.
     ///
     /// Persistence matches [`ChainTransition::connect_window`].
     #[allow(clippy::result_large_err)]
