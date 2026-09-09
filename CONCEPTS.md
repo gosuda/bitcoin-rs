@@ -319,6 +319,69 @@ Bytes after the durable head's segment cursor. They may be truncated on
 recovery and are never authoritative: neither file length nor a decodable frame
 promotes a root.
 
+### Parallel granularity (per-item cost rule)
+Whether a fan-out pays is decided by per-item work against dispatch cost, not by how parallelizable the loop looks: ~100 µs script checks want more parallelism (`MIN_PARALLEL_SCRIPT_CHECKS` = 32, `crates/consensus/src/verify_tx.rs`), ~500 ns UTXO lookups want none, ~2.6 µs Merkle nodes gain from SIMD batching rather than task fan-out. Thresholds have an interior optimum in both directions. Gate on **elapsed**, never on the stage being targeted.
+
+### Global rayon pool cap
+The process-wide rayon pool is capped at `GLOBAL_RAYON_THREADS` (4) by `cap_global_thread_pool` (`crates/node/src/run.rs`). It serves the apply-path parse and non-script checks, UTXO commit, coinstats, and index preparation fan-outs, while `SCRIPT_VERIFY_POOL` separately holds up to 32 threads; uncapped, its workers oversubscribe a many-core host and spin. The cap measured better on both wall and CPU for a loopback sync to height 150,000 and cost a full-verification replay nothing (rationale and table at the constant's doc comment).
+
+### Chain generation
+The even/odd atomic counter on `MempoolGateway` that fences admission
+against chain changes (`crates/mempool/src/gateway.rs`). Even values mean
+the chain is stable and admission is open; odd values mean a connect,
+disconnect, or reorg is in progress and admission is closed.
+`stable_generation` returns `Some(even)` when stable, `None` when a chain
+change is active. `begin_chain_change` takes the pool write lock, stores the
+next odd value, and returns a `ChainChangeGuard` that owns the reservation.
+Only `finish` may compare-exchange the odd value to the reserved even value,
+reopening admission. A clean refusal before the UTXO commit-of-record finishes
+and reopens admission (retryable, no restart); a `UtxoCommit` refusal, panic,
+crash, or torn state leaves the generation odd until recovery establishes a
+consistent chainstate. A generation-settlement failure itself (`finish` CAS
+failure / `GenerationMoved`) is an invariant violation: admission stays closed
+and the failure is surfaced as fatal — the node does not retry until recovery
+or restart re-establishes a consistent gateway.
+
+### Admission origin
+The `AdmissionOrigin` enum on `MutationEnvelope` that identifies how a
+transaction entered the node (`crates/mempool/src/mutation.rs`): `Rpc`
+(submitted through `sendrawtransaction`), `Peer` (relayed from a network
+peer, carrying a `PeerToken`), `Reorg` (re-admitted by a disconnect walk via
+`reconsider_disconnected`), or `Block` (confirmed by block application). The
+observer receives the origin alongside the committed `MutationResult` so
+downstream consumers (ZMQ publisher, metrics) can distinguish relay from
+reorg re-admission without inspecting call sites.
+
+### Chainstate facade
+The in-process owner of applied-tip mutation (`bitcoin_rs_node::Chainstate`).
+Callers copy a `ChainstateSnapshot` or obtain a `ChainTransition`; they do
+not hold the raw UTXO, tip, and lock cells and reproduce a partial
+transition. `chain` still plans the branch. Node-level reorg still sequences
+disconnect then connect. UTXO, storage, and index still own their operations.
+
+### Chain-change proof
+The type-level binding of a `TransitionLock` to the `ChainChangeGuard` that
+reserved the active odd generation (`crates/node/src/apply.rs`). The
+caller-facing mutation capability is `ChainTransition`, which holds that
+proof. Apply-path helpers accept `&ChainChangeProof`, not independent lock
+and guard arguments, so a call without an active odd generation cannot
+compile. The proof owns the guard, so the reserved generation is fixed for
+the whole transition rather than read from a snapshot that may have moved.
+
+### Count-and-byte bound
+A window sized by whichever of a count cap and a byte cap binds first, because item size varies by orders of magnitude across the chain. The script window (`window_len`, `crates/node/src/apply.rs`) and the download window's pending and staging budgets (`SyncBudget` in `crates/p2p/src/download_window.rs`) both use it. In the script window one block larger than the whole byte cap still goes through alone rather than stalling the chain.
+
+## Chain state and reorg
+
+### Chain control
+Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip, loads every body the disconnect/connect plan needs, then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
+
+### Commit point (multi-store mutation)
+The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/node/src/state.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start refuses). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down. See `docs/solutions/architecture-patterns/node-reorg-execution-design.md`.
+
+### Disconnect marker phase
+The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the UTXO mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; a checkpoint must not clear it. `RolledBack`: UTXO set and applied tip moved together and need one clean checkpoint. Startup refuses either. Only the checkpoint that publishes the rolled-back state removes the marker.
+
 ### Undo record
 The per-block inverse of a UTXO commit, keyed by height **and** block hash so a
 stale branch record cannot replay against another block at the same height.

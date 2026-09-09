@@ -111,6 +111,7 @@ proptest.workspace = true
 anyhow.workspace = true
 criterion.workspace = true
 sonic-rs.workspace = true
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
 name = "sync_pipeline"
