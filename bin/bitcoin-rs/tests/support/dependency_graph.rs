@@ -291,44 +291,7 @@ impl WorkspaceGraph {
         // 5. The external ZMQ dependency is owned by the RPC surface crate.
         //    Node may forward the surface feature but must not name the
         //    external dependency directly.
-        for (name, dependencies) in &self.zmq_deps {
-            if name != RPC_CRATE && !dependencies.is_empty() {
-                violations.push(format!(
-                    "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
-                ));
-            }
-            checked_features += dependencies.len();
-        }
-        match self
-            .features
-            .get(RPC_CRATE)
-            .and_then(|feature_map| feature_map.get("zmq"))
-        {
-            Some(implies) if implies.iter().any(|entry| entry == "dep:zmq") => {
-                checked_features += 1;
-            }
-            _ => violations
-                .push("the RPC `zmq` feature must enable its owned external dependency".to_owned()),
-        }
-        let node_zmq = self
-            .features
-            .get(NODE_CRATE)
-            .and_then(|feature_map| feature_map.get("zmq"));
-        match node_zmq {
-            Some(implies) if implies.iter().any(|entry| entry == "bitcoin-rs-rpc/zmq") => {
-                checked_features += 1;
-            }
-            _ => violations
-                .push("the node `zmq` feature must forward the RPC surface feature".to_owned()),
-        }
-        match node_zmq {
-            Some(implies) if implies.iter().all(|entry| entry != "dep:zmq") => {
-                checked_features += 1;
-            }
-            _ => violations.push(
-                "the node `zmq` feature must not enable a direct external dependency".to_owned(),
-            ),
-        }
+        checked_features += self.validate_zmq_surface(&mut violations);
 
         if violations.is_empty() {
             Ok(Validation {
@@ -346,5 +309,52 @@ impl WorkspaceGraph {
         } else {
             Err(violations)
         }
+    }
+
+    /// Validates the ZMQ surface ownership boundary: the external ZMQ
+    /// dependency is owned by the RPC surface crate, and node forwards
+    /// the surface feature without naming the dependency directly.
+    /// Returns the number of feature assertions checked.
+    fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {
+        let mut checked = 0_usize;
+        for (name, dependencies) in &self.zmq_deps {
+            if name != RPC_CRATE && !dependencies.is_empty() {
+                violations.push(format!(
+                    "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
+                ));
+            }
+            checked += dependencies.len();
+        }
+        match self
+            .features
+            .get(RPC_CRATE)
+            .and_then(|feature_map| feature_map.get("zmq"))
+        {
+            Some(implies) if implies.iter().any(|entry| entry == "dep:zmq") => {
+                checked += 1;
+            }
+            _ => violations
+                .push("the RPC `zmq` feature must enable its owned external dependency".to_owned()),
+        }
+        let node_zmq = self
+            .features
+            .get(NODE_CRATE)
+            .and_then(|feature_map| feature_map.get("zmq"));
+        match node_zmq {
+            Some(implies) if implies.iter().any(|entry| entry == "bitcoin-rs-rpc/zmq") => {
+                checked += 1;
+            }
+            _ => violations
+                .push("the node `zmq` feature must forward the RPC surface feature".to_owned()),
+        }
+        match node_zmq {
+            Some(implies) if implies.iter().all(|entry| entry != "dep:zmq") => {
+                checked += 1;
+            }
+            _ => violations.push(
+                "the node `zmq` feature must not enable a direct external dependency".to_owned(),
+            ),
+        }
+        checked
     }
 }
