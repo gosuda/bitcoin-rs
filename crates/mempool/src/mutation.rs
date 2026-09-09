@@ -234,7 +234,11 @@ mod tests {
         assert_eq!(result.sequence_of(1), Some(42));
         assert_eq!(result.sequence_of(2), Some(43));
         for index in [result.len(), result.len() + 1, usize::MAX] {
-            assert_eq!(result.sequence_of(index), None, "out-of-bounds index {index}");
+            assert_eq!(
+                result.sequence_of(index),
+                None,
+                "out-of-bounds index {index}"
+            );
         }
     }
 
