@@ -380,7 +380,10 @@ fn read_bounded_tail(mut reader: impl Read) -> CapturedOutput {
                     truncated = true;
                     continue;
                 }
-                let overflow = tail.len().saturating_add(chunk.len()).saturating_sub(OUTPUT_TAIL_BYTES);
+                let overflow = tail
+                    .len()
+                    .saturating_add(chunk.len())
+                    .saturating_sub(OUTPUT_TAIL_BYTES);
                 if overflow != 0 {
                     drop(tail.drain(..overflow));
                     truncated = true;
@@ -391,7 +394,10 @@ fn read_bounded_tail(mut reader: impl Read) -> CapturedOutput {
             Err(error) => {
                 let marker = format!("\n[g20 output capture read error: {error}]\n");
                 let marker = marker.as_bytes();
-                let overflow = tail.len().saturating_add(marker.len()).saturating_sub(OUTPUT_TAIL_BYTES);
+                let overflow = tail
+                    .len()
+                    .saturating_add(marker.len())
+                    .saturating_sub(OUTPUT_TAIL_BYTES);
                 if overflow != 0 {
                     drop(tail.drain(..overflow));
                     truncated = true;
