@@ -138,7 +138,7 @@ fn supplied_witness_is_verified_without_mutating_the_transaction() {
     let mut corrupted_tx = tx.clone();
     corrupted_tx.inputs[0].witness[0][0] ^= 1;
     assert!(verify(&corrupted_tx, &prevouts, 0).is_err());
-    let stored_witness = corrupted_tx.inputs[0].witness.clone();
+    let unchanged_tx = corrupted_tx.clone();
     assert_eq!(
         Interpreter.execute_with_prevouts(
             &prevouts[0].script_pubkey,
@@ -151,7 +151,7 @@ fn supplied_witness_is_verified_without_mutating_the_transaction() {
         ),
         Ok(true)
     );
-    assert_eq!(corrupted_tx.inputs[0].witness, stored_witness);
+    assert_eq!(corrupted_tx, unchanged_tx);
 }
 
 /// The [`ScriptError::InputIndexOutOfRange`] contract in
