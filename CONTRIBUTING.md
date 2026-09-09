@@ -24,10 +24,9 @@ rustup override set stable
 cargo install --locked cargo-deny
 ```
 
-The directory override makes the local Cargo commands below use stable even
-when [`rust-toolchain.toml`](rust-toolchain.toml) selects another toolchain.
-Explicit `+nightly` commands still use nightly. CI jobs and pre-commit hooks
-select their own toolchains.
+[`rust-toolchain.toml`](rust-toolchain.toml), CI, pre-commit hooks, and the
+local commands above all select stable. Explicit `+nightly` commands below are
+limited to checks that require nightly Rust.
 
 Start with the affected package or test while developing, then run the
 applicable CI checks before submitting. The workflow files define the complete
