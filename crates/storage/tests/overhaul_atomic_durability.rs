@@ -126,13 +126,21 @@ const FAULTS: [PersistFault; 7] = [
 #[test]
 #[cfg(feature = "fjall")]
 fn fjall_injected_faults_never_mix_families() {
-    run_fault_matrix("fjall", |path| bitcoin_rs_storage::FjallStore::open(path), &ROWS);
+    run_fault_matrix(
+        "fjall",
+        |path| bitcoin_rs_storage::FjallStore::open(path),
+        &ROWS,
+    );
 }
 
 #[test]
 #[cfg(feature = "redb")]
 fn redb_injected_faults_never_mix_families() {
-    run_fault_matrix("redb", |path| bitcoin_rs_storage::RedbStore::open(path), &ROWS);
+    run_fault_matrix(
+        "redb",
+        |path| bitcoin_rs_storage::RedbStore::open(path),
+        &ROWS,
+    );
 }
 
 #[test]
@@ -148,7 +156,11 @@ fn rocksdb_injected_faults_never_mix_families() {
 #[test]
 #[cfg(feature = "mdbx")]
 fn mdbx_injected_faults_never_mix_families() {
-    run_fault_matrix("mdbx", |path| bitcoin_rs_storage::MdbxStore::open(path), &ROWS);
+    run_fault_matrix(
+        "mdbx",
+        |path| bitcoin_rs_storage::MdbxStore::open(path),
+        &ROWS,
+    );
 }
 
 #[test]
@@ -302,6 +314,10 @@ fn fjall_snapshot_is_coherent_across_batch_commit() {
             .get(cf, key)
             .expect("snapshot read")
             .expect("row exists");
-        assert_eq!(observed.as_slice(), b"before", "snapshot mixed pre- and post-batch rows");
+        assert_eq!(
+            observed.as_slice(),
+            b"before",
+            "snapshot mixed pre- and post-batch rows"
+        );
     }
 }
