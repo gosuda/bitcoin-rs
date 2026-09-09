@@ -147,6 +147,24 @@ impl BlockFacts {
         }
     }
 
+    /// Consensus weight of an already-decoded transaction slice, without
+    /// transaction identifiers or the Merkle reduction.
+    ///
+    /// Weight-only callers must not pay for [`Self::from_txids`]'s identifier
+    /// clone and Merkle walk. The arithmetic below matches [`Self::from_txids`]
+    /// exactly; any change there must change here.
+    #[must_use]
+    pub fn block_weight(txs: &[Tx]) -> u64 {
+        let count_len = u64::from(compact_size_len(len_u64(txs.len())));
+        let mut stripped = HEADER_LEN.saturating_add(count_len);
+        let mut total = HEADER_LEN.saturating_add(count_len);
+        for tx in txs {
+            stripped = stripped.saturating_add(len_u64(tx.base_size()));
+            total = total.saturating_add(len_u64(tx.total_size()));
+        }
+        stripped.saturating_mul(3).saturating_add(total)
+    }
+
     /// Transaction IDs in block order, hashed exactly once.
     #[must_use]
     pub fn txids(&self) -> &[Txid] {

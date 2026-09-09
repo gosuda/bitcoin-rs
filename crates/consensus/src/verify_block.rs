@@ -113,8 +113,7 @@ pub fn verify_block_rules_precomputed(
     }
     // Facts are supplied independently of the block; derive the consensus
     // weight from this exact block rather than trusting a mismatched slice.
-    let weight_facts = BlockFacts::from_txids(&block.txs, facts.txids().to_vec());
-    let weight = weight_facts.weight();
+    let weight = BlockFacts::block_weight(&block.txs);
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
             weight,
