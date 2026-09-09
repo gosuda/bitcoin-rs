@@ -1,0 +1,37 @@
+name: PR665 completion source
+on:
+  push:
+    branches: [review/pr665-completion-ci-20260910]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned main, candidate, and three-way integration result
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/export"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/export/main.tar.gz" 970387318c0e14f93491d0a535b8ec2e0a127825
+          git archive --format=tar.gz -o "$RUNNER_TEMP/export/candidate.tar.gz" db1504be00f994a7d3d214a8ecb3c0ea6e25181a
+          git diff --binary f8bb0f8d0f49ade933eb558d6722041d37a9c02c db1504be00f994a7d3d214a8ecb3c0ea6e25181a > "$RUNNER_TEMP/export/reviewed.patch"
+          git diff --stat f8bb0f8d0f49ade933eb558d6722041d37a9c02c 970387318c0e14f93491d0a535b8ec2e0a127825 > "$RUNNER_TEMP/export/main-changes.txt"
+          git checkout --detach 970387318c0e14f93491d0a535b8ec2e0a127825
+          git apply --3way "$RUNNER_TEMP/export/reviewed.patch" > "$RUNNER_TEMP/export/integration.txt" 2>&1 || true
+          git status --short >> "$RUNNER_TEMP/export/integration.txt"
+          git diff --cached --binary > "$RUNNER_TEMP/export/integrated.patch"
+          if ! git ls-files -u | grep -q .; then
+            git write-tree > "$RUNNER_TEMP/export/integrated-tree.txt"
+            git archive --format=tar.gz -o "$RUNNER_TEMP/export/integrated.tar.gz" "$(git write-tree)"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr665-completion-source
+          path: ${{ runner.temp }}/export/*
+          retention-days: 1
+          if-no-files-found: error
