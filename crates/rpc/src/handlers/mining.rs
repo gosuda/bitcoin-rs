@@ -36,7 +36,7 @@ fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
         return Err(());
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0.iter() {
         out.push((nibble(chunk[0])? << 4) | nibble(chunk[1])?);
     }
     Ok(out)

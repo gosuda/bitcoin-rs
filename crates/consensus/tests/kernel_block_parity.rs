@@ -539,7 +539,7 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
     let digits = hex.as_bytes();
-    for pair in digits.chunks_exact(2) {
+    for pair in digits.as_chunks::<2>().0.iter() {
         let value = u8::from_str_radix(str::from_utf8(pair)?, 16)?;
         bytes.push(value);
     }

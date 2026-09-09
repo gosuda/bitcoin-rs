@@ -542,7 +542,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>> {
         bail!("hex string must have even length");
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0.iter() {
         let hi = hex_nibble(pair[0]).ok_or_else(|| anyhow::anyhow!("invalid hex"))?;
         let lo = hex_nibble(pair[1]).ok_or_else(|| anyhow::anyhow!("invalid hex"))?;
         out.push((hi << 4) | lo);

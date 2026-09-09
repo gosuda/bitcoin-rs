@@ -5412,7 +5412,6 @@ mod scantxoutset_tests {
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
     use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
-    use sonic_rs::JsonValueTrait as _;
 
     use super::*;
 

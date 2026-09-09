@@ -28,7 +28,11 @@ fn scalar_merkle(level: &mut Vec<Txid>) -> Option<(Txid, bool)> {
     }
     let mut mutated = false;
     while level.len() > 1 {
-        mutated |= level.chunks_exact(2).any(|pair| pair[0] == pair[1]);
+        mutated |= level
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| pair[0] == pair[1]);
         let original_len = level.len();
         for parent in 0..original_len.div_ceil(2) {
             let left = level[2 * parent];

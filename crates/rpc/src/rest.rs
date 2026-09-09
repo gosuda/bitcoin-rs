@@ -806,7 +806,7 @@ fn hex_decode(hex: &str) -> Vec<u8> {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0.iter() {
         let hi = nibble(chunk[0]);
         let lo = nibble(chunk[1]);
         if hi == 0xff || lo == 0xff {

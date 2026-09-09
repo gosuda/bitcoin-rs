@@ -1988,7 +1988,9 @@ mod tests {
     fn decode_hex(hex: &str) -> Vec<u8> {
         assert!(hex.len().is_multiple_of(2), "hex string has odd length");
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digits = std::str::from_utf8(pair).unwrap_or_else(|_| panic!("hex ascii"));
                 u8::from_str_radix(digits, 16).unwrap_or_else(|_| panic!("hex digit"))
