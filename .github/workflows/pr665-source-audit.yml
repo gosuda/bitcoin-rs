@@ -1,0 +1,31 @@
+name: PR665 source audit
+on:
+  push:
+    branches: [review/pr-665-verification-20260909]
+    paths: [.github/workflows/pr665-source-audit.yml]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export audit inputs
+        run: |
+          mkdir "$RUNNER_TEMP/audit"
+          cp .review/reconcile*.json "$RUNNER_TEMP/audit/"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/audit/base.tar.gz" a571ed307c3f9fee318fedde92e6d8e23f1d337b
+          git archive --format=tar.gz -o "$RUNNER_TEMP/audit/latest.tar.gz" d10455da83725690429d85cd8c184c99a18580e7
+          git archive --format=tar.gz -o "$RUNNER_TEMP/audit/candidate.tar.gz" 036c76bd034cdcedbfe1fbc404585cc04d82ea87
+          git log --oneline a571ed307c3f9fee318fedde92e6d8e23f1d337b..d10455da83725690429d85cd8c184c99a18580e7 > "$RUNNER_TEMP/audit/concurrent.txt"
+          git diff --binary a571ed307c3f9fee318fedde92e6d8e23f1d337b d10455da83725690429d85cd8c184c99a18580e7 > "$RUNNER_TEMP/audit/concurrent.patch"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr665-source-audit
+          path: ${{ runner.temp }}/audit/*
+          retention-days: 1
+          if-no-files-found: error
