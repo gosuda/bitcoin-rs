@@ -11,7 +11,6 @@
 use bitcoin_rs_storage::{
     ColumnFamily, KvStore, PersistFault, StorageError, WriteBatch, WriteCondition,
 };
-use std::path::Path;
 
 const ROWS: [(ColumnFamily, &[u8]); 3] = [
     (ColumnFamily::TxConfirmed, &[0]),
@@ -126,9 +125,10 @@ const FAULTS: [PersistFault; 7] = [
 #[test]
 #[cfg(feature = "fjall")]
 fn fjall_injected_faults_never_mix_families() {
+    let dir = tempfile::tempdir().expect("tempdir");
     run_fault_matrix(
         "fjall",
-        |path| bitcoin_rs_storage::FjallStore::open(path),
+        || bitcoin_rs_storage::FjallStore::open(dir.path()),
         &ROWS,
     );
 }
@@ -136,9 +136,10 @@ fn fjall_injected_faults_never_mix_families() {
 #[test]
 #[cfg(feature = "redb")]
 fn redb_injected_faults_never_mix_families() {
+    let dir = tempfile::tempdir().expect("tempdir");
     run_fault_matrix(
         "redb",
-        |path| bitcoin_rs_storage::RedbStore::open(path),
+        || bitcoin_rs_storage::RedbStore::open(dir.path()),
         &ROWS,
     );
 }
@@ -146,9 +147,10 @@ fn redb_injected_faults_never_mix_families() {
 #[test]
 #[cfg(feature = "rocksdb")]
 fn rocksdb_injected_faults_never_mix_families() {
+    let dir = tempfile::tempdir().expect("tempdir");
     run_fault_matrix(
         "rocksdb",
-        |path| bitcoin_rs_storage::RocksDbStore::open(path),
+        || bitcoin_rs_storage::RocksDbStore::open(dir.path()),
         &ROWS,
     );
 }
@@ -156,9 +158,10 @@ fn rocksdb_injected_faults_never_mix_families() {
 #[test]
 #[cfg(feature = "mdbx")]
 fn mdbx_injected_faults_never_mix_families() {
+    let dir = tempfile::tempdir().expect("tempdir");
     run_fault_matrix(
         "mdbx",
-        |path| bitcoin_rs_storage::MdbxStore::open(path),
+        || bitcoin_rs_storage::MdbxStore::open(dir.path()),
         &ROWS,
     );
 }
@@ -171,9 +174,10 @@ fn redb_txindex_injected_faults_never_mix_families() {
         (ColumnFamily::UtxoMeta, b"meta"),
         (ColumnFamily::TxConfirmed, &[7; 12]),
     ];
+    let dir = tempfile::tempdir().expect("tempdir");
     run_fault_matrix(
         "redb-txindex",
-        |path| bitcoin_rs_storage::open_redb_tx_index_store(path),
+        || bitcoin_rs_storage::open_redb_tx_index_store(dir.path()),
         &rows,
     );
 }
@@ -181,7 +185,7 @@ fn redb_txindex_injected_faults_never_mix_families() {
 fn run_fault_matrix<S, F>(backend: &str, open: F, rows: &[(ColumnFamily, &[u8])])
 where
     S: KvStore,
-    F: Fn(&Path) -> Result<S, StorageError>,
+    F: Fn() -> Result<S, StorageError>,
 {
     let old = expected_state(rows, b"old");
     let proposed = expected_state(rows, b"new");
@@ -192,21 +196,21 @@ where
         Route::FlushDeferred,
     ] {
         for fault in FAULTS {
-            let dir = tempfile::tempdir().expect("tempdir");
             let label = format!("{backend}/{route:?}/{fault:?}");
             {
-                let store = open(dir.path()).expect("open for seed");
+                // Restore and verify the entire pre-batch state before each case.
+                let store = open().expect("open for seed");
                 store
                     .write_durable(batch(&store, rows, b"old"))
                     .expect("seed write");
                 assert_eq!(snapshot_all(&store, rows), old, "{label}: seed state");
             }
             let outcome = {
-                let store = open(dir.path()).expect("reopen to arm");
+                let store = open().expect("reopen to arm");
                 store.arm_persist_fault(fault);
                 route.apply(&store, batch(&store, rows, b"new"), rows[0].0)
             };
-            let store = open(dir.path()).expect("reopen to inspect");
+            let store = open().expect("reopen to inspect");
             assert_atomic_recovery(&snapshot_all(&store, rows), &old, &proposed, &label);
             if route.completion_fault(fault) {
                 assert!(
