@@ -1,0 +1,65 @@
+name: offline-ci-repro
+
+on:
+  push:
+    branches: [ci/offline-repro-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-ci-repro-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e423b1a9983c86839826a4211b852d382773acd1
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.1
+          components: clippy,rustfmt
+      - name: Verify dependency sources before exporting
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+          lock = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          sources = {p['source'] for p in lock['package'] if 'source' in p}
+          assert sources == {'registry+https://github.com/rust-lang/crates.io-index'}, sources
+          PY
+      - name: Vendor locked public dependencies
+        run: |
+          mkdir -p target/offline-repro
+          cargo +1.98.1 vendor --locked --versioned-dirs target/offline-vendor \
+            > target/offline-repro/vendor-config.toml
+      - name: Package only source, compiler tools, and vendored crates
+        run: |
+          set -euo pipefail
+          bundle="$PWD/target/offline-repro"
+          toolchain_dir="$(dirname "$(dirname "$(rustup which --toolchain 1.98.1 rustc)")")"
+          git archive --format=tar HEAD > "$bundle/source.tar"
+          tar -C "$toolchain_dir" -I 'zstd -T2 -3' -cf "$bundle/toolchain.tar.zst" .
+          tar -C target/offline-vendor -I 'zstd -T2 -3' -cf "$bundle/vendor.tar.zst" .
+          {
+            printf 'source_commit=%s\nworkflow_commit=%s\nrun_id=%s\n' \
+              "$(git rev-parse HEAD)" "$GITHUB_SHA" "$GITHUB_RUN_ID"
+            rustc +1.98.1 --version --verbose
+            cargo +1.98.1 --version
+            rustfmt +1.98.1 --version
+          } > "$bundle/context.txt"
+          # No Cargo credentials/config, Git metadata, environment dump,
+          # operator state, or runner home directory enters the archive.
+          (cd "$bundle" && sha256sum source.tar toolchain.tar.zst vendor.tar.zst > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offline-ci-repro-e423b1a-${{ github.run_id }}
+          path: target/offline-repro/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
