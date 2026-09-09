@@ -87,17 +87,19 @@ impl KvStore for TestStore {
     }
 
     fn write(&self, _batch: Self::WriteBatch) -> Result<(), StorageError> {
-        Ok(())
+        Err(StorageError::InvalidOperation(
+            "transition test store does not persist writes",
+        ))
     }
 
     fn write_durable_if(
         &self,
         _conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        _batch: Self::WriteBatch,
     ) -> Result<bool, StorageError> {
-        self.write(batch)?;
-        self.flush()?;
-        Ok(true)
+        Err(StorageError::InvalidOperation(
+            "transition test store does not persist writes",
+        ))
     }
 
     fn flush(&self) -> Result<(), StorageError> {
@@ -110,7 +112,7 @@ impl KvStore for TestStore {
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
         Err(StorageError::InvalidOperation(
-            "test snapshots are unsupported",
+            "transition test store does not support snapshots",
         ))
     }
 
@@ -181,10 +183,10 @@ impl UtxoChangeListener for ReentrantListener {
 #[test]
 fn blocked_flush_does_not_block_resident_reads() {
     let store = TestStore::default();
-    let set = PersistentUtxoSet::new(UtxoSet::new(), store.clone());
+    let raw = UtxoSet::new();
     let a = txid(1);
-    set.connect_block(&funding(a), &a, CoinDurability::Durable)
-        .expect("seed resident coin");
+    raw.commit_block(&funding(a), &a).expect("seed resident coin");
+    let set = PersistentUtxoSet::new(raw, store.clone());
 
     let gate = store.block_next_flush();
     let (tx, rx) = mpsc::channel();
@@ -225,8 +227,13 @@ fn listener_reentry_is_rejected_instead_of_deadlocking() {
     assert!(target.set(Arc::downgrade(&set)).is_ok());
 
     let a = txid(2);
-    set.connect_block(&funding(a), &a, CoinDurability::Durable)
-        .expect("outer mutation");
+    let error = set
+        .connect_block(&funding(a), &a, CoinDurability::Durable)
+        .expect_err("test store rejects outer persistence after the callback");
+    assert!(matches!(
+        error,
+        PersistentUtxoError::Storage(StorageError::InvalidOperation(_))
+    ));
 
     assert!(called.load(Ordering::SeqCst), "listener was invoked");
     assert!(
