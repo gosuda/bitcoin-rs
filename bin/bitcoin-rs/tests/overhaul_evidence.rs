@@ -179,7 +179,8 @@ fn repeated_samples_and_empty_cells_survive_a_round_trip() {
     assert_eq!(reparsed.cells.len(), 36);
 }
 
-/// ATTR-01: direct construction and deserialization enforce the same identity.
+/// `docs/contracts/hot-path-attribution.md` § `ATTR-01`: construction and
+/// deserialization enforce the same non-empty evidence identity.
 #[test]
 fn empty_identity_fields_are_rejected_on_record_and_parse() {
     for field in [
@@ -215,13 +216,15 @@ fn empty_identity_fields_are_rejected_on_record_and_parse() {
     }
 }
 
-/// ATTR-01: a hexadecimal digest cannot contain a numeric sign.
+/// `docs/contracts/hot-path-attribution.md` § `ATTR-01`: digests are
+/// hexadecimal values, not signed numeric strings.
 #[test]
 fn signed_pairs_are_not_hexadecimal_digests() {
     assert!("+1".repeat(32).parse::<Sha256Hex>().is_err());
 }
 
-/// ATTR-01: aggregation cannot launder invalid identities or mix interval kinds.
+/// `docs/contracts/hot-path-attribution.md` § `ATTR-01`–`ATTR-02`:
+/// aggregation validates identities and interval semantics.
 #[test]
 fn aggregation_validates_both_inputs_and_interval_kind() {
     let left = sample(0, 10);

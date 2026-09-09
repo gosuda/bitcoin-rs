@@ -160,6 +160,21 @@ posture.
 - Local replay or a diagnostic fixture cannot satisfy the live full-tip
   default-lane gate.
 
+### `ATTR-01`: Evidence identity is validated at every boundary
+
+- Record construction and deserialization apply the same non-empty identity
+  validation to path, owner, version, backend, durability, hardware, and
+  optional corpus identifiers. Whitespace-only values are invalid.
+- Digest fields are hexadecimal values, not signed numeric strings.
+- Aggregation validates both inputs before combining them; it must reject
+  invalid identities, inverted intervals, and intervals with different kinds.
+
+### `ATTR-02`: Evidence aggregation preserves identity and interval semantics
+
+- Aggregation may combine samples only when their validated identity and
+  interval kind agree. It must not launder an invalid identity or alter the
+  interval boundaries while producing the aggregate.
+
 ### `HPA-13`: Promotion and regression thresholds
 
 - A product cell promotion requires a measured median win of at least
