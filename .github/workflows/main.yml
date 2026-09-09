@@ -50,23 +50,23 @@ jobs:
       # Consensus fixture corpus includes the large deterministic vectors.
       - name: Kernel consensus tests including ignored vectors
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
+        run: cargo test --locked -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
       # -p bitcoin-rs propagates all backends and kernel through the binary's
       # feature table; virtual-workspace --features would not do so.
       - name: Full-node binary Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: |
-          cargo clippy -p bitcoin-rs --all-targets \
+          cargo clippy --locked -p bitcoin-rs --all-targets \
             --no-default-features --features "${FULL_NODE_FEATURES}" \
             -- -D warnings
       # The binary's all-target pass does not lint dependency test targets.
       - name: Kernel node Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
+        run: cargo clippy --locked -p bitcoin-rs-node --all-targets -- -D warnings
       # Include consensus's kernel-gated tests and kernel_verify_spike example.
       - name: Kernel consensus Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings
+        run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets -- -D warnings
       # Run every binary test, including the pinned process and formal gates.
       - name: Full-node binary tests
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
@@ -77,7 +77,7 @@ jobs:
           printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-node\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             > target/apalache/run-context.txt
-          cargo test -p bitcoin-rs --no-fail-fast \
+          cargo test --locked -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "${FULL_NODE_FEATURES}"
       - name: Preserve full-node formal evidence
         if: ${{ always() }}
@@ -103,10 +103,10 @@ jobs:
       # Bin package has no bench targets; all benchmarks live in their own
       # crates.
       - run: |
-          cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
-          cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
-          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
-          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
+          cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
+          cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
+          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
 
 
   # The imported qa-assets corpora (fuzz/corpus/, provenance in
@@ -146,7 +146,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo +nightly update -Zdirect-minimal-versions
-      - run: cargo +nightly check --workspace --all-targets
+      - run: cargo +nightly check --locked --workspace --all-targets
 
   # Main-only (issue #174): the small real feature matrix, not a powerset.
   feature-combinations:
@@ -160,7 +160,7 @@ jobs:
       # which builds libbitcoinkernel from C++ -- install its prerequisites
       # so the matrix runs unexcluded (deep lanes own the C++ toolchain).
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      - run: cargo hack check --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
+      - run: cargo hack check --locked --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
 
   # Full-feature dependency audit: the PR gate's deny job checks the full
   # graph (all backends + kernel); this lane is a confirmation on `main`.
@@ -187,4 +187,4 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo test -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+      - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
