@@ -61,7 +61,7 @@ pub(crate) struct CliArgs {
     pub(crate) metrics_bind: Option<SocketAddr>,
     #[arg(long = "assume-valid-height")]
     pub(crate) assume_valid_height: Option<u32>,
-    /// Compare native parse/txids and script verdicts against libbitcoinkernel.
+    /// Optional kernel oracle; see validation contract VAL-03.
     /// Requires `--features kernel`.
     #[arg(long = "verify-kernel", num_args = 0..=1, default_missing_value = "true")]
     pub(crate) verify_kernel: Option<bool>,
