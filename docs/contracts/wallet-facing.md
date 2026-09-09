@@ -54,6 +54,11 @@ mixed-tip page.
   with the Esplora origin and its own request fee limits.
 - Confirmation tracking, replacement observation, disconnect and reorg
   observation, and rescan all run over the same public reads.
+- Public `/api` responses, including errors, allow cross-origin reads with
+  `Access-Control-Allow-Origin: *` and expose `X-Total-Results`. `OPTIONS`
+  requests under `/api` return a 204 preflight response permitting `GET`,
+  `POST`, and the `Content-Type` request header. The mempool backend
+  `/esplora` namespace, JSON-RPC, and Core REST do not inherit this policy.
 - `/api` is a closed electrs namespace: a request in it never falls
   through to JSON-RPC. Unprefixed electrs paths on this listener 404 so
   JSON-RPC keeps `/`. `/api/v1` is Mempool's API on the explorer port,
