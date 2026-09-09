@@ -31,7 +31,7 @@ holds a second admission evaluator.
   | Max replacement evictions | 100 |
   | Max fee | 0.1 BTC/kvB |
   | Standard transaction sigops | 16_000 |
-  | TRUC (v3) transactions | supported |
+| TRUC (v3) transactions | rejected at the version gate (`TX_VERSION_MAX = 2`); standard only after the T21 TRUC policy layer lands |
 
 - `crates/mempool/src/policy.rs` resolves one versioned `AdmissionPolicy`
   from `NodeConfig` at startup. The gateway stamps every verdict with the
@@ -119,15 +119,19 @@ holds a second admission evaluator.
 
 ### `POL-06`: Preview purity and finality
 
-- Preview runs the identical pipeline and stops before mutation. It
+- Preview runs the commit pipeline path and stops before mutation. It
   changes no membership, no estimator state, no relay state, no
   admission sequence, and no victims. It returns verdict rows with the
   captured stamp; a stale stamp is visible to the caller. It may
-  populate safe verification caches.
-- Absolute locktime and BIP68 sequence locks evaluate at tip height + 1
-  from retained coin metadata and MTP context. A non-final transaction
-  is typed before fee-floor classification. A disabled sequence
-  contributes no lock. An unconfirmed parent contributes its own state.
+  populate safe verification caches. Preview/commit identical-pipeline
+  parity (including script verification in preview) is T18 work:
+  no `AdmissionMode::Preview` exists and the RPC preview does not run
+  `verify_transaction` (deviation ledger entries 1-2).
+- Absolute locktime evaluates at tip height + 1 from retained coin
+  metadata and MTP context. Relative (BIP68) sequence locks are
+  unchecked at admission and typed `NonBip68Final` has no producer;
+  BIP68 admission is T19 work (deviation ledger entry 3). A disabled
+  sequence contributes no lock once that work lands.
 - `testmempoolaccept` returns preview rows in the frozen Core 31.1
   `TestMempoolAccept` / `MempoolAcceptance` shape with frozen
   reject-reason strings.
