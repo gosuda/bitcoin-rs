@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: never
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -26,6 +29,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
+          toolchain: stable
           components: rustfmt
       - name: Apply review fixes
         run: |
@@ -72,6 +76,7 @@ jobs:
           test "$(git write-tree)" = "$(cat "$RUNNER_TEMP/candidate/REVIEW_TREE")"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
+          toolchain: stable
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
@@ -94,6 +99,12 @@ jobs:
           cargo clippy --locked -p bitcoin-rs-consensus --all-targets --no-default-features -- -D warnings || status=1
           cargo fmt --all -- --check || status=1
           exit "$status"
+      - name: Evidence validation
+        if: always()
+        run: cargo test --locked -p bitcoin-rs --no-default-features --test overhaul_evidence
+      - name: Evidence and node lints
+        if: always()
+        run: cargo clippy --locked -p bitcoin-rs --no-default-features --test overhaul_evidence -- -D warnings
   stage:
     needs: prepare
     runs-on: ubuntu-latest
