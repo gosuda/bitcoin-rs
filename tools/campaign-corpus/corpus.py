@@ -312,13 +312,23 @@ class CorpusWriter:
         self._entries.seek(self._entries_pos)
         return archive_end == self._offset and entries_end == self._entries_pos
 
-    def append(self, payload: bytes, *, expected_hash: str | None = None) -> FrameMeta:
+    def _require_committed_prefix(self) -> None:
+        """Fail closed while an unverified tail or a poisoned frame remains.
+
+        Both entry gates (``append`` and ``finish``) enforce this: a writer
+        whose rolling digests absorbed uncommitted bytes, or whose files
+        carry a tail past the committed prefix, must neither advance nor
+        publish until the owner truncates to the recorded prefix.
+        """
         if self._write_failed:
             raise ContractError("a previous append failed mid-frame: resume a new writer over the committed prefix")
         if self._tail_pending:
             if not self._tail_cleared():
                 raise ContractError("unverified tail present: truncate owned files to the recorded prefix first")
             self._tail_pending = False
+
+    def append(self, payload: bytes, *, expected_hash: str | None = None) -> FrameMeta:
+        self._require_committed_prefix()
         if self._count >= self._chosen.block_count:
             raise ContractError("append exceeds the frozen block count")
         if len(payload) > MAX_PAYLOAD:
@@ -371,6 +381,7 @@ class CorpusWriter:
         )
 
     def finish(self, manifest: BinaryIO) -> CorpusSummary:
+        self._require_committed_prefix()
         if self._count != self._chosen.block_count:
             raise ContractError(
                 f"{self._chosen.corpus_id} archive has {self._count} blocks, expected {self._chosen.block_count}"
