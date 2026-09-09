@@ -786,12 +786,6 @@ pub(crate) fn start_node(
 
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
 
-    if let Some(bind) = state.config().observability.metrics_bind {
-        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        guard.services.metrics =
-            crate::metrics::start_metrics(Some(bind), state.shutdown(), &identity)?;
-    }
-
     let shutdown = state.shutdown();
     let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
         (rx, None)
@@ -965,6 +959,13 @@ pub(crate) fn start_node(
         .name("bitcoin-rs-event-loop".into())
         .spawn(move || loop_handle.spin(&shutdown))?;
     guard.services.event_loop = Some(event_loop);
+    // Install the process-global recorder only after all other fallible startup
+    // steps have succeeded, so a failed startup can be retried with new config.
+    if let Some(bind) = state.config().observability.metrics_bind {
+        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
+        guard.services.metrics =
+            crate::metrics::start_metrics(Some(bind), state.shutdown(), &identity)?;
+    }
     let (state, services) = guard.disarm();
     Ok((state, services, context))
 }
