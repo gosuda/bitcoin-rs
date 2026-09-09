@@ -1,4 +1,4 @@
-//! T02 — a measurement without its identity is not evidence.
+//! HPA-12 — a measurement without its identity is not evidence.
 //!
 //! Every sample in the hot-path ledger names the binary, configuration,
 //! corpus, backend, durability and hardware it ran under. The ledger refuses
