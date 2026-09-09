@@ -1,3 +1,4 @@
+//! CONTRACT: docs/contracts/validation-default.md#VAL-01 (fixture parity only).
 //! T06 parity: the one-pass derivation over the T05 borrowed layout must
 //! agree with the independent `bitcoin`-crate oracle on txids, wtxids,
 //! weight, byte positions, and Merkle mutation flags over the golden

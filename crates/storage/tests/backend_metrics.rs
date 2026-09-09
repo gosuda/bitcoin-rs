@@ -140,6 +140,7 @@ fn cache_capacity(backend: &str) -> String {
     format!("storage.cache_capacity_bytes{{backend=\"{backend}\"}}")
 }
 
+#[cfg(any(feature = "fjall", feature = "rocksdb", feature = "mdbx"))]
 fn put_one_row(store: &impl KvStore) -> Result<(), bitcoin_rs_storage::StorageError> {
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::BlockBodies, b"metrics-key", b"value");

@@ -15,7 +15,7 @@
 //! cargo run -p bitcoin-rs-storage --example storage_footprint --release -- [backend]
 //! ```
 //!
-//! `backend` is one of `fjall` (default), `redb`, `rocksdb`. The corpus is
+//! `backend` is one of `fjall` (default), `redb`, `rocksdb`, `mdbx`. The corpus is
 //! designed to complete in under a minute on a laptop.
 #![allow(clippy::print_stdout)]
 #![allow(clippy::expect_used)]
@@ -46,6 +46,17 @@ const BLOCK_BODY_VALUE_BYTES: usize = 16 * 1024;
 /// Undo-data value size — a few UTXO entries per block.
 const UNDO_VALUE_BYTES: usize = 256;
 
+const INDEX_CFS: &[(ColumnFamily, usize, usize)] = &[
+    (ColumnFamily::TxConfirmed, 12, 8),
+    (ColumnFamily::TxMempool, 5, 4),
+    (ColumnFamily::BlockHeaders, 80, 0),
+    (ColumnFamily::Funding, 12, 8),
+    (ColumnFamily::Spending, 12, 8),
+    (ColumnFamily::Coinstats, 12, 8),
+    (ColumnFamily::BlockTree, 37, 0),
+    (ColumnFamily::UtxoMeta, 16, 8),
+];
+
 /// Computes the logical (raw key + value) bytes written across all CFs.
 fn logical_data_size() -> u64 {
     let mut total: u64 = 0;
@@ -55,18 +66,8 @@ fn logical_data_size() -> u64 {
     // + 8-byte value (Coinstats),
     // 37-byte key + 0-byte value (BlockTree), 16-byte key + 8-byte value
     // (UtxoMeta), 5-byte key + 4-byte value (TxMempool).
-    let index_cfs: &[(ColumnFamily, usize, usize)] = &[
-        (ColumnFamily::TxConfirmed, 12, 8),
-        (ColumnFamily::TxMempool, 5, 4),
-        (ColumnFamily::BlockHeaders, 80, 0),
-        (ColumnFamily::Funding, 12, 8),
-        (ColumnFamily::Spending, 12, 8),
-        (ColumnFamily::Coinstats, 12, 8),
-        (ColumnFamily::BlockTree, 37, 0),
-        (ColumnFamily::UtxoMeta, 16, 8),
-    ];
 
-    for &(_, key_len, val_len) in index_cfs {
+    for &(_, key_len, val_len) in INDEX_CFS {
         total += u64::from(INDEX_ROWS)
             * (u64::try_from(key_len).expect("key length fits in u64")
                 + u64::try_from(val_len).expect("value length fits in u64"));
@@ -86,18 +87,8 @@ fn logical_data_size() -> u64 {
 /// Writes the synthetic corpus into `store`.
 fn write_corpus<S: KvStore>(store: &S) {
     // Index CFs with small key/value pairs.
-    let index_cfs: &[(ColumnFamily, usize, usize)] = &[
-        (ColumnFamily::TxConfirmed, 12, 8),
-        (ColumnFamily::TxMempool, 5, 4),
-        (ColumnFamily::BlockHeaders, 80, 0),
-        (ColumnFamily::Funding, 12, 8),
-        (ColumnFamily::Spending, 12, 8),
-        (ColumnFamily::Coinstats, 12, 8),
-        (ColumnFamily::BlockTree, 37, 0),
-        (ColumnFamily::UtxoMeta, 16, 8),
-    ];
 
-    for &(cf, key_len, val_len) in index_cfs {
+    for &(cf, key_len, val_len) in INDEX_CFS {
         let mut batch = store.new_batch();
         for i in 0..INDEX_ROWS {
             let key = synthetic_key(i, key_len);
@@ -186,6 +177,7 @@ fn dir_size(path: &Path) -> u64 {
 
 /// Measures per-column-family bytes for fjall. Each keyspace is a separate
 /// numbered directory under `keyspaces/`. Also reports the shared journal.
+#[cfg(feature = "fjall")]
 fn fjall_cf_sizes(root: &Path) -> (HashMap<String, u64>, u64) {
     let mut sizes = HashMap::new();
     let cf_names: Vec<&str> = ColumnFamily::ALL.iter().map(|cf| cf.name()).collect();
@@ -313,7 +305,7 @@ fn main() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let path = temp.path();
 
-    match backend.as_str() {
+    let (cf_sizes, journal) = match backend.as_str() {
         #[cfg(feature = "fjall")]
         "fjall" => {
             let store = bitcoin_rs_storage::FjallStore::open(path).expect("open fjall");
@@ -322,34 +314,36 @@ fn main() {
                 .force_flush_memtables()
                 .expect("force flush memtables");
             drop(store);
-            let total = dir_size(path);
-            let (cf_sizes, journal) = fjall_cf_sizes(path);
-            print_results(&backend, total, logical, &cf_sizes, journal);
+            fjall_cf_sizes(path)
         }
         #[cfg(feature = "redb")]
         "redb" => {
             let store = bitcoin_rs_storage::RedbStore::open(path).expect("open redb");
             write_corpus(&store);
             drop(store);
-            let total = dir_size(path);
-            let (cf_sizes, journal) = redb_cf_sizes(path);
-            print_results(&backend, total, logical, &cf_sizes, journal);
+            redb_cf_sizes(path)
         }
         #[cfg(feature = "rocksdb")]
         "rocksdb" => {
             let store = bitcoin_rs_storage::RocksDbStore::open(path).expect("open rocksdb");
             write_corpus(&store);
             drop(store);
-            let total = dir_size(path);
-            let (cf_sizes, journal) = rocksdb_cf_sizes(path);
-            print_results(&backend, total, logical, &cf_sizes, journal);
+            rocksdb_cf_sizes(path)
+        }
+        #[cfg(feature = "mdbx")]
+        "mdbx" => {
+            let store = bitcoin_rs_storage::MdbxStore::open(path).expect("open mdbx");
+            write_corpus(&store);
+            drop(store);
+            (HashMap::new(), 0)
         }
         other => {
             eprintln!("Unknown backend: {other}");
-            eprintln!("Usage: storage_footprint [fjall|redb|rocksdb]");
+            eprintln!("Usage: storage_footprint [fjall|redb|rocksdb|mdbx]");
             std::process::exit(1);
         }
-    }
+    };
+    print_results(&backend, dir_size(path), logical, &cf_sizes, journal);
 }
 
 fn print_results(
