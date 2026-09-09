@@ -1,0 +1,57 @@
+{
+  "docs/contracts/mempool-policy.md": [
+    [2,6,"The current implementation is described in the\n[policy compatibility ledger](../policies/mempool-policy.md). This page separates\nimplemented admission fences from the proposed unified policy owner. A target\nclause or planned test is not proof of Core 31.1 policy parity.\n"],
+    [9,4,"### `POL-01`: Versioned admission policy (target)\n"],
+    [14,1,"One immutable policy profile should own admission limits and a policy epoch.\nToday policy is assembled from pool limits and caller context; the complete\nversioned `AdmissionPolicy`/`ReadStamp` design is not implemented. Concrete\ncurrent defaults belong to `MempoolLimits` and `StandardnessPolicy`, not a second\ncopy of constants on this page.\n"],
+    [16,1,"### `POL-02`: One admission owner and mode (partial)\n"],
+    [18,2,"`MempoolGateway::admit_transaction` owns verified commit admission. RPC preview\nstill uses the separate package-acceptance evaluator. There is no shared\n`AdmissionMode::{Preview, Commit}` pipeline. Esplora broadcast currently calls\nRPC `sendrawtransaction` and therefore uses its origin and fee limits.\n"],
+    [21,13,"The target is one pipeline for every ingress, explicit origin-specific limits,\nand preview that stops before mutation. Do not claim this wiring is complete.\n"],
+    [35,7,"### `POL-03`: Stale admission evidence must not commit (implemented fence)\n"],
+    [43,1,"Script verification runs outside the pool writer. After every provisional\nverdict, including a policy or script rejection, admission acquires the writer\nand rechecks chain generation and mempool sequence before using that verdict.\nA stale context returns its typed retryable error instead of an obsolete result.\n`gateway.rs::rejected_verdicts_are_rechecked_after_verification` exercises both\nrejection classes against both concurrent changes.\n"],
+    [45,11,"Complete coin metadata, policy epochs, one-pass owner input resolution, and one\nshared cross-ingress retry policy remain targets. Current callers still prepare\nadmission context. This narrower fence does not establish full policy parity.\n"],
+    [57,1,"### `POL-04`: Owner-computed sigop cost (target)\n"],
+    [59,30,"Today `PolicyContext.total_sigop_cost` can be supplied by a caller; omitted\nprevout-dependent cost is not an owner-computed total. The target owner must\ncompute legacy, P2SH, and witness cost from resolved inputs and enforce the\nstandard transaction limit. Boundary tests must cover missing and false caller\ncounts; no such guarantee is claimed for the current ingress paths.\n"],
+    [90,1,"### `POL-05`: Replacement, cluster, and package policy (partial)\n"],
+    [92,6,"Current replacement uses `rbf.rs`'s BIP125 checks and existing cluster limits.\nThe Core 31.1 feerate-diagram replacement profile and TRUC v3 topology rules are\nnot implemented. Version 3 remains non-standard. `submitpackage` remains\nunimplemented. Preserve all-or-nothing replacement and test each future policy\nchange against the pinned product reference rather than treating existing BIP125\nfixtures as proof of the new profile.\n"],
+    [99,1,"### `POL-06`: Preview purity and finality (partial)\n"],
+    [101,17,"Preview is non-mutating but is not the commit verifier: it does not establish\nscript validity. Absolute finality is checked at the next block height. Full\ncoinbase-maturity and BIP68 height/time sequence-lock policy are not implemented\nby this admission path. Those need retained coin metadata, explicit typed\nfailures, and common preview/commit fixtures before promotion to implemented.\n"],
+    [119,1,"## Existing evidence\n"],
+    [121,39,"`gateway.rs` unit tests, `crates/mempool/tests/policy_contract.rs`,\n`rbf_bip125.rs`, `ancestor_limits.rs`, and the RPC policy/transaction tests cover\ntheir named existing behaviors. Planned `overhaul_admission_owner`,\n`overhaul_finality_policy`, and `overhaul_replacement_profile` campaigns do not\nsupply evidence until implemented and run.\n"]
+  ],
+  "docs/contracts/embedding.md": [
+    [2,7,"Owner: `crates/node/src/run.rs::start_node` and `NodeServices::teardown`.\nConsumers: `crates/node/src/embed.rs` and the daemon runner.\n"],
+    [12,3,"`run()` and `Node::start` share startup and teardown. The embedded API does not\nspawn a daemon subprocess or maintain a second service graph.\n"],
+    [16,1,"### `EMB-02`: Ordered teardown\n"],
+    [18,6,"Teardown requests shutdown and wakes the event loop, joins the core services,\ndrains bounded subsystems, joins bootstrap/signal workers, then considers clean\ncheckpoint publication. `join_core_services` owns the detailed order. Bootstrap\nworker joins are not abandoned at the subsystem drain deadline.\n"],
+    [25,1,"### `EMB-03`: Report errors after cleanup\n"],
+    [27,1,"`Node::start` returns a running `Node` after startup, not a shutdown result.\n`Node::shutdown` consumes the node and reports teardown failure; `run()` reports\nit on exit. An earlier join failure does not skip later cleanup: teardown retains\nthe first error and continues. It suppresses clean checkpoint publication.\n"],
+    [29,2,"The async entry points currently execute synchronous startup/shutdown work.\nEmbedders must account for executor blocking; see `embed.rs` runtime ownership.\n"],
+    [32,1,"### `EMB-04`: Startup rollback and clean shutdown\n"],
+    [34,10,"`StartupAbort` never publishes a clean checkpoint. `CleanShutdown` publishes\nonly when preceding cleanup succeeded and an applied tip exists. Taking worker\nhandles and the teardown guard make repeated cleanup a no-op. Drop performs\nbest-effort cleanup; explicit shutdown is the error-reporting path.\n"],
+    [45,1,"### `EMB-05`: In-process RPC\n"],
+    [47,2,"RPC and the embedded API address the same node state and service graph.\n"],
+    [50,1,"### `EMB-06`: Checkpoint recovery remains implemented\n"],
+    [52,4,"A successful clean shutdown calls `NodeState::write_clean_checkpoint`.\nStartup can restore that checkpoint. The proposed checkpoint-independent\n`crates/chainstate` durable-root owner does not exist yet. Checkpoint removal is\na future recovery migration, not current behavior; see [recovery](recovery.md).\n"],
+    [57,1,"### `EMB-07`: Failure evidence\n"],
+    [59,11,"`crates/node/src/run.rs` includes\n`clean_shutdown_publishes_checkpoint_and_returns_success`,\n`teardown_join_failure_completes_cleanup_and_suppresses_checkpoint`, and\n`teardown_joins_bootstrap_worker_beyond_former_deadline`.\n`crates/node/tests/shutdown.rs` exercises the daemon and embedded paths.\nThese tests cover lifecycle behavior, not the proposed durable-root protocol.\n"]
+  ],
+  "docs/contracts/recovery.md": [
+    [2,4,"**Target protocol, not the current startup implementation.** The proposed\n`crates/chainstate` owner and durable-root publication are not integrated.\nCurrent startup/shutdown uses the node checkpoint path; see\n[embedding](embedding.md#emb-06-checkpoint-recovery-remains-implemented).\nThe owner paths and full crash/reorg campaigns below are planned unless marked\nexisting. A proof label is not an executed result.\n\nExisting `crates/storage/tests/overhaul_atomic_durability.rs` covers injected\nbackend faults and clean reopen: whole old/new batches, and errors instead of\nfalse durability receipts. It does not simulate power loss or prove this whole\nnode protocol. `PersistentUtxoSet` is not wired into production node recovery.\n\nThe target has one durable authority; derived components reconcile to it.\n"],
+    [19,1,"The proposed authoritative durable root is:\n"],
+    [39,1,"The proposed persisted form (not an implemented Rust type) is:\n"],
+    [117,1,"The target crash and error points in `docs/chainstate-recovery.md` and\n"],
+    [124,1,"| Append/sync fails before the atomic batch is attempted | Keep the prior root. Synced orphan frames do not authorize a new head. |\n"],
+    [126,1,"| Durable batch ambiguous | Keep the fence closed. Read the recovered `CommitId` and full identity: prior or whole proposed root is possible. Reconcile that result before publication or retry; do not assume rollback. |\n"]
+  ],
+  "docs/benchmarks/p2p-loopback.md": [
+    [8,1,"| `replay.live_ibd_loopback` | current node-owned download window; proposed P2P owner | wall to pinned stop, blocks/s, peak RSS, versus Core `v31.1` fed identical frames | `planned_not_executed` |\n"],
+    [13,1,"| `p2p.optional_off` | `p2p` | with `bip324` and compact filters disabled: no service bits, no negotiation messages, validation equivalence requires a separate comparison | `planned_not_executed` |\n"],
+    [15,7,"The transport comparison is blocked on implementing BIP324. `bip324` is not\nan available Cargo feature, so no enabled/disabled transport campaign is\ncurrently runnable. A future pair needs separately identified artifacts and\nidentical validation inputs; `g19` is not transport-equivalence evidence.\nThe `overhaul_download_owner`, `overhaul_compact_blocks`, and\n`overhaul_optional_protocols` test targets are planned and do not exist today.\nCurrent wire checks run with `cargo test -p bitcoin-rs-p2p --test core_compat`.\n"]
+  ],
+  "docs/benchmarks/muhash-rpc.md": [
+    [3,0,"\n## Current evidence boundary\n\nThe controller checks each reply against the frozen configuration's expected\nvalues. Configuration is a declared expectation, not an independently certified\nCore oracle: a campaign must separately attest how those values were obtained.\nThe production query does not yet own one atomic UTXO/tip `ReadStamp`; the\ncoherent, bounded, cancellable query described below is a target, not a guarantee.\n"],
+    [21,1,"The target query is bounded and isolated from validation resources; that read fence and quota ownership are not implemented today. Result rendering keeps integer satoshis internally and Core's exact external units.\n"]
+  ],
+  "docs/contracts/indexing.md": [[7,1,"Current runtime ownership is `crates/node/src/txindex_worker.rs`. The index-local\nruntime and unified query fences below are targets. The capability adapter now\nprojects the attached worker's wake revision, but that diagnostic counter is not\nan atomic snapshot or proof that separately read capability rows are coherent.\n\nTarget owners:\n"]],
+  "docs/contracts/muhash-rpc.md": [[43,0,"\n**Target, not implemented by the current handler.** It scans UTXOs and obtains\nheight/best-block separately. Existing digest fixtures do not prove a non-torn\nanswer under a concurrent transition. The required change and evidence are:\n"]]
+}
