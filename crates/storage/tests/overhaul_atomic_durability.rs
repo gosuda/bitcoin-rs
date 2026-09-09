@@ -1,67 +1,83 @@
-//! Atomic-durability proofs for the storage ladder under injected
-//! persistence faults.
+//! Storage fault-injection coverage for RCV-03 and RCV-04 in
+//! `docs/contracts/recovery.md`.
 //!
-//! Every fault in [`PersistFault`] is armed at each persistence boundary and
-//! fired against a multi-family batch spanning three column families. After
-//! the faulted call and a reopen, each family must hold either the complete
-//! pre-batch or the complete post-batch state — never a cross-family mix —
-//! and a durability completion (`Ok` from `write_durable`, `Ok(true)` from
-//! `write_durable_if`, `Ok` from `flush`) must never precede the persisted
-//! write it vouches for.
+//! A reopened batch must be entirely old or entirely new across all families.
+//! Read failures fail the test; they are not evidence of an empty store.
+//! These injected faults and clean reopens do not substitute for process-death
+//! or power-loss testing of the complete chainstate commit protocol.
 
 #![expect(clippy::expect_used, reason = "test assertions")]
 
-use bitcoin_rs_storage::{ColumnFamily, KvStore, PersistFault, WriteBatch, WriteCondition};
-use std::fmt;
+use bitcoin_rs_storage::{
+    ColumnFamily, KvStore, PersistFault, StorageError, WriteBatch, WriteCondition,
+};
 use std::path::Path;
 
-const FAMILIES: [ColumnFamily; 3] = [
-    ColumnFamily::TxConfirmed,
-    ColumnFamily::Funding,
-    ColumnFamily::Spending,
+const ROWS: [(ColumnFamily, &[u8]); 3] = [
+    (ColumnFamily::TxConfirmed, &[0]),
+    (ColumnFamily::Funding, &[1]),
+    (ColumnFamily::Spending, &[2]),
 ];
 
-/// One family's observed rows at a point in the fault protocol.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FamilyState {
-    rows: Vec<(Vec<u8>, Vec<u8>)>,
-}
+// The txindex adapter requires a fixed-width TxConfirmed key.
+const TXINDEX_ROWS: [(ColumnFamily, &[u8]); 2] = [
+    (ColumnFamily::UtxoMeta, b"meta"),
+    (ColumnFamily::TxConfirmed, &[7; 12]),
+];
 
-impl fmt::Display for FamilyState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} rows: ", self.rows.len())?;
-        for (key, value) in &self.rows {
-            write!(f, "{key:02x?}->{value:02x?}, ")?;
-        }
-        Ok(())
-    }
-}
+type FamilyState = Vec<(Vec<u8>, Vec<u8>)>;
 
-fn snapshot_all(store: &impl KvStore) -> Vec<FamilyState> {
-    FAMILIES
-        .iter()
-        .map(|cf| {
-            let mut rows = Vec::new();
-            if let Ok(iter) = store.iter_prefix(*cf, b"") {
-                for (key, value) in iter.flatten() {
-                    rows.push((key, value));
-                }
-            }
-            FamilyState { rows }
+fn snapshot_all(store: &impl KvStore, rows: &[(ColumnFamily, &[u8])]) -> Vec<FamilyState> {
+    rows.iter()
+        .map(|(cf, _)| {
+            let mut observed = store
+                .iter_prefix(*cf, b"")
+                .expect("open recovery iterator")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read every recovery row");
+            observed.sort();
+            observed
         })
         .collect()
 }
 
-/// A one-row-per-family batch tagged `label`; family index is the key.
-fn multi_family_batch<S: KvStore>(store: &S, label: &[u8]) -> S::WriteBatch {
+fn expected_state(rows: &[(ColumnFamily, &[u8])], value: &[u8]) -> Vec<FamilyState> {
+    rows.iter()
+        .map(|(_, key)| vec![(key.to_vec(), value.to_vec())])
+        .collect()
+}
+
+fn batch<S: KvStore>(store: &S, rows: &[(ColumnFamily, &[u8])], value: &[u8]) -> S::WriteBatch {
     let mut batch = store.new_batch();
-    for (index, cf) in FAMILIES.iter().enumerate() {
-        batch.put(*cf, &[u8::try_from(index).unwrap_or(0)], label);
+    for (cf, key) in rows {
+        batch.put(*cf, key, value);
     }
     batch
 }
 
-/// One write route through the ladder.
+fn assert_atomic_recovery(
+    observed: &[FamilyState],
+    old: &[FamilyState],
+    proposed: &[FamilyState],
+    label: &str,
+) {
+    assert!(
+        observed == old || observed == proposed,
+        "{label}: mixed batch: observed={observed:?}, old={old:?}, proposed={proposed:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "mixed batch")]
+fn recovery_checker_rejects_cross_family_mixture() {
+    let old = expected_state(&ROWS, b"old");
+    let proposed = expected_state(&ROWS, b"new");
+    let mut mixed = old.clone();
+    mixed[1].clone_from(&proposed[1]);
+    assert_atomic_recovery(&mixed, &old, &proposed, "checker regression");
+}
+
+#[derive(Debug)]
 enum Route {
     Write,
     WriteDurable,
@@ -70,12 +86,35 @@ enum Route {
 }
 
 impl Route {
-    fn label(&self) -> &'static str {
+    fn apply<S: KvStore>(
+        &self,
+        store: &S,
+        batch: S::WriteBatch,
+        guard_family: ColumnFamily,
+    ) -> Result<(), StorageError> {
         match self {
-            Self::Write => "write",
-            Self::WriteDurable => "write_durable",
-            Self::WriteDurableIf => "write_durable_if",
-            Self::FlushDeferred => "write_deferred+flush",
+            Self::Write => store.write(batch),
+            Self::WriteDurable => store.write_durable(batch),
+            Self::WriteDurableIf => store
+                .write_durable_if(
+                    &[WriteCondition::Absent {
+                        cf: guard_family,
+                        key: &[0xff],
+                    }],
+                    batch,
+                )
+                .map(|committed| assert!(committed, "the absent-key guard must match")),
+            Self::FlushDeferred => store.write_deferred(batch).and_then(|()| store.flush()),
+        }
+    }
+
+    fn completion_fault(&self, fault: PersistFault) -> bool {
+        match self {
+            Self::WriteDurable | Self::WriteDurableIf => {
+                matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
+            }
+            Self::FlushDeferred => fault == PersistFault::FailFlush,
+            Self::Write => false,
         }
     }
 }
@@ -90,121 +129,71 @@ const FAULTS: [PersistFault; 7] = [
     PersistFault::LostFlush,
 ];
 
-fn fault_name(fault: PersistFault) -> &'static str {
-    match fault {
-        PersistFault::FailApply => "FailApply",
-        PersistFault::LostApply => "LostApply",
-        PersistFault::PartialApply => "PartialApply",
-        PersistFault::FailSync => "FailSync",
-        PersistFault::LostSync => "LostSync",
-        PersistFault::FailFlush => "FailFlush",
-        PersistFault::LostFlush => "LostFlush",
-    }
-}
-
 #[test]
 #[cfg(feature = "fjall")]
 fn fjall_injected_faults_never_mix_families() {
-    run_fault_matrix("fjall", |path| bitcoin_rs_storage::FjallStore::open(path));
+    run_fault_matrix("fjall", bitcoin_rs_storage::FjallStore::open, &ROWS);
 }
 
 #[test]
 #[cfg(feature = "redb")]
 fn redb_injected_faults_never_mix_families() {
-    run_fault_matrix("redb", |path| bitcoin_rs_storage::RedbStore::open(path));
+    run_fault_matrix("redb", bitcoin_rs_storage::RedbStore::open, &ROWS);
 }
 
 #[test]
 #[cfg(feature = "rocksdb")]
 fn rocksdb_injected_faults_never_mix_families() {
-    run_fault_matrix("rocksdb", |path| {
-        bitcoin_rs_storage::RocksDbStore::open(path)
-    });
+    run_fault_matrix("rocksdb", bitcoin_rs_storage::RocksDbStore::open, &ROWS);
 }
 
 #[test]
 #[cfg(feature = "mdbx")]
 fn mdbx_injected_faults_never_mix_families() {
-    run_fault_matrix("mdbx", |path| bitcoin_rs_storage::MdbxStore::open(path));
+    run_fault_matrix("mdbx", bitcoin_rs_storage::MdbxStore::open, &ROWS);
 }
 
-/// The txindex store serves fixed-width physical tables, so its batch uses
-/// one `UtxoMeta` row (arbitrary bytes) plus one 12-byte `TxConfirmed` row; both
-/// families must still recover whole.
 #[test]
 #[cfg(feature = "redb")]
 fn redb_txindex_injected_faults_never_mix_families() {
-    let routes = [
+    run_fault_matrix(
+        "redb-txindex",
+        bitcoin_rs_storage::open_redb_tx_index_store,
+        &TXINDEX_ROWS,
+    );
+}
+
+fn run_fault_matrix<S, F>(backend: &str, open: F, rows: &[(ColumnFamily, &[u8])])
+where
+    S: KvStore,
+    F: Fn(&Path) -> Result<S, StorageError>,
+{
+    let old = expected_state(rows, b"old");
+    let proposed = expected_state(rows, b"new");
+    for route in [
+        Route::Write,
         Route::WriteDurable,
         Route::WriteDurableIf,
         Route::FlushDeferred,
-    ];
-    for route in &routes {
+    ] {
         for fault in FAULTS {
             let dir = tempfile::tempdir().expect("tempdir");
-            let path = dir.path().to_path_buf();
-            let label = format!("redb-txindex/{}/{})", route.label(), fault_name(fault));
-
-            // Seed old state.
+            let label = format!("{backend}/{route:?}/{fault:?}");
             {
-                let store =
-                    bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("open for seed");
-                let mut batch = store.new_batch();
-                batch.put(ColumnFamily::UtxoMeta, b"meta", b"old");
-                batch.put(ColumnFamily::TxConfirmed, &[7_u8; 12], b"old");
-                store.write_durable(batch).expect("seed write");
+                let store = open(dir.path()).expect("open for seed");
+                store
+                    .write_durable(batch(&store, rows, b"old"))
+                    .expect("seed write");
+                assert_eq!(snapshot_all(&store, rows), old, "{label}: seed state");
             }
-
-            // Arm and fire.
             let outcome = {
-                let store =
-                    bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("reopen to arm");
+                let store = open(dir.path()).expect("reopen to arm");
                 store.arm_persist_fault(fault);
-                let mut batch = store.new_batch();
-                batch.put(ColumnFamily::UtxoMeta, b"meta", b"new");
-                batch.put(ColumnFamily::TxConfirmed, &[7_u8; 12], b"new");
-                match route {
-                    Route::WriteDurable => store.write_durable(batch),
-                    Route::WriteDurableIf => store
-                        .write_durable_if(
-                            &[WriteCondition::Absent {
-                                cf: ColumnFamily::UtxoMeta,
-                                key: &[0xff],
-                            }],
-                            batch,
-                        )
-                        .map(|_| ()),
-                    Route::FlushDeferred => {
-                        store.write_deferred(batch).and_then(|()| store.flush())
-                    }
-                    Route::Write => unreachable!("write route excluded above"),
-                }
+                route.apply(&store, batch(&store, rows, b"new"), rows[0].0)
             };
-
-            // Reopen and classify both families.
-            let store =
-                bitcoin_rs_storage::open_redb_tx_index_store(&path).expect("reopen to inspect");
-            let meta = store
-                .get(ColumnFamily::UtxoMeta, b"meta")
-                .expect("read meta");
-            let confirmed = store
-                .get(ColumnFamily::TxConfirmed, &[7_u8; 12])
-                .expect("read confirmed");
-            let both_old = meta.as_deref() == Some(b"old") && confirmed.as_deref() == Some(b"old");
-            let both_new = meta.as_deref() == Some(b"new") && confirmed.as_deref() == Some(b"new");
-            assert!(
-                both_old || both_new,
-                "{label}: families recovered as a mix: meta={meta:?} confirmed={confirmed:?}"
-            );
-
-            let completion_fault = match route {
-                Route::WriteDurable | Route::WriteDurableIf => {
-                    matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
-                }
-                Route::FlushDeferred => fault == PersistFault::FailFlush,
-                Route::Write => false,
-            };
-            if completion_fault {
+            let store = open(dir.path()).expect("reopen to inspect");
+            assert_atomic_recovery(&snapshot_all(&store, rows), &old, &proposed, &label);
+            if route.completion_fault(fault) {
                 assert!(
                     outcome.is_err(),
                     "{label}: durable route reported success on a faulted completion"
@@ -214,108 +203,6 @@ fn redb_txindex_injected_faults_never_mix_families() {
     }
 }
 
-/// The full route × fault matrix: seed the old state durably, arm one fault,
-/// fire one route, reopen, and classify every family as entirely-old or
-/// entirely-new.
-fn run_fault_matrix<S, F>(backend: &str, open: F)
-where
-    S: KvStore,
-    F: Fn(&Path) -> Result<S, bitcoin_rs_storage::StorageError> + Copy,
-{
-    let routes = [
-        Route::Write,
-        Route::WriteDurable,
-        Route::WriteDurableIf,
-        Route::FlushDeferred,
-    ];
-    for route in &routes {
-        for fault in FAULTS {
-            let dir = tempfile::tempdir().expect("tempdir");
-            one_scenario(backend, open, dir.path(), fault, route);
-        }
-    }
-}
-
-fn one_scenario<S, F>(backend: &str, open: F, path: &Path, fault: PersistFault, route: &Route)
-where
-    S: KvStore,
-    F: Fn(&Path) -> Result<S, bitcoin_rs_storage::StorageError>,
-{
-    let label = format!("{backend}/{}/{})", route.label(), fault_name(fault));
-
-    // Seed the old state durably.
-    let old = {
-        let store = open(path).expect("open for seed");
-        store
-            .write_durable(multi_family_batch(&store, b"old"))
-            .expect("seed write");
-        snapshot_all(&store)
-    };
-
-    // Arm and fire.
-    let outcome = {
-        let store = open(path).expect("reopen to arm");
-        store.arm_persist_fault(fault);
-        let batch = multi_family_batch(&store, b"new");
-        match route {
-            Route::Write => store.write(batch),
-            Route::WriteDurable => store.write_durable(batch),
-            Route::WriteDurableIf => store
-                .write_durable_if(
-                    &[WriteCondition::Absent {
-                        cf: FAMILIES[0],
-                        key: &[0xff],
-                    }],
-                    batch,
-                )
-                .map(|_| ()),
-            Route::FlushDeferred => store.write_deferred(batch).and_then(|()| store.flush()),
-        }
-    };
-
-    // Reopen and classify each family.
-    let after = {
-        let store = open(path).expect("reopen to inspect");
-        snapshot_all(&store)
-    };
-    for (index, (before, later)) in old.iter().zip(after.iter()).enumerate() {
-        let is_old = before == later;
-        let mut expected_new = FamilyState {
-            rows: before
-                .rows
-                .iter()
-                .map(|(key, _)| (key.clone(), b"new".to_vec()))
-                .collect(),
-        };
-        expected_new.rows.sort();
-        let mut later_sorted = later.clone();
-        later_sorted.rows.sort();
-        let is_new = later_sorted == expected_new;
-        assert!(
-            is_old || is_new,
-            "{label}: family {index} recovered as a mix: {later} (was {before})"
-        );
-    }
-
-    // Completion honesty: routes that promise durability never report success
-    // when the durability step faulted.
-    let reported_success = outcome.is_ok();
-    let completion_fault = match route {
-        Route::WriteDurable | Route::WriteDurableIf => {
-            matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
-        }
-        Route::FlushDeferred => fault == PersistFault::FailFlush,
-        Route::Write => false,
-    };
-    if completion_fault {
-        assert!(
-            !reported_success,
-            "{label}: durable route reported success on a faulted completion"
-        );
-    }
-}
-
-/// A condition mismatch applies zero rows and consumes no armed fault.
 #[test]
 #[cfg(feature = "fjall")]
 fn fjall_condition_mismatch_applies_nothing_and_consumes_no_fault() {
@@ -350,65 +237,40 @@ fn rocksdb_condition_mismatch_applies_nothing_and_consumes_no_fault() {
 
 fn assert_mismatch_applies_nothing_and_consumes_no_fault<S: KvStore>(store: &S) {
     store
-        .write_durable(multi_family_batch(store, b"old"))
+        .write_durable(batch(store, &ROWS, b"old"))
         .expect("seed");
-
-    // Arm an apply fault that must never be consulted: the mismatch returns
-    // before any persistence boundary.
     store.arm_persist_fault(PersistFault::FailApply);
-
     let committed = store
         .write_durable_if(
             &[WriteCondition::Equals {
-                cf: FAMILIES[0],
-                key: &[0],
+                cf: ROWS[0].0,
+                key: ROWS[0].1,
                 expected: b"not-the-seeded-value",
             }],
-            multi_family_batch(store, b"new"),
+            batch(store, &ROWS, b"new"),
         )
         .expect("condition evaluation must not error");
     assert!(!committed, "condition mismatch must report Ok(false)");
+    assert_eq!(snapshot_all(store, &ROWS), expected_state(&ROWS, b"old"));
 
-    for (index, cf) in FAMILIES.iter().enumerate() {
-        let observed = store
-            .get(*cf, &[u8::try_from(index).unwrap_or(0)])
-            .expect("read")
-            .expect("row exists");
-        assert_eq!(
-            observed,
-            b"old".to_vec(),
-            "family {index} observed batch effects from a mismatched conditional write"
-        );
-    }
-
-    // The armed fault is still live for a later matching call.
     let outcome = store.write_durable_if(
         &[WriteCondition::Equals {
-            cf: FAMILIES[0],
-            key: &[0],
+            cf: ROWS[0].0,
+            key: ROWS[0].1,
             expected: b"old",
         }],
-        multi_family_batch(store, b"newer"),
+        batch(store, &ROWS, b"newer"),
     );
-    assert!(
-        outcome.is_err(),
-        "the armed FailApply fault must fire on the matching conditional write"
-    );
+    assert!(outcome.is_err(), "the matching call must consume FailApply");
 }
 
-/// `FailApply` is contract-mandated to return `Err` with nothing applied on
-/// every write path of every backend; this pins the seam wiring on the plain
-/// `write` route the fault matrix deliberately excludes.
 #[test]
 #[cfg(feature = "rocksdb")]
 fn rocksdb_fail_apply_errors_on_plain_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("open");
     store.arm_persist_fault(PersistFault::FailApply);
-    assert!(
-        store.write(multi_family_batch(&store, b"new")).is_err(),
-        "FailApply must return Err on the plain write route"
-    );
+    assert!(store.write(batch(&store, &ROWS, b"new")).is_err());
 }
 
 #[test]
@@ -417,36 +279,26 @@ fn mdbx_fail_apply_errors_on_plain_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = bitcoin_rs_storage::MdbxStore::open(dir.path()).expect("open");
     store.arm_persist_fault(PersistFault::FailApply);
-    assert!(
-        store.write(multi_family_batch(&store, b"new")).is_err(),
-        "FailApply must return Err on the plain write route"
-    );
+    assert!(store.write(batch(&store, &ROWS, b"new")).is_err());
 }
 
-/// Snapshots are coherent across a batch commit while held.
 #[test]
 #[cfg(feature = "fjall")]
 fn fjall_snapshot_is_coherent_across_batch_commit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = bitcoin_rs_storage::FjallStore::open(dir.path()).expect("open");
     store
-        .write_durable(multi_family_batch(&store, b"before"))
+        .write_durable(batch(&store, &ROWS, b"before"))
         .expect("seed");
-
     let snapshot = store.snapshot().expect("snapshot");
     store
-        .write(multi_family_batch(&store, b"after"))
+        .write(batch(&store, &ROWS, b"after"))
         .expect("commit while held");
-
-    for (index, cf) in FAMILIES.iter().enumerate() {
+    for (cf, key) in ROWS {
         let observed = snapshot
-            .get(*cf, &[u8::try_from(index).unwrap_or(0)])
+            .get(cf, key)
             .expect("snapshot read")
             .expect("row exists");
-        assert_eq!(
-            observed,
-            b"before".to_vec(),
-            "snapshot mixed pre- and post-batch rows in family {index}"
-        );
+        assert_eq!(observed, b"before", "snapshot mixed pre- and post-batch rows");
     }
 }
