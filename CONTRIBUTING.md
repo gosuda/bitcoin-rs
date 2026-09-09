@@ -5,8 +5,7 @@ workflow, coding standards, and verification commands used across the project.
 
 ## Prerequisites
 
-- Use the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
-  (currently 1.95.0, Rust 2024 edition), matching CI.
+- Use the current stable Rust toolchain (Rust 2024 edition).
 - Install C/C++ build tools for native dependencies such as ZeroMQ. The default
   binary excludes `libbitcoinkernel`, but this does not make every dependency
   Rust-only.
@@ -17,16 +16,22 @@ workflow, coding standards, and verification commands used across the project.
 - The PR comparator tests use Python 3.13. Fuzzing and dependency/feature
   matrix checks also need the tools described in the main workflow below.
 
-Install tools:
+From the repository root, install and select stable:
 
 ```sh
-rustup toolchain install 1.95.0 --component rustfmt --component clippy
+rustup toolchain install stable --component rustfmt --component clippy
+rustup override set stable
 cargo install --locked cargo-deny
 ```
 
-Run the commands below from the repository root. Start with the affected
-package or test while developing, then run the applicable CI checks before
-submitting. The workflow files define the complete job set.
+The directory override makes the local Cargo commands below use stable even
+when [`rust-toolchain.toml`](rust-toolchain.toml) selects another toolchain.
+Explicit `+nightly` commands still use nightly. CI jobs and pre-commit hooks
+select their own toolchains.
+
+Start with the affected package or test while developing, then run the
+applicable CI checks before submitting. The workflow files define the complete
+job set.
 
 ## Pull-request verification
 
