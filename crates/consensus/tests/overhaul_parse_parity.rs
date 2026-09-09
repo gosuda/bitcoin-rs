@@ -434,9 +434,14 @@ fn mutated_tree_flags_merkle_mutation_while_unmutated_passes() {
         facts.merkle_mutated(),
         "equal real siblings must flag mutation"
     );
-    let error =
-        verify_block_rules_precomputed(&mutated, BlockRuleContext::non_contextual(), &facts)
-            .expect_err("mutated tree must be rejected");
+    let error = verify_block_rules_precomputed(
+        &mutated,
+        BlockRuleContext::non_contextual(),
+        facts.txids(),
+        facts.wtxids().unwrap_or_default(),
+        facts.has_witness(),
+    )
+    .expect_err("mutated tree must be rejected");
     assert!(
         matches!(error, ConsensusError::MerkleMutation),
         "expected MerkleMutation, got {error:?}"
@@ -445,8 +450,14 @@ fn mutated_tree_flags_merkle_mutation_while_unmutated_passes() {
     // Control: the untouched two-transaction fixture stays valid through the
     // same rules entry.
     let control_facts = BlockFacts::from_txids(&base.txs, base.txs.iter().map(Tx::txid).collect());
-    verify_block_rules_precomputed(&base, BlockRuleContext::non_contextual(), &control_facts)
-        .unwrap_or_else(|error| panic!("valid fixture must pass rules: {error:?}"));
+    verify_block_rules_precomputed(
+        &base,
+        BlockRuleContext::non_contextual(),
+        control_facts.txids(),
+        control_facts.wtxids().unwrap_or_default(),
+        control_facts.has_witness(),
+    )
+    .unwrap_or_else(|error| panic!("valid fixture must pass rules: {error:?}"));
 }
 
 #[test]
