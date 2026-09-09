@@ -515,6 +515,19 @@ fn apalache_tool_and_inventory_are_pinned() {
 }
 
 #[test]
+fn jvm_heap_default_matches_the_register() {
+    let register = fs::read_to_string(workspace_root().join(CONSTRAINTS))
+        .expect("read CONSTRAINTS.md for the Solver row");
+    let Some(row) = register.lines().find(|line| line.starts_with("| Solver |")) else {
+        panic!("g20: CONSTRAINTS.md carries no Solver row (skill rc 11)");
+    };
+    assert!(
+        row.contains(JVM_ARGS_DEFAULT),
+        "g20: gate JVM default {JVM_ARGS_DEFAULT} drifted from the CONSTRAINTS.md Solver row: {row}"
+    );
+}
+
+#[test]
 fn all_model_specs_check_with_apalache() {
     let home = verify_tool_identity();
     let _inventory = verify_proof_inventory();
