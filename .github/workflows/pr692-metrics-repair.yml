@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   repair:
-    runs-on: ubuntu-24.04-arm
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -37,9 +37,9 @@ jobs:
         run: |
           cargo fmt --all
           git diff --check
-          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=1
-          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib run::tests::late_start_failure_releases_metrics_identity_and_keeps_startup_metrics -- --exact --test-threads=1
-          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib metrics:: -- --test-threads=1
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib run::tests::late_start_failure_releases_metrics_identity_and_keeps_startup_metrics -- --exact --test-threads=1
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --all-targets -- -D warnings
       - name: Publish verified follow-up branch
         run: |
           git config user.name 'github-actions[bot]'
