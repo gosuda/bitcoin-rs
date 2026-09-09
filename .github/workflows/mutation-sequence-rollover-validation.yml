@@ -1,0 +1,199 @@
+name: mutation-sequence-rollover-validation
+
+on:
+  push:
+    branches: [validation/mutation-sequence-rollover-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mutation-sequence-rollover-validation
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  rollover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: b9430763f80f0d7f193d80d094863789d2c84e4d
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          shared-key: mutation-rollover
+      - name: Add the owner regression and require it to fail before the fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/rollover-evidence"
+          rustc --version | tee "$RUNNER_TEMP/rollover-evidence/toolchain.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          expected = {
+              'crates/mempool/src/pool.rs': 'f45739921f96aa2e392f056ec08cf3012e401da8',
+              'crates/mempool/src/mutation.rs': '301a0178192f120bed3ea0b265435ce8758a4199',
+              'docs/contracts/mempool-mutations.md': 'd7a4392cd081076c783ec518f2a22eb11f299751',
+          }
+          for path, blob in expected.items():
+              actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+              if actual != blob:
+                  raise SystemExit(f'preimage moved for {path}: {actual} != {blob}')
+          p = Path('crates/mempool/src/pool.rs')
+          text = p.read_text()
+          if not text.endswith('}\n'):
+              raise SystemExit('unexpected pool test-module ending')
+          test = r'''
+
+    // MPL-02: sequence assignment is modulo 2^64 across one committed batch.
+    #[test]
+    fn mutation_sequence_rolls_over_without_losing_in_batch_sequences() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.mempool_sequence = u64::MAX - 1;
+        let first = txid_of([0x71; 32]);
+        let second = txid_of([0x72; 32]);
+        let mut changes = Vec::new();
+        pool.push_change(&mut changes, first, MutationOutcome::Accepted);
+        pool.push_change(
+            &mut changes,
+            second,
+            MutationOutcome::Removed(RemovalReason::Clear),
+        );
+
+        let result = pool.finish_mutation(changes);
+        assert_eq!(pool.sequence_number(), 0);
+        assert_eq!(result.sequence_base, u64::MAX);
+        assert_eq!(result.sequence_of(0), Some(u64::MAX));
+        assert_eq!(result.sequence_of(1), Some(0));
+        assert_eq!(result.sequence_of(2), None);
+    }
+'''
+          p.write_text(text[:-2] + test + '}\n')
+          PY
+          rustfmt --edition 2024 crates/mempool/src/pool.rs
+          set +e
+          cargo test --locked -p bitcoin-rs-mempool --lib mutation_sequence_rolls_over_without_losing_in_batch_sequences -- --nocapture > "$RUNNER_TEMP/rollover-evidence/red.log" 2>&1
+          status=$?
+          set -e
+          tail -n 100 "$RUNNER_TEMP/rollover-evidence/red.log"
+          test "$status" -ne 0
+          grep -q 'test result: FAILED' "$RUNNER_TEMP/rollover-evidence/red.log"
+          grep -q 'mutation_sequence_rolls_over_without_losing_in_batch_sequences' "$RUNNER_TEMP/rollover-evidence/red.log"
+      - name: Apply one wrapping contract to assignment, batch construction, and lookup
+        id: fixed
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected one preimage in {path}: {old!r}; found {text.count(old)}')
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'crates/mempool/src/pool.rs',
+              '.map_or(0, |_| self.mempool_sequence - batch_len + 1);',
+              '.map_or(0, |_| {\n                self.mempool_sequence\n                    .wrapping_sub(batch_len)\n                    .wrapping_add(1)\n            });',
+          )
+          replace_once(
+              'crates/mempool/src/mutation.rs',
+              '        self.sequence_base.checked_add(offset)\n',
+              '        Some(self.sequence_base.wrapping_add(offset))\n',
+          )
+          replace_once(
+              'crates/mempool/src/mutation.rs',
+              '    /// the write lock, so a batch\'s sequences are contiguous.\n',
+              '    /// the write lock, so a batch\'s sequences are contiguous modulo `2^64`.\n'
+              '    /// A non-empty batch may therefore have sequence zero after rollover.\n',
+          )
+          replace_once(
+              'docs/contracts/mempool-mutations.md',
+              '- `Mempool::sequence_number` advances exactly once per emitted change while\n'
+              '  the write lock is held. A failed insert, a no-op removal, and a clear of\n'
+              '  an empty pool assign nothing.\n',
+              '- `Mempool::sequence_number` advances exactly once per emitted change while\n'
+              '  the write lock is held, wrapping modulo `2^64`. Batch-base reconstruction\n'
+              '  and `MutationResult::sequence_of` use the same wrapping arithmetic, so a\n'
+              '  batch crossing `u64::MAX -> 0` retains every assigned sequence. A failed\n'
+              '  insert, a no-op removal, and a clear of an empty pool assign nothing.\n',
+          )
+          marker = '- `crates/mempool/src/gateway.rs` (inline tests):\n'
+          p = Path('docs/contracts/mempool-mutations.md')
+          text = p.read_text()
+          if marker not in text:
+              raise SystemExit('proof inventory marker moved')
+          proof = '- `crates/mempool/src/pool.rs` (inline tests):\n  `mutation_sequence_rolls_over_without_losing_in_batch_sequences`.\n'
+          p.write_text(text.replace(marker, proof + marker, 1))
+          PY
+          rustfmt --edition 2024 crates/mempool/src/pool.rs crates/mempool/src/mutation.rs
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'crates/mempool/src/pool.rs', 'crates/mempool/src/mutation.rs', 'docs/contracts/mempool-mutations.md'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f'unexpected source scope: {actual ^ expected}')
+          PY
+          git diff > "$RUNNER_TEMP/rollover-evidence/candidate.patch"
+          cargo test --locked -p bitcoin-rs-mempool --lib mutation_sequence_rolls_over_without_losing_in_batch_sequences -- --nocapture | tee "$RUNNER_TEMP/rollover-evidence/green-focused.log"
+      - name: Mempool suite and downstream sequence consumers
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-mempool --lib > "$RUNNER_TEMP/rollover-evidence/mempool.log" 2>&1 || status=1
+          tail -n 35 "$RUNNER_TEMP/rollover-evidence/mempool.log"
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test mining > "$RUNNER_TEMP/rollover-evidence/mining.log" 2>&1 || status=1
+          tail -n 40 "$RUNNER_TEMP/rollover-evidence/mining.log"
+          cargo test --locked -p bitcoin-rs-rpc --no-default-features --lib zmq:: > "$RUNNER_TEMP/rollover-evidence/zmq.log" 2>&1 || status=1
+          tail -n 40 "$RUNNER_TEMP/rollover-evidence/zmq.log"
+          exit "$status"
+      - name: All three strict Clippy profiles and formatting
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings > "$RUNNER_TEMP/rollover-evidence/clippy-workspace.log" 2>&1 || status=1
+          tail -n 60 "$RUNNER_TEMP/rollover-evidence/clippy-workspace.log"
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings > "$RUNNER_TEMP/rollover-evidence/clippy-consensus.log" 2>&1 || status=1
+          tail -n 60 "$RUNNER_TEMP/rollover-evidence/clippy-consensus.log"
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings > "$RUNNER_TEMP/rollover-evidence/clippy-node.log" 2>&1 || status=1
+          tail -n 60 "$RUNNER_TEMP/rollover-evidence/clippy-node.log"
+          cargo fmt --all -- --check > "$RUNNER_TEMP/rollover-evidence/fmt.log" 2>&1 || status=1
+          tail -n 30 "$RUNNER_TEMP/rollover-evidence/fmt.log"
+          exit "$status"
+      - name: Publish source-only candidate
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/mempool/src/pool.rs crates/mempool/src/mutation.rs docs/contracts/mempool-mutations.md
+          git commit -m 'fix(mempool): make mutation sequence rollover coherent'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/rollover-evidence/candidate-sha.txt"
+          git ls-tree HEAD crates/mempool/src/pool.rs crates/mempool/src/mutation.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/rollover-evidence/blobs.txt"
+          git push origin HEAD:refs/heads/followup/mutation-sequence-rollover
+      - name: Preserve validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mutation-sequence-rollover-evidence
+          path: ${{ runner.temp }}/rollover-evidence
+          retention-days: 3
+          if-no-files-found: error
