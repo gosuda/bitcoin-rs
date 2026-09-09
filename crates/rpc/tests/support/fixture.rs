@@ -922,9 +922,9 @@ mod tests {
         Ok(())
     }
 
-    /// API-07: a release or kernel version cannot relabel an old capture.
+    /// API-07: only the pinned Core version can identify this capture.
     #[test]
-    fn corpus_rejects_stale_or_empty_core_version() -> Result<(), Box<dyn std::error::Error>> {
+    fn corpus_rejects_non_pinned_core_version() -> Result<(), Box<dyn std::error::Error>> {
         for version in ["31.0.0", "31.99.0", ""] {
             let mut fixture = captured_fixture()?;
             fixture["provenance"]["core_version"] = Value::from(version);
