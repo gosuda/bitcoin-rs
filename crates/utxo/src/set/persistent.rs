@@ -237,6 +237,11 @@ impl<S: KvStore> PersistentUtxoSet<S> {
         }
         changes.retain(|change| change.before != change.after);
         self.persist_changed(&changes, mode)?;
+        // Durable writes (including guarded durable writes) also complete every
+        // earlier deferred write, so none of their before-images remain pinned.
+        if mode != CoinDurability::Deferred {
+            state.retained_before_images.clear();
+        }
         for change in changes {
             if mode == CoinDurability::Deferred {
                 state
