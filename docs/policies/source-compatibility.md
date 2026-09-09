@@ -44,6 +44,12 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
   2. Compilation and verification across all four storage backend features (`fjall`, `rocksdb`, `mdbx`, `redb`).
   3. Verification against the `kernel` consensus feature path.
 
+### 3.3 TLS Transport and Crypto Providers
+- Every TLS path uses Rustls with default features disabled and a reviewed non-C crypto provider.
+- Do not enable or transitively admit AWS-LC, ring, OpenSSL, native TLS, or platform TLS as an unreviewed transport or crypto-provider path.
+- Keep `deny.toml` aligned with this policy so the prohibited native-TLS and C-provider dependency family cannot re-enter through adapter or default features.
+- A TLS dependency or feature change requires reviewing the full transitive provider graph, not only the direct crate declaration.
+
 ## 4. Workspace Versioning and Semver Commitment
 
 All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.5.0`).
