@@ -291,3 +291,47 @@ fn every_deviation_entry_states_its_deviation() {
     }
     assert!(deviations > 0, "the manifest must record its deviations");
 }
+
+/// REF-03: product identity comes from the exporter registry, not arbitrary TOML.
+#[test]
+fn noncanonical_corpus_identities_are_rejected() {
+    for (old, new) in [
+        ("stop_height = 150000", "stop_height = 149999"),
+        (
+            "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b",
+            "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884c",
+        ),
+        ("id = \"C150\"", "id = \"unknown\""),
+        ("id = \"Cmodern\"", "id = \"C150\""),
+    ] {
+        assert!(
+            matches!(
+                load_reference_set(&edit_manifest(old, new)),
+                Err(ReferenceError::CorpusIdentityMismatch { .. })
+            ),
+            "{new}"
+        );
+    }
+}
+
+/// REF-02: a distinct label is not necessarily a kernel development version.
+#[test]
+fn kernel_identity_requires_a_31_99_patch_version() {
+    for version in [
+        "nonsense",
+        "31.99",
+        "31.99.",
+        "31.99.x",
+        "31.99.0.1",
+        "32.0.0",
+    ] {
+        let edited = edit_manifest(
+            "core_version = \"31.99.0\"",
+            &format!("core_version = \"{version}\""),
+        );
+        assert_eq!(
+            load_reference_set(&edited),
+            Err(ReferenceError::IdentityConfusion)
+        );
+    }
+}

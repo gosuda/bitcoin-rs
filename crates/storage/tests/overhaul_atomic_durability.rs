@@ -101,13 +101,12 @@ impl Route {
         }
     }
 
-    fn completion_fault(&self, fault: PersistFault) -> bool {
-        match self {
-            Self::WriteDurable | Self::WriteDurableIf => {
-                matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
-            }
-            Self::FlushDeferred => fault == PersistFault::FailFlush,
-            Self::Write => false,
+    fn crosses(&self, boundary: bitcoin_rs_storage::PersistBoundary) -> bool {
+        use bitcoin_rs_storage::PersistBoundary;
+        match boundary {
+            PersistBoundary::Apply => true,
+            PersistBoundary::Sync => matches!(self, Self::WriteDurable | Self::WriteDurableIf),
+            PersistBoundary::Flush => matches!(self, Self::FlushDeferred),
         }
     }
 }
@@ -211,11 +210,18 @@ where
                 route.apply(&store, batch(&store, rows, b"new"), rows[0].0)
             };
             let store = open().expect("reopen to inspect");
-            assert_atomic_recovery(&snapshot_all(&store, rows), &old, &proposed, &label);
-            if route.completion_fault(fault) {
+            let recovered = snapshot_all(&store, rows);
+            assert_atomic_recovery(&recovered, &old, &proposed, &label);
+            if outcome.is_ok() && !matches!(route, Route::Write) {
+                assert_eq!(
+                    recovered, proposed,
+                    "{label}: success acknowledged an absent durable batch"
+                );
+            }
+            if route.crosses(fault.boundary()) {
                 assert!(
                     outcome.is_err(),
-                    "{label}: durable route reported success on a faulted completion"
+                    "{label}: route reported success on an injected fault at its boundary"
                 );
             }
         }

@@ -1,11 +1,21 @@
 # Recovery contract
 
-How the node recovers an authoritative chainstate after a crash, a lost
-write, a reorganization, or an incompatible datadir. `chainstate` is the
-single durable authority. Every other persisted component is derived and
-reconciles to it.
+## Implementation status
 
-Owners:
+This page specifies the **target durable-root protocol**, not the current
+startup implementation. The proposed `crates/chainstate` owner and `DurableHead`
+below do not exist in the runtime. Current startup/shutdown still restores and
+publishes node checkpoints; see [embedding](embedding.md). `PersistentUtxoSet`
+is an isolated persisted-cache API, not an integrated node recovery protocol.
+
+Existing `crates/storage/tests/overhaul_atomic_durability.rs` checks injected
+backend faults and clean reopen: each recovered batch is wholly old or new,
+and a successful durable receipt requires the proposed bytes. It does not
+simulate power loss or prove whole-node recovery. The owner paths and crash,
+reorg, and checkpoint-independence tests below are planned unless they actually
+exist; naming a test here is not evidence that it ran.
+
+Target owners:
 - Authoritative durable root and ordered commit protocol:
   `crates/chainstate/src/transition.rs`
 - Recovery and schema admission: `crates/chainstate/src/recovery.rs`
@@ -17,7 +27,7 @@ Owners:
 
 ## Durable root
 
-The authoritative durable root is:
+The proposed authoritative durable root is:
 
 ```text
 R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs)
@@ -37,7 +47,7 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
   the durable byte range in the corresponding segment file. Undo and body
   references include the block hash, not only the height.
 
-`DurableHead` is the persisted form:
+The proposed persisted form (not an implemented Rust type) is:
 
 ```rust
 struct DurableHead {
@@ -115,16 +125,16 @@ the durable root recovery contract.
 
 ### `RCV-04`: Crash matrix
 
-The crash and error points in `docs/contracts/chainstate-recovery.md` and
+The target crash and error points in `docs/chainstate-recovery.md` and
 `docs/policies/db-migration.md` produce exactly these results:
 
 | Crash or error point | Recovery result |
 |---|---|
 | Body append mid-frame | The in-progress frame is discarded on next start; no durable head references it. |
 | Undo append mid-frame | Same as body append; partial undo is not the authoritative head. |
-| Sync before durable batch | The atomic batch contains only data that reached the OS; any missing body or undo prevents commit. |
+| Append/sync fails before the atomic batch is attempted | Keep the prior root. Even synced orphan frames do not authorize a new head. |
 | Durable batch complete, no publish | Restart sees the new head, coins, and `refs`; mempool and index reconcile. |
-| Durable batch ambiguous | Recovery resolves the ambiguity by `CommitId` and full identity; no mixed head/coins. |
+| Durable batch ambiguous | Keep the fence closed. Recover the prior or whole proposed root by `CommitId` and full identity, then reconcile before publication or retry. Do not assume rollback. |
 | Publication callback lost | The durable root is still authoritative; mempool and index reconcile after restart. |
 | Reorg stage 1: disconnect | Apply the exact per-block inverse; hold the fence until all disconnects commit. |
 | Reorg stage 2: reconnect | Apply the new branch using ordinary connect; each connect advances `CommitId`. |
