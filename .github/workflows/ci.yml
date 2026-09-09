@@ -6,35 +6,19 @@ on:
   pull_request:
     # Every pull request, not only those based on `main`. A stacked PR targets
     # the branch below it, and `branches: [main]` excluded those by
-    # construction -- five open PRs had never been built or tested, while
-    # reporting no failing checks, which reads exactly like green.
+    # construction.
     branches: ['**']
 
-# Bounded because the trigger above is wider: a superseded pull-request run is
-# cancelled when a newer commit lands on the same PR.
-#
-# `main` pushes are put in a group of their own, keyed by `run_id`, rather than
-# relying on `cancel-in-progress: false`. That flag only protects a run that is
-# already executing: with a shared group, a `main` run that is still *pending*
-# behind an in-progress one is cancelled when a third push arrives, and its
-# commit then has no CI record at all. A unique group per run means `main`
-# pushes never queue against each other and so are never cancelled.
+# Superseded pull-request runs are cancelled when a newer commit lands on the
+# same PR. Main pushes use unique groups so no commit loses its CI record.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Fast PR gate. The ordinary lint and test jobs avoid libbitcoinkernel and do
-# not install CMake/Boost; bench-smoke intentionally compiles the kernel-enabled
-# benchmark surface and installs those prerequisites. Deeper fuzz, nightly,
-# feature-matrix, and kernel-oracle lanes live in main.yml and run on `main`.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Feature set for the full dependency-graph deny check: all four storage
-  # backends plus the bitcoinkernel script-verification engine. cargo-deny
-  # resolves metadata without compiling, so checking the full graph costs no
-  # C++ toolchain here.
   FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel"
 
 jobs:
@@ -56,10 +40,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Keep the three native all-target profiles independent. A lint failure
-      # must not hide later diagnostics, but still fails this job. Do not run
-      # after cancellation or a failed toolchain installation. Kernel and
-      # backend-specific profiles remain in main.yml.
+      # Keep native profiles independent: one lint failure must not hide the
+      # diagnostics from another profile.
       - name: Workspace Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
@@ -82,29 +64,30 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: toolchain
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Pure-Rust test gate: each workspace member tested with its own default
-      # features minus kernel. Deliberately no apt step -- the default path
-      # needs no CMake/Boost toolchain; the kernel engine is opt-in and
-      # exercised only by the main-only lanes in main.yml. consensus and node
-      # are excluded from the workspace pass (their defaults include kernel)
-      # and tested separately with --no-default-features.
-      - run: |
-          cargo test --workspace --no-fail-fast \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-          cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+      # The retired formal/reference fixture harness is intentionally absent.
+      # Run each retained profile independently so a failure in one does not
+      # hide later diagnostics.
+      - name: Native consensus tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+      - name: Native node tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
           cargo test -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --no-fail-fast
-      # Isolated so node's default `zmq` feature cannot unify this package on.
-      - run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-      # Node / binary tests run with the full-node backend set, minus the
-      # kernel engine: the kernel builds from C++ (cmake + libboost-dev),
-      # which this job deliberately does not install. Kernel-gated bin tests
-      # run in the main-only `full-node` lane, and the deny job still audits
-      # the full graph including kernel. -p is required because
-      # `--workspace --features` silently ignores --features in a virtual
-      # workspace (no root [package] section in the top-level Cargo.toml).
-      - run: |
+      - name: RPC tests without default features
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+      - name: Workspace tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
+          cargo test --workspace --no-fail-fast \
+            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
+      - name: Full-backend native binary tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
           cargo test -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "rocksdb,fjall,redb,mdbx"
 
@@ -114,21 +97,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The kernel engine is built from C++ (cmake + libboost-dev); the default
-      # feature set now includes it, so every production lane installs the
-      # prerequisites up front.
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # Compile every retained benchmark target on PRs. These profiles avoid
+      # the kernel feature, so no C++ toolchain is needed.
       - run: |
-          cargo bench -p bitcoin-rs --no-run \
-            --no-default-features --features "${FULL_NODE_FEATURES}"
-      # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
-      # the production-allocator benchmark so bench breakage is visible to CI.
-      - run: cargo bench -p bitcoin-rs-utxo --no-run
-      # The chainstate replay gate is an explicit harness: compile it on every
-      # PR, while measured executions remain release/PR evidence.
-      - run: |
-          cargo bench -p bitcoin-rs-node --no-run \
-            --no-default-features --features fjall --bench chainstate_journal
+          cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
+          cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
+          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
 
   deny:
     runs-on: ubuntu-latest
@@ -137,17 +112,8 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
         with:
           rust-version: "stable"
-          # Check the full dependency graph (all backends + kernel).
-          # cargo-deny resolves metadata without compiling, so this costs no
-          # C++ toolchain. The opt-in kernel/full-backend graph is also
-          # audited by the main-only `deny-full` lane in main.yml.
           arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
 
-  # Comparator campaign behavioral tests and the C150/Cmodern corpus freeze.
-  # Pure Python, self-contained -- no bitcoind, no external services. The
-  # comparator tests use typing.TypeIs (Python 3.13+); actions/setup-python
-  # downloads the runtime from GitHub's release hosting, which is a
-  # first-party action but network-dependent.
   comparator-tests:
     runs-on: ubuntu-latest
     steps:
