@@ -215,6 +215,35 @@ struct TxPrep {
     output_value: u64,
 }
 
+/// Checks non-coinbase input outpoints for null or repeated references.
+///
+/// This context-free subset of Core's `CheckTransaction` is shared with
+/// mempool admission before missing-input policy can retain an orphan.
+/// It does not resolve coins, execute scripts, or validate the other transaction
+/// fields. The one-null-input coinbase shape is left to the caller's coinbase rules.
+///
+/// # Errors
+///
+/// Returns the first null or duplicate input in transaction order, preserving
+/// the ordinary verifier's existing error precedence.
+///
+/// Reference: <https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_check.cpp>.
+pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
+    if is_coinbase(tx) {
+        return Ok(());
+    }
+    let mut seen = HashSet::new();
+    for (input_index, input) in tx.inputs.iter().enumerate() {
+        if is_null_outpoint(&input.previous_output) {
+            return Err(ConsensusError::NullPrevout { input_index });
+        }
+        if !seen.insert(input.previous_output) {
+            return Err(ConsensusError::DuplicateInput { input_index });
+        }
+    }
+    Ok(())
+}
+
 /// Runs a transaction's non-script pre-checks: finality, empty in/out, total
 /// output value, coinbase scriptSig size, duplicate/null inputs, and ordered
 /// prevout resolution with input-value overflow. `lookup(input_index, outpoint)`
@@ -250,15 +279,7 @@ fn prepare_tx_checks(
         return Ok(None);
     }
 
-    let mut seen = HashSet::new();
-    for (input_index, input) in tx.inputs.iter().enumerate() {
-        if is_null_outpoint(&input.previous_output) {
-            return Err(ConsensusError::NullPrevout { input_index });
-        }
-        if !seen.insert(input.previous_output) {
-            return Err(ConsensusError::DuplicateInput { input_index });
-        }
-    }
+    verify_transaction_input_outpoints(tx)?;
 
     let mut input_value = 0u64;
     let mut prevouts = Vec::with_capacity(tx.inputs.len());
