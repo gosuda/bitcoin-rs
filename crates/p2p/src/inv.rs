@@ -24,8 +24,15 @@ pub fn request_missing_parents(
 ) -> bool {
     use bitcoin::hashes::Hash as _;
 
+    let Some(lease) = peers.lease(source.addr) else {
+        return false;
+    };
+    let connection = lease.source(source.addr);
+    if PeerToken::from(connection) != source {
+        return false;
+    }
     let mut seen = hashbrown::HashSet::new();
-    let mut items: Vec<Inventory> = parents
+    let items: Vec<Inventory> = parents
         .iter()
         .filter(|txid| seen.insert(**txid))
         .map(|txid| Inventory::Transaction(bitcoin::Txid::from_byte_array(*txid.as_bytes())))
@@ -33,24 +40,15 @@ pub fn request_missing_parents(
     if items.is_empty() {
         return false;
     }
-    // Identity validation and the nonblocking enqueue share the table's read
-    // guard, so registration cannot supersede this connection between them.
-    let mut queued = false;
-    peers.for_each_lease(|addr, lease| {
-        if addr != source.addr || lease.connection_id().get() != source.connection_id {
-            return;
-        }
-        if let Err(error) = lease.send(Message::GetData(std::mem::take(&mut items))) {
-            tracing::debug!(
-                peer_addr = %source.addr,
-                %error,
-                "orphan parent getdata not sent"
-            );
-        } else {
-            queued = true;
-        }
-    });
-    queued
+    // The snapshot only adapts the opaque admission token. PeerTable owns the
+    // live-identity check and pins it through enqueue, including replacement
+    // or cancellation after the snapshot above.
+    if peers.send(connection, Message::GetData(items)).is_err() {
+        tracing::debug!(peer_addr = %source.addr, "orphan parent getdata not sent");
+        false
+    } else {
+        true
+    }
 }
 
 /// Classify an inbound inventory announcement into a getdata request.
@@ -123,7 +121,7 @@ mod tests {
             .into()
     }
 
-    // BIP339 permits MSG_TX getdata for parents not announced by the peer.
+    // P2P-01 / BIP339: unannounced parents may be requested by txid.
     #[test]
     fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
         let table = PeerTable::new();
@@ -147,6 +145,7 @@ mod tests {
         assert!(!lease.is_cancelled());
     }
 
+    // P2P-02: a stale source cannot target or cancel its successor.
     #[test]
     fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
         let table = PeerTable::new();
@@ -174,6 +173,7 @@ mod tests {
         assert!(matches!(new_receiver.try_recv(), Ok(Message::GetData(_))));
     }
 
+    // P2P-02: only the saturated delivering connection is cancelled.
     #[test]
     fn missing_parent_request_keeps_outbound_saturation_policy() {
         let table = PeerTable::new();
@@ -188,6 +188,7 @@ mod tests {
         assert!(lease.is_cancelled());
     }
 
+    // P2P-02: cancellation prevents subsequent parent-request enqueue.
     #[test]
     fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
         let table = PeerTable::new();
