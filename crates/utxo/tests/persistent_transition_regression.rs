@@ -20,6 +20,7 @@ use bitcoin_rs_utxo::set::{
     BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UndoBatch, UtxoAdd,
     UtxoChangeEvents, UtxoChangeListener, UtxoInserted, UtxoRemoved, UtxoSet,
 };
+use parking_lot::{Mutex, RwLock};
 
 const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -56,10 +57,13 @@ struct FlushGate {
 }
 
 #[derive(Clone, Default)]
-struct TestStore {
-    rows: Arc<parking_lot::RwLock<Vec<Row>>>,
-    reject_writes: Arc<AtomicBool>,
-    next_flush: Arc<parking_lot::Mutex<Option<FlushGate>>>,
+struct TestStore(Arc<TestStoreInner>);
+
+#[derive(Default)]
+struct TestStoreInner {
+    rows: RwLock<Vec<Row>>,
+    reject_writes: AtomicBool,
+    next_flush: Mutex<Option<FlushGate>>,
 }
 
 impl TestStore {
@@ -68,12 +72,12 @@ impl TestStore {
             entered: Arc::new(Barrier::new(2)),
             release: Arc::new(Barrier::new(2)),
         };
-        *self.next_flush.lock() = Some(gate.clone());
+        *self.0.next_flush.lock() = Some(gate.clone());
         gate
     }
 
     fn reject_writes(&self) {
-        self.reject_writes.store(true, Ordering::SeqCst);
+        self.0.reject_writes.store(true, Ordering::SeqCst);
     }
 }
 
@@ -82,6 +86,7 @@ impl KvStore for TestStore {
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self
+            .0
             .rows
             .read()
             .iter()
@@ -95,6 +100,7 @@ impl KvStore for TestStore {
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
         let mut rows = self
+            .0
             .rows
             .read()
             .iter()
@@ -113,12 +119,12 @@ impl KvStore for TestStore {
     }
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        if self.reject_writes.load(Ordering::SeqCst) {
+        if self.0.reject_writes.load(Ordering::SeqCst) {
             return Err(StorageError::InvalidOperation(
                 "transition test store rejects writes",
             ));
         }
-        apply_ops(&mut self.rows.write(), batch.ops);
+        apply_ops(&mut self.0.rows.write(), batch.ops);
         Ok(())
     }
 
@@ -127,13 +133,13 @@ impl KvStore for TestStore {
         conditions: &[WriteCondition<'_>],
         batch: Self::WriteBatch,
     ) -> Result<bool, StorageError> {
-        if self.reject_writes.load(Ordering::SeqCst) {
+        if self.0.reject_writes.load(Ordering::SeqCst) {
             return Err(StorageError::InvalidOperation(
                 "transition test store rejects writes",
             ));
         }
         {
-            let mut rows = self.rows.write();
+            let mut rows = self.0.rows.write();
             let matched = conditions.iter().all(|condition| {
                 let (cf, key) = condition.location();
                 condition.matches(
@@ -152,7 +158,8 @@ impl KvStore for TestStore {
     }
 
     fn flush(&self) -> Result<(), StorageError> {
-        if let Some(gate) = self.next_flush.lock().take() {
+        let gate = self.0.next_flush.lock().take();
+        if let Some(gate) = gate {
             gate.entered.wait();
             gate.release.wait();
         }
