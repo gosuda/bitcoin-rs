@@ -1,3 +1,5 @@
+//! CONTRACT: docs/contracts/reference-set.md#REF-02 and #REF-07.
+//!
 //! T01 — the differential lane runs two public processes, never handlers.
 //!
 //! The pinned Core 31.1 `bitcoind` and the `bitcoin-rs` binary each start in

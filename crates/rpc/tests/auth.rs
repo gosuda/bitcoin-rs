@@ -180,6 +180,7 @@ fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02.
 #[test]
 fn public_esplora_success_and_error_responses_allow_cross_origin_reads()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -187,11 +188,12 @@ fn public_esplora_success_and_error_responses_allow_cross_origin_reads()
     for path in ["/api/blocks/tip/height", "/api/not-an-esplora-route"] {
         let response = request_get(address, path, "close")?;
         assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
-        assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
+        assert!(!response.contains("Access-Control-Expose-Headers:"));
     }
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02.
 #[test]
 fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -206,6 +208,7 @@ fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02.
 #[test]
 fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -214,7 +217,7 @@ fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dy
 
     assert!(response.starts_with("HTTP/1.1 204 No Content"));
     assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
-    assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
+    assert!(!response.contains("Access-Control-Expose-Headers:"));
     assert!(response.contains("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"));
     assert!(response.contains("Access-Control-Allow-Headers: Content-Type\r\n"));
     assert!(!response.contains("Content-Length:"));
@@ -222,6 +225,7 @@ fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dy
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02.
 #[test]
 fn options_never_falls_through_to_json_rpc_or_non_public_surfaces()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -407,4 +411,19 @@ fn request(
 fn handler_is_constructible_for_auth_tests() {
     let handler = Handler::new(Arc::new(Context::new()));
     assert!(handler.dispatch("getblockcount", &json!([])).is_ok());
+}
+
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02.
+#[test]
+fn unprefixed_esplora_get_has_a_plain_not_found_body() -> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    let response = request_get(address, "/blocks/tip/height", "close")?;
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(response.contains("Content-Type: text/plain\r\n"));
+    assert!(!response.contains("Access-Control-"));
+    assert_eq!(
+        response.split_once("\r\n\r\n").ok_or("missing body")?.1,
+        "not found"
+    );
+    Ok(())
 }

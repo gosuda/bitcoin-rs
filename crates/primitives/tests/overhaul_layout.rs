@@ -1,3 +1,5 @@
+//! CONTRACT: docs/contracts/architecture.md#ARCH-01 (primitives ownership); CONSTRAINTS.md#CL-06.
+//!
 //! Scenario tests for the checked borrowed wire layout (`layout` module).
 //!
 

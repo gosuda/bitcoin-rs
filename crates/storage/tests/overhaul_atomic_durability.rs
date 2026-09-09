@@ -102,12 +102,11 @@ impl Route {
     }
 
     fn completion_fault(&self, fault: PersistFault) -> bool {
-        match self {
-            Self::WriteDurable | Self::WriteDurableIf => {
-                matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
-            }
-            Self::FlushDeferred => fault == PersistFault::FailFlush,
-            Self::Write => false,
+        use bitcoin_rs_storage::PersistBoundary;
+        match fault.boundary() {
+            PersistBoundary::Apply => true,
+            PersistBoundary::Sync => matches!(self, Self::WriteDurable | Self::WriteDurableIf),
+            PersistBoundary::Flush => matches!(self, Self::FlushDeferred),
         }
     }
 }
@@ -208,10 +207,25 @@ where
             let outcome = {
                 let store = open().expect("reopen to arm");
                 store.arm_persist_fault(fault);
-                route.apply(&store, batch(&store, rows, b"new"), rows[0].0)
+                let outcome = route.apply(&store, batch(&store, rows, b"new"), rows[0].0);
+                if outcome.is_ok() {
+                    assert_eq!(
+                        snapshot_all(&store, rows),
+                        proposed,
+                        "{label}: successful write is not visible"
+                    );
+                }
+                outcome
             };
             let store = open().expect("reopen to inspect");
-            assert_atomic_recovery(&snapshot_all(&store, rows), &old, &proposed, &label);
+            let observed = snapshot_all(&store, rows);
+            assert_atomic_recovery(&observed, &old, &proposed, &label);
+            if outcome.is_ok() && !matches!(route, Route::Write) {
+                assert_eq!(
+                    observed, proposed,
+                    "{label}: successful durable batch disappeared"
+                );
+            }
             if route.completion_fault(fault) {
                 assert!(
                     outcome.is_err(),

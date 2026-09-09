@@ -197,11 +197,7 @@ impl KvStore for MdbxStore {
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "mdbx").increment(1);
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
-            return match fault {
-                crate::PersistFault::FailFlush => Err(fault.injected_error()),
-                crate::PersistFault::LostFlush => Ok(()),
-                _ => unreachable!("take_at only releases Flush-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         self.env
             .sync(true)

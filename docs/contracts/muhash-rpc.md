@@ -52,3 +52,16 @@ keep the original FileRef identity.
   `test_verified_config_inode_survives_workspace_path_replace`,
   `test_spawn_reads_verified_config_after_workspace_replace`,
   `test_warm_campaign_agrees_across_all_backends`
+
+### `MRPC-04`: One UTXO and applied-tip read
+
+`gettxoutsetinfo` in `crates/rpc/src/handlers/chain.rs` holds
+`Context::with_stable_chainstate`, the existing connect/disconnect guard, across
+the coin scan and tip reads. Counts, memory accounting, and the selected hash
+come from one stable UTXO view. The response cannot combine different transitions.
+The `coin_queries_wait_for_one_consistent_utxo_and_tip_transition` test covers
+all three hash modes and `scantxoutset` against an in-progress transition.
+
+This read can block chain mutation for the duration of a full scan. A bounded,
+cancellable query with isolated resources remains future work; no such performance
+guarantee is implied by the consistency fix.

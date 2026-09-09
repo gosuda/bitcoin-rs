@@ -576,6 +576,7 @@ mod tests {
         );
     }
 
+    // CONTRACT: docs/contracts/wallet-facing.md#WF-02.
     #[test]
     fn fee_estimate_conversion_preserves_the_exact_relay_floor() {
         assert_eq!(

@@ -17,7 +17,6 @@ const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
 const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
 const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
 const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
-const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
@@ -212,7 +211,17 @@ fn dispatch_http_request(
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
         }
         HttpRoute::NotFound => {
-            write_status(stream, 404, "Not Found", b"not found", keep_alive)?;
+            write_response(
+                stream,
+                &crate::rest::Response {
+                    status: 404,
+                    reason: "Not Found",
+                    content_type: "text/plain",
+                    body: b"not found".to_vec(),
+                },
+                keep_alive,
+                CorsPolicy::Disabled,
+            )?;
         }
         HttpRoute::JsonRpc => {
             if !auth.validate_header(request.authorization.as_deref()) {
@@ -588,7 +597,6 @@ enum CorsPolicy {
     Public {
         methods: &'static [&'static str],
         headers: &'static [&'static str],
-        expose: &'static [&'static str],
     },
 }
 
@@ -598,7 +606,6 @@ impl HttpSurface {
             Self::EsploraPublic => CorsPolicy::Public {
                 methods: PUBLIC_ESPLORA_METHODS,
                 headers: PUBLIC_ESPLORA_HEADERS,
-                expose: PUBLIC_ESPLORA_EXPOSE_HEADERS,
             },
             Self::JsonRpc | Self::CoreRest | Self::EsploraBackend => CorsPolicy::Disabled,
         }
@@ -676,16 +683,10 @@ fn write_headers(stream: &mut TcpStream, head: &ResponseHead<'_>) -> io::Result<
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
         head.status, head.reason, head.content_type
     )?;
-    if let CorsPolicy::Public {
-        methods,
-        headers,
-        expose,
-    } = head.cors_policy
-    {
+    if let CorsPolicy::Public { methods, headers } = head.cors_policy {
         write!(stream, "Access-Control-Allow-Origin: *\r\n")?;
         write_header_list(stream, "Access-Control-Allow-Methods", methods)?;
         write_header_list(stream, "Access-Control-Allow-Headers", headers)?;
-        write_header_list(stream, "Access-Control-Expose-Headers", expose)?;
     }
     if head.status != 204 {
         write!(stream, "Content-Length: {}\r\n", head.content_length)?;

@@ -10,6 +10,15 @@ node. A ratio is computed only after every custody and correctness gate
 passes. This repository does not claim a live C150 or Cmodern campaign: CI
 proves the harness with fixture nodes.
 
+## Oracle boundary
+
+`expected_state` is caller-declared. The harness checks equality to that record
+and between arms, but does not attest that it came from an independent Core 31.1
+certification. Binary hash pinning also does not establish product provenance by
+itself. Before treating a run as product evidence, separately attest the reference
+binary and the recorded oracle response under `REF-02` and `REF-07`. Fixture-node
+runs prove harness behavior only; they cannot certify C150 or Cmodern correctness.
+
 ## What is held identical
 
 One `offline-full-validation-config-v1` document binds every arm:
@@ -41,7 +50,7 @@ One `offline-full-validation-config-v1` document binds every arm:
   requires hash-bound evidence before it will claim page-cache eviction;
   this harness does not enact eviction, so that policy string is refused
   rather than published as a posture the run did not take.
-- **Certified state**: height, best block, UTXO count, total amount in
+- **Declared expected state**: height, best block, UTXO count, total amount in
   satoshis, MuHash, `hash_serialized_3`, body availability, and one-block
   disconnect readiness. Height and best block must equal the manifest tip.
   Body availability and disconnect readiness must be true.
@@ -86,7 +95,7 @@ sleeper and then exits 0 is refused; no result JSON is published.
 2. Alternation: even pairs Core-first, odd pairs bitcoin-rs-first.
 3. Archive and binary identities unchanged from the campaign pin.
 4. Each arm exited 0 (durable clean exit). Reopen arms additionally exited 0.
-5. Certified state equals the config expectation on both arms and the two
+5. Reported state equals the config expectation on both arms and the two
    arms agree with each other.
 
 Any refusal raises `ContractError`, the process exits 2, and **no result

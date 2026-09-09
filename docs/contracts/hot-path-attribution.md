@@ -181,7 +181,7 @@ posture.
 
 - `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs`
   (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`)
-- `bin/bitcoin-rs/tests/overhaul_evidence.rs` (planned): rejects evidence
+- `bin/bitcoin-rs/tests/overhaul_evidence.rs`: rejects evidence
   missing binary, corpus, configuration, or durability identity; rejects
   summing nested or concurrent intervals; retains repeated samples and
   empty or missing cells.

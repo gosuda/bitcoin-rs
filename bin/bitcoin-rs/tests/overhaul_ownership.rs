@@ -1,3 +1,5 @@
+//! CONTRACT: docs/contracts/architecture.md#ARCH-01, #ARCH-02 and #ARCH-08.
+//!
 //! T03 — Enforce owner boundaries before moving code.
 //!
 //! This test validates:

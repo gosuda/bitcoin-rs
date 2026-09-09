@@ -1,12 +1,13 @@
+//! CONTRACT: docs/contracts/architecture.md#ARCH-05.
+//!
 //! Scenario tests for the configuration ladder and the one status owner.
 //!
 //! These pin the merge contract users depend on: later explicitly supplied
 //! fields override earlier layers, absent nested fields never clobber
 //! earlier values, the mining payout validates against the fully resolved
 //! network, runtime/test controls stay out of the public configuration
-//! surface, and the status snapshot carries one runtime revision. The
-//! revision flow through the adapter seam is pinned in
-//! `bitcoin-rs-rpc`'s capabilities tests (IDX-02).
+//! surface. Capability rows are checked by the RPC capability tests (IDX-02);
+//! no revision or coherent multi-owner snapshot is implied by these merge tests.
 
 #![expect(clippy::expect_used, reason = "test assertions")]
 

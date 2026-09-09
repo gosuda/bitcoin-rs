@@ -103,10 +103,8 @@ pub enum PersistFault {
     /// Persistence faults before any batch byte is applied: the call returns
     /// `Err` and no operation lands in any family.
     FailApply,
-    /// Lost write at the apply boundary: the engine write is silently
-    /// dropped. Paths that promise no durability may report `Ok`; paths that
-    /// must complete durability return `Err`, because completion never
-    /// precedes the persisted write.
+    /// The engine write is dropped before apply. The call returns `Err`:
+    /// even a deferred write must not acknowledge bytes that are not visible.
     LostApply,
     /// Partial write at the apply boundary: a strict prefix of the batch
     /// reaches the engine and the boundary then faults. The engine discards
@@ -117,15 +115,14 @@ pub enum PersistFault {
     /// visible but not confirmed durable, and the call returns `Err` rather
     /// than reporting completion.
     FailSync,
-    /// Lost durability completion: the sync step is silently dropped after
-    /// the batch applied. The call may report success; a reopen observes the
-    /// whole batch or none of it, never a cross-family mix.
+    /// Durability completion is lost after apply. The call returns `Err`;
+    /// recovery may observe the whole batch or none, never a cross-family mix.
     LostSync,
     /// `flush` faults without completing deferred durability: the call
     /// returns `Err`.
     FailFlush,
-    /// Lost flush: `flush` returns `Ok` without performing the sync; a reopen
-    /// observes each earlier batch whole or not at all.
+    /// The flush sync is dropped. The call returns `Err` rather than
+    /// acknowledging deferred durability that has not completed.
     LostFlush,
 }
 
