@@ -25,7 +25,8 @@ concurrency:
 
 # Fast PR gate. The ordinary lint and test jobs avoid libbitcoinkernel and do
 # not install CMake/Boost; bench-smoke intentionally compiles the kernel-enabled
-# benchmark surface and installs those prerequisites. Deeper fuzz, nightly,
+# benchmark surface, runs the witness-activation regression, and installs
+# those prerequisites. Deeper fuzz, nightly,
 # feature-matrix, and kernel-oracle lanes live in main.yml and run on `main`.
 env:
   CARGO_TERM_COLOR: never
@@ -170,6 +171,12 @@ jobs:
       # feature set now includes it, so every production lane installs the
       # prerequisites up front.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # Reuse this lane's C++ prerequisites for the focused kernel regression;
+      # the ordinary test job exercises the same target with the native backend.
+      - name: Witness activation kernel regression
+        run: |
+          cargo test --locked -p bitcoin-rs-consensus \
+            --no-default-features --features kernel --test witness_sigop_activation
       - run: |
           cargo bench -p bitcoin-rs --no-run \
             --no-default-features --features "${FULL_NODE_FEATURES}"
