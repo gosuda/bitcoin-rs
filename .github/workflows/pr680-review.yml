@@ -8,19 +8,100 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
 jobs:
-  export:
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      commit: ${{ steps.objects.outputs.commit }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 0008b76c168956e00bee115463ceccde60337790
+          ref: d146e0f21b1ebbd761658f56017256f5520b29cd
           persist-credentials: false
-      - name: Archive the reviewed source
-        run: git archive --format=tar HEAD > /tmp/pr-680-source.tar
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 46021c6dc808f634c8bd8da73156721c71f3791d
+          path: .review-tools
+          persist-credentials: false
+          sparse-checkout: .github/pr680-review-fixes.py
+          sparse-checkout-cone-mode: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: rustfmt
+      - name: Apply reviewed edits with exact source-blob guards
+        run: python3 .review-tools/.github/pr680-review-fixes.py
+      - name: Format and refresh the fuzz workspace lockfile without building
+        run: |
+          cargo fmt --all
+          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /tmp/fuzz-metadata.json
+          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked --no-deps > /dev/null
+          git diff HEAD --check
+          git diff HEAD --stat
+          git diff HEAD --binary > /tmp/pr680-review.diff
+      - name: Create an unreferenced candidate commit, not a branch update
+        id: objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess, urllib.request
+          from pathlib import Path
+          parent = 'd146e0f21b1ebbd761658f56017256f5520b29cd'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          assert git('rev-parse', 'HEAD') == parent
+          allowed = set('crates/consensus/src/verify_tx.rs crates/mempool/src/accounting.rs crates/node/README.md crates/node/src/run.rs crates/node/src/tx_ingress.rs crates/node/tests/tx_ingress_e2e.rs crates/p2p/README.md crates/script/src/sigops.rs docs/contracts/mempool-mutations.md docs/policies/mempool-policy.md fuzz/Cargo.lock'.split())
+          paths = git('diff', 'HEAD', '--name-only').splitlines()
+          assert paths and set(paths) <= allowed, paths
+          def post(endpoint, payload):
+              request = urllib.request.Request('https://api.github.com/repos/gosuda/bitcoin-rs/git/' + endpoint, data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
+              with urllib.request.urlopen(request) as response:
+                  return json.load(response)
+          entries = []
+          for path in paths:
+              assert not Path(path).is_symlink()
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': Path(path).read_text()})
+          tree = post('trees', {'base_tree': git('rev-parse', 'HEAD^{tree}'), 'tree': entries})
+          commit = post('commits', {'message': 'fix: unify transaction accounting and committed mining effects', 'tree': tree['sha'], 'parents': [parent]})
+          print('candidate_commit=' + commit['sha'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('commit=' + commit['sha'] + '\n')
+          Path('/tmp/pr680-candidate.json').write_text(json.dumps({'parent': parent, 'commit': commit['sha'], 'tree': tree['sha'], 'files': paths}, indent=2))
+          PY
+          git add --update
+          git archive --format=tar "$(git write-tree)" > /tmp/pr680-candidate.tar
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr-680-source
-          path: /tmp/pr-680-source.tar
+          name: pr680-candidate
+          path: |
+            /tmp/pr680-review.diff
+            /tmp/pr680-candidate.json
+            /tmp/pr680-candidate.tar
           retention-days: 1
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p bitcoin-rs-script -p bitcoin-rs-mempool --no-default-features --lib
+      - run: cargo test -p bitcoin-rs-consensus --no-default-features --lib
+      - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib tx_ingress::tests
+      - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e
+      - run: cargo test -p bitcoin-rs-p2p --lib inv::tests
+      - run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
