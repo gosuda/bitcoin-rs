@@ -235,13 +235,29 @@ fn cell_histories_match_the_matrix_and_runtime_schema() {
     let mut actual = BTreeSet::new();
     for cell in &ledger.cells {
         assert!(!cell.id.is_empty(), "empty cell id");
-        assert!(actual.insert(cell.id.clone()), "duplicate cell id `{}`", cell.id);
+        assert!(
+            actual.insert(cell.id.clone()),
+            "duplicate cell id `{}`",
+            cell.id
+        );
         for sample in &cell.samples {
-            assert!(!sample.path.is_empty(), "cell `{}` contains an empty sample path", cell.id);
+            assert!(
+                !sample.path.is_empty(),
+                "cell `{}` contains an empty sample path",
+                cell.id
+            );
         }
     }
-    assert_eq!(ledger.cells.len(), CELL_COUNT, "ledger must declare one history per cell");
-    assert_eq!(actual, ledger.matrix.cell_ids(), "cell histories must equal the matrix cross-product");
+    assert_eq!(
+        ledger.cells.len(),
+        CELL_COUNT,
+        "ledger must declare one history per cell"
+    );
+    assert_eq!(
+        actual,
+        ledger.matrix.cell_ids(),
+        "cell histories must equal the matrix cross-product"
+    );
 }
 
 #[test]
