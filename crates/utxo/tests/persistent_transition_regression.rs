@@ -311,6 +311,40 @@ fn blocked_flush_does_not_block_resident_reads() {
 }
 
 #[test]
+fn real_durable_write_releases_earlier_deferred_pins() {
+    for mode in [CoinDurability::Durable, CoinDurability::CasGuarded] {
+        let store = TestStore::default();
+        let set = PersistentUtxoSet::new(UtxoSet::new(), store);
+        let a = txid(3);
+        let b = txid(4);
+
+        set.connect_block(&funding(a), &a, CoinDurability::Durable)
+            .expect("seed first record");
+        let mut spend_a = BlockChanges::default();
+        spend_a.remove(outpoint(a, 0));
+        set.connect_block(&spend_a, &a, CoinDurability::Deferred)
+            .expect("defer first-record spend");
+        assert!(
+            set.ledger()
+                .expect("deferred ledger")
+                .retained_before_image_bytes
+                > 0,
+            "deferred overwrite must retain its before-image"
+        );
+
+        set.connect_block(&funding(b), &b, mode)
+            .expect("real durability boundary on second record");
+        assert_eq!(
+            set.ledger()
+                .expect("durable ledger")
+                .retained_before_image_bytes,
+            0,
+            "a real durable write must complete every earlier deferred write"
+        );
+    }
+}
+
+#[test]
 fn listener_reentry_is_rejected_instead_of_deadlocking() {
     let target = Arc::new(OnceLock::new());
     let called = Arc::new(AtomicBool::new(false));
