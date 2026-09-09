@@ -99,12 +99,15 @@ jobs:
           cargo clippy --locked -p bitcoin-rs-consensus --all-targets --no-default-features -- -D warnings || status=1
           cargo fmt --all -- --check || status=1
           exit "$status"
-      - name: Evidence validation
+      - name: Evidence and ledger validation
         if: always()
-        run: cargo test --locked -p bitcoin-rs --no-default-features --test overhaul_evidence
-      - name: Evidence and node lints
+        run: cargo test --locked -p bitcoin-rs --no-default-features --test overhaul_evidence --test g18_hot_path_ledger
+      - name: Bounded formal-runner capture
         if: always()
-        run: cargo clippy --locked -p bitcoin-rs --no-default-features --test overhaul_evidence -- -D warnings
+        run: cargo test --locked -p bitcoin-rs --no-default-features --test g20_formal_models bounded_capture
+      - name: Evidence and gate lints
+        if: always()
+        run: cargo clippy --locked -p bitcoin-rs --no-default-features --test overhaul_evidence --test g18_hot_path_ledger --test g20_formal_models -- -D warnings
   stage:
     needs: prepare
     runs-on: ubuntu-latest
