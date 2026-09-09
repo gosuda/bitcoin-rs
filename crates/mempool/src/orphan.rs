@@ -1,6 +1,7 @@
-//! Gateway-owned orphan residency and peer rejection bookkeeping.
+//! Gateway-owned peer orphan lifecycle.
 //!
-//! The owner contract is `MPL-04` in `docs/contracts/mempool-mutations.md`.
+//! Retention, exact-body identity, and retry invariants are owned by `MPL-04`
+//! in `docs/contracts/mempool-mutations.md`.
 
 use crate::mutation::PeerToken;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
@@ -9,9 +10,6 @@ use hashbrown::{HashMap, HashSet};
 
 const DEFAULT_ORPHAN_QUOTA: usize = 100;
 /// Aggregate BIP141 weight budget for resident orphan bodies.
-///
-/// `MPL-04` bounds retained transaction weight independently of count. This
-/// is a BIP141 payload-weight limit, not a measurement of heap or index bytes.
 const DEFAULT_MAX_ORPHAN_WEIGHT: u64 = 10_000_000;
 const DEFAULT_REJECT_CAP: usize = 100_000;
 
@@ -319,8 +317,7 @@ mod tests {
         pool.mark_ready(child.txid());
         assert!(pool.ready.is_empty());
     }
-    /// `MPL-04`: the aggregate weight cap evicts FIFO entries and their ready
-    /// work even while the independent transaction-count quota has capacity.
+    // MPL-04: aggregate orphan weight is bounded independently of count.
     #[test]
     fn aggregate_weight_evicts_fifo_even_when_count_quota_has_room() {
         let parent = tx(9, Txid::default()).txid();
