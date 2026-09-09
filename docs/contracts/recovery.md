@@ -153,6 +153,14 @@ tests.
   transition. Re-entering a `PersistentUtxoSet` operation from that owner
   returns `PersistentUtxoError::ReentrantOperation`; no nested persistent
   transition begins.
+- A deferred mutation retains its prior durable coin image as a pin until a
+  durability receipt covers it. A successful explicit `flush`, or a successful
+  non-empty `Durable` or `CasGuarded` persistence operation, covers every
+  earlier completed deferred write and clears all retained pins. An empty or
+  no-op mutation performs no store durability operation and must not clear
+  pins. A failed flush provides no receipt and leaves pins intact; failed
+  persistence or a CAS mismatch never treats retained pins as durably
+  completed and leaves the failed mutation quarantined.
 - Timed concurrency regressions use their finite timeout only as a deadlock
   detector. The timeout is not a latency target or service-level guarantee;
   the contract requires progress before the deliberately blocked storage
