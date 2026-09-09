@@ -64,18 +64,18 @@ jobs:
       - name: Workspace Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
-          cargo clippy --workspace --all-targets \
+          cargo clippy --locked --workspace --all-targets \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
             -- -D warnings
       - name: Native consensus Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
-          cargo clippy -p bitcoin-rs-consensus \
+          cargo clippy --locked -p bitcoin-rs-consensus \
             --no-default-features --all-targets -- -D warnings
       - name: Native node Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
-          cargo clippy -p bitcoin-rs-node \
+          cargo clippy --locked -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --all-targets -- -D warnings
 
   test:
@@ -94,16 +94,16 @@ jobs:
       # Failures still fail the job; cancellation and failed setup stop tests.
       - name: Native consensus tests
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+        run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast
       - name: Native node tests
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         run: |
-          cargo test -p bitcoin-rs-node \
+          cargo test --locked -p bitcoin-rs-node \
             --no-default-features --features fjall,zmq --no-fail-fast
       # Isolated so node's default `zmq` feature cannot unify this package on.
       - name: RPC tests without default features
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+        run: cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast
       # consensus and node have kernel-enabled defaults, so the workspace
       # pass excludes them and the explicit native profiles above cover them.
       # This pass includes the binary's process and formal gates, unfiltered.
@@ -116,7 +116,7 @@ jobs:
           printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=workspace\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             > target/apalache/run-context.txt
-          cargo test --workspace --no-fail-fast \
+          cargo test --locked --workspace --no-fail-fast \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
       # Save each profile before the next invocation can replace run-*.txt.
       # Only formal diagnostics are uploaded, never downloaded executables.
@@ -147,7 +147,7 @@ jobs:
           printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-backend-native\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             > target/apalache/run-context.txt
-          cargo test -p bitcoin-rs --no-fail-fast \
+          cargo test --locked -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "rocksdb,fjall,redb,mdbx"
       - name: Preserve full-backend native formal evidence
         if: ${{ always() }}
@@ -178,15 +178,15 @@ jobs:
           cargo test --locked -p bitcoin-rs-consensus \
             --no-default-features --features kernel --test witness_sigop_activation
       - run: |
-          cargo bench -p bitcoin-rs --no-run \
+          cargo bench --locked -p bitcoin-rs --no-run \
             --no-default-features --features "${FULL_NODE_FEATURES}"
       # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
       # the production-allocator benchmark so bench breakage is visible to CI.
-      - run: cargo bench -p bitcoin-rs-utxo --no-run
+      - run: cargo bench --locked -p bitcoin-rs-utxo --no-run
       # The chainstate replay gate is an explicit harness: compile it on every
       # PR, while measured executions remain release/PR evidence.
       - run: |
-          cargo bench -p bitcoin-rs-node --no-run \
+          cargo bench --locked -p bitcoin-rs-node --no-run \
             --no-default-features --features fjall --bench chainstate_journal
 
   deny:
