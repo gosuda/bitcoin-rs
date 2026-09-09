@@ -175,11 +175,65 @@ fn settle_window_failure(
     mut error: crate::apply::WindowApplyError,
 ) -> crate::apply::WindowApplyError {
     if !matches!(error.source, ApplyError::UtxoCommit(_)) {
-        if let Err(source) = transition.finish() {
-            error.source = source;
+        if let Err(finish_source) = transition.finish() {
+            tracing::error!(
+                original = %error.source,
+                finish = %finish_source,
+                "chain transition could not be settled after a window failure; \
+                 mempool admission stays closed until recovery or restart"
+            );
+            error.disposition = crate::apply::WindowApplyDisposition::Fatal;
         }
     }
     error
+}
+
+/// Settles a successful window: finishes the transition, or classifies a
+/// finish failure as [`WindowApplyDisposition::Fatal`] when the reserved
+/// even generation could not be published.
+///
+/// Symmetric with [`settle_window_failure`]: both paths attempt `finish`
+/// and surface a `Fatal` disposition when the CAS fails, so the caller
+/// stops retrying instead of wedging on an odd generation.
+#[allow(clippy::result_large_err)]
+fn settle_window_success(
+    transition: crate::apply::ChainTransition<'_>,
+    applied: usize,
+    committed: Vec<crate::apply::ConnectOutcome>,
+) -> core::result::Result<usize, crate::apply::WindowApplyError> {
+    match transition.finish() {
+        Ok(()) => Ok(applied),
+        Err(finish_source) => {
+            tracing::error!(
+                finish = %finish_source,
+                "chain transition could not be settled after a committed window; \
+                 mempool admission stays closed until recovery or restart"
+            );
+            Err(crate::apply::WindowApplyError {
+                applied,
+                committed,
+                source: finish_source,
+                disposition: crate::apply::WindowApplyDisposition::Fatal,
+                invalidated: Box::default(),
+            })
+        }
+    }
+}
+
+/// Where restoration of un-applied drained blocks must start.
+///
+/// When the whole chunk committed and only the chain-transition finish failed
+/// (`stopped == chunk_len`), there is no refused block to skip: restoration
+/// starts at the head of the next chunk, `chunk_start + stopped`. When a block
+/// was refused inside the chunk (`stopped < chunk_len`), that block is dropped
+/// for retry and restoration starts one past it, `chunk_start + stopped + 1`.
+fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize) -> usize {
+    let base = chunk_start.saturating_add(stopped);
+    if stopped < chunk_len {
+        base.saturating_add(1)
+    } else {
+        base
+    }
 }
 
 impl BlockSync {
@@ -257,16 +311,7 @@ impl BlockSync {
                     self.followers.connected(block, outcome);
                 }
                 let applied = outcomes.len();
-                transition
-                    .finish()
-                    .map_err(|source| crate::apply::WindowApplyError {
-                        applied,
-                        committed: outcomes,
-                        source,
-                        disposition: crate::apply::WindowApplyDisposition::Operational,
-                        invalidated: Box::default(),
-                    })?;
-                Ok(applied)
+                settle_window_success(transition, applied, outcomes)
             }
             Err(error) => {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
@@ -912,8 +957,19 @@ impl BlockSync {
                 Err(error) => {
                     let stopped = error.applied.min(chunk.len());
                     failed = failed.saturating_add(1);
-                    if let Some(blocker) = chunk.get(stopped) {
+                    let blocker = chunk.get(stopped);
+                    if let Some(blocker) = blocker {
                         failed_hash = Some(blocker.hash);
+                    }
+                    if error.disposition == crate::apply::WindowApplyDisposition::Fatal {
+                        tracing::error!(
+                            applied = stopped,
+                            error = %error.source,
+                            "block sync: chain transition could not be settled; \
+                             mempool admission is closed and the node will not \
+                             retry until recovery or restart"
+                        );
+                    } else if let Some(blocker) = blocker {
                         tracing::warn!(
                             hash = %blocker.hash,
                             error = %error.source,
@@ -926,11 +982,12 @@ impl BlockSync {
                     applied = applied.saturating_add(stopped);
                     // Everything after the block that failed, in the order it
                     // was drained: the rest of this chunk past the failure, then
-                    // every chunk not yet attempted.
-                    let restore_from = chunk_start
-                        .saturating_add(stopped)
-                        .saturating_add(1)
-                        .min(drained.len());
+                    // every chunk not yet attempted. When the whole chunk
+                    // committed and only finish failed (`stopped == chunk.len()`),
+                    // there is no refused block to skip, so restoration starts
+                    // at the next chunk head.
+                    let restore_from =
+                        restore_split(chunk_start, stopped, chunk.len()).min(drained.len());
                     self.block_stager
                         .lock()
                         .restore_many(drained[restore_from..].iter().cloned());
@@ -6120,6 +6177,119 @@ mod tests {
             "a possibly torn UTXO commit must keep admission closed"
         );
         Ok(())
+    }
+
+    #[test]
+    fn settle_window_failure_finish_failure_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        // Force a different odd generation so the CAS in finish fails.
+        sync.handles
+            .mempool_gateway
+            .force_chain_generation(transition.proof().odd_generation().wrapping_add(2));
+        let error = crate::apply::WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: crate::state::ApplyError::BlockValueOverflow,
+            disposition: crate::apply::WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        };
+
+        let error = super::settle_window_failure(transition, error);
+
+        assert_eq!(
+            error.disposition,
+            crate::apply::WindowApplyDisposition::Fatal,
+            "finish failure must be classified Fatal"
+        );
+        assert!(
+            matches!(error.source, crate::state::ApplyError::BlockValueOverflow),
+            "original source must be preserved, not overwritten by the finish error"
+        );
+        assert_eq!(
+            sync.handles.mempool_gateway.stable_generation(),
+            None,
+            "generation must stay odd after a failed finish"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn utxo_commit_skip_holds_under_moved_generation() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        // Force a different odd generation so finish would fail if attempted.
+        sync.handles
+            .mempool_gateway
+            .force_chain_generation(transition.proof().odd_generation().wrapping_add(2));
+        let error = crate::apply::WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            disposition: crate::apply::WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        };
+
+        let error = super::settle_window_failure(transition, error);
+
+        assert_eq!(
+            error.disposition,
+            crate::apply::WindowApplyDisposition::Operational,
+            "UtxoCommit must not attempt finish, so disposition stays Operational"
+        );
+        assert!(
+            matches!(
+                error.source,
+                crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+            ),
+            "UtxoCommit source must be unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settle_window_success_finish_failure_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        // Force a different odd generation so the CAS in finish fails.
+        sync.handles
+            .mempool_gateway
+            .force_chain_generation(transition.proof().odd_generation().wrapping_add(2));
+        let applied = 2_usize;
+        let committed: Vec<crate::apply::ConnectOutcome> = Vec::new();
+
+        let error = match super::settle_window_success(transition, applied, committed) {
+            Err(error) => error,
+            Ok(_) => panic!("finish failure must return Err, got Ok"),
+        };
+
+        assert_eq!(
+            error.disposition,
+            crate::apply::WindowApplyDisposition::Fatal,
+            "success-path finish failure must be classified Fatal"
+        );
+        assert_eq!(error.applied, applied, "applied count must be preserved");
+        assert!(
+            error.committed.is_empty(),
+            "committed outcomes must be preserved"
+        );
+        assert_eq!(
+            sync.handles.mempool_gateway.stable_generation(),
+            None,
+            "generation must stay odd after a failed finish"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_split_pins_off_by_one() {
+        // Full-chunk stop: nothing refused, restore from the next chunk head.
+        // The old formula (chunk_start + stopped + 1) returned 5 here.
+        assert_eq!(super::restore_split(2, 2, 2), 4);
+        // Mid-chunk stop: the refused block is dropped, tail starts after it.
+        assert_eq!(super::restore_split(2, 1, 2), 4);
+        // Empty chunk boundary.
+        assert_eq!(super::restore_split(0, 0, 0), 0);
     }
 
     #[test]

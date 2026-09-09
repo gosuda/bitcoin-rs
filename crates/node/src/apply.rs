@@ -2083,7 +2083,9 @@ pub struct WindowApplyError {
     pub source: ApplyError,
     /// How the caller must treat this failure: `Permanent` failures poisoned
     /// the failed block's header subtree while the chain transition was still
-    /// held; `Operational` failures poisoned nothing.
+    /// held; `Operational` failures poisoned nothing; `Fatal` means the
+    /// transition itself could not be settled (the reserved even generation
+    /// could not be published), so admission stays closed until recovery.
     pub disposition: WindowApplyDisposition,
     /// Hashes marked invalid under the held transition when `disposition` is
     /// [`WindowApplyDisposition::Permanent`]: the failed block and every
@@ -2135,6 +2137,13 @@ pub enum WindowApplyDisposition {
     /// Transient failure (storage, UTXO commit, shutdown). Nothing was
     /// invalidated; the failed block and its tail stay retryable.
     Operational,
+    /// The transition could not be concluded: the reserved even generation
+    /// could not be published (`ChainChangeGuard::finish` failed /
+    /// `GenerationMoved`). Mempool admission stays closed; a retry cannot
+    /// begin until recovery or restart re-establishes a consistent gateway.
+    /// Nothing about the blocks is invalid — committed blocks stay applied
+    /// and nothing is purged.
+    Fatal,
 }
 
 /// Prepares consecutive blocks against one overlay and verifies all their input
