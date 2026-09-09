@@ -764,8 +764,17 @@ pub(crate) fn start_node(
 )> {
     cap_global_thread_pool();
 
+    let prepared_metrics = if config.observability.metrics_bind.is_some() {
+        Some(crate::metrics::PreparedMetrics::of_process(&config)?)
+    } else {
+        None
+    };
     let injected_shutdown = runtime.shutdown;
-    let state = NodeState::open(config, runtime.mempool_observer.as_ref())?;
+    let state = if let Some(prepared) = prepared_metrics.as_ref() {
+        prepared.capture(|| NodeState::open(config, runtime.mempool_observer.as_ref()))?
+    } else {
+        NodeState::open(config, runtime.mempool_observer.as_ref())?
+    };
     let mut guard = StartupGuard {
         state: Some(state),
         services: NodeServices::default(),
@@ -959,12 +968,19 @@ pub(crate) fn start_node(
         .name("bitcoin-rs-event-loop".into())
         .spawn(move || loop_handle.spin(&shutdown))?;
     guard.services.event_loop = Some(event_loop);
-    // Install the process-global recorder only after all other fallible startup
-    // steps have succeeded, so a failed startup can be retried with new config.
+    // Activate the process-global recorder only after all other fallible startup
+    // steps have succeeded. `NodeState::open` used this same recorder locally,
+    // so one-shot recovery/storage metrics survive without consuming the global
+    // recorder slot when a startup is abandoned.
     if let Some(bind) = state.config().observability.metrics_bind {
-        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        guard.services.metrics =
-            crate::metrics::start_metrics(Some(bind), state.shutdown(), &identity)?;
+        let Some(prepared) = prepared_metrics.as_ref() else {
+            panic!("configured metrics recorder was prepared before state open");
+        };
+        guard.services.metrics = Some(crate::metrics::MetricsServer::bind_prepared(
+            bind,
+            state.shutdown(),
+            prepared,
+        )?);
     }
     let (state, services) = guard.disarm();
     Ok((state, services, context))
