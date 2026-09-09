@@ -649,9 +649,13 @@ impl MempoolGateway {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
         // These failures cannot be repaired by another witness or parent arrival.
-        // Keep their one consensus-owned check ahead of missing-input policy,
+        // Standardness bounds the scan before it allocates an input set.
+        // Keep the consensus-owned check ahead of missing-input policy,
         // but after every generation, sequence, and resident-claim guard.
-        if bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx).is_err()
+        let policy = pool.policy_snapshot();
+        if crate::standardness::is_standard_tx(&request.tx, &policy.standardness).is_ok()
+            && bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
+                .is_err()
         {
             self.record_peer_failure(
                 &pool,
@@ -679,7 +683,6 @@ impl MempoolGateway {
         //    checks standardness, missing inputs, coinbase, min-relay,
         //    max-fee, and replacement — but NOT package limits (those are
         //    enforced by `replace_transaction` below).
-        let policy = pool.policy_snapshot();
         let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
             &pool,
             policy.incremental_relay_fee_sat_per_kvb,
@@ -3018,5 +3021,29 @@ mod tests {
         assert_eq!(gateway.recent_rejects_count(), 0);
         assert_eq!(gateway.orphan_count(), 0);
         assert_eq!(gateway.read().sequence_number(), 1);
+    }
+
+    #[test]
+    fn input_structure_nonstandard_transactions_keep_policy_precedence() {
+        use crate::standardness::{AcceptanceRejectReason, StandardnessError};
+        for (version, witness_len, reason) in [
+            (0, 1, StandardnessError::Version),
+            (2, 400_001, StandardnessError::Weight),
+        ] {
+            let gateway = gateway_with(None);
+            let mut candidate = standard_tx(95);
+            candidate.version = version;
+            candidate.inputs.push(candidate.inputs[0].clone());
+            candidate.inputs[0].witness = vec![vec![0; witness_len]];
+            let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+            assert_eq!(
+                gateway.admit_transaction(request),
+                Err(AdmitError::Policy(AcceptanceRejectReason::NonStandard(
+                    reason
+                )))
+            );
+            assert!(gateway.read().is_empty());
+            assert_eq!(gateway.read().sequence_number(), 0);
+        }
     }
 }

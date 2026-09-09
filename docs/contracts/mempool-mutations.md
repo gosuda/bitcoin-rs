@@ -142,13 +142,15 @@ state (`crates/mempool/src/orphan.rs`).
   Rust's `OutPoint::default()` is `(zero txid, index 0)`, which is non-null.
   Such unresolved inputs follow ordinary missing-parent requests and parent
   indexing instead of being silently omitted from retry tracking.
-- Before missing-input policy can retain a peer body, the gateway runs the
-  consensus-owned `verify_transaction_input_outpoints` check. Duplicate inputs
+- For standard transactions, the gateway checks input structure before
+  missing-input policy can retain a peer body. The consensus-owned `verify_transaction_input_outpoints` check. Duplicate inputs
   and null outpoints in non-coinbase transactions reject as `Consensus` and
   use transaction-scoped caching even when witness data is present or coins
   are missing. Parent arrival or a different witness cannot repair these
   failures. State and resident-claim guards still precede classification;
-  RPC failures do not populate peer caches. Coinbase policy remains separate.
+  RPC failures do not populate peer caches. Standardness bounds the input
+  scan; nonstandard and oversized transactions keep their existing policy
+  verdicts without allocating its input set. Coinbase policy remains separate.
 - Recent rejects use one bounded FIFO with an identity scope for each hash.
   Witness-scoped refusals suppress only the checked wtxid; transaction-scoped
   refusals additionally suppress the txid. Legacy inventory does not consult
@@ -190,6 +192,7 @@ state (`crates/mempool/src/orphan.rs`).
 
 - `crates/mempool/src/gateway.rs` (inline tests):
   `input_structure_checks_follow_generation_and_sequence_guards`,
+  `input_structure_nonstandard_transactions_keep_policy_precedence`,
   `accepted_and_block_inclusion_events_arrive_in_commit_order`,
   `remove_for_block_publishes_removals_with_origins`,
   `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent`,
