@@ -178,3 +178,114 @@ fn repeated_samples_and_empty_cells_survive_a_round_trip() {
     assert_eq!(measured[0].samples.len(), 2);
     assert_eq!(reparsed.cells.len(), 36);
 }
+
+#[test]
+fn every_evidence_entry_point_rejects_blank_required_fields() {
+    for field in [
+        "path",
+        "owner",
+        "version",
+        "backend",
+        "durability",
+        "hardware",
+        "corpus.id",
+    ] {
+        for blank in ["", " \t\n", "\u{2003}"] {
+            let mut invalid = sample(0, 10);
+            let value = match field {
+                "path" => &mut invalid.path,
+                "owner" => &mut invalid.owner,
+                "version" => &mut invalid.identity.version,
+                "backend" => &mut invalid.identity.backend,
+                "durability" => &mut invalid.identity.durability,
+                "hardware" => &mut invalid.identity.hardware,
+                "corpus.id" => &mut invalid.identity.corpus.as_mut().expect("fixture corpus").id,
+                _ => unreachable!("fixed field list"),
+            };
+            *value = blank.into();
+            let expected = EvidenceError::EmptyField(field);
+            let mut ledger = Ledger::parse(LEDGER_TOML).expect("ledger");
+            assert_eq!(ledger.record(CELL, invalid.clone()), Err(expected));
+            assert!(
+                matches!(invalid.sum(&sample(10, 20)), Err(EvidenceError::EmptyField(name)) if name == field)
+            );
+            assert!(
+                matches!(sample(10, 20).sum(&invalid), Err(EvidenceError::EmptyField(name)) if name == field)
+            );
+            // Deserialization must validate too, not just the record method.
+            ledger.cells[0].samples.push(invalid);
+            let text = ledger.render().expect("render unchecked fixture");
+            assert!(
+                matches!(Ledger::parse(&text), Err(EvidenceError::EmptyField(name)) if name == field)
+            );
+        }
+    }
+}
+
+#[test]
+fn summation_validates_both_inputs_and_interval_kinds() {
+    let left = sample(0, 10);
+    let right = sample(10, 20);
+    let mut missing_corpus = right.clone();
+    missing_corpus.identity.corpus = None;
+    assert_eq!(left.sum(&missing_corpus), Err(EvidenceError::MissingCorpus));
+    assert_eq!(missing_corpus.sum(&left), Err(EvidenceError::MissingCorpus));
+    let mut inverted = right.clone();
+    inverted.interval.end_ns = 0;
+    assert!(matches!(
+        left.sum(&inverted),
+        Err(EvidenceError::InvertedInterval(_))
+    ));
+    assert!(matches!(
+        inverted.sum(&left),
+        Err(EvidenceError::InvertedInterval(_))
+    ));
+    for kind in [IntervalKind::Outside, IntervalKind::DomainDefined] {
+        let mut other = right.clone();
+        other.interval.kind = kind;
+        assert_eq!(left.sum(&other), Err(EvidenceError::MismatchedTreatment));
+    }
+}
+
+#[test]
+fn empty_half_open_intervals_share_no_instants() {
+    let outer = sample(0, 20);
+    for offset in [0, 10, 20] {
+        let empty = sample(offset, offset);
+        assert!(!empty.interval.overlaps(outer.interval));
+        assert!(!outer.interval.overlaps(empty.interval));
+        assert!(!empty.interval.overlaps(empty.interval));
+        assert_eq!(
+            outer
+                .sum(&empty)
+                .expect("empty interval is disjoint")
+                .elapsed_ns,
+            20
+        );
+    }
+    assert!(!outer.interval.overlaps(sample(20, 30).interval));
+    assert!(outer.interval.overlaps(sample(19, 30).interval));
+}
+
+#[test]
+fn digest_parser_rejects_signed_pairs_and_non_hex_spellings() {
+    for malformed in [
+        "+0".repeat(32),
+        "-0".repeat(32),
+        "0 ".repeat(32),
+        "g0".repeat(32),
+        "é".repeat(32),
+    ] {
+        assert!(
+            malformed.parse::<Sha256Hex>().is_err(),
+            "accepted {malformed:?}"
+        );
+    }
+    for digest in [
+        Sha256Hex([0; 32]),
+        Sha256Hex([0xab; 32]),
+        Sha256Hex([0xff; 32]),
+    ] {
+        assert_eq!(digest.to_string().parse::<Sha256Hex>(), Ok(digest));
+    }
+}

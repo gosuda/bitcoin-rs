@@ -328,8 +328,7 @@ fn serve_scrape(stream: &mut TcpStream, handle: &PrometheusHandle) {
 
 /// A SHA-256 digest carried as 64 lowercase hex characters in evidence.
 ///
-/// A digest is bytes, not a label: a placeholder such as "unmeasured" cannot
-/// parse, so an identity is either real or absent.
+/// Parsing validates the encoding, not the provenance of the hashed artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Sha256Hex(pub [u8; 32]);
 
@@ -356,15 +355,16 @@ impl core::str::FromStr for Sha256Hex {
 
     fn from_str(text: &str) -> Result<Self, EvidenceError> {
         let malformed = || EvidenceError::MalformedDigest(text.into());
-        if text.len() != 64 {
+        if text.len() != 64
+            || !text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(malformed());
         }
         let mut bytes = [0_u8; 32];
         for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
             let text = core::str::from_utf8(pair).map_err(|_| malformed())?;
-            if text.bytes().any(|c| c.is_ascii_uppercase()) {
-                return Err(malformed());
-            }
             *byte = u8::from_str_radix(text, 16).map_err(|_| malformed())?;
         }
         Ok(Self(bytes))
@@ -396,8 +396,7 @@ pub struct CorpusIdentity {
 
 /// Everything a measurement was taken under.
 ///
-/// A number without this record is a rumor: it cannot be matched against a
-/// control cell or regenerated later.
+/// Used to match samples to their artifact, configuration, and treatment.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceIdentity {
@@ -514,7 +513,10 @@ impl Interval {
     /// and concurrency.
     #[must_use]
     pub fn overlaps(self, other: Self) -> bool {
-        self.start_ns < other.end_ns && other.start_ns < self.end_ns
+        self.start_ns < self.end_ns
+            && other.start_ns < other.end_ns
+            && self.start_ns < other.end_ns
+            && other.start_ns < self.end_ns
     }
 }
 
@@ -558,8 +560,23 @@ fn combine(
 
 impl Sample {
     fn check(&self) -> Result<(), EvidenceError> {
-        if self.identity.corpus.is_none() {
-            return Err(EvidenceError::MissingCorpus);
+        let corpus = self
+            .identity
+            .corpus
+            .as_ref()
+            .ok_or(EvidenceError::MissingCorpus)?;
+        for (field, value) in [
+            ("path", self.path.as_str()),
+            ("owner", self.owner.as_str()),
+            ("version", self.identity.version.as_str()),
+            ("backend", self.identity.backend.as_str()),
+            ("durability", self.identity.durability.as_str()),
+            ("hardware", self.identity.hardware.as_str()),
+            ("corpus.id", corpus.id.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(EvidenceError::EmptyField(field));
+            }
         }
         self.interval.check()
     }
@@ -569,7 +586,13 @@ impl Sample {
     /// Nested and concurrent intervals share instants, so their resources
     /// were consumed once and cannot be added; extrema take the maximum.
     pub fn sum(&self, other: &Self) -> Result<Self, EvidenceError> {
-        if self.path != other.path || self.owner != other.owner || self.identity != other.identity {
+        self.check()?;
+        other.check()?;
+        if self.path != other.path
+            || self.owner != other.owner
+            || self.identity != other.identity
+            || self.interval.kind != other.interval.kind
+        {
             return Err(EvidenceError::MismatchedTreatment);
         }
         if self.interval.overlaps(other.interval) {
@@ -684,11 +707,14 @@ pub enum EvidenceError {
     /// A product sample named no corpus.
     #[error("product sample carries no corpus identity")]
     MissingCorpus,
+    /// A required identity or sample label was empty or only whitespace.
+    #[error("evidence field {0} is empty")]
+    EmptyField(&'static str),
     /// An interval ended before it started.
     #[error("interval {0:?} ends before it starts")]
     InvertedInterval(Interval),
     /// The two samples were not taken under one treatment.
-    #[error("samples differ in path, owner or identity")]
+    #[error("samples differ in path, owner, identity or interval kind")]
     MismatchedTreatment,
     /// The two intervals share instants.
     #[error("intervals {0:?} and {1:?} overlap; nested or concurrent work is not an addend")]
