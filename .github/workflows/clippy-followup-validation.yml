@@ -1,0 +1,102 @@
+name: clippy-followup-validation
+
+on:
+  push:
+    branches: [validation/clippy-followup-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clippy-followup-validation
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  clippy-followup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 7d384289f6d47a6c44705ad05b7aa14926624e4b
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Prepare the source-only candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clippy-evidence"
+          rustc --version | tee "$RUNNER_TEMP/clippy-evidence/toolchain.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          path = 'crates/node/src/metrics.rs'
+          expected = '801775b321dd24bd4e29c35daf91460dffa309e5'
+          actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
+          if actual != expected:
+              raise SystemExit(f'metrics preimage changed: {actual}')
+          p = Path(path)
+          text = p.read_text()
+          old = 'bytes.iter_mut().zip(text.as_bytes().chunks_exact(2))'
+          new = 'bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0)'
+          if text.count(old) != 1:
+              raise SystemExit('expected exactly one chunk iteration preimage')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          rustfmt --edition 2024 crates/node/src/metrics.rs
+          git diff --check
+          test "$(git diff --name-only)" = crates/node/src/metrics.rs
+          git diff | tee "$RUNNER_TEMP/clippy-evidence/candidate.patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/node/src/metrics.rs
+          git commit -m 'fix(node): use fixed-size digest chunks for current-stable Clippy'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/clippy-evidence/candidate-sha.txt"
+          git ls-tree HEAD crates/node/src/metrics.rs | tee "$RUNNER_TEMP/clippy-evidence/blobs.txt"
+          git push origin HEAD:refs/heads/followup/stable-clippy-cleanup
+      - name: Workspace Clippy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-evidence/workspace.log"
+      - name: Native consensus Clippy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-evidence/consensus.log"
+      - name: Native node Clippy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-evidence/node.log"
+      - name: Metrics tests and workspace formatting
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: > "$RUNNER_TEMP/clippy-evidence/metrics-tests.log" 2>&1 || status=1
+          tail -n 70 "$RUNNER_TEMP/clippy-evidence/metrics-tests.log"
+          cargo fmt --all -- --check > "$RUNNER_TEMP/clippy-evidence/fmt.log" 2>&1 || status=1
+          tail -n 70 "$RUNNER_TEMP/clippy-evidence/fmt.log"
+          exit "$status"
+      - name: Preserve candidate and all profile results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stable-clippy-followup-evidence
+          path: ${{ runner.temp }}/clippy-evidence
+          retention-days: 3
+          if-no-files-found: error
