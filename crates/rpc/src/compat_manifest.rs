@@ -22,8 +22,8 @@
 //! `MethodDisabled` error). No whole method is disabled: methods this node
 //! does not expose are absent from the manifest and answer `-32601`.
 //!
-//! Reference identities and fixture validation are owned by
-//! `bin/bitcoin-rs/tests/support/reference_set.rs` (REF-01..REF-07).
+//! Reference identity parsing and custody validation are owned by
+//! `bin/bitcoin-rs/tests/support/reference_set.rs`.
 
 /// The manifest source, embedded so it cannot drift from the binary.
 pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
