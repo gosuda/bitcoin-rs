@@ -171,7 +171,8 @@ pub fn dispatch_inbound_full<S>(
             if let Some(mut response) = response {
                 if let Message::GetData(items) = &mut response {
                     let witness = peer.remote_version.as_ref().is_some_and(|version| {
-                        version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0
+                        version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64()
+                            != 0
                     });
                     request_transaction_witness(items, witness);
                 }
@@ -1014,12 +1015,7 @@ mod tests {
                         Inventory::Block(block),
                     ]);
                     assert_eq!(
-                        dispatch_collect_full(
-                            &mut peer,
-                            &Message::Inv(items.clone()),
-                            None,
-                            view,
-                        ),
+                        dispatch_collect_full(&mut peer, &Message::Inv(items.clone()), None, view,),
                         vec![Message::GetData(expected)],
                     );
                 }
