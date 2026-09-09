@@ -9,10 +9,11 @@ On conflict, fix the code and amend both pages in the same changeset.
 
 Owners: `P2pService` in `crates/p2p/src/service.rs` (sessions, leases,
 download-window scheduling); `PeerTable` and `PeerLease` in
-`crates/p2p/src/peer_table.rs` (session identity); the address book in
-`crates/p2p/src/address_book.rs`; compact blocks in
-`crates/p2p/src/compact_block.rs`; optional transport in
-`crates/p2p/src/transport_v2.rs`.
+`crates/p2p/src/peer_table.rs` (session identity). The address book
+(`crates/p2p/src/address_book.rs`), compact blocks
+(`crates/p2p/src/compact_block.rs`), and optional transport
+(`crates/p2p/src/transport_v2.rs`) are planned owners: none of the three
+files exists today, and their clauses below describe the target contract.
 
 ## Clauses
 
@@ -48,25 +49,6 @@ download-window scheduling); `PeerTable` and `PeerLease` in
   serviceable under block and transaction queue pressure. Receive and
   send buffers are bounded by bytes and work. A full queue drops bulk
   data with accounting and never starves control.
-
-### `P2P-03`: Discovery and the persistent address book
-
-- `crates/p2p/src/address_book.rs` owns the bounded persistent address
-  manager: tried and new candidate tables with timestamps and rate
-  bounds, IPv4/IPv6 and selected addrv2 formats, DNS seed and bootstrap
-  policy, `getaddr`/`getaddr_rcv` behavior, per-message and total intake
-  caps, and explicit proxy behavior.
-- Discovery state persists across restart under a discovery-owned
-  version field. A corrupt or unknown discovery version degrades to
-  seeded or empty discovery with a typed reseed status; it never fails
-  authoritative startup. A rejected discovery file stays in place until
-  an authorized rebuild.
-- `P2pService` maintains configured outbound diversity through its
-  reconnect and backoff. No second connection owner appears. Peer
-  status, connect and disconnect, network-active control, manual bans,
-  and declared discouragement live under `P2pService`.
-- Advertised service bits match the node's actual pruning and capability
-  state. A disabled feature is never advertised.
 
 ### `P2P-03`: Discovery and the persistent address book
 
