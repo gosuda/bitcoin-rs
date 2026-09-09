@@ -117,12 +117,7 @@ impl RocksDbStore {
         // Same seam discipline as the primary backends: apply faults precede
         // the engine write, sync faults drop the durable write options.
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
-            return match fault {
-                crate::PersistFault::FailApply
-                | crate::PersistFault::LostApply
-                | crate::PersistFault::PartialApply => Err(fault.injected_error()),
-                _ => unreachable!("take_at only releases Apply-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         let sync_fault = if sync {
             self.faults.take_at(crate::PersistBoundary::Sync)
@@ -142,13 +137,7 @@ impl RocksDbStore {
         };
         outcome?;
         if let Some(fault) = sync_fault {
-            return match fault {
-                // Completion never precedes the persisted write.
-                crate::PersistFault::FailSync | crate::PersistFault::LostSync => {
-                    Err(fault.injected_error())
-                }
-                _ => unreachable!("take_at only releases Sync-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         Ok(())
     }
@@ -236,11 +225,7 @@ impl KvStore for RocksDbStore {
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "rocksdb").increment(1);
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
-            return match fault {
-                crate::PersistFault::FailFlush => Err(fault.injected_error()),
-                crate::PersistFault::LostFlush => Ok(()),
-                _ => unreachable!("take_at only releases Flush-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         self.db.flush_wal(true).map_err(StorageError::backend)
     }

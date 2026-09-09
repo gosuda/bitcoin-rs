@@ -296,7 +296,9 @@ impl Shard {
     /// encoded bytes by full identity, for before- and after-images.
     pub(crate) fn record_bytes(&self, key: UtxoKey, txid: Hash256) -> Option<Vec<u8>> {
         let table = self.inner.read();
-        find_record(&table, key, txid).map(|record| record.encoded_bytes().to_vec())
+        find_record(&table, key, txid)
+            .filter(|record| !record.is_empty())
+            .map(|record| record.encoded_bytes().to_vec())
     }
 }
 

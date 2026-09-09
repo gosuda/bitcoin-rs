@@ -127,14 +127,7 @@ impl BlockFacts {
         let has_witness = txs
             .iter()
             .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()));
-        let count_len = u64::from(compact_size_len(len_u64(txs.len())));
-        let mut stripped = HEADER_LEN.saturating_add(count_len);
-        let mut total = HEADER_LEN.saturating_add(count_len);
-        for tx in txs {
-            stripped = stripped.saturating_add(len_u64(tx.base_size()));
-            total = total.saturating_add(len_u64(tx.total_size()));
-        }
-        let weight = stripped.saturating_mul(3).saturating_add(total);
+        let weight = Self::block_weight(txs);
         let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
         Self {
             txids,
@@ -150,9 +143,7 @@ impl BlockFacts {
     /// Consensus weight of an already-decoded transaction slice, without
     /// transaction identifiers or the Merkle reduction.
     ///
-    /// Weight-only callers must not pay for [`Self::from_txids`]'s identifier
-    /// clone and Merkle walk. The arithmetic below matches [`Self::from_txids`]
-    /// exactly; any change there must change here.
+    /// Shared by weight-only validation and [`Self::from_txids`].
     #[must_use]
     pub fn block_weight(txs: &[Tx]) -> u64 {
         let count_len = u64::from(compact_size_len(len_u64(txs.len())));

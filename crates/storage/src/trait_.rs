@@ -91,7 +91,7 @@ pub enum PersistBoundary {
 ///
 /// Test-only seam, hidden from the documented API: when armed on a backend,
 /// the next write path that reaches the fault's boundary fires the fault once
-/// and consumes it. Unarmed stores never consult the seam, and a fault armed
+/// and consumes it. An unarmed slot leaves behavior unchanged, and a fault armed
 /// at a boundary a path does not cross stays armed for a later path. The
 /// observable contract under every fault is fixed by [`KvStore`]: a
 /// multi-family batch recovers as the complete old or the complete new state
@@ -103,10 +103,8 @@ pub enum PersistFault {
     /// Persistence faults before any batch byte is applied: the call returns
     /// `Err` and no operation lands in any family.
     FailApply,
-    /// Lost write at the apply boundary: the engine write is silently
-    /// dropped. Paths that promise no durability may report `Ok`; paths that
-    /// must complete durability return `Err`, because completion never
-    /// precedes the persisted write.
+    /// The apply step is lost. Returns `Err` without applying the batch:
+    /// even a deferred write must be visible before it reports success.
     LostApply,
     /// Partial write at the apply boundary: a strict prefix of the batch
     /// reaches the engine and the boundary then faults. The engine discards
@@ -117,15 +115,15 @@ pub enum PersistFault {
     /// visible but not confirmed durable, and the call returns `Err` rather
     /// than reporting completion.
     FailSync,
-    /// Lost durability completion: the sync step is silently dropped after
-    /// the batch applied. The call may report success; a reopen observes the
-    /// whole batch or none of it, never a cross-family mix.
+    /// The durability completion is lost after the batch applies. Returns
+    /// `Err`: visibility does not establish durable completion. A reopen
+    /// may observe the complete old or complete new state, never a mix.
     LostSync,
     /// `flush` faults without completing deferred durability: the call
     /// returns `Err`.
     FailFlush,
-    /// Lost flush: `flush` returns `Ok` without performing the sync; a reopen
-    /// observes each earlier batch whole or not at all.
+    /// The flush completion is lost. Returns `Err` without confirming
+    /// durability; earlier batches must still recover atomically.
     LostFlush,
 }
 
@@ -325,8 +323,7 @@ pub trait KvStore: Send + Sync + 'static {
     /// Arms `fault` to fire once at its persistence boundary.
     ///
     /// Test seam for the atomic-durability proofs: not part of the storage
-    /// contract, hidden from the documented API. Unarmed stores never
-    /// consult the slot.
+    /// contract, hidden from the documented API. An unarmed slot leaves behavior unchanged.
     #[doc(hidden)]
     fn arm_persist_fault(&self, fault: PersistFault);
 }
