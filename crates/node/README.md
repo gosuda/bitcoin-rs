@@ -20,12 +20,9 @@ the ZMQ protocol and transport; node constructs its `ZmqPublisher`, attaches the
 mempool observer, and orders publication with committed chain effects. `signal`
 and `shutdown` bridge process signals into graceful shutdown.
 
-For transactions, node supplies the chain view and connects shared mempool
-admission to the P2P inventory, parent-request, and relay consumers. Mempool
-owns admission preparation, retries, orphans, and recent rejects; P2P owns
-connection checks and relay policy. Node retains worker startup/shutdown,
-mining generation, and the timing of chain-change notifications to mempool.
-The boundaries follow [ARCH-05](../../docs/contracts/architecture.md).
+Transaction ownership and lifecycle boundaries follow the authoritative
+[ARCH-05 contract](../../docs/contracts/architecture.md). This crate wires those
+surfaces into the node runtime.
 
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
 See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
