@@ -2,12 +2,12 @@
 
 A readable projection of the `[reference]` record in
 `docs/api/core-compat.toml` and the corresponding record in
-`crates/rpc/src/compat_manifest.rs`. `ReferenceSet` is the identity record
+`bin/bitcoin-rs/tests/support/reference_set.rs`. `ReferenceSet` is the identity record
 inside the compatibility manifest. It is not a separate registry and not a
 new public type.
 
 This page is a readable projection only. On conflict, the two manifest files
-`docs/api/core-compat.toml` and `crates/rpc/src/compat_manifest.rs` govern.
+`docs/api/core-compat.toml` and `bin/bitcoin-rs/tests/support/reference_set.rs` govern.
 A version label alone is never custody.
 
 ## Clauses
@@ -15,7 +15,7 @@ A version label alone is never custody.
 ### `REF-01`: Manifest files govern
 
 - The `[reference]` record in `docs/api/core-compat.toml` and the
-  corresponding record in `crates/rpc/src/compat_manifest.rs` are the
+  corresponding record in `bin/bitcoin-rs/tests/support/reference_set.rs` are the
   machine-readable authorities.
 - `docs/contracts/reference-set.md` is a readable projection. It does not
   override the manifest files on conflict.
@@ -72,7 +72,7 @@ The product corpora are defined in
   UTXO total.
 
 `manifest_sha256` is optional and absent from the manifest until the archive
-exists; `corpus_custody()` in `crates/rpc/src/compat_manifest.rs` reports such
+exists; `corpus_custody()` in `bin/bitcoin-rs/tests/support/reference_set.rs` reports such
 a corpus as `Blocked { missing: "manifest_sha256" }` rather than inventing a
 digest.
 
@@ -100,7 +100,7 @@ This is an evidence tool pin. No checker run is claimed by this page.
 - A reference with only a version label or a mismatched binary digest is
   rejected with a typed `ReferenceError` variant (`VersionLabelOnly`,
   `DigestMalformed`, `IdentityConfusion`, `MissingCorpus`) from
-  `crates/rpc/src/compat_manifest.rs`.
+  `bin/bitcoin-rs/tests/support/reference_set.rs`.
 - The 31.1 product reference and the 31.99.0 kernel tree are distinct. No
   test may claim product parity against the kernel tree identity.
 - Known deviations are explicit. No status in the manifest upgrades to
@@ -108,7 +108,7 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 ## Proven by
 
-- `docs/api/core-compat.toml` and `crates/rpc/src/compat_manifest.rs`
+- `docs/api/core-compat.toml` and `bin/bitcoin-rs/tests/support/reference_set.rs`
   (existing): the machine-readable reference record.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
   digest-mismatch identities, and pins `corpus_custody()` honesty.
