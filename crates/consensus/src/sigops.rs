@@ -4,7 +4,7 @@
 //! by consensus verification and mempool preparation. Script-level counters
 //! remain owned by `bitcoin-rs-script`.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::script::{
@@ -12,20 +12,15 @@ use bitcoin_rs_script::script::{
 };
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
 
-/// Counts BIP141 transaction sigop cost against resolved previous outputs.
+/// Counts transaction sigop cost against resolved previous outputs.
 ///
-/// Legacy and P2SH sigops cost four units; witness-v0 sigops cost one. Nested
-/// witness programs require a P2SH prevout and a push-only scriptSig. Taproot
-/// retains its separate per-input budget. These are counting rules, not script
-/// verification or activation decisions; callers retain their validation flags
-/// and activation checks. Missing prevouts contribute no contextual sigops.
+/// The counting rules are documented in the repository's
+/// [mempool policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/mempool-policy.md).
+/// This function does not verify scripts or select activation flags.
 ///
-/// Prevouts may be incomplete or unordered. Input order permits a linear pass
-/// without allocation, which is the normal admission/consensus preparation order.
-/// A missing or unordered input builds a borrowed index once rather than
-/// repeatedly scanning the full prevout slice.
-/// The rules follow BIP141 and Core v31.1 `GetTransactionSigOpCost`,
-/// `CScript::GetSigOpCount` and `CountWitnessSigOps`.
+/// Callers may supply incomplete or unordered prevouts and must retain their
+/// own missing-input and validation status. Input order permits a linear pass
+/// without allocation; other input orders build one borrowed lookup index.
 #[must_use]
 pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
     let mut cost = count_tx_legacy(tx).saturating_mul(4);

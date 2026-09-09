@@ -19,6 +19,7 @@ fjall = []
 redb = []
 
 [dependencies]
+hashbrown.workspace = true
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-script.workspace = true
 secp256k1.workspace = true
@@ -33,7 +34,6 @@ rayon.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 anyhow.workspace = true
-hashbrown.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
 

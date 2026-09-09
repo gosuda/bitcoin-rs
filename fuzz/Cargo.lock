@@ -117,6 +117,7 @@ version = "0.5.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
+ "hashbrown",
  "rayon",
  "secp256k1",
  "serde",
