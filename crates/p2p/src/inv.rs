@@ -14,7 +14,7 @@ pub type InventoryVector = Inventory;
 /// connection. A stale source never sends to a same-address replacement.
 ///
 /// Parent inputs identify transactions by txid. Witness-capable sources receive
-/// `MSG_WITNESS_TX` so a SegWit parent's witness is not stripped; other sources
+/// `MSG_WITNESS_TX` so a `SegWit` parent's witness is not stripped; other sources
 /// receive `MSG_TX`. Both identify the parent by txid, as BIP339 permits for
 /// unannounced parents, independently of the peer's announcement preference.
 /// Repeated parents produce one inventory item. Returns whether a non-empty
@@ -161,7 +161,7 @@ mod tests {
         assert!(!lease.is_cancelled());
     }
 
-    /// P2P-01 / BIP144: request witness serialization by txid from NODE_WITNESS
+    /// P2P-01 / BIP144: request witness serialization by txid from `NODE_WITNESS`
     /// sources. BIP339 announcement preference does not alter this requirement.
     /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
     #[test]
