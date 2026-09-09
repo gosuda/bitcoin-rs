@@ -4,11 +4,11 @@
 //! Each test binds real TCP listeners on 127.0.0.1 and drives the production
 //! wire path end to end: a dialer peer frames `version`/`verack`/`inv`/`tx`
 //! with `bitcoin_rs_p2p::wire`, the node side runs the real inbound handshake
-//! and `dispatch_inbound_full` with the real [`TxAdmission`] as the
+//! and `dispatch_inbound_full` with the real [`MempoolGateway`] as the
 //! `TxInventory` filter, the decoded transaction enters the real bounded
 //! channel drained by [`spawn_tx_ingress_consumer`], admission commits through
-//! the node's one shared `MempoolGateway`, and the real relay worker (started
-//! by that spawn) announces through `PeerRelaySink` over
+//! the node's one shared `MempoolGateway`, and the real P2P relay worker
+//! announces through `PeerRelaySink` over
 //! `NodeState::peer_table`. The assertions read framed messages back off
 //! the sockets: the bystander peer receives the `inv`, the source peer does
 //! not.
@@ -22,7 +22,7 @@
 //! tests return early with a `tracing::warn!` rather than failing.
 
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -31,19 +31,21 @@ use anyhow::{anyhow, bail};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_mining::{
     BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, MiningControl,
     MiningControlError, MiningInfo,
 };
 use bitcoin_rs_node::state::NodeState;
-use bitcoin_rs_node::tx_admission::TxAdmission;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
 use bitcoin_rs_node::{Network, NodeConfig};
-use bitcoin_rs_p2p::TxInventory;
 use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
 use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
-use bitcoin_rs_p2p::{InboundTx, Message, Peer, PeerLease};
+use bitcoin_rs_p2p::{
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundTx, Message, Peer, PeerLease, PeerRelaySink,
+    TxRelayQueue, spawn_tx_relay_worker,
+};
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
@@ -91,12 +93,21 @@ fn open_node() -> anyhow::Result<(NodeState, tempfile::TempDir)> {
 /// seam the apply path writes through), so the spend below passes the
 /// missing-inputs check.
 fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> anyhow::Result<()> {
+    fund_utxo_script(state, parent, value, vec![0x51])
+}
+
+fn fund_utxo_script(
+    state: &NodeState,
+    parent: Txid,
+    value: u64,
+    script_pubkey: Vec<u8>,
+) -> anyhow::Result<()> {
     let mut changes = BlockChanges::with_capacity(1, 0);
     changes.add(UtxoAdd::new(
         OutPoint::new(parent, 0),
         TxOut {
             value,
-            script_pubkey: vec![0x51],
+            script_pubkey,
         },
         false,
         100,
@@ -197,6 +208,7 @@ fn loopback_skip() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Node-side wiring shared by every loopback peer of one test.
+#[derive(Clone)]
 struct PeerWiring {
     magic: Magic,
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
@@ -211,15 +223,43 @@ struct PeerWiring {
 struct LoopbackPeer {
     /// Test-held client end of the real TCP connection.
     dialer: TcpStream,
+    peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
+    peer_addr: SocketAddr,
+    lease: PeerLease,
+    pump: Option<std::thread::JoinHandle<()>>,
+    service: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LoopbackPeer {
+    fn close(&mut self) -> bool {
+        self.lease.cancel();
+        let _ = self.dialer.shutdown(Shutdown::Both);
+        self.peer_table.remove_current(self.peer_addr, &self.lease);
+        let service_ok = self
+            .service
+            .take()
+            .is_none_or(|handle| handle.join().is_ok());
+        let pump_ok = self.pump.take().is_none_or(|handle| handle.join().is_ok());
+        service_ok && pump_ok
+    }
+}
+
+impl Drop for LoopbackPeer {
+    fn drop(&mut self) {
+        let joined = self.close();
+        if !std::thread::panicking() {
+            assert!(joined, "loopback peer worker panicked");
+        }
+    }
 }
 
 /// Dials one loopback connection and starts its node-side service thread:
 /// real inbound handshake, then a dispatch loop that filters `inv` through
-/// the real [`TxAdmission`] and forwards decoded `tx` bodies into the real
+/// the real [`MempoolGateway`] and forwards decoded `tx` bodies into the real
 /// ingress channel with the lease-stamped source.
 fn open_loopback_peer(
     wiring: &PeerWiring,
-    admission: Arc<TxAdmission>,
+    gateway: Arc<MempoolGateway>,
     name: &'static str,
 ) -> anyhow::Result<LoopbackPeer> {
     let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
@@ -228,59 +268,63 @@ fn open_loopback_peer(
 
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<Message>();
     let lease = PeerLease::new_inbound(outbound_tx);
-    wiring.peer_table.register(peer_addr, lease.clone());
-
     let mut wire_out = accepted
         .try_clone()
         .map_err(|error| anyhow!("accepted stream clone failed: {error}"))?;
+    wire_out.set_write_timeout(Some(READ_POLL))?;
+    let reader = accepted;
     let magic = wiring.magic;
-    // Detached: both threads exit when the harness flags shut down, and the
-    // pump's channel senders drop with the peer leases.
-    std::thread::Builder::new()
-        .name(format!("ingress-e2e-pump-{name}"))
-        .spawn(move || {
-            while let Ok(message) = outbound_rx.recv() {
-                if write_message(&mut wire_out, magic, &message).is_err() {
-                    break;
+    let mut peer = LoopbackPeer {
+        dialer,
+        peer_table: Arc::clone(&wiring.peer_table),
+        peer_addr,
+        lease: lease.clone(),
+        pump: None,
+        service: None,
+    };
+    wiring.peer_table.register(peer_addr, lease.clone());
+    let pump_lease = lease.clone();
+    peer.pump = Some(
+        std::thread::Builder::new()
+            .name(format!("ingress-e2e-pump-{name}"))
+            .spawn(move || {
+                while !pump_lease.is_cancelled() {
+                    match outbound_rx.recv_timeout(READ_POLL) {
+                        Ok(message) => {
+                            if write_message(&mut wire_out, magic, &message).is_err() {
+                                break;
+                            }
+                        }
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    }
                 }
-            }
-        })?;
+            })?,
+    );
 
-    let reader = accepted
-        .try_clone()
-        .map_err(|error| anyhow!("accepted stream clone failed: {error}"))?;
-    let ingress_tx = Sender::clone(&wiring.ingress_tx);
-    let stop = Arc::clone(&wiring.stop);
-    std::thread::Builder::new()
-        .name(format!("ingress-e2e-node-{name}"))
-        .spawn(move || {
-            serve_connection(
-                reader,
-                peer_addr,
-                &lease,
-                &admission,
-                &ingress_tx,
-                &stop,
-                magic,
-            );
-        })?;
+    let wiring = wiring.clone();
+    peer.service = Some(
+        std::thread::Builder::new()
+            .name(format!("ingress-e2e-node-{name}"))
+            .spawn(move || {
+                serve_connection(reader, peer_addr, &lease, &gateway, &wiring);
+            })?,
+    );
 
-    Ok(LoopbackPeer { dialer })
+    Ok(peer)
 }
 
 /// Node-side half of one loopback connection: the production handshake, then
 /// the production dispatch loop. `Message::Tx` is forwarded into the ingress
-/// channel with the real lease-stamped source — the one seam the production
-/// listener has not wired yet (see the module docs).
+/// channel with the same lease-stamped source as the production listener.
 fn serve_connection(
     stream: TcpStream,
     peer_addr: SocketAddr,
     lease: &PeerLease,
-    admission: &Arc<TxAdmission>,
-    ingress_tx: &Sender<InboundTx>,
-    stop: &Arc<AtomicBool>,
-    magic: Magic,
+    gateway: &Arc<MempoolGateway>,
+    wiring: &PeerWiring,
 ) {
+    let magic = wiring.magic;
     let stream = stream;
     if stream.set_read_timeout(Some(READ_POLL)).is_err() {
         return;
@@ -290,16 +334,34 @@ fn serve_connection(
     if run_inbound_handshake(&mut peer, 1, 0, lease, None, deadline).is_err() {
         return;
     }
+    let Some(version) = peer.remote_version.as_ref() else {
+        return;
+    };
+    let Ok(addr_bind) = peer.stream.local_addr() else {
+        return;
+    };
+    let mut info = bitcoin_rs_p2p::PeerInfo::inbound_from_version(
+        peer_addr,
+        addr_bind,
+        version,
+        0,
+        0,
+        Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
+    );
+    info.wtxid_relay = peer.wtxid_relay.peer_supported();
+    if !wiring.peer_table.publish_info(peer_addr, lease, info) {
+        return;
+    }
     let _ = peer.stream.set_read_timeout(Some(READ_POLL));
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if wiring.stop.load(Ordering::Relaxed) {
             return;
         }
         match read_message(&mut peer.stream, magic) {
             Ok((message, _raw)) => {
                 if let Message::Tx(tx) = message {
                     let source = lease.source(peer_addr);
-                    let _ = ingress_tx.try_send(InboundTx::new(tx, source));
+                    let _ = wiring.ingress_tx.try_send(InboundTx::new(tx, source));
                     continue;
                 }
                 let mut send = |response: Message| {
@@ -311,7 +373,7 @@ fn serve_connection(
                     &mut peer,
                     &message,
                     None,
-                    Some(admission.as_ref()),
+                    Some(gateway.as_ref()),
                     &|| true,
                     &mut send,
                 );
@@ -324,7 +386,7 @@ fn serve_connection(
 }
 
 /// Completes the dialer half of the handshake against the node side.
-fn dial_handshake(dialer: &TcpStream, magic: Magic) -> anyhow::Result<()> {
+fn dial_handshake(dialer: &TcpStream, magic: Magic, wtxid_relay: bool) -> anyhow::Result<()> {
     let mut stream = dialer
         .try_clone()
         .map_err(|error| anyhow!("dialer clone failed: {error}"))?;
@@ -335,6 +397,9 @@ fn dial_handshake(dialer: &TcpStream, magic: Magic) -> anyhow::Result<()> {
         if matches!(message, Message::Verack) {
             break;
         }
+    }
+    if wtxid_relay {
+        write_message(&mut stream, magic, &Message::WtxidRelay)?;
     }
     write_message(&mut stream, magic, &Message::Verack)?;
     Ok(())
@@ -384,11 +449,12 @@ fn announces_tx(frames: &[Message], txid: &Txid) -> bool {
     })
 }
 
-/// True when one of `frames` requests `txid` with `getdata`.
+/// P2P-01 / BIP144: these dialers advertise `NODE_WITNESS`, so require
+/// witness-serialized getdata rather than accepting the legacy request.
 fn requests_tx(frames: &[Message], txid: &Txid) -> bool {
     frames.iter().any(|message| match message {
         Message::GetData(items) => items.iter().any(|item| match item {
-            Inventory::Transaction(hash) => hash.as_byte_array() == txid.as_bytes(),
+            Inventory::WitnessTransaction(hash) => hash.as_byte_array() == txid.as_bytes(),
             _ => false,
         }),
         _ => false,
@@ -452,21 +518,22 @@ fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> anyhow::Result
 // Harness
 // ---------------------------------------------------------------------------
 
-/// Full path under test: funded node state, spawned ingress consumer (which
-/// also starts the production relay worker), and a source + bystander
+/// Full path under test: funded node state, the production ingress and P2P
+/// relay workers, and a source + bystander
 /// loopback peer pair with completed handshakes.
 struct Harness {
-    /// Kept alive for the whole test body: the node holds storage handles
-    /// under this data directory.
-    _dir: tempfile::TempDir,
     state: NodeState,
     magic: Magic,
-    admission: Arc<TxAdmission>,
+    gateway: Arc<MempoolGateway>,
     mining: Arc<RecordingMining>,
     shutdown: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     source: LoopbackPeer,
     bystander: LoopbackPeer,
+    ingress: Option<std::thread::JoinHandle<()>>,
+    relay: Option<std::thread::JoinHandle<()>>,
+    /// Dropped after state releases its storage handles.
+    _dir: tempfile::TempDir,
 }
 
 impl Harness {
@@ -476,22 +543,13 @@ impl Harness {
         let (state, dir) = open_node()?;
         let magic = Magic::from_bytes(state.config().p2p.magic);
         let gateway = state.mempool_gateway();
-        let admission = Arc::new(TxAdmission::new(Arc::clone(&gateway)));
 
-        let (ingress_tx, ingress_rx) = crossbeam_channel::bounded::<InboundTx>(64);
+        let ingress_tx = state.inbound_tx_sender();
+        let ingress_rx = state.inbound_tx_rx_handle();
+        let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         let mining = Arc::new(RecordingMining::default());
         let mining_control: Arc<dyn MiningControl> = Arc::<RecordingMining>::clone(&mining);
         let shutdown = Arc::new(AtomicBool::new(false));
-        // Detached: the consumer exits when the shutdown flag rises or the
-        // ingress channel disconnects.
-        spawn_tx_ingress_consumer(
-            &state,
-            Arc::clone(&gateway),
-            mining_control,
-            Arc::clone(&shutdown),
-            Arc::new(Mutex::new(ingress_rx)),
-            Arc::clone(&admission),
-        )?;
 
         let wiring = PeerWiring {
             magic,
@@ -502,26 +560,66 @@ impl Harness {
 
         fund_utxo(&state, parent_txid(source_marker), 50_000)?;
 
-        let source = open_loopback_peer(&wiring, Arc::clone(&admission), "source")?;
-        let bystander = open_loopback_peer(&wiring, Arc::clone(&admission), "bystander")?;
-        dial_handshake(&source.dialer, magic)?;
-        dial_handshake(&bystander.dialer, magic)?;
+        let source = open_loopback_peer(&wiring, Arc::clone(&gateway), "source")?;
+        let bystander = open_loopback_peer(&wiring, Arc::clone(&gateway), "bystander")?;
+        dial_handshake(&source.dialer, magic, false)?;
+        dial_handshake(&bystander.dialer, magic, false)?;
+        wait_until(OBSERVE_TIMEOUT, || {
+            wiring.peer_table.ready_source(source.peer_addr).is_some()
+                && wiring
+                    .peer_table
+                    .ready_source(bystander.peer_addr)
+                    .is_some()
+        })?;
 
-        Ok(Self {
-            _dir: dir,
+        let mut harness = Self {
             state,
             magic,
-            admission,
+            gateway,
             mining,
             shutdown,
             stop: wiring.stop,
             source,
             bystander,
-        })
+            ingress: None,
+            relay: None,
+            _dir: dir,
+        };
+        // Register each handle as soon as its spawn succeeds so later setup
+        // failure still closes the peers and joins every earlier worker.
+        harness.relay = Some(spawn_tx_relay_worker(
+            PeerRelaySink::new(harness.state.peer_table()),
+            relay_rx,
+            Arc::clone(&harness.shutdown),
+        )?);
+        harness.ingress = Some(spawn_tx_ingress_consumer(
+            &harness.state,
+            Arc::clone(&harness.gateway),
+            mining_control,
+            Arc::clone(&harness.shutdown),
+            ingress_rx,
+            relay,
+        )?);
+        Ok(harness)
     }
 
     fn tx_in_mempool(&self, txid: &Txid) -> bool {
         self.state.mempool_gateway().read().contains_txid(txid)
+    }
+
+    fn connect_peer(&self, name: &'static str, wtxid_relay: bool) -> anyhow::Result<LoopbackPeer> {
+        let wiring = PeerWiring {
+            magic: self.magic,
+            peer_table: self.state.peer_table(),
+            ingress_tx: self.state.inbound_tx_sender(),
+            stop: Arc::clone(&self.stop),
+        };
+        let peer = open_loopback_peer(&wiring, Arc::clone(&self.gateway), name)?;
+        dial_handshake(&peer.dialer, self.magic, wtxid_relay)?;
+        wait_until(OBSERVE_TIMEOUT, || {
+            wiring.peer_table.ready_source(peer.peer_addr).is_some()
+        })?;
+        Ok(peer)
     }
 }
 
@@ -529,12 +627,132 @@ impl Drop for Harness {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.shutdown.store(true, Ordering::Relaxed);
+        let source_ok = self.source.close();
+        let bystander_ok = self.bystander.close();
+        let ingress_ok = self
+            .ingress
+            .take()
+            .is_none_or(|handle| handle.join().is_ok());
+        let relay_ok = self.relay.take().is_none_or(|handle| handle.join().is_ok());
+        if !std::thread::panicking() {
+            assert!(
+                source_ok && bystander_ok && ingress_ok && relay_ok,
+                "transaction ingress harness worker panicked"
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[test]
+fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Result<()> {
+    let (state, _dir) = open_node()?;
+    fund_utxo(&state, parent_txid(0xDD), 50_000)?;
+    let gateway = state.mempool_gateway();
+    let (relay, _relay_rx) = TxRelayQueue::new(1);
+    let pending = spending_tx(parent_txid(0xEE), 40_000);
+    assert!(relay.announce(pending.txid(), pending.wtxid(), None));
+    let mining = Arc::new(RecordingMining::default());
+    let mining_control: Arc<dyn MiningControl> = Arc::<RecordingMining>::clone(&mining);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let (ingress_tx, ingress_rx) = crossbeam_channel::bounded(1);
+    let tx = spending_tx(parent_txid(0xDD), 40_000);
+    let txid = tx.txid();
+    let (outbound_tx, _outbound_rx) = crossbeam_channel::bounded(1);
+    let source = PeerLease::new(outbound_tx).source(SocketAddr::from((Ipv4Addr::LOCALHOST, 8333)));
+    let ingress = spawn_tx_ingress_consumer(
+        &state,
+        Arc::clone(&gateway),
+        mining_control,
+        Arc::clone(&shutdown),
+        Arc::new(Mutex::new(ingress_rx)),
+        relay.clone(),
+    )?;
+
+    let observed = ingress_tx
+        .try_send(InboundTx::new(tx, source))
+        .map_err(|error| anyhow!("failed to queue peer transaction: {error}"))
+        .and_then(|()| {
+            wait_until(OBSERVE_TIMEOUT, || {
+                gateway.read().contains_txid(&txid) && mining.publish_count() >= 1
+            })
+        });
+    shutdown.store(true, Ordering::Relaxed);
+    let joined = ingress.join();
+    observed?;
+    joined.map_err(|_| anyhow!("transaction ingress worker panicked"))?;
+    assert_eq!(relay.enqueued(), 1);
+    assert_eq!(relay.dropped(), 1);
+    assert!(gateway.read().contains_txid(&txid));
+    Ok(())
+}
+
+#[test]
+fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<()> {
+    if let Some(reason) = loopback_skip() {
+        tracing::warn!(%reason, "skipping tx ingress e2e");
+        return Ok(());
+    }
+    let harness = Harness::build(0xA1)?;
+    let witness_peer = harness.connect_peer("wtxid", true)?;
+    let parent = parent_txid(0xA2);
+    let witness_script = vec![0x51];
+    let mut locking_script = vec![0x00, 0x20];
+    locking_script
+        .extend_from_slice(bitcoin::hashes::sha256::Hash::hash(&witness_script).as_byte_array());
+    fund_utxo_script(&harness.state, parent, 50_000, locking_script)?;
+    let mut tx = spending_tx(parent, 40_000);
+    tx.inputs[0].witness = vec![witness_script];
+    let txid = tx.txid();
+    let wtxid = tx.wtxid();
+    assert_ne!(txid.as_bytes(), wtxid.as_bytes());
+    write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
+    wait_until(OBSERVE_TIMEOUT, || harness.tx_in_mempool(&txid))?;
+
+    let legacy_frames = collect_frames(
+        &harness.bystander.dialer,
+        harness.magic,
+        Instant::now() + ABSENCE_WINDOW,
+    )?;
+    let witness_frames = collect_frames(
+        &witness_peer.dialer,
+        harness.magic,
+        Instant::now() + ABSENCE_WINDOW,
+    )?;
+    let inventories = |frames: &[Message]| -> Vec<Inventory> {
+        frames
+            .iter()
+            .filter_map(|message| match message {
+                Message::Inv(items) => Some(items.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect()
+    };
+    assert_eq!(
+        inventories(&legacy_frames),
+        vec![Inventory::Transaction(bitcoin::Txid::from_byte_array(
+            *txid.as_bytes()
+        ),)]
+    );
+    assert_eq!(
+        inventories(&witness_frames),
+        vec![Inventory::WTx(bitcoin::Wtxid::from_byte_array(
+            *wtxid.as_bytes()
+        ),)]
+    );
+    let source_frames = collect_frames(
+        &harness.source.dialer,
+        harness.magic,
+        Instant::now() + ABSENCE_WINDOW,
+    )?;
+    assert!(inventories(&source_frames).is_empty());
+    Ok(())
+}
 
 /// R1–R8 over a real socket: the source peer announces `inv`, the node
 /// requests the body with `getdata` (real dispatch + real admission filter),
@@ -552,7 +770,7 @@ fn accepted_peer_tx_is_admitted_and_relayed_excluding_the_source() -> anyhow::Re
     let tx = spending_tx(parent_txid(0xAA), 40_000);
     let txid = tx.txid();
 
-    // The source announces; the node's dispatch + TxAdmission filter does not
+    // The source announces; the node's dispatch + gateway inventory filter does not
     // know the tx and requests its body over the same socket.
     write_frame(&harness.source.dialer, harness.magic, &tx_inv(&txid))?;
     wait_for_tx_getdata(
@@ -595,7 +813,7 @@ fn accepted_peer_tx_is_admitted_and_relayed_excluding_the_source() -> anyhow::Re
         "accepted tx must wake the mining control"
     );
     assert!(
-        harness.admission.have_tx(Hash256::from(txid), false),
+        harness.gateway.have_tx(Hash256::from(txid), false),
         "the admission inventory must report the mempool hold"
     );
 
@@ -630,7 +848,7 @@ fn below_min_relay_tx_is_rejected_recorded_and_never_relayed() -> anyhow::Result
     // …the body is delivered and rejected…
     write_frame(&harness.source.dialer, harness.magic, &Message::Tx(tx))?;
     wait_until(OBSERVE_TIMEOUT, || {
-        harness.admission.is_rejected(Hash256::from(txid))
+        harness.gateway.is_rejected(Hash256::from(txid))
     })
     .map_err(|_| anyhow!("rejected tx never reached the recent-rejects cache"))?;
     assert!(

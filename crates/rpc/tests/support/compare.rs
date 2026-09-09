@@ -343,10 +343,9 @@ fn compare_tuple(
             ),
         ));
     }
-    // Derived framing: Content-Length is not pinned data. Each tuple with
-    // a known wire body length must carry exactly one ASCII-decimal header
-    // equal to that length, so byte-identical bodies get equal lengths for
-    // free and a known-gap body difference may change the length.
+    // Derived framing: Content-Length is not pinned data. A 204 must omit it;
+    // every other tuple with a known wire body length must carry exactly one
+    // ASCII-decimal header equal to that length.
     check_tuple_content_length(fixture, side, expected)?;
     check_tuple_content_length(fixture, side, live)?;
     // Header membership is complete: every name on the pinned side and on
@@ -414,11 +413,10 @@ fn header_value<'a>(tuple: &'a HttpTuple, name: &str) -> Option<&'a str> {
         .map(|(_, value)| value.as_str())
 }
 
-/// Enforces the derived `Content-Length` invariant on one tuple: when the
-/// tuple's wire body length is known it must carry exactly one header and
-/// its ASCII-decimal value must equal that length; when the length is not
-/// derivable (a JSON-body pinned tuple) the header is covered by the live
-/// side's check instead.
+/// Enforces the derived `Content-Length` invariant on one tuple. A 204 has no
+/// content and must omit the header; otherwise a known wire body length must
+/// carry exactly one matching ASCII-decimal header. When the length is not
+/// derivable (a JSON-body pinned tuple), the live side owns the check.
 fn check_tuple_content_length(
     fixture: &str,
     side: &str,
@@ -437,6 +435,16 @@ fn check_tuple_content_length(
         .collect();
     if declared.len() > 1 {
         return Err(fail("duplicate Content-Length headers".into()));
+    }
+    if tuple.status == 204 {
+        if tuple.body_len != Some(0) {
+            return Err(fail("204 response must have an empty body".into()));
+        }
+        return if declared.is_empty() {
+            Ok(())
+        } else {
+            Err(fail("204 response must not carry Content-Length".into()))
+        };
     }
     let Some(length) = tuple.body_len else {
         return Ok(());

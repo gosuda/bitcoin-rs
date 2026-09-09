@@ -62,7 +62,7 @@ mdbx = [
     "bitcoin-rs-storage/mdbx",
 ]
 kernel = ["bitcoin-rs-consensus/kernel"]
-zmq = ["dep:zmq", "bitcoin-rs-rpc/zmq"]
+zmq = ["bitcoin-rs-rpc/zmq"]
 prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
@@ -84,6 +84,7 @@ bitcoin.workspace = true
 bytes.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 crossbeam-channel.workspace = true
 crossbeam-utils.workspace = true
 parking_lot.workspace = true
@@ -99,7 +100,6 @@ quanta.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
-zmq = { workspace = true, optional = true }
 sha2.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
@@ -111,7 +111,7 @@ proptest.workspace = true
 anyhow.workspace = true
 criterion.workspace = true
 sonic-rs.workspace = true
-toml.workspace = true
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
 name = "sync_pipeline"

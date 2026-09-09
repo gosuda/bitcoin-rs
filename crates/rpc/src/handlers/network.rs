@@ -610,11 +610,13 @@ mod tests {
         use bitcoin_rs_p2p::PeerInfo;
 
         let info = PeerInfo {
+            wtxid_relay: false,
             addr: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
             version: 70_016,
             services: (1_u64 << 0) | (1_u64 << 3),
             user_agent: "stub".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound: false,
             addr_bind: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
@@ -797,11 +799,13 @@ mod addnode_validation_tests {
         let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
         let ctx = Context::new();
         let info = PeerInfo {
+            wtxid_relay: false,
             addr,
             version: 70_016,
             services: 9,
             user_agent: "test".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound: false,
             addr_bind: addr,
@@ -1139,11 +1143,13 @@ mod peer_counter_tests {
                 .unwrap_or_else(|_| panic!("test address {text} must parse"))
         };
         PeerInfo {
+            wtxid_relay: false,
             addr: parse(addr),
             version: 70_016,
             services: 0,
             user_agent: "/test/".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound,
             addr_bind: parse(bind),
@@ -1511,11 +1517,13 @@ mod getnodeaddresses_tests {
     fn peer(addr: &str, services: u64) -> PeerInfo {
         let parsed: SocketAddr = addr.parse().expect("addr");
         PeerInfo {
+            wtxid_relay: false,
             addr: parsed,
             version: 70_016,
             services,
             user_agent: "test".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 100,
             inbound: false,
             addr_bind: parsed,

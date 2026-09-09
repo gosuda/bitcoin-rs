@@ -1,6 +1,6 @@
 # bitcoin-rs product hot-path ledger. Owner: docs/contracts/hot-path-attribution.md.
 # Schema is parsed by bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs.
-schema = "bitcoin-rs-hot-path-ledger-v1"
+schema = "bitcoin-rs-hot-path-ledger-v2"
 contract = "docs/contracts/hot-path-attribution.md"
 
 [matrix]
@@ -759,3 +759,153 @@ reason = "Weakens the measured query."
 id = "probe.skip_checkpoint"
 name = "suppress checkpoint, reopen, or recovery work"
 reason = "Weakens the product lifecycle."
+
+# ---------------------------------------------------------------------------
+# Cell histories. One entry per matrix cell; a run appends samples through
+# bitcoin_rs_node::metrics::Ledger and never edits or removes an earlier one.
+# An empty history is an unmeasured cell.
+# ---------------------------------------------------------------------------
+
+[[cells]]
+id = "offline.c150.x86_64.fjall"
+samples = []
+
+[[cells]]
+id = "offline.c150.x86_64.rocksdb"
+samples = []
+
+[[cells]]
+id = "offline.c150.x86_64.redb"
+samples = []
+
+[[cells]]
+id = "offline.c150.arm64.fjall"
+samples = []
+
+[[cells]]
+id = "offline.c150.arm64.rocksdb"
+samples = []
+
+[[cells]]
+id = "offline.c150.arm64.redb"
+samples = []
+
+[[cells]]
+id = "offline.cmodern.x86_64.fjall"
+samples = []
+
+[[cells]]
+id = "offline.cmodern.x86_64.rocksdb"
+samples = []
+
+[[cells]]
+id = "offline.cmodern.x86_64.redb"
+samples = []
+
+[[cells]]
+id = "offline.cmodern.arm64.fjall"
+samples = []
+
+[[cells]]
+id = "offline.cmodern.arm64.rocksdb"
+samples = []
+
+[[cells]]
+id = "offline.cmodern.arm64.redb"
+samples = []
+
+[[cells]]
+id = "p2p.c150.x86_64.fjall"
+samples = []
+
+[[cells]]
+id = "p2p.c150.x86_64.rocksdb"
+samples = []
+
+[[cells]]
+id = "p2p.c150.x86_64.redb"
+samples = []
+
+[[cells]]
+id = "p2p.c150.arm64.fjall"
+samples = []
+
+[[cells]]
+id = "p2p.c150.arm64.rocksdb"
+samples = []
+
+[[cells]]
+id = "p2p.c150.arm64.redb"
+samples = []
+
+[[cells]]
+id = "p2p.cmodern.x86_64.fjall"
+samples = []
+
+[[cells]]
+id = "p2p.cmodern.x86_64.rocksdb"
+samples = []
+
+[[cells]]
+id = "p2p.cmodern.x86_64.redb"
+samples = []
+
+[[cells]]
+id = "p2p.cmodern.arm64.fjall"
+samples = []
+
+[[cells]]
+id = "p2p.cmodern.arm64.rocksdb"
+samples = []
+
+[[cells]]
+id = "p2p.cmodern.arm64.redb"
+samples = []
+
+[[cells]]
+id = "muhash.c150.x86_64.fjall"
+samples = []
+
+[[cells]]
+id = "muhash.c150.x86_64.rocksdb"
+samples = []
+
+[[cells]]
+id = "muhash.c150.x86_64.redb"
+samples = []
+
+[[cells]]
+id = "muhash.c150.arm64.fjall"
+samples = []
+
+[[cells]]
+id = "muhash.c150.arm64.rocksdb"
+samples = []
+
+[[cells]]
+id = "muhash.c150.arm64.redb"
+samples = []
+
+[[cells]]
+id = "muhash.cmodern.x86_64.fjall"
+samples = []
+
+[[cells]]
+id = "muhash.cmodern.x86_64.rocksdb"
+samples = []
+
+[[cells]]
+id = "muhash.cmodern.x86_64.redb"
+samples = []
+
+[[cells]]
+id = "muhash.cmodern.arm64.fjall"
+samples = []
+
+[[cells]]
+id = "muhash.cmodern.arm64.rocksdb"
+samples = []
+
+[[cells]]
+id = "muhash.cmodern.arm64.redb"
+samples = []

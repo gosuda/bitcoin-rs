@@ -667,7 +667,16 @@ fn begin_chain_transition<'a>(
 /// accept `&ChainChangeProof`, not independent `&TransitionLock` and
 /// `&ChainChangeGuard` arguments, so a call without an active odd generation
 /// fails to compile. Build one proof per single operation, whole window, or
-/// whole reorg. Finish only at the outer success boundary.
+/// whole reorg. Finish it once the operation reaches a consistent chainstate:
+/// a successful return, or a clean refusal whose failing block was refused
+/// before the UTXO commit-of-record (`utxo.commit_borrowed_block`). Every
+/// failure before that point touches only idempotent derived state (undo,
+/// block body, header tree) that a retry overwrites; a `UtxoCommit` refusal
+/// may tear the UTXO set, so the transition must be dropped and left odd
+/// until recovery establishes a consistent chainstate. Callers that own the
+/// retry loop (e.g. [`BlockSync`]) may finish on a clean refusal; convenience
+/// entry points finish on success and drop on refusal so the gateway stays
+/// fail-closed.
 pub(crate) struct ChainChangeProof<'a> {
     #[expect(
         dead_code,
@@ -995,9 +1004,16 @@ pub struct Chainstate {
 /// operational failures leave that block retryable.
 ///
 /// [`Self::finish`] stores the reserved even mempool generation. It does not
-/// persist chainstate. Call it only after a successful mutation. A crash or
-/// drop after a successful connect but before finish leaves generation odd
-/// until an external recovery path resets it.
+/// persist chainstate. Call it once the window attempt concludes on a
+/// consistent chainstate: a successful return, or a failure whose committed
+/// prefix is already in place and whose failing block was refused before the
+/// UTXO commit-of-record (`utxo.commit_borrowed_block`). Every failure before
+/// that point touches only idempotent derived state (undo, block body, header
+/// tree) that a retry overwrites. A `UtxoCommit` refusal is different: the
+/// per-shard commit is not all-or-nothing across runs, so the UTXO set may be
+/// torn; drop the transition and leave generation odd until recovery
+/// establishes a consistent chainstate. A drop on crash, panic, or any torn
+/// state does the same.
 pub struct ChainTransition<'a> {
     chainstate: &'a Chainstate,
     proof: ChainChangeProof<'a>,
@@ -1085,8 +1101,12 @@ impl<'a> ChainTransition<'a> {
     /// Finishes the chain change, storing the reserved even generation.
     ///
     /// Consumes the capability so it cannot be used after finish. Does not
-    /// persist chainstate. Call only on the success path; drop on error so
-    /// generation stays odd.
+    /// persist chainstate. Call it once the attempt has reached a consistent
+    /// chainstate — a successful return, or a clean refusal whose committed
+    /// prefix is already in place and whose failing block was refused before
+    /// the UTXO commit-of-record (`utxo.commit_borrowed_block`). Drop on a
+    /// `UtxoCommit` refusal, panic, or torn state leaves generation odd until
+    /// recovery establishes a consistent chainstate.
     pub fn finish(self) -> core::result::Result<(), ApplyError> {
         self.proof.finish()
     }
@@ -1140,11 +1160,17 @@ impl Chainstate {
         })
     }
 
-    /// Begins an admitted chain mutation: admission, transition lock, and
-    /// mempool generation.
+    /// Begins an admitted chain mutation: admission, the transition lock, and
+    /// the mempool generation reservation.
     ///
-    /// The returned capability is the only way to connect or disconnect.
-    /// Finish it on success; drop it on failure so generation stays odd.
+    /// The returned capability is the only way to connect or disconnect. Finish
+    /// it once the attempt reaches a consistent chainstate: a successful
+    /// return, or a clean refusal whose committed prefix is already in place
+    /// and whose failing block was refused before the UTXO commit-of-record
+    /// (`utxo.commit_borrowed_block`). Drop on a `UtxoCommit` refusal, panic,
+    /// or torn state leaves generation odd until recovery establishes a
+    /// consistent chainstate. Failure before this method returns a capability
+    /// acquires no transition and therefore makes no generation postcondition.
     pub fn begin_transition(&self) -> core::result::Result<ChainTransition<'_>, ApplyError> {
         let lock = self.lock_transition()?;
         self.begin_transition_locked(lock)
@@ -1194,7 +1220,11 @@ impl Chainstate {
         }
     }
 
-    /// Admits a transition, connects `block`, and finishes on success.
+    /// Admits a transition, connects `block`, and finishes on success. Failure
+    /// before admission acquires no transition and does not change generation.
+    /// A refusal after admission drops the transition and leaves generation
+    /// odd; callers that need to retry a clean refusal should use
+    /// [`ChainTransition`] directly and finish it explicitly.
     ///
     /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
     /// not invoked. Production paths with followers must dispatch while the
@@ -1230,6 +1260,10 @@ impl Chainstate {
     }
 
     /// Admits a transition, disconnects `block`, and finishes on success.
+    /// Failure before admission acquires no transition and does not change
+    /// generation. A refusal after admission drops the transition and leaves
+    /// generation odd; callers that need to retry should use [`ChainTransition`]
+    /// directly.
     ///
     /// Persistence matches [`ChainTransition::disconnect`]. An admission
     /// failure is `DisconnectError::Refused`. Derived consumers are not
@@ -1249,6 +1283,10 @@ impl Chainstate {
     }
 
     /// Admits a transition, applies consecutive blocks, and finishes on success.
+    /// Failure before admission acquires no transition and does not change
+    /// generation. A refusal after admission drops the transition and leaves
+    /// generation odd; callers that need to retry a clean refusal should use
+    /// [`ChainTransition::connect_window`] directly and finish explicitly.
     ///
     /// Persistence matches [`ChainTransition::connect_window`].
     #[allow(clippy::result_large_err)]
@@ -2002,17 +2040,30 @@ fn invalidate_failed_subtree(
 /// republishes the best valid tip rather than retrying the same block.
 /// Operational failures (storage, UTXO commit, undo record, shutdown) are
 /// transient and must not permanently mark a block invalid.
+///
+/// Kernel-backed script verification failures are classified Operational
+/// because `bitcoinkernel` can reject a valid block depending on process
+/// state (issue #618): the same block applies successfully after restart.
+/// Treating these as Permanent would freeze the node at the tip and
+/// invalidate a valid header subtree with no retry path. The native
+/// interpreter path does not produce this spurious failure, so its
+/// `ConsensusError::Script` remains Permanent.
 pub(crate) fn is_permanent_apply_error(error: &ApplyError) -> bool {
     match error {
         ApplyError::ProofOfWork { .. }
         | ApplyError::TargetAboveLimit
         | ApplyError::NbitsNonRetargetMismatch { .. } => true,
-        ApplyError::Consensus(error) => !matches!(
-            error,
+        ApplyError::Consensus(error) => match error {
             bitcoin_rs_consensus::ConsensusError::PrevoutMatrixSize { .. }
-                | bitcoin_rs_consensus::ConsensusError::Kernel(_)
-                | bitcoin_rs_consensus::ConsensusError::Encoding(_)
-        ),
+            | bitcoin_rs_consensus::ConsensusError::Kernel(_)
+            | bitcoin_rs_consensus::ConsensusError::Encoding(_) => false,
+            bitcoin_rs_consensus::ConsensusError::Script { reason, .. }
+                if reason.starts_with("kernel script verification failed:") =>
+            {
+                false
+            }
+            _ => true,
+        },
         _ => false,
     }
 }
@@ -2032,7 +2083,9 @@ pub struct WindowApplyError {
     pub source: ApplyError,
     /// How the caller must treat this failure: `Permanent` failures poisoned
     /// the failed block's header subtree while the chain transition was still
-    /// held; `Operational` failures poisoned nothing.
+    /// held; `Operational` failures poisoned nothing; `Fatal` means the
+    /// transition itself could not be settled (the reserved even generation
+    /// could not be published), so admission stays closed until recovery.
     pub disposition: WindowApplyDisposition,
     /// Hashes marked invalid under the held transition when `disposition` is
     /// [`WindowApplyDisposition::Permanent`]: the failed block and every
@@ -2084,6 +2137,13 @@ pub enum WindowApplyDisposition {
     /// Transient failure (storage, UTXO commit, shutdown). Nothing was
     /// invalidated; the failed block and its tail stay retryable.
     Operational,
+    /// The transition could not be concluded: the reserved even generation
+    /// could not be published (`ChainChangeGuard::finish` failed /
+    /// `GenerationMoved`). Mempool admission stays closed; a retry cannot
+    /// begin until recovery or restart re-establishes a consistent gateway.
+    /// Nothing about the blocks is invalid — committed blocks stay applied
+    /// and nothing is purged.
+    Fatal,
 }
 
 /// Prepares consecutive blocks against one overlay and verifies all their input
@@ -2180,7 +2240,8 @@ fn prove_window<'a>(
             return Vec::new();
         };
         let tx_plan = plan_block_transactions(block, &txids);
-        let view = bitcoin_rs_consensus::BlockView::new(&block.txs, txids);
+        let facts = kernel_block.derive_facts(&block.txs, &txids);
+        let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
         let resolved = Arc::new(ResolvedUtxoView::resolve(&overlay, block, &tx_plan));
         if overlay
             .advance(
@@ -2212,13 +2273,15 @@ fn prove_window<'a>(
     // could send a body with the expected header and one altered witness
     // reserved value, keeping every txid intact, and force a full window of
     // script verification for a block that is rejected immediately either way.
-    // Both checks below depend on nothing but the block, so running them here
-    // costs a hash per block and removes the amplification.
+    // Both checks below depend on nothing but the block, so the window runs
+    // them before any script work. The Merkle verdict is already derived in
+    // the one-pass parse, so this is a comparison, not a hash; a
+    // witness-carrying block hashes its witness IDs exactly once below.
     for ((block, unit), context) in blocks.iter().zip(prepared.iter_mut()).zip(&contexts) {
-        if !bitcoin_rs_consensus::verify_block::block_merkle_root_matches_txids(
-            block,
-            unit.view.txids(),
-        ) {
+        // The one-pass derivation already reduced these txids through the
+        // production walker; comparing the stored root is the same verdict
+        // without a second tree walk.
+        if !unit.view.merkle_root_matches(block.header.merkle_root) {
             return Vec::new();
         }
         // BIP141: a missing commitment is fatal only when the block carries
@@ -2229,7 +2292,7 @@ fn prove_window<'a>(
         if context
             .flags
             .contains(bitcoin_rs_script::VerifyFlags::WITNESS)
-            && bitcoin_rs_consensus::verify_block::block_has_witness(block)
+            && unit.view.facts().has_witness()
         {
             let commitment_matches = {
                 let wtxids = unit.view.witness_ids();
@@ -2258,7 +2321,6 @@ fn prove_window<'a>(
         // same reason the script checks are batched across blocks rather than
         // split within one.
         let mut units = Vec::with_capacity(prepared.len());
-        let mut flags: Vec<bitcoin_rs_script::VerifyFlags> = Vec::with_capacity(prepared.len());
         for (index, ((block, unit), context)) in blocks
             .iter()
             .zip(prepared.iter_mut())
@@ -2288,22 +2350,17 @@ fn prove_window<'a>(
                 &mut unit.view,
                 context.height,
                 context.locktime_cutoff,
+                context.flags,
                 &unit.kernel_block,
             ) {
-                Ok(checks) => {
-                    units.push(checks);
-                    // Pushed together with the unit so the two stay aligned:
-                    // collecting flags from every context would misalign them
-                    // against a units list that skipped some.
-                    flags.push(context.flags);
-                }
+                Ok(checks) => units.push(checks),
                 Err(_) => return Vec::new(),
             }
         }
         metrics::histogram!("node.window.checks_seconds")
             .record(checks_started.elapsed().as_secs_f64());
         let verify_started = quanta::Instant::now();
-        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units, &flags);
+        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
         metrics::histogram!("node.window.verify_seconds")
             .record(verify_started.elapsed().as_secs_f64());
         if verdict.is_err() {
@@ -2446,13 +2503,6 @@ pub(crate) fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
     sink.equal && sink.offset == raw.len()
 }
 
-#[cfg_attr(
-    not(feature = "kernel"),
-    expect(
-        clippy::needless_pass_by_value,
-        reason = "the kernel build consumes preserved bytes through this shared signature"
-    )
-)]
 fn parse_block_for_apply(
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
@@ -2491,15 +2541,29 @@ fn parse_block_for_apply(
         let txids = kernel_block.txids().map_err(ApplyError::Consensus)?;
         (kernel_block, txids)
     };
-    // Without the kernel there is no second parse to harvest identities from,
-    // so hash each transaction of the already-decoded block exactly once.
-    // Re-decoding the preserved bytes here would make the native path pay two
-    // full decodes plus one consensus re-serialization per block.
+    // Without the kernel the checked borrowed layout is the one parse: it
+    // derives the txids, witness IDs, weight, byte positions, and the
+    // Merkle verdicts in a single pass, and the decoded block feeds only
+    // the stages that mutate or verify against it. No second transaction
+    // tree decode happens on this path.
     #[cfg(not(feature = "kernel"))]
-    let (kernel_block, txids) = (
-        bitcoin_rs_consensus::kernel::KernelBlock,
-        block_txids(block),
-    );
+    let (kernel_block, txids) = {
+        let raw_block: bytes::Bytes =
+            provided_serialized.unwrap_or_else(|| bytes::Bytes::from(consensus_bytes(block)));
+        let kernel_block = bitcoin_rs_consensus::kernel::KernelBlock::parse(&raw_block)
+            .map_err(ApplyError::Consensus)?;
+        if kernel_block.transaction_count() != block.txs.len() {
+            return Err(ApplyError::Consensus(
+                bitcoin_rs_consensus::ConsensusError::Kernel(format!(
+                    "layout parsed {} transactions, decoder produced {}",
+                    kernel_block.transaction_count(),
+                    block.txs.len()
+                )),
+            ));
+        }
+        let txids = kernel_block.txids().to_vec();
+        (kernel_block, txids)
+    };
     Ok((kernel_block, txids))
 }
 
@@ -2508,7 +2572,7 @@ fn parse_block_for_apply(
 /// Blocks beyond the threshold the window verifier uses fan the hashing out;
 /// below it, serial iteration wins because dispatch costs more than the
 /// per-transaction double SHA256.
-#[cfg(any(test, not(feature = "kernel")))]
+#[cfg(test)]
 fn block_txids(block: &Block) -> Vec<Txid> {
     if block.txs.len() > 32 {
         block.txs.par_iter().map(Tx::txid).collect()
@@ -2529,7 +2593,8 @@ fn prepare_apply<'b, S: crate::window_overlay::OutputSource + ?Sized>(
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
     let (kernel_block, txids) = parse_block_for_apply(block, provided_serialized)?;
     let tx_plan = plan_block_transactions(block, &txids);
-    let view = bitcoin_rs_consensus::BlockView::new(&block.txs, txids);
+    let facts = kernel_block.derive_facts(&block.txs, &txids);
+    let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
     Ok(PreparedApply {
         kernel_block,
@@ -2700,6 +2765,8 @@ fn apply_block_admitted<'b>(
     // Witness IDs are needed only for a witness-carrying block under active
     // segwit; the view computes them once and the commitment check consumes
     // the cache, so witness-free blocks never serialize-and-hash for wtxids.
+    // The native one-pass layout already carries them; this only fills the
+    // kernel-build facts, which derive witness IDs lazily.
     let needs_wtxids = softfork_state.segwit_active && tx_plan.witness_presence.is_present();
     if needs_wtxids {
         view.witness_ids();
@@ -2709,9 +2776,7 @@ fn apply_block_admitted<'b>(
         bitcoin_rs_consensus::BlockRuleContext {
             segwit_active: softfork_state.segwit_active,
         },
-        view.txids(),
-        view.computed_witness_ids().unwrap_or(&[]),
-        tx_plan.witness_presence.is_present(),
+        view.facts(),
     );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
@@ -3495,6 +3560,7 @@ fn run_non_script_checks_only(
     txids: &[Txid],
     height: u32,
     locktime_cutoff: u32,
+    flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     if !tx_plan.needs_local_utxo_overlay {
         block.txs.par_iter().try_for_each(|tx| {
@@ -3507,6 +3573,7 @@ fn run_non_script_checks_only(
                 &*resolved,
                 height,
                 locktime_cutoff,
+                flags,
             )
         })?;
         return Ok(());
@@ -3523,6 +3590,7 @@ fn run_non_script_checks_only(
             &view,
             height,
             locktime_cutoff,
+            flags,
         )?;
         view.spend_inputs(tx);
         view.add_outputs(tx_index, *txid, tx.outputs.len())?;
@@ -3530,13 +3598,6 @@ fn run_non_script_checks_only(
     Ok(())
 }
 
-#[cfg_attr(
-    not(feature = "kernel"),
-    expect(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "the kernel build borrows an owning block handle through this shared signature"
-    )
-)]
 #[allow(
     clippy::as_conversions,
     clippy::cast_sign_loss,
@@ -3570,6 +3631,7 @@ fn verify_block_transactions(
             view.txids(),
             context.height,
             context.locktime_cutoff,
+            context.flags,
         );
     }
     // Full-verify: resolve every transaction's prevouts serially in block order
@@ -7759,11 +7821,13 @@ mod consensus_rule_tests {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
 
-        fn prepare_block(
+        fn prepare_block_with_spent_scripts(
             &self,
+            _capabilities: bitcoin_rs_index::IndexCapabilities,
             _height: u32,
             _hash: [u8; 32],
             _body: &[u8],
+            _spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
         ) -> Result<bitcoin_rs_index::PreparedBlock, bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
@@ -7779,13 +7843,14 @@ mod consensus_rule_tests {
         ) -> Result<(), bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
-        fn commit_rollback_one_for_with_cursor(
+        fn commit_rollback_one_for_with_cursor_with_spent_scripts(
             &self,
             _fence: bitcoin_rs_index::IndexWriteFence,
             _capabilities: bitcoin_rs_index::IndexCapabilities,
             _prev: Option<bitcoin_rs_index::IndexWatermark>,
             _body: &[u8],
             _cursor: bitcoin_rs_index::ConsumerCursorUpdate<'_>,
+            _spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
         ) -> Result<(), bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
@@ -9146,7 +9211,7 @@ mod consensus_rule_tests {
                 crate::SequenceEvent::Connected(hash) => (hash, b'C'),
                 crate::SequenceEvent::Disconnected(hash) => (hash, b'D'),
                 // Test-fake arms for the mempool `A`/`R` events; the
-                // production payload mapping lives in `zmq_publisher`.
+                // production payload mapping lives in `bitcoin_rs_rpc::zmq`.
                 crate::SequenceEvent::Added(txid, _) => (Hash256::from(txid), b'A'),
                 crate::SequenceEvent::Removed(txid, _) => (Hash256::from(txid), b'R'),
             };
@@ -10608,6 +10673,37 @@ mod consensus_rule_tests {
             "fallible tree preparation must precede the first UTXO mutation and stay absent on failure"
         );
         Ok(())
+    }
+
+    /// #618 regression: a kernel-backed script verification failure must be
+    /// classified Operational (retryable), not Permanent, because
+    /// `bitcoinkernel` can reject a valid block depending on process state.
+    /// The same block applies successfully after restart, so permanently
+    /// invalidating its header subtree would freeze the node at the tip.
+    #[test]
+    fn kernel_script_verification_failure_is_operational() {
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "kernel script verification failed: Script verification failed".to_owned(),
+        });
+        assert!(
+            !is_permanent_apply_error(&error),
+            "kernel script verification failures must be Operational (retryable) per #618"
+        );
+    }
+
+    /// A native (non-kernel) script verification failure remains Permanent:
+    /// the native interpreter is deterministic and not process-state-dependent.
+    #[test]
+    fn native_script_verification_failure_is_permanent() {
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "Script verification failed".to_owned(),
+        });
+        assert!(
+            is_permanent_apply_error(&error),
+            "native script verification failures must remain Permanent"
+        );
     }
 }
 

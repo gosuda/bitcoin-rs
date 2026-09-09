@@ -760,11 +760,11 @@ mod tests {
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
         let window_slots = budget.max_received_blocks;
-        assert!(u8::try_from(window_slots).is_ok());
 
         for index in 0..window_slots {
             let mut raw = [0xee_u8; 32];
-            raw[0] = u8::try_from(index).unwrap_or_else(|_| panic!("window exceeds u8 range"));
+            let index_bytes = index.to_le_bytes();
+            raw[..index_bytes.len()].copy_from_slice(&index_bytes);
             let hash = Hash256::from_le_bytes(&raw);
             match stager.insert(hash, None, block.clone(), serialized.clone(), now) {
                 super::StagedBlock::Memory { dropped, .. } => {

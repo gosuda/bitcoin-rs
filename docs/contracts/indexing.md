@@ -59,7 +59,7 @@ remove another script's output.
 ### `IDX-03`: Query gating and snapshot consistency
 
 - **Ready invariant**: `ready ⇔ cursor == applied_tip on active chain`.
-- `TxIndexQueryEngine::with_snapshot` and `index_info_internal` gate every read:
+- `TxIndexQueryEngine::with_snapshot` and `index_info` gate every read:
   1. The worker runtime must be healthy (neither `failed` nor `shutdown`).
   2. The applied tip loaded before snapshot creation must match the durable
      capability watermark (`IndexWatermark { height, hash }`) for every consumed
@@ -102,6 +102,10 @@ remove another script's output.
   `ConsumerCursor`).
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
+  `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
+  version, and the one recorded predecessor (format 3, spending keys without
+  positions) by resetting only `ScriptHistory` for rebuild (`IDX-04`); every
+  other version is `IndexError::UnsupportedTxIndexFormatVersion`.
 - On node startup, index workers read their persisted watermarks and reconcile
   against `NodeState::active_chain_snapshot()`:
   - If the watermark is an ancestor of the restored tip, the worker connects

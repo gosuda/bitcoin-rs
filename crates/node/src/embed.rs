@@ -114,7 +114,7 @@ impl Node {
     ///
     /// [`NodeError::Startup`] names the failed configuration check, storage
     /// open, crash recovery, or service bind.
-    #[allow(clippy::unused_async)] // async by contract; the body is synchronous today.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async API defers work until polled.
     pub async fn start(
         config: crate::NodeConfig,
         runtime: crate::RuntimeInputs,
@@ -207,7 +207,7 @@ impl Node {
     ///
     /// [`NodeError::Unavailable`] when the block is known but its body is
     /// pruned or fails identity verification against its stored bytes.
-    #[allow(clippy::unused_async)] // async by contract; the body is synchronous today.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async API defers work until polled.
     pub async fn block_by_hash(&self, hash: BlockHash) -> Result<Option<Block>, NodeError> {
         let hash = Hash256::from(hash);
         let Some(record) = self.context.block_by_hash(hash) else {
@@ -242,7 +242,7 @@ impl Node {
     ///
     /// [`NodeError::Unavailable`] for a disabled or unhealthy index,
     /// [`NodeError::NotFound`] for a proven-absent transaction.
-    #[allow(clippy::unused_async)] // async by contract; the body is synchronous today.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async API defers work until polled.
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
         // Bind before matching: holding a pool or map guard alive across the
         // `if let` body would keep a lock for the whole lookup chain.
@@ -300,7 +300,7 @@ impl Node {
     ///
     /// [`NodeError::Broadcast`] when the transaction fails any policy check
     /// or the pool refuses it.
-    #[allow(clippy::unused_async)] // async by contract; the body is synchronous today.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async API defers work until polled.
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
         // Core's `sendrawtransaction` default `maxfeerate` (0.1 BTC/kvB);
         // the embedded surface admits under the identical cap.
@@ -318,7 +318,7 @@ impl Node {
     ///
     /// [`NodeError::Shutdown`] when drain, checkpoint publication, or a
     /// worker join fails.
-    #[allow(clippy::unused_async)] // async by contract; the body is synchronous today.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)] // async API defers work until polled.
     pub async fn shutdown(self) -> Result<(), NodeError> {
         self.shutdown_blocking()
     }
@@ -496,8 +496,8 @@ mod tests {
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 
-    use crate::zmq_publisher::MempoolSequenceObserver;
-    use crate::zmq_publisher::{SequenceEvent, ZmqPublisher};
+    use bitcoin_rs_rpc::zmq::MempoolSequenceObserver;
+    use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
     /// Captures every `sequence`-topic event the gateway's observer emits.
     #[derive(Default)]
@@ -589,7 +589,7 @@ mod tests {
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());
-        let recording: Arc<dyn crate::zmq_publisher::ZmqPublisher> = publisher.clone();
+        let recording: Arc<dyn bitcoin_rs_rpc::zmq::ZmqPublisher> = publisher.clone();
         let observer: Arc<dyn MempoolObserver> = Arc::new(MempoolSequenceObserver::new(recording));
         let config = embedded_config(&dir.path().join("node"));
 

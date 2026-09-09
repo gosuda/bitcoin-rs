@@ -8,11 +8,14 @@ This policy applies to every crate in the `bitcoin-rs` workspace (`crates/*`) an
 
 ## 2. Toolchain and Language Edition
 
-Language and toolchain settings are locked centrally in `rust-toolchain.toml` and root `Cargo.toml`.
+The repository development toolchain is selected by `rust-toolchain.toml`.
+Language edition and the compatibility floor are owned by the root `Cargo.toml`,
+with Clippy's compatibility behavior mirrored in `clippy.toml`.
 
 | Setting | Value | Configuration Source |
 | :--- | :--- | :--- |
-| Minimum Supported Rust Version (MSRV) | `1.95.0` | `rust-toolchain.toml`, `Cargo.toml` (`rust-version`) |
+| Development Rust toolchain | `stable` | `rust-toolchain.toml` |
+| Minimum Supported Rust Version (MSRV) | `1.95.0` | `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`) |
 | Rust Language Edition | `2024` | `Cargo.toml` (`workspace.package.edition`) |
 | Strict Workspace Lints | Enabled | `Cargo.toml` (`workspace.lints`) |
 
@@ -21,7 +24,7 @@ Language and toolchain settings are locked centrally in `rust-toolchain.toml` an
 - MSRV increases only under these conditions:
   1. A required upstream dependency bumps its MSRV floor beyond `1.95.0`.
   2. A new standard library feature or compiler capability is strictly necessary for consensus correctness or performance.
-- An MSRV bump requires updating `rust-toolchain.toml`, root `Cargo.toml` (`rust-version`), and workspace documentation simultaneously.
+- An MSRV bump requires updating root `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`), and workspace documentation simultaneously. The repository development toolchain remains `stable`.
 
 ## 3. Dependency Policy
 
@@ -30,10 +33,10 @@ Language and toolchain settings are locked centrally in `rust-toolchain.toml` an
 ### 3.1 Adding Dependencies
 - All `[dependencies]` and `[build-dependencies]` of member crates (`crates/*`) must be defined centrally in `Cargo.toml` under `[workspace.dependencies]`.
 - Member crates must inherit those using `{ workspace = true }`.
-- `[dev-dependencies]` are exempt. They do not reach the shipped binary, so a version skew between two crates' test harnesses cannot produce a runtime conflict, and centralizing them buys nothing. Twelve member manifests declare `tempfile = "3"` directly under `[dev-dependencies]` and there is no workspace entry for it; that is intended, not drift.
+- `[dev-dependencies]` are exempt. They do not reach the shipped binary, so a version skew between two crates' test harnesses cannot produce a runtime conflict, and centralizing them buys nothing. Eight member manifests declare `tempfile = ">=3.20.0, <4"` directly under `[dev-dependencies]` and there is no workspace entry for it; that is intended, not drift.
 - Centralize a dev-dependency anyway when two crates must agree on a type that crosses between them in tests.
 - Do not add dependencies for functionality available in the Rust standard library or existing workspace crates.
-- Prohibited dependencies: `tokio`, `async-std`, or any async runtime. The node architecture uses a synchronous crossbeam-channel event loop.
+- Prohibited dependencies: `tokio`, `async-std`, or any async runtime. The node architecture uses a synchronous crossbeam-channel event loop. The embedding API (`crates/node/src/embed.rs`) exposes `async fn` signatures whose bodies are synchronous; the node never creates, enters, or retains a runtime, and the embedder supplies its own executor (`docs/contracts/embedding.md`, EMB-02). That contract does not add a runtime dependency and is not an exception to this rule.
 
 ### 3.2 Major Version Bumps
 - Upgrading a workspace dependency to a new major version requires:
@@ -43,7 +46,7 @@ Language and toolchain settings are locked centrally in `rust-toolchain.toml` an
 
 ## 4. Workspace Versioning and Semver Commitment
 
-All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.4.0`).
+All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.5.0`).
 
 | Workspace Crate | Path | Description |
 | :--- | :--- | :--- |
@@ -90,4 +93,3 @@ maintainer decision and matching migration policy before adding a reader.
 - On-disk storage schemas do not maintain backward-compatibility translation shims.
 - When key-value column families, block file encodings, or checkpoint formats change, the system does not convert old databases in place.
 - Datadir schema markers, resync requirements, and checkpoint commit/recovery semantics are defined by the canonical [datadir migration policy](db-migration.md). This policy does not duplicate those on-disk rules.
-

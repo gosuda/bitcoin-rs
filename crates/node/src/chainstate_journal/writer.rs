@@ -1546,6 +1546,10 @@ mod tests {
         fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
             unreachable!("unused in writer tests")
         }
+
+        fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+            unreachable!("unused in writer tests")
+        }
     }
 
     struct NoopBatch;

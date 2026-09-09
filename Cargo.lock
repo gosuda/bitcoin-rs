@@ -225,11 +225,12 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin-rs-node",
+ "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
  "clap",
  "mimalloc",
@@ -237,12 +238,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "toml 1.1.5+spec-1.1.0",
 ]
 
 [[package]]
 name = "bitcoin-rs-chain"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -263,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-consensus"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -284,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-index"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -306,9 +308,10 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mempool"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
+ "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
@@ -326,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mining"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-chain",
@@ -341,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-node"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -383,16 +386,16 @@ dependencies = [
  "toml 1.1.5+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
- "zmq",
 ]
 
 [[package]]
 name = "bitcoin-rs-p2p"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bytemuck",
@@ -415,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-primitives"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bytemuck",
@@ -430,8 +433,9 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-rpc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
+ "anyhow",
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
@@ -459,11 +463,12 @@ dependencies = [
  "thiserror",
  "toml 1.1.5+spec-1.1.0",
  "tracing",
+ "zmq",
 ]
 
 [[package]]
 name = "bitcoin-rs-script"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
@@ -484,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bytemuck",
@@ -507,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utxo"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",

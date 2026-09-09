@@ -1035,9 +1035,11 @@ mod tests {
             crate::PeerInfo {
                 addr,
                 version: 70_016,
+                wtxid_relay: false,
                 services: 0,
                 user_agent: String::from("/test/"),
                 start_height: 0,
+                best_known_height: 0,
                 conn_time: 0,
                 inbound: false,
                 addr_bind: addr,
@@ -1120,8 +1122,10 @@ mod tests {
             crate::PeerInfo {
                 addr: connected,
                 version: 70_016,
+                wtxid_relay: false,
                 services: 9,
                 user_agent: String::from("/test/"),
+                best_known_height: 1,
                 start_height: 1,
                 conn_time: 10,
                 inbound: false,

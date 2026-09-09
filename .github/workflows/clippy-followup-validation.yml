@@ -1,0 +1,144 @@
+name: clippy-followup-validation
+
+on:
+  push:
+    branches: [validation/clippy-followup-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: clippy-followup-validation
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  metrics-bind-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 39582762a94f0573ff12bd2ae643ee933b8bec15
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          cache-on-failure: true
+      - name: Extract only the tested fresh-process probe onto current main
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/metrics-evidence"
+          rustc --version | tee "$RUNNER_TEMP/metrics-evidence/toolchain.txt"
+          git fetch origin 5efe8c3281465bb8999b3d305119c9c519bd6833
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          path = 'crates/node/src/metrics.rs'
+          tested = subprocess.check_output(['git','show',f'5efe8c3281465bb8999b3d305119c9c519bd6833:{path}'],text=True)
+          current = Path(path).read_text()
+          start = '    fn occupied_address_bind_errors_and_in_process_retry_succeeds() {\n'
+          end = '\n    #[test]\n    fn scrape_returns_prometheus_text_with_recorded_metrics()'
+          def span(text):
+              if text.count(start) != 1 or text.count(end) != 1:
+                  raise SystemExit('metrics function boundaries changed')
+              a = text.index(start)
+              b = text.index(end,a)
+              return a,b
+          a,b = span(tested)
+          replacement = tested[a:b]
+          # Preserve the newly merged test mutex and all other server guards.
+          needle = '        const FINISHED: &str = "fresh-recorder-bind-probe-finished";\n'
+          if replacement.count(needle) != 1:
+              raise SystemExit('tested probe changed')
+          replacement = replacement.replace(needle,needle+'        let _guard = SERVER_TEST_LOCK.lock();\n',1)
+          a,b = span(current)
+          if current[a:b].count('let _guard = SERVER_TEST_LOCK.lock();') != 1:
+              raise SystemExit('expected the merged fixture guard')
+          updated = current[:a]+replacement+current[b:]
+          if updated.split('#[cfg(test)]')[0] != current.split('#[cfg(test)]')[0]:
+              raise SystemExit('production metrics changed')
+          Path(path).write_text(updated)
+          PY
+          rustfmt --edition 2024 crates/node/src/metrics.rs
+          git diff --check
+          test "$(git diff --name-only)" = crates/node/src/metrics.rs
+          git diff | tee "$RUNNER_TEMP/metrics-evidence/candidate.patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/node/src/metrics.rs
+          git commit -m 'test(node): prove failed metrics bind leaves a fresh recorder uninstalled'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/metrics-evidence/candidate-sha.txt"
+          git push origin HEAD:refs/heads/followup/metrics-bind-proof
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/metrics-evidence/source.tar.gz"
+      - name: Workspace Clippy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee "$RUNNER_TEMP/metrics-evidence/workspace.log"
+      - name: Native consensus Clippy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/metrics-evidence/consensus.log"
+      - name: Native node Clippy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/metrics-evidence/node.log"
+      - name: Parallel metrics stress, complete native node library, and formatting
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=8 > "$RUNNER_TEMP/metrics-evidence/metrics-$attempt.log" 2>&1
+          done
+          tail -n 20 "$RUNNER_TEMP/metrics-evidence/metrics-20.log"
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib > "$RUNNER_TEMP/metrics-evidence/node-tests.log" 2>&1
+          tail -n 30 "$RUNNER_TEMP/metrics-evidence/node-tests.log"
+          cargo fmt --all -- --check > "$RUNNER_TEMP/metrics-evidence/fmt.log" 2>&1
+      - name: Verify the regression rejects recorder-before-listener initialization
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/node/src/metrics.rs')
+          text = p.read_text()
+          old = '        let listener = TcpListener::bind(addr)?;\n        let local_addr = listener.local_addr()?;\n        let handle = prometheus_handle(identity)?;'
+          new = '        let handle = prometheus_handle(identity)?;\n        let listener = TcpListener::bind(addr)?;\n        let local_addr = listener.local_addr()?;'
+          if text.count(old) != 1:
+              raise SystemExit('ordering mutation preimage changed')
+          p.write_text(text.replace(old,new,1))
+          PY
+          set +e
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics::tests::occupied_address_bind_errors_and_in_process_retry_succeeds -- --exact --nocapture > "$RUNNER_TEMP/metrics-evidence/ordering-mutant.log" 2>&1
+          status=$?
+          set -e
+          git restore crates/node/src/metrics.rs
+          tail -n 50 "$RUNNER_TEMP/metrics-evidence/ordering-mutant.log"
+          test "$status" -ne 0
+          grep -q 'failed bind must not install the process recorder' "$RUNNER_TEMP/metrics-evidence/ordering-mutant.log"
+          grep -q 'test result: FAILED' "$RUNNER_TEMP/metrics-evidence/ordering-mutant.log"
+          git diff --exit-code
+      - name: Preserve exact-source validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: metrics-bind-proof-evidence
+          path: ${{ runner.temp }}/metrics-evidence
+          retention-days: 3
+          if-no-files-found: error

@@ -1,4 +1,55 @@
-# Index read-path benchmarks
+# Index read-path cells
+
+This document owns the read-path cells of the generic index (`TxLookup`, `ScriptLive`, `ScriptHistory`) and of the Esplora and Core projections over them. The target schema is [`scriptindex-format.md`](scriptindex-format.md) (T30); the runtime and readiness owner is `crates/index/src/runtime.rs` (T29). Prior resolver measurements below were taken on the Electrum-era position-backed resolver and a synthetic fixture; they are retained as candidate evidence for the position and lazy-txid changes and do not describe the target schema.
+
+## Cells it owns
+
+| Cell | Query | Readiness fence | Status |
+|---|---|---|---|
+| `index.read.tx_lookup` | txid to occurrence, body locator and byte range | `TxLookup` watermark hash equals queried tip hash | `planned_not_executed` |
+| `index.read.script_live` | script digest to live outpoints, value and script resolved against coherent coins | `ScriptLive` watermark equals tip; exact script verification after prefix hit | `planned_not_executed` |
+| `index.read.script_history` | script digest to chronological funding and spending events, bounded page with public Esplora cursor | `ScriptHistory` watermark equals tip | `planned_not_executed` |
+| `index.read.spender` | occurrence and vout to spending occurrence and input index | `TxLookup` and `ScriptHistory` agree | `planned_not_executed` |
+| `api.query.esplora_address` | mixed confirmed plus unconfirmed address summary | all consumed capabilities agree and gateway-owned mempool snapshot carries the same `ReadStamp` | `planned_not_executed` |
+
+Readiness is `healthy && capability watermark == queried active tip identity` by hash, never height alone. A lagging, rolling-back, rebuilding or disabled capability returns typed `Unavailable` or `Retry`; it never returns empty successful history. A pruned node reports unavailable history honestly. Historical prevout values resolve through body positions and a bounded decoded-transaction cache; there is no second coin database.
+
+## Fixture contract
+
+Real `FlatFileBlockStore` bodies, positioned rows, target scripts planted at block midpoints, heights 1, 8 and 64, blocks of roughly 250 KB and 1 MB, at least 20 samples per group, on a quiet pinned host. Medians are read from stable per-iteration distributions with raw samples retained. Harness noise floor is measured with identical arms before any ratio is quoted.
+
+```bash
+cargo test --locked -p bitcoin-rs-index --no-default-features --features fjall --test overhaul_scriptindex -- --nocapture
+```
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (2026-08-13 resolver harness and earlier)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
 
 Baseline for the ScriptIndex resolver read path, captured before any optimization.
 Prior performance campaigns covered the sync and apply path only; `crates/index`
@@ -21,7 +72,7 @@ against the position-backed resolver — over the same rows and block files.
 > shipped in that shape. Caught in review of PR #80. The Electrum tables below are
 > the re-measurement with the arms actually separated.
 
-## Fixture shape
+### Fixture shape
 
 Synthetic blocks of P2WPKH-shaped outputs: 2,200 filler transactions
 (~250 KB serialized) or 9,000 (~1 MB), with one transaction paying the target
@@ -57,7 +108,7 @@ open/`fstat`/seek/read sequence.
 Backend RocksDB. Medians of 20 samples. Apple Silicon laptop, not a quiet
 measurement host — see the noise floor below.
 
-## Index resolvers
+### Index resolvers
 
 Medians, `before_scan` arm, pre-optimization. Measured on the in-memory harness,
 and retained: the scan path is CPU-bound, and re-measuring it against the
@@ -88,7 +139,7 @@ a txid only for transactions that matched. That is a double-SHA256 over every
 full transaction serialization in the block, per row, thrown away for all but
 one transaction.
 
-## Historical Electrum dispatch evidence
+### Historical Electrum dispatch evidence
 
 > This protocol-level measurement is retained only as provenance for the resolver
 > campaign. The Electrum server was removed; current consumers are `ScriptIndex`
@@ -119,7 +170,7 @@ the number establishes is direction and shape, not a gate result.
 wallet issues one per address on connect, so it is the highest-volume caller of
 this path.
 
-## Harness noise floor
+### Harness noise floor
 
 Measured at the baseline commit, when both arms of every group were the same
 code and their spread was therefore pure noise. Both harnesses now run different
@@ -149,7 +200,7 @@ That constraint is no longer binding: the `after` arm now runs in under a
 millisecond. The measured 71.6x and 76.5x ratios are about 30x the largest
 observed 2.4x spread, so the conclusion does not depend on the spread improving.
 
-## Landed: lazy txid in the unspent-output resolvers
+### Landed: lazy txid in the unspent-output resolvers
 
 **Change.** `resolve_unspent_outputs_with_height` computed `tx.compute_txid()`
 for every transaction in the block *before* testing any output script, and
@@ -167,8 +218,8 @@ harness. Current resolver behavior is covered by the Indexer unit tests and
 the transaction-position contract tests; the private full-scan helpers remain
 the live fallback path.
 
-**Historical speed**, paired arms in one run, from the retired
-`crates/index/benches/history_resolve.rs` harness.
+**Historical speed**, paired arms in one run, from the retired `before_scan` /
+`after_fast` arms of `crates/index/benches/history_resolve.rs`.
 In-memory harness, and unaffected by that: both arms here are scan-path variants,
 so both are CPU-bound and I/O cancels out of the ratio.
 
@@ -195,7 +246,7 @@ noise floor above; on this run their identical arms disagreed by 1.7x.
 removed after the comparison was completed. The historical numbers above remain
 evidence for the lazy-txid change, not a current test or runtime contract.
 
-## Landed: transaction byte positions in row values
+### Landed: transaction byte positions in row values
 
 The resolver now uses the positions for one-transaction reads.
 
@@ -236,7 +287,7 @@ contract. It intentionally does
 not retain equivalence coverage for a second ingest implementation; the index
 has one supported serialized-block ingest path.
 
-## Landed: resolvers read only the transactions their positions name
+### Landed: resolvers read only the transactions their positions name
 
 **Change.** `resolve_script_history`, `resolve_unspent_outputs{,_with_height}`
 and `resolve_transaction` now read each row's `TxPosition` list, fetch only
@@ -323,7 +374,7 @@ arrays lexicographically, so offset 256 would sort before offset 1, and stored
 positions would not be in block order. Emission order
 is contractual — Electrum clients hash the sequence to derive a status.
 
-## Rejected: decoded-block cache
+### Rejected: decoded-block cache
 
 Built, measured, reverted. Recorded so nobody rebuilds it without first removing
 the reason it fails.
@@ -367,18 +418,21 @@ change — and production sets `cache_block_bodies_in_memory: false`, so the pat
 off by default. Changing a public type for a win that cannot be measured in the
 default configuration fails the same gate that rejected the cache.
 
-## Platform check: is this an Apple Silicon artefact?
+### Platform check: is this an Apple Silicon artefact?
 
 Asked directly, and worth recording, because two effects pull in opposite
 directions and the published ratios are measured on the flattering side of one
 of them.
 
-**No read-path code is platform-gated.** `crates/index`, `crates/electrum`,
-`crates/storage` and `crates/primitives` contain zero `cfg(target_arch)`,
-`cfg(target_os)` or feature-detection sites. The workspace's only such file is
+**No read-path code is platform-gated.** At the time of this check,
+`crates/index`, the since-removed `crates/electrum`, `crates/storage` and
+`crates/primitives` contained zero `cfg(target_arch)`, `cfg(target_os)` or
+feature-detection sites, and the workspace's only such file was
 `crates/consensus/src/sha256d64.rs`, the AVX2 Merkle reducer, which is on the
-apply path and is not reached by anything measured here. So there is no
-Linux-only or x86-only optimization sitting idle on this host.
+apply path and is not reached by anything measured here. (Today
+`crates/storage/src/footprint.rs` carries a `cfg(target_os = "linux")` for
+`/proc/self/fd` path resolution; it is not on the resolver read path.) So
+there was no Linux-only or x86-only optimization sitting idle on this host.
 
 **SHA-256 is scalar here, and that flatters the `before` arm.**
 `bitcoin_hashes 0.14` carries an x86-only SHA-NI path
@@ -429,7 +483,7 @@ with block size. That is a complexity change, and no amount of hardware moves
 `resolve_script_history` at 8 heights off 106 µs whether the blocks are 250 KB or
 1 MB.
 
-## Historical protocol gate: still unclaimed
+### Historical protocol gate: still unclaimed
 
 Everything above is in-tree resolver evidence. The retired protocol gate was
 never run against a mainnet-tip node.
@@ -466,7 +520,7 @@ synthetic fixtures on a laptop. What they establish is that the resolver's cost
 no longer scales with block size and that the dominant term is gone — the
 direction and the shape, not the gate result.
 
-## Reproduce
+### Reproduce
 
 ```
 cargo bench -p bitcoin-rs-index    --bench history_resolve   --features rocksdb

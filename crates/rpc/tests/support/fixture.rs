@@ -183,11 +183,9 @@ pub(crate) struct HeaderCheck {
     /// Declared divergence names (known-gap fixtures only).
     #[serde(default)]
     pub(crate) gap: Vec<String>,
-    /// `Content-Length` is derived framing, not pinned data: exactly one
-    /// ASCII-decimal header per tuple whose value equals that tuple's
-    /// actual raw body byte length. Bodies that are byte-identical
-    /// therefore get equal lengths for free, and a known-gap body
-    /// difference may legitimately change the length.
+    /// `Content-Length` is derived framing, not pinned data: it is absent on
+    /// 204 responses and otherwise exactly one ASCII-decimal header per tuple
+    /// whose value equals that tuple's actual raw body byte length.
     #[serde(default)]
     pub(crate) body_length: bool,
 }
@@ -294,13 +292,16 @@ impl std::error::Error for LoadError {}
 /// [`LoadError::Violation`] when any ceiling, strict-parse rule or provenance
 /// pin fails; [`LoadError::Io`] when the corpus directory cannot be read.
 pub(crate) fn load_corpus() -> Result<BTreeMap<String, Fixture>, LoadError> {
-    let dir = corpus_dir();
+    load_corpus_from(&corpus_dir())
+}
+
+fn load_corpus_from(dir: &Path) -> Result<BTreeMap<String, Fixture>, LoadError> {
     // Root custody: the corpus directory itself is opened no-follow, and
     // every entry is read from and opened relative to that one descriptor.
     // A replacement of the directory name after this point cannot redirect
     // any child open, because no child is ever resolved by full pathname.
     let dir_fd = rustix::fs::open(
-        &dir,
+        dir,
         rustix::fs::OFlags::RDONLY
             | rustix::fs::OFlags::NOFOLLOW
             | rustix::fs::OFlags::CLOEXEC
@@ -496,11 +497,10 @@ fn settle_body_lengths(fixture: &mut Fixture) {
     }
 }
 
-/// Custody rule for one pinned tuple's `Content-Length`: at most one such
-/// header; when the wire body length is derivable it is mandatory and its
-/// ASCII-decimal value must equal it; a literal on a JSON-body tuple is a
-/// guessed value and is refused — the length there is derived framing,
-/// enforced live by the comparator instead.
+/// Custody rule for one pinned tuple's `Content-Length`: a 204 must have an
+/// empty body and omit the header. Otherwise at most one header is accepted;
+/// when the wire body length is derivable its value must match. A literal on
+/// a JSON-body tuple is refused because the wire length cannot be reproduced.
 fn validate_tuple_content_length(
     tuple: &HttpTuple,
     label: &str,
@@ -515,6 +515,18 @@ fn validate_tuple_content_length(
     let fail = |why: String| LoadError::Violation(format!("{}: {label}: {why}", path.display()));
     if declared.len() > 1 {
         return Err(fail("duplicate Content-Length headers".to_owned()));
+    }
+    if tuple.status == 204 {
+        if tuple.body_len != Some(0) {
+            return Err(fail("204 response must have an empty body".to_owned()));
+        }
+        return if declared.is_empty() {
+            Ok(())
+        } else {
+            Err(fail(
+                "204 response must not carry Content-Length".to_owned(),
+            ))
+        };
     }
     match (declared.first(), tuple.body_len) {
         (None, _) => Ok(()),
@@ -862,5 +874,88 @@ fn pinned_current_result(fixture: &Fixture, envelope_index: usize) -> Option<&se
         rows.get(envelope_index)?.get("result")
     } else {
         value.get("result")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    use super::load_corpus_from;
+
+    const FIXTURE_NAME: &str = "01_getblockchaininfo_v2_positional.json";
+    const CAPTURED_FIXTURE: &str =
+        include_str!("../corpus/core-31.1/01_getblockchaininfo_v2_positional.json");
+
+    fn captured_fixture() -> Result<Value, serde_json::Error> {
+        serde_json::from_str(CAPTURED_FIXTURE)
+    }
+
+    fn assert_reference_rejected(
+        fixture: &Value,
+        reason: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join(FIXTURE_NAME), serde_json::to_vec(fixture)?)?;
+        let Err(error) = load_corpus_from(dir.path()) else {
+            return Err("invalid Core reference was accepted".into());
+        };
+        let message = error.to_string();
+        assert!(message.contains(FIXTURE_NAME), "{message}");
+        assert!(message.contains(reason), "expected {reason:?}: {message}");
+        Ok(())
+    }
+
+    /// API-07: the control uses the same directory loader as each refusal.
+    #[test]
+    fn copied_fixture_preserves_core_reference() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let fixture = captured_fixture()?;
+        std::fs::write(dir.path().join(FIXTURE_NAME), serde_json::to_vec(&fixture)?)?;
+        let corpus = load_corpus_from(dir.path())?;
+        assert_eq!(corpus.len(), 1);
+        Ok(())
+    }
+
+    /// API-07: absent identities cannot silently acquire default values.
+    #[test]
+    fn corpus_rejects_missing_core_reference_fields() -> Result<(), Box<dyn std::error::Error>> {
+        for field in ["core_version", "core_binary_sha256"] {
+            let mut fixture = captured_fixture()?;
+            fixture["provenance"]
+                .as_object_mut()
+                .ok_or("captured provenance must be an object")?
+                .remove(field);
+            assert_reference_rejected(&fixture, &format!("missing field `{field}`"))?;
+        }
+        Ok(())
+    }
+
+    /// API-07: only the pinned Core version can identify this capture.
+    #[test]
+    fn corpus_rejects_non_pinned_core_version() -> Result<(), Box<dyn std::error::Error>> {
+        for version in ["31.0.0", "31.99.0", ""] {
+            let mut fixture = captured_fixture()?;
+            fixture["provenance"]["core_version"] = Value::from(version);
+            assert_reference_rejected(&fixture, "pinned version")?;
+        }
+        Ok(())
+    }
+
+    /// API-07: even a well-formed, one-nibble digest change must be refused.
+    #[test]
+    fn corpus_rejects_mismatched_or_empty_core_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let original = captured_fixture()?;
+        let digest = original["provenance"]["core_binary_sha256"]
+            .as_str()
+            .ok_or("captured binary digest must be a string")?;
+        let mut changed = digest.to_owned();
+        changed.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+        for digest in [changed.as_str(), ""] {
+            let mut fixture = original.clone();
+            fixture["provenance"]["core_binary_sha256"] = Value::from(digest);
+            assert_reference_rejected(&fixture, "pinned binary digest")?;
+        }
+        Ok(())
     }
 }

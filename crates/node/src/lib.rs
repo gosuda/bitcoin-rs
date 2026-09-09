@@ -54,23 +54,20 @@ pub mod state;
 pub mod storage_footprint;
 /// Block download orchestrator.
 pub mod sync;
-/// Inbound P2P transaction admission policy: orphan map and recent-rejects.
-pub mod tx_admission;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
-/// Outbound transaction relay worker: announce accepted txs to peers
-/// excluding the source connection.
-pub mod tx_relay;
 mod txindex_worker;
 /// Prevout lookups across a window of consecutive blocks.
 mod window_overlay;
-/// ZMQ publisher trait + implementations for the notification subsystem.
-pub mod zmq_publisher;
-
 pub use apply::{
     ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
 };
 pub use bitcoin_rs_primitives::Network;
+#[cfg(feature = "zmq")]
+pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;
+pub use bitcoin_rs_rpc::zmq::{
+    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
+};
 pub use chain_effects::{ChainEffects, ChainFollowers};
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
@@ -89,8 +86,3 @@ pub use storage_footprint::{
 };
 pub use sync::BlockSync;
 pub use txindex_worker::TxIndexRuntime;
-#[cfg(feature = "zmq")]
-pub use zmq_publisher::SocketZmqPublisher;
-pub use zmq_publisher::{
-    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
-};

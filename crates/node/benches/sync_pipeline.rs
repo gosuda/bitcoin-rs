@@ -38,6 +38,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::path::Path;
+
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
@@ -55,14 +57,16 @@ use bitcoin::{
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+use bitcoin_rs_node::metrics::{
+    Cell, CorpusIdentity, EvidenceIdentity, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample,
+    Sha256Hex,
+};
 use bitcoin_rs_node::{
-    BlockSync, Network, NodeConfig, TxIndexRuntime,
-    apply::Chainstate,
-    state::NodeState,
-    sync::{SyncBudget, default_sync_budget},
+    BlockSync, Network, NodeConfig, TxIndexRuntime, apply::Chainstate, state::NodeState,
+    sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
-use bitcoin_rs_primitives::deserialize;
+use bitcoin_rs_primitives::{consensus_bytes, deserialize};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -178,7 +182,8 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     print_signed_spend_proxy_summary(&blocks);
 
     const SIGNED_SPEND_SAMPLES: usize = 30;
-    let samples: ParkingMutex<Vec<Duration>> =
+    let origin = Instant::now();
+    let samples: ParkingMutex<Vec<(Duration, Duration)>> =
         ParkingMutex::new(Vec::with_capacity(SIGNED_SPEND_SAMPLES.saturating_mul(4)));
 
     c.bench_function("sync_pipeline_apply_signed_spend_proxy", |b| {
@@ -192,7 +197,9 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
                         .apply_block(black_box(block))
                         .unwrap_or_else(|error| panic!("signed-spend apply failed: {error}"));
                 }
-                samples.lock().push(sweep_start.elapsed());
+                samples
+                    .lock()
+                    .push((sweep_start.duration_since(origin), sweep_start.elapsed()));
                 black_box(
                     state
                         .applied_tip()
@@ -205,7 +212,75 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
         })
     });
 
-    print_percentiles("signed_spend_proxy", &samples.lock());
+    let sweeps = samples.lock();
+    print_percentiles(
+        "signed_spend_proxy",
+        &sweeps
+            .iter()
+            .map(|(_, elapsed)| *elapsed)
+            .collect::<Vec<_>>(),
+    );
+    record_evidence("sync_pipeline.signed_spend_proxy", &blocks, &sweeps);
+}
+
+/// Appends one identity-bearing sample per sweep to the bench evidence
+/// ledger under `target/benchmarks/`.
+///
+/// Every number carries the binary, configuration, corpus, backend and
+/// durability it was taken under, so a later comparison can match or reject
+/// it; the ledger is append-only across runs.
+fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]) {
+    let config = production_state_config();
+    let mut identity = EvidenceIdentity::of_process(&config)
+        .unwrap_or_else(|error| panic!("evidence identity: {error}"));
+    let corpus_bytes: Vec<u8> = blocks.iter().flat_map(consensus_bytes).collect();
+    identity.corpus = Some(CorpusIdentity {
+        id: cell.to_owned(),
+        manifest_sha256: Sha256Hex::digest(&corpus_bytes),
+    });
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/benchmarks/sync_pipeline.toml");
+    let mut ledger = match std::fs::read_to_string(&path) {
+        Ok(text) => Ledger::parse(&text).unwrap_or_else(|error| panic!("bench ledger: {error}")),
+        Err(_) => Ledger {
+            schema: LEDGER_SCHEMA.into(),
+            cells: Vec::new(),
+            contract: std::collections::BTreeMap::new(),
+        },
+    };
+    if !ledger.cells.iter().any(|candidate| candidate.id == cell) {
+        ledger.cells.push(Cell {
+            id: cell.to_owned(),
+            samples: Vec::new(),
+        });
+    }
+    let nanos = |duration: Duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    for (start, elapsed) in sweeps {
+        let sample = Sample {
+            path: "apply.prove_window".into(),
+            owner: "node".into(),
+            identity: identity.clone(),
+            interval: Interval {
+                kind: IntervalKind::Inside,
+                start_ns: nanos(*start),
+                end_ns: nanos(start.saturating_add(*elapsed)),
+            },
+            cpu_ns: None,
+            elapsed_ns: nanos(*elapsed),
+            rss_peak_bytes: None,
+            io_bytes: None,
+            storage_bytes: None,
+        };
+        ledger
+            .record(cell, sample)
+            .unwrap_or_else(|error| panic!("record bench sample: {error}"));
+    }
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .unwrap_or_else(|error| panic!("bench evidence dir: {error}"));
+    let rendered = ledger
+        .render()
+        .unwrap_or_else(|error| panic!("render bench ledger: {error}"));
+    std::fs::write(&path, rendered).unwrap_or_else(|error| panic!("write bench ledger: {error}"));
 }
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {

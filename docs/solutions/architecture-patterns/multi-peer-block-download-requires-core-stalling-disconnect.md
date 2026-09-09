@@ -2,7 +2,7 @@
 title: Multi-peer block download is the only IBD wall-time lever and requires Core-style stalling-disconnect
 date: 2026-06-08
 category: docs/solutions/architecture-patterns
-module: node IBD block-download scheduler (crates/node/src/sync.rs, sync/window.rs)
+module: IBD block-download scheduler (window and constants in crates/p2p/src/download_window.rs; BlockSync in crates/node/src/sync.rs)
 problem_type: architecture_pattern
 component: background_job
 severity: high
@@ -30,16 +30,22 @@ tags:
 
 ## Status
 
-**The design this document prescribes has since landed.** `crates/node/src/sync.rs` now
-carries `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16`, `MIN_PEERS_FOR_FANOUT = PENDING_BUDGET / 16`
-(single-peer-128 depth as the sub-threshold fallback), window-blocked staller detection
-(`DownloadWindow::window_blocked_on`, not raw `applied_tip+1` stagnation), and the adaptive
-`BLOCK_STALLING_TIMEOUT` 2s→`BLOCK_STALLING_TIMEOUT_MAX` 64s with a `STALLER_COOLDOWN`
-eligibility exclusion. Staging was resized with it: `PENDING_BLOCK_BYTE_ESTIMATE` is 2 MiB, so
-`RECEIVED_BLOCK_BYTE_BUDGET` is 128 × 2 MiB, and a build assertion pins it against
-`MAX_SERIALIZED_BLOCK_SIZE`. The guidance below is the reasoning that produced that design and
-the failure modes it must keep avoiding — `sync.rs` cites this document as their pin. Read it as
-the rationale record, not as pending work.
+**The design this document prescribes has since landed.** The window scheduler and its
+constants now live in `crates/p2p/src/download_window.rs` (imported by `BlockSync` in
+`crates/node/src/sync.rs`). It carries `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16`,
+`MIN_PEERS_FOR_FANOUT = 8` (matching the default outbound target; the source comment explicitly
+warns against deriving it from `PENDING_BUDGET`), the single-peer deep pipeline as the
+sub-threshold fallback (`PEER_INFLIGHT_BUDGET = PENDING_BUDGET`), window-blocked staller
+detection (`DownloadWindow::window_blocked_on`, not raw `applied_tip+1` stagnation), and the
+adaptive `BLOCK_STALLING_TIMEOUT` 2s→`BLOCK_STALLING_TIMEOUT_MAX` 64s with a `STALLER_COOLDOWN`
+eligibility exclusion. Staging was resized with it: `PENDING_BLOCK_BYTE_ESTIMATE` is 2 MiB and
+`RECEIVED_BLOCK_BYTE_BUDGET` is defined as `PENDING_BYTE_BUDGET`, so the in-flight and staged
+byte bounds are one constant. `PENDING_BUDGET` has since been raised from the 128 assumed
+throughout this note to 256 (a measured single-peer depth; see the constant's doc comment). The
+guidance below is the reasoning that produced that design and the failure modes it must keep
+avoiding; the `MAX_BLOCKS_IN_TRANSIT_PER_PEER` doc comment cites the reverted attempt
+(`5608279`) as its pin. Read it as the rationale record, not as pending work, and re-read the
+constants file before trusting any number quoted here.
 
 ## Context
 
@@ -128,8 +134,9 @@ multi-peer attempt starts from the correct design and validation plan instead of
    shard-aware UTXO batching (the UTXO set already has 256 shards, so reduce churn + reuse per-commit
    scratch rather than adding shards), and batched storage writes. Net: gocoin does not hand over a
    free faster-than-Core lunch; the multi-peer download lever above remains the real one. (session history)
-   Caveat on stale constants: a prior session recorded `GETDATA_BATCH_SIZE = 16`; current code has it
-   `= PENDING_BUDGET = 128` — re-read `crates/node/src/sync.rs` before trusting any cited constant.
+   Caveat on stale constants: a prior session recorded `GETDATA_BATCH_SIZE = 16`; the code defines it
+   as `PENDING_BUDGET` (128 when this was written, 256 now) — re-read
+   `crates/p2p/src/download_window.rs` before trusting any cited constant.
 
 ## Why This Matters
 
@@ -159,7 +166,9 @@ Reverted attempt and its failure signature:
   -> 1/4 still collapsed AND ~18x slower than single-peer    -> DISCARDED
 ```
 
-Key constants and anchors (`crates/node/src/sync.rs`):
+Key constants and anchors as they stood when this note was written (June 2026; the constants
+have since moved to `crates/p2p/src/download_window.rs` and `PENDING_BUDGET`,
+`PEER_INFLIGHT_BUDGET`, and `RECEIVED_BLOCK_BUDGET` are now 256):
 
 ```
 PENDING_BUDGET = 128            // in-flight getdata window
@@ -169,9 +178,9 @@ PENDING_TIMEOUT = 1 min         // re-request timeout (too slow for a stalled fr
 RECEIVED_BLOCK_BYTE_BUDGET = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE = 128 * 2 MiB
 ```
 
-Scheduler entry points: `BlockSync` (sync.rs), `DownloadWindow::next_peer_request`,
-`mark_received`, `expire_pending`, `release_disconnected_peers`, `request_peer_scan_limit`
-(`crates/node/src/sync/window.rs`).
+Scheduler entry points: `BlockSync` (`crates/node/src/sync.rs`), `DownloadWindow::next_peer_request`,
+`mark_received` (now a test-only shorthand for `mark_received_from`), `expire_pending`,
+`release_disconnected_peers`, `request_peer_scan_limit` (`crates/p2p/src/download_window.rs`).
 
 ## Related
 

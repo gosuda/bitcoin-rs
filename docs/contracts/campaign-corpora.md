@@ -1,8 +1,8 @@
 # Campaign corpora contract
 
 The two immutable cumulative corpora every product-domain cell uses. This page
-owns the identities, archive format, validation posture, script census, and
-chain-state oracle. Numeric pins live in
+owns the identities, archive format, validation posture, script census,
+chain-state oracle, and end-state evidence roles. Numeric pins live in
 [`tools/campaign-corpus/products.json`](../../tools/campaign-corpus/products.json).
 The exporter and classifier live in
 [`tools/campaign-corpus/corpus.py`](../../tools/campaign-corpus/corpus.py).
@@ -50,6 +50,9 @@ product cell. A length-prefixed diagnostic file is not a product corpus.
 - Height-correct consensus flags. No sampled or REST-live certification.
 - Fresh native stores per trial. The timed work and reopen gates are owned by
   #46 / #34 / #36, not by this freeze.
+- Invalid and nonstandard-but-consensus-valid corpora are counted and
+  classified with a fixed skip reason and count for every section of the
+  consensus rule family.
 
 ### `CORP-04`: Script census
 
@@ -101,12 +104,36 @@ Cmodern uses the same RPC at height 709,635. The numeric `txouts`,
 `total_amount`, and `muhash` are the first certified Core 31.1 response at
 that height. No Cmodern cell may close on a guessed or recalled UTXO total.
 
+### `CORP-06`: End-state evidence roles
+
+- G0 pins: the corpus identities, stop hashes, manifest digest binding, and
+  chain-state oracle values are reference-set truth. They are recorded in
+  [`reference-set.md`](reference-set.md).
+- G5 replay arms: every product cell uses a C150 or Cmodern replay as one arm
+  of the promotion gate. The full native validation path must match the
+  certified `muhash` and the invalid corpus must be counted and classified.
+- A corpus with a mismatched stop hash, an unsynchronized `coinstatsindex`, or
+  a guessed `muhash` is rejected as reference-set failure.
+
 ## Proven by
 
-- `tools/campaign-corpus/test_corpus.py` (`python3 tools/campaign-corpus/test_corpus.py`)
-  pins both identities, the eleven specials, C150 census zeros, Cmodern
-  all-positive specials, Core framing, manifest digest binding, and
-  `assume_valid_height = 0`.
+- `tools/campaign-corpus/test_corpus.py`
+  (`python3 tools/campaign-corpus/test_corpus.py`) pins both identities, the
+  eleven specials, C150 census zeros, Cmodern all-positive specials, Core
+  framing, manifest digest binding, and `assume_valid_height = 0`.
+- `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned): G0 pin; rejects
+  a corpus with a mismatched stop hash or missing chain-state oracle.
+- `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 replay
+  arm; covers every active and inactive consensus boundary with invalid
+  corpora counted and classified.
+- `crates/consensus/tests/overhaul_parse_parity.rs` (planned): G3 parse parity
+  over the product corpora, including txids, wtxids, weight, positions, and
+  Merkle mutation flags.
 - Export: `python3 tools/campaign-corpus/corpus.py export --rest-url HOST:PORT --corpus-id C150|Cmodern --archive blocks.dat --manifest manifest.json`
 - Convert: `python3 tools/campaign-corpus/corpus.py convert --length-prefixed FILE --corpus-id C150 --archive blocks.dat --manifest manifest.json`
 - Verify / classify: `verify` and `classify` subcommands of the same tool.
+
+## Vocabulary
+
+Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
+product corpus, chain-state oracle, `muhash`.
