@@ -23,11 +23,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Fast gate: the only required-status job set for pull requests. Pure Rust and
-# default features only -- no libboost/cmake install, no kernel build. The
-# expensive or C++-building lanes (full-node feature set, benches, fuzz,
-# nightly dependency/feature matrices, kernel oracle) live in main.yml and run
-# on `main` pushes only.
+# Fast PR gate. The ordinary lint and test jobs avoid libbitcoinkernel and do
+# not install CMake/Boost; bench-smoke intentionally compiles the kernel-enabled
+# benchmark surface and installs those prerequisites. Deeper fuzz, nightly,
+# feature-matrix, and kernel-oracle lanes live in main.yml and run on `main`.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
@@ -43,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -52,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -83,7 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # Pure-Rust test gate: each workspace member tested with its own default
       # features minus kernel. Deliberately no apt step -- the default path
@@ -114,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # The kernel engine is built from C++ (cmake + libboost-dev); the default
       # feature set now includes it, so every production lane installs the
@@ -138,7 +137,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
         with:
-          rust-version: "1.95.0"
+          rust-version: "stable"
           # Check the full dependency graph (all backends + kernel).
           # cargo-deny resolves metadata without compiling, so this costs no
           # C++ toolchain. The opt-in kernel/full-backend graph is also
