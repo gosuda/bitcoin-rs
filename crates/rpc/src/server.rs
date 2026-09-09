@@ -687,11 +687,10 @@ fn write_headers(stream: &mut TcpStream, head: &ResponseHead<'_>) -> io::Result<
         write_header_list(stream, "Access-Control-Allow-Headers", headers)?;
         write_header_list(stream, "Access-Control-Expose-Headers", expose)?;
     }
-    write!(
-        stream,
-        "Content-Length: {}\r\nConnection: {connection}\r\n\r\n",
-        head.content_length
-    )
+    if head.status != 204 {
+        write!(stream, "Content-Length: {}\r\n", head.content_length)?;
+    }
+    write!(stream, "Connection: {connection}\r\n\r\n")
 }
 
 fn write_header_list(stream: &mut TcpStream, name: &str, values: &[&str]) -> io::Result<()> {
