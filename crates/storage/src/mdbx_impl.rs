@@ -26,6 +26,7 @@ const MDBX_MAX_LOOSE_PAGES: u64 = 255;
 pub struct MdbxStore {
     env: Environment,
     databases: Vec<Database>,
+    faults: crate::PersistFaultSlot,
 }
 
 impl MdbxStore {
@@ -76,7 +77,11 @@ impl MdbxStore {
             );
         }
         txn.commit().map_err(StorageError::backend)?;
-        Ok(Self { env, databases })
+        Ok(Self {
+            env,
+            databases,
+            faults: crate::PersistFaultSlot::default(),
+        })
     }
 
     fn database(&self, cf: ColumnFamily) -> Result<Database, StorageError> {
@@ -86,8 +91,6 @@ impl MdbxStore {
             .ok_or(StorageError::UnknownColumnFamily(cf))
     }
 
-    /// Applies one batch as a single logical write with the given durability
-    /// label, so each write is counted exactly once.
     fn write_with_durability(
         &self,
         batch: MdbxWriteBatch,
@@ -95,8 +98,28 @@ impl MdbxStore {
     ) -> Result<(), StorageError> {
         count_write(durability, batch.encoded_bytes);
         let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
+        self.commit_batch(txn, batch)
+    }
+
+    /// Owns the apply and sync boundaries for both guarded and ordinary writes.
+    /// Guard evaluation must finish before entering this function.
+    fn commit_batch(&self, txn: RwTxSync, mut batch: MdbxWriteBatch) -> Result<(), StorageError> {
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
+            if fault == crate::PersistFault::PartialApply {
+                // Returning without commit aborts the staged prefix in every family.
+                batch.ops.truncate(1);
+                apply_mdbx_ops(self, &txn, batch)?;
+            }
+            return Err(fault.injected_error());
+        }
+        let sync_fault = self.faults.take_at(crate::PersistBoundary::Sync);
         apply_mdbx_ops(self, &txn, batch)?;
-        txn.commit().map_err(StorageError::backend)
+        txn.commit().map_err(StorageError::backend)?;
+        // A committed batch is not a confirmed completion when the reply is lost.
+        if let Some(fault) = sync_fault {
+            return Err(fault.injected_error());
+        }
+        Ok(())
     }
 }
 
@@ -145,8 +168,7 @@ impl KvStore for MdbxStore {
     }
 
     fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        // MDBX environments are opened with default durable sync flags, so a normal
-        // synchronous write transaction already returns after the data is fsynced.
+        // Default durable sync flags make a normal transaction commit synchronous.
         self.write_with_durability(batch, "durable")
     }
 
@@ -163,18 +185,24 @@ impl KvStore for MdbxStore {
                 .get(self.database(cf)?.dbi(), key)
                 .map_err(StorageError::backend)?;
             if !condition.matches(current.as_deref()) {
-                // Dropping the transaction aborts it, so no batch operation is applied.
+                // Aborting the transaction applies nothing and consumes no fault.
                 return Ok(false);
             }
         }
-        apply_mdbx_ops(self, &txn, batch)?;
-        txn.commit().map_err(StorageError::backend)?;
+        self.commit_batch(txn, batch)?;
         count_write("durable", encoded_bytes);
         Ok(true)
     }
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "mdbx").increment(1);
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
+            return match fault {
+                crate::PersistFault::FailFlush => Err(fault.injected_error()),
+                crate::PersistFault::LostFlush => Ok(()),
+                _ => unreachable!("take_at only releases Flush-boundary faults"),
+            };
+        }
         self.env
             .sync(true)
             .map(|_| ())
@@ -187,9 +215,12 @@ impl KvStore for MdbxStore {
             databases: self.databases.clone(),
         }))
     }
+
+    fn arm_persist_fault(&self, fault: crate::PersistFault) {
+        self.faults.arm(fault);
+    }
 }
 
-/// Records one backend-neutral write-path metric sample.
 fn count_write(durability: &'static str, encoded_bytes: usize) {
     metrics::counter!("storage.writes_total", "backend" => "mdbx", "durability" => durability)
         .increment(1);
@@ -197,30 +228,23 @@ fn count_write(durability: &'static str, encoded_bytes: usize) {
         .record(crate::metric_f64_from_usize(encoded_bytes));
 }
 
-/// Applies every ordered batch operation inside one open write transaction.
 fn apply_mdbx_ops(
     store: &MdbxStore,
     txn: &RwTxSync,
     batch: MdbxWriteBatch,
 ) -> Result<(), StorageError> {
-    let mut databases = [None; ColumnFamily::ALL.len()];
     for op in batch.ops {
         match op {
             BatchOp::Put { cf, key, value } => {
-                txn.put(
-                    cached_database(store, &mut databases, cf)?,
-                    &key,
-                    &value,
-                    WriteFlags::empty(),
-                )
-                .map_err(StorageError::backend)?;
+                txn.put(store.database(cf)?, &key, &value, WriteFlags::empty())
+                    .map_err(StorageError::backend)?;
             }
             BatchOp::Delete { cf, key } => {
-                txn.del(cached_database(store, &mut databases, cf)?, &key, None)
+                txn.del(store.database(cf)?, &key, None)
                     .map_err(StorageError::backend)?;
             }
             BatchOp::DeleteRange { cf, start, end } => {
-                let database = cached_database(store, &mut databases, cf)?;
+                let database = store.database(cf)?;
                 for key in collect_range_keys(txn, database, &start, &end)? {
                     txn.del(database, &key, None)
                         .map_err(StorageError::backend)?;
@@ -229,20 +253,6 @@ fn apply_mdbx_ops(
         }
     }
     Ok(())
-}
-
-fn cached_database(
-    store: &MdbxStore,
-    databases: &mut [Option<Database>],
-    cf: ColumnFamily,
-) -> Result<Database, StorageError> {
-    let slot = databases
-        .get_mut(cf.index())
-        .ok_or(StorageError::UnknownColumnFamily(cf))?;
-    if slot.is_none() {
-        *slot = Some(store.database(cf)?);
-    }
-    slot.ok_or(StorageError::UnknownColumnFamily(cf))
 }
 
 /// MDBX write-batch adapter.
@@ -347,8 +357,6 @@ fn scan_prefix<'tx>(
     prefix: &[u8],
     limit: crate::PrefixScanLimit,
 ) -> Result<crate::PrefixScan, StorageError> {
-    use std::borrow::Cow;
-
     let mut cursor = txn.cursor(database).map_err(StorageError::backend)?;
     let mut iter = cursor
         .iter_from::<Cow<'tx, [u8]>, Cow<'tx, [u8]>>(prefix)
@@ -357,14 +365,12 @@ fn scan_prefix<'tx>(
     let mut bytes = 0;
     while let Some((key, value)) = iter.borrow_next().map_err(StorageError::backend)? {
         if !key.starts_with(prefix) {
-            // Native forward ordering means no later key can match.
             return Ok(crate::PrefixScan {
                 rows,
                 complete: true,
             });
         }
         if !crate::trait_::push_bounded_row(&mut rows, &mut bytes, &key, &value, limit) {
-            // Stop before copying the first row that exceeds limits.
             return Ok(crate::PrefixScan {
                 rows,
                 complete: false,
