@@ -844,6 +844,7 @@ fn concurrent_partial_spends_preserve_siblings_and_store_cache_agreement() {
     }
 }
 
+// RCV-04A: a real durable or guarded-durable receipt covers all earlier deferred writes.
 #[test]
 fn real_durable_write_releases_earlier_deferred_pins() {
     for mode in [CoinDurability::Durable, CoinDurability::CasGuarded] {
