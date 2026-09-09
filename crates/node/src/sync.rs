@@ -9,6 +9,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 mod stage;
@@ -63,6 +64,7 @@ pub struct BlockSync {
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
+    fatal_apply: AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -257,6 +259,7 @@ impl BlockSync {
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             known_sessions: Mutex::new(HashMap::new()),
+            fatal_apply: AtomicBool::new(false),
         }
     }
 
@@ -646,7 +649,11 @@ impl BlockSync {
         }
 
         self.switch_branch_if_outweighed();
-        let (applied, failed) = self.apply_buffered_blocks(apply_head_check);
+        let (applied, failed) = if self.fatal_apply.load(Ordering::Acquire) {
+            (0, 0)
+        } else {
+            self.apply_buffered_blocks(apply_head_check)
+        };
         if received > 0 || applied > 0 || failed > 0 {
             tracing::debug!(
                 received,
@@ -964,6 +971,7 @@ impl BlockSync {
                         failed_hash = Some(blocker.hash);
                     }
                     if error.disposition == crate::apply::WindowApplyDisposition::Fatal {
+                          self.fatal_apply.store(true, Ordering::Release);
                         tracing::error!(
                             applied = stopped,
                             error = %error.source,
