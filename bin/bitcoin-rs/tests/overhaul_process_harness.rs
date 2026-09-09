@@ -1,4 +1,4 @@
-//! T01 — the differential lane runs two public processes, never handlers.
+//! REF-02/REF-07 — the differential lane runs two public processes, never handlers.
 //!
 //! The pinned Core 31.1 `bitcoind` and the `bitcoin-rs` binary each start in
 //! an isolated regtest datadir, share identical block bytes, answer only
