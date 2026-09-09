@@ -565,6 +565,7 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
     let peer_table = Arc::new(PeerTable::new());
     let info = PeerInfo {
+        wtxid_relay: false,
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         version: 70016,
         services: 0,

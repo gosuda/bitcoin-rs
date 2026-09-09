@@ -7469,6 +7469,7 @@ mod tests {
 
     fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         PeerInfo {
+            wtxid_relay: false,
             addr,
             version: 70_016,
             services: 0,

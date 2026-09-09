@@ -276,6 +276,20 @@ impl PeerTable {
         }
     }
 
+    /// Visits handshake-complete leases and their identity-bound metadata.
+    /// Holds table authority through each callback, including an outbound queue
+    /// operation, so replacement cannot change the target or relay preference.
+    pub(crate) fn for_each_ready_lease(
+        &self,
+        mut f: impl FnMut(SocketAddr, &PeerLease, &PeerInfo),
+    ) {
+        for (addr, entry) in self.entries.read().iter() {
+            if let Some(info) = &entry.info {
+                f(*addr, &entry.lease, info);
+            }
+        }
+    }
+
     /// Metadata of every handshake-complete connection, ordered by connection
     /// identity (connection order).
     #[must_use]
@@ -406,6 +420,7 @@ mod tests {
         PeerInfo {
             addr,
             version: 70016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::new(),
             start_height,
@@ -540,8 +555,15 @@ mod tests {
         let mut called = false;
         assert!(!table.with_current(stale_source, || called = true));
         assert!(!called);
-        assert!(table.with_current(current_source, || called = true));
+        assert!(table.with_current(current_source, || {
+            // A replacement needs this write lock. Queueing while the
+            // operation holds table authority must linearize before it.
+            assert!(table.entries.try_write().is_none());
+            assert!(current.send(crate::Message::Ping(1)).is_ok());
+            called = true;
+        }));
         assert!(called);
+        assert!(matches!(current_rx.try_recv(), Ok(crate::Message::Ping(1))));
         assert!(table.send(stale_source, crate::Message::Ping(1)).is_err());
         assert!(table.send(current_source, crate::Message::Ping(2)).is_ok());
         assert!(matches!(current_rx.try_recv(), Ok(crate::Message::Ping(2))));

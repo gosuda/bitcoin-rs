@@ -696,7 +696,6 @@ pub struct ChainAdmissionView<'a> {
     utxo: &'a bitcoin_rs_utxo::UtxoSet,
     applied_tip: &'a ArcSwapOption<TipSnapshot>,
     block_tree: &'a RwLock<bitcoin_rs_chain::BlockTree>,
-    transactions: &'a RwLock<HashMap<Txid, Tx>>,
 }
 
 impl<'a> ChainAdmissionView<'a> {
@@ -706,13 +705,11 @@ impl<'a> ChainAdmissionView<'a> {
         utxo: &'a bitcoin_rs_utxo::UtxoSet,
         applied_tip: &'a ArcSwapOption<TipSnapshot>,
         block_tree: &'a RwLock<bitcoin_rs_chain::BlockTree>,
-        transactions: &'a RwLock<HashMap<Txid, Tx>>,
     ) -> Self {
         Self {
             utxo,
             applied_tip,
             block_tree,
-            transactions,
         }
     }
 }
@@ -737,9 +734,12 @@ impl AdmissionChain for ChainAdmissionView<'_> {
                     .map(|coin| (outpoint, coin.txout))
             })
             .collect();
-        // This preserves the existing peer-side confirmed lookup. RPC ignores
-        // this hint: its transaction lookup cache is not mempool membership.
-        let confirmed = self.transactions.read().contains_key(&tx.txid());
+        // Live confirmed coins are positive chain evidence. The RPC lookup
+        // cache may contain unconfirmed bodies and cannot supply this fact.
+        // No live outputs means unknown, not proof that the tx is unconfirmed.
+        let confirmed = self
+            .utxo
+            .has_live_outputs_for_txid(&Hash256::from(tx.txid()));
         Some(ChainAdmissionSnapshot {
             prevouts,
             height,
@@ -1190,12 +1190,7 @@ impl Context {
     /// Borrows the provisional chain capability shared with P2P admission.
     #[must_use]
     pub fn admission_chain(&self) -> ChainAdmissionView<'_> {
-        ChainAdmissionView::new(
-            &self.utxo,
-            &self.applied_tip,
-            &self.block_tree,
-            &self.transactions,
-        )
+        ChainAdmissionView::new(&self.utxo, &self.applied_tip, &self.block_tree)
     }
 
     /// Admits one transaction through the full policy stack, then mutates
@@ -2262,6 +2257,67 @@ mod admission_chain_tests {
     }
 
     #[test]
+    fn cached_unconfirmed_transaction_is_still_admitted_from_a_peer() -> anyhow::Result<()> {
+        use bitcoin_rs_mempool::{AdmissionOrigin, PeerToken, SubmitOutcome};
+        let ctx = Context::new();
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[9; 32])), 0);
+        let tx = spending(outpoint);
+        let txid = tx.txid();
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            outpoint,
+            TxOut {
+                value: 10_000,
+                script_pubkey: spendable_script(),
+            },
+            false,
+            0,
+        ));
+        ctx.utxo.commit_block(&changes, &Hash256::default())?;
+        ctx.add_transaction(tx.clone());
+        assert!(
+            !ctx.admission_chain()
+                .snapshot(&tx)
+                .context("snapshot")?
+                .confirmed
+        );
+        let result = ctx.mempool.submit_transaction(
+            Arc::new(tx),
+            AdmissionOrigin::Peer(PeerToken {
+                addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+                connection_id: 1,
+            }),
+            None,
+            0,
+            &ctx.admission_chain(),
+        )?;
+        assert!(matches!(result, SubmitOutcome::Committed(_)));
+        assert!(ctx.mempool.read().contains_txid(&txid));
+        Ok(())
+    }
+
+    #[test]
+    fn confirmed_hint_requires_live_chain_outputs_and_survives_no_cache() -> anyhow::Result<()> {
+        let ctx = Context::new();
+        let tx = spending(OutPoint::new(
+            Txid::from(Hash256::from_le_bytes(&[10; 32])),
+            0,
+        ));
+        let output = OutPoint::new(tx.txid(), 0);
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(output, tx.outputs[0].clone(), false, 0));
+        ctx.utxo.commit_block(&changes, &Hash256::default())?;
+        assert!(ctx.transactions.read().is_empty());
+        assert!(
+            ctx.admission_chain()
+                .snapshot(&tx)
+                .context("snapshot")?
+                .confirmed
+        );
+        Ok(())
+    }
+
+    #[test]
     fn admission_chain_uses_current_handles_and_one_applied_tip() -> anyhow::Result<()> {
         let mut ctx = Context::new();
         let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[7; 32])), 0);
@@ -2300,7 +2356,10 @@ mod admission_chain_tests {
         assert_eq!(snapshot.prevouts.len(), 1);
         assert_eq!(snapshot.prevouts[0].0, outpoint);
         assert_eq!(snapshot.prevouts[0].1.value, 10_000);
-        assert!(snapshot.confirmed);
+        assert!(
+            !snapshot.confirmed,
+            "lookup-cache membership is not chain evidence"
+        );
         Ok(())
     }
 }

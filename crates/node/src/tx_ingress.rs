@@ -13,7 +13,7 @@ use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
-use bitcoin_rs_primitives::{Hash256, Tx, Txid};
+use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
@@ -38,7 +38,6 @@ pub fn spawn_tx_ingress_consumer(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let consumer = TxIngressConsumer {
         utxo: state.utxo(),
-        transactions: state.transactions(),
         peer_table: state.peer_table(),
         mempool_gateway: gateway,
         mining_control,
@@ -74,7 +73,6 @@ pub fn spawn_tx_ingress_consumer(
 
 struct TxIngressConsumer {
     utxo: Arc<UtxoSet>,
-    transactions: Arc<RwLock<hashbrown::HashMap<Txid, Tx>>>,
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     mempool_gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
@@ -85,17 +83,13 @@ struct TxIngressConsumer {
 
 impl TxIngressConsumer {
     fn chain_view(&self) -> ChainAdmissionView<'_> {
-        ChainAdmissionView::new(
-            &self.utxo,
-            &self.applied_tip,
-            &self.block_tree,
-            &self.transactions,
-        )
+        ChainAdmissionView::new(&self.utxo, &self.applied_tip, &self.block_tree)
     }
 
     fn process_one(&self, inbound: bitcoin_rs_p2p::InboundTx) {
         let source: PeerToken = inbound.source.into();
         let txid = inbound.tx.txid();
+        let wtxid = inbound.tx.wtxid();
         let outcome = self.mempool_gateway.submit_transaction(
             Arc::new(inbound.tx),
             AdmissionOrigin::Peer(source),
@@ -103,7 +97,7 @@ impl TxIngressConsumer {
             unix_time_secs(),
             &self.chain_view(),
         );
-        self.dispatch_outcome(txid, source, outcome);
+        self.dispatch_outcome(txid, wtxid, source, outcome);
     }
 
     fn process_retries(&self) -> bool {
@@ -114,7 +108,7 @@ impl TxIngressConsumer {
             .iter()
             .any(|retry| matches!(retry.result, Ok(SubmitOutcome::Committed(_))));
         for retry in retries {
-            self.dispatch_outcome(retry.txid, retry.source, retry.result);
+            self.dispatch_outcome(retry.txid, retry.wtxid, retry.source, retry.result);
         }
         made_progress
     }
@@ -122,6 +116,7 @@ impl TxIngressConsumer {
     fn dispatch_outcome(
         &self,
         txid: Txid,
+        wtxid: Wtxid,
         source: PeerToken,
         outcome: Result<SubmitOutcome, SubmitError>,
     ) {
@@ -134,7 +129,7 @@ impl TxIngressConsumer {
                             bitcoin_rs_mempool::MutationOutcome::Accepted
                         )
                 }) {
-                    self.relay.announce(txid, Some(source.connection_id));
+                    self.relay.announce(txid, wtxid, Some(source.connection_id));
                     self.mining_control.publish_generation();
                 }
             }
@@ -161,7 +156,7 @@ mod tests {
         Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
     };
     use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
-    use bitcoin_rs_primitives::{Block, OutPoint, TxIn, TxOut};
+    use bitcoin_rs_primitives::{Block, OutPoint, Tx, TxIn, TxOut};
     use parking_lot::{Mutex, RwLock};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::AtomicUsize;
@@ -303,11 +298,9 @@ mod tests {
         ));
         utxo.commit_block(&changes, &Hash256::from_le_bytes(&[0xBB; 32]))
             .expect("utxo commit must succeed");
-        let transactions = Arc::new(RwLock::new(hashbrown::HashMap::new()));
         let (relay, _relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         TxIngressConsumer {
             utxo,
-            transactions,
             peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             mempool_gateway: Arc::clone(gateway),
             mining_control: mining,
@@ -332,11 +325,9 @@ mod tests {
         mining: Arc<RecordingMining>,
     ) -> TxIngressConsumer {
         let utxo = Arc::new(UtxoSet::new());
-        let transactions = Arc::new(RwLock::new(hashbrown::HashMap::new()));
         let (relay, _relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         TxIngressConsumer {
             utxo,
-            transactions,
             peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
             mempool_gateway: Arc::clone(gateway),
             mining_control: mining,
@@ -576,6 +567,7 @@ mod tests {
             "the fixture must exceed MAX_STANDARD_TX_WEIGHT"
         );
         let txid = tx.txid();
+        let wtxid = tx.wtxid();
         consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
         assert_eq!(
             consumer.mempool_gateway.orphan_count(),
@@ -583,8 +575,12 @@ mod tests {
             "a non-standard missing-input body must not consume orphan quota"
         );
         assert!(
-            consumer.mempool_gateway.is_rejected(Hash256::from(txid)),
-            "a non-standard missing-input body must enter recent-rejects"
+            consumer.mempool_gateway.is_rejected(Hash256::from(wtxid)),
+            "the oversized witness body must enter recent-rejects"
+        );
+        assert!(
+            !consumer.mempool_gateway.have_tx(Hash256::from(txid), false),
+            "a smaller witness variant must remain requestable"
         );
     }
 }

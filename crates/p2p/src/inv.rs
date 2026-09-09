@@ -39,15 +39,20 @@ pub fn request_missing_parents(
     if items.is_empty() {
         return false;
     }
-    if let Err(error) = lease.send(Message::GetData(items)) {
-        tracing::debug!(
-            peer_addr = %source.addr,
-            %error,
-            "orphan parent getdata not sent"
-        );
-        return false;
-    }
-    true
+    let mut queued = false;
+    // Revalidate and enqueue under the same authority as replacement. Bytes
+    // already in flight may still finish on a retiring socket; this boundary
+    // prevents a new enqueue after its replacement becomes authoritative.
+    peers.with_current(lease.source(source.addr), || {
+        match lease.send(Message::GetData(items)) {
+            Ok(()) => queued = true,
+            Err(error) => tracing::debug!(
+                peer_addr = %source.addr,
+                %error,
+                "orphan parent getdata not sent"
+            ),
+        }
+    }) && queued
 }
 
 /// Classify an inbound inventory announcement into a getdata request.
@@ -84,7 +89,7 @@ pub fn request_inventory_filtered(
 ///
 /// For `Transaction` and `WitnessTransaction` the hash is the txid; for
 /// `WTx` (BIP339) it is the wtxid. The caller interprets the hash according
-/// to the peer's negotiated wtxid-relay mode.
+/// to this inventory type, independently of either relay direction's preference.
 pub fn inventory_tx_hash(item: &InventoryVector) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {

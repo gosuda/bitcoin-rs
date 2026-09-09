@@ -862,7 +862,10 @@ pub(crate) fn start_node(
     gateway
         .attach_observer_leg(
             "tx-relay",
-            Arc::new(bitcoin_rs_p2p::LocalTxRelayObserver::new(relay_queue)),
+            Arc::new(bitcoin_rs_p2p::LocalTxRelayObserver::new(
+                relay_queue,
+                Arc::downgrade(&gateway),
+            )),
         )
         .map_err(anyhow::Error::msg)?;
     let rpc_auth = Arc::new(build_rpc_auth(&state.config().rpc.auth)?);
