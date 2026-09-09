@@ -13,9 +13,11 @@
 //!
 //! ```text
 //! cargo run -p bitcoin-rs-storage --example storage_footprint --release -- [backend]
+//! cargo run -p bitcoin-rs-storage --features mdbx --example storage_footprint --release -- mdbx
 //! ```
 //!
-//! `backend` is one of `fjall` (default), `redb`, `rocksdb`, `mdbx`. The corpus is
+//! `backend` is one of `fjall` (default), `redb`, `rocksdb`, `mdbx` (requires
+//! `--features mdbx`). The corpus is
 //! designed to complete in under a minute on a laptop.
 #![allow(clippy::print_stdout)]
 #![allow(clippy::expect_used)]
