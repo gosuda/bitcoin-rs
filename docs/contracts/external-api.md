@@ -3,7 +3,8 @@
 Target contract for the node's external surface: JSON-RPC, REST, ZMQ, and
 the two Esplora dialects. One manifest owns the inventory. Every dialect
 projects the same coherent node state and maps typed owner results to its
-own wire format.
+own wire format. `API-07` is the recorded Core reference used by the RPC
+fixture replay gate.
 
 Owners:
 
@@ -14,7 +15,7 @@ Owners:
 - `crates/rpc/src/rest.rs`: the REST dialect.
 - `crates/rpc/src/esplora.rs` with `esplora/{public,backend,projection}.rs`:
   the public `/api` dialect and the `/esplora` backend superset.
-- `crates/node/src/zmq_publisher.rs`: ZMQ topics, sequence bytes, and
+- `crates/rpc/src/zmq.rs`: ZMQ topics, sequence bytes, and
   bounded delivery.
 - `crates/mempool/src/gateway.rs`: the admission owner behind every
   broadcast and preview entry point.
@@ -131,19 +132,24 @@ Owners:
 - `getmininginfo`'s `networkhashps` is best-effort from the applied tip and
   does not use this RPC height-validation error path.
 
-### `API-07`: Coherent reads, capability errors, and cancellation
+### `API-07`: RPC fixture reference provenance
 
-- Every mixed chain-and-mempool read carries a `ReadStamp`
-  (`architecture.md`). A caller never composes a view from a separately
-  loaded tip and mutable UTXOs. Height-only caches are invalid.
-- Capability-gated queries ride the index readiness fence
-  (`indexing.md` `IDX-03`). A lagging, rebuilding, or disabled capability
-  returns the declared typed `Unavailable` or `Retry` for that dialect:
-  the typed JSON-RPC error envelope for RPC, the 503 response for REST
-  and Esplora. Unavailable is never an empty successful result.
-- Query cancellation releases retained snapshots. A long index or scan
-  operation returns the declared retry or unavailable result rather than
-  mixing tips.
+- **Owner**: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns
+  `PINNED_CORE_VERSION`, `PINNED_CORE_SHA256`, and their validation. Every
+  fixture records the version and exact binary digest used for its capture;
+  missing, empty, or mismatched values fail loading before replay starts.
+- These pins describe the released Core node used for the recorded RPC
+  responses. They are separate from the `bitcoinkernel` oracle and from the
+  broader API family declared by `MANIFEST` (`API-01`). Changing either of
+  those references cannot relabel existing captures.
+- `core_parity` replays recorded responses against bitcoin-rs. It does not
+  execute or hash a local `bitcoind`, and the fixture metadata does not attest
+  a source commit or build configuration. Verifying process binaries and
+  recording those missing identities remain work under #625 and #626.
+- A reference refresh must update the capture provenance and affected
+  fixtures together, with evidence from the selected Core build.
+
+## Live gaps
 
 ### `API-08`: Bounded public exposure
 
@@ -197,6 +203,12 @@ The wallet-facing subset of this surface is owned by
 
 ## Proven by
 
+- `API-07`: `crates/rpc/tests/core_parity.rs` test
+  `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:
+  - `copied_fixture_preserves_core_reference`
+  - `corpus_rejects_missing_core_reference_fields`
+  - `corpus_rejects_stale_or_empty_core_version`
+  - `corpus_rejects_mismatched_or_empty_core_digest`
 - `bin/bitcoin-rs/tests/overhaul_core_api.rs` (planned): every required
   manifest row driven statefully against the pinned reference, including
   auth negatives, batches, notifications, fee units, ZMQ sequence bytes
