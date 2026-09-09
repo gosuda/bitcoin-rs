@@ -153,11 +153,8 @@ impl MempoolGateway {
                 if pool.contains_txid(&txid) {
                     return Ok(SubmitOutcome::AlreadyKnown);
                 }
-                if peer {
-                    let lifecycle = self.lifecycle.lock();
-                    if lifecycle.is_rejected(Hash256::from(tx.wtxid())) {
-                        return Ok(SubmitOutcome::AlreadyKnown);
-                    }
+                if peer && self.lifecycle.lock().is_rejected(Hash256::from(tx.wtxid())) {
+                    return Ok(SubmitOutcome::AlreadyKnown);
                 }
                 let Some(prevouts) = resolve_mempool_inputs(&pool, &tx) else {
                     // These facts are wholly mempool-owned and still fenced
@@ -578,7 +575,12 @@ mod tests {
             ),
             Ok(SubmitOutcome::Held { .. })
         ));
-        let claim = gateway.lifecycle.lock().orphans.get(&invalid.txid()).cloned();
+        let claim = gateway
+            .lifecycle
+            .lock()
+            .orphans
+            .get(&invalid.txid())
+            .cloned();
         let Some(claim) = claim else {
             panic!("the missing transaction must be resident")
         };
