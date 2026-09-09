@@ -199,6 +199,9 @@ pub enum AcceptanceRejectReason {
     /// Transaction exceeds ancestor or descendant package limits.
     #[error(transparent)]
     PackageLimit(#[from] PolicyError),
+    /// Transaction sigop cost exceeds the per-transaction relay limit.
+    #[error("too-many-sigops")]
+    TooManySigops,
     /// Next-block BIP68 relative sequence locks are unmet.
     #[error("non-BIP68-final")]
     NonBip68Final,

@@ -34,6 +34,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 
 [[bench]]

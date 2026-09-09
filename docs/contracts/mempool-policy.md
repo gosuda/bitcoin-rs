@@ -134,10 +134,12 @@ holds a second admission evaluator.
 
 ## Proven by
 
-- `crates/mempool/tests/overhaul_admission_owner.rs` (planned): same
-  verdict across RPC, P2P, Esplora, and package shapes; preview
-  nonmutation; stale retry then typed `Busy`; sigop boundary at 16_000
-  and 16_001; owner-computed cost overrides a caller-supplied count.
+- `crates/mempool/tests/admission.rs`: stale-context retry
+  (`stale_policy_verdict_becomes_retryable`), sigop boundary enforcement
+  (`p2sh_sigop_cost_exceeds_standard_limit`,
+  `p2wsh_sigop_cost_exceeds_standard_limit`), and owner-computed cost
+  overriding a caller-supplied count
+  (`caller_sigop_cost_is_ignored_in_stored_entry`).
 - `crates/mempool/tests/overhaul_finality_policy.rs` (planned): policy
   pins, epoch invalidation, CSV boundaries at `tip+1`, fee precedence,
   pressure floor rise, and decay behavior.

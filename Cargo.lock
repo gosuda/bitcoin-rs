@@ -311,6 +311,7 @@ version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-consensus",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bytemuck",

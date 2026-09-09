@@ -18,7 +18,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{UtxoView, verify_transaction};
+use bitcoin_rs_consensus::{UtxoView, total_sigop_cost, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashSet;
@@ -752,7 +752,7 @@ impl MempoolGateway {
             &pool,
             policy.incremental_relay_fee_sat_per_kvb,
         );
-        let fact = crate::standardness::evaluate_one(
+        let mut fact = crate::standardness::evaluate_one(
             &pool,
             &policy.standardness,
             &request.tx,
@@ -764,6 +764,15 @@ impl MempoolGateway {
         if let Some(reason) = fact.reject_reason {
             return Err(AdmitError::Policy(reason));
         }
+        // Owner-computed sigop cost from resolved prevouts: a caller-supplied
+        // figure never reaches the stored entry.
+        let sigop_cost = total_sigop_cost(&request.tx, &request.prevouts);
+        if sigop_cost > crate::accept::MAX_STANDARD_TX_SIGOPS_COST {
+            return Err(AdmitError::Policy(
+                crate::standardness::AcceptanceRejectReason::TooManySigops,
+            ));
+        }
+        fact.sigop_cost = sigop_cost;
         let chain_view = PrevoutMap(&request.prevouts);
         let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
         if let Err(_err) = verify_transaction(
