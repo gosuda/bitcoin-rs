@@ -9,9 +9,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
-use bitcoin::hashes::{Hash as _, sha256};
+use bitcoin::hashes::Hash as _;
 use bitcoin::{Address, Block, Network, OutPoint, PrivateKey};
-use bitcoin_rs_rpc::compat_manifest::reference_set;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -106,27 +105,6 @@ pub(crate) struct ProcessNode {
 
 pub(crate) fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-pub(crate) fn verify_reference_binary(path: &Path) -> Result<(), HarnessError> {
-    let reference = reference_set().map_err(|error| HarnessError::Protocol(error.to_string()))?;
-    let expected = sha256::Hash::from_byte_array(reference.release.bitcoind_sha256).to_string();
-    let mut file = File::open(path).map_err(|error| HarnessError::Reference {
-        path: path.to_owned(),
-        expected: expected.clone(),
-        detail: error.to_string(),
-    })?;
-    let mut engine = sha256::Hash::engine();
-    std::io::copy(&mut file, &mut engine)?;
-    let actual = sha256::Hash::from_engine(engine);
-    if actual.to_byte_array() != reference.release.bitcoind_sha256 {
-        return Err(HarnessError::Reference {
-            path: path.to_owned(),
-            expected,
-            detail: format!("BLOCKED: actual SHA256 {actual}"),
-        });
-    }
-    Ok(())
 }
 
 fn executable(binary: NodeBinary) -> Result<PathBuf, HarnessError> {
