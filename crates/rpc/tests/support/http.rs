@@ -1,11 +1,11 @@
 //! Bounded HTTP/1.1 replay client for the Core parity gate.
 //!
 //! Response framing comes only from an exact `HTTP/1.1` status line with
-//! CRLF line endings, a 3-digit status, a strict `Content-Length` of ASCII
-//! digits, and explicit refusal of `Transfer-Encoding` and duplicate or
-//! conflicting framing — never from end of stream. Every read is byte-
-//! bounded before it happens, the absolute per-connection deadline is
-//! recomputed and re-armed onto the socket before *every* syscall (a
+//! CRLF line endings, a 3-digit status, the status-defined empty body for
+//! 204 or a strict ASCII-decimal `Content-Length`, and explicit refusal of
+//! `Transfer-Encoding` and conflicting framing — never from end of stream.
+//! Every read is byte-bounded before it happens, and the absolute
+//! per-connection deadline is recomputed and re-armed before *every* syscall (a
 //! multi-syscall `write_all` or buffered read can never outlive the window
 //! set once), the read buffer is retained across responses so pipelined or
 //! trailing bytes survive to the next framed response instead of being
@@ -38,7 +38,7 @@ pub(crate) struct RawResponse {
     pub(crate) reason: String,
     /// Header lines in wire order, names lower-cased.
     pub(crate) headers: Vec<(String, String)>,
-    /// Body bytes read to the declared `Content-Length`.
+    /// Body bytes read to the declared or status-defined length.
     pub(crate) body: Vec<u8>,
 }
 
@@ -342,11 +342,12 @@ impl Connection {
     }
 
     /// Decodes one response from the retained buffer, framed by an exact
-    /// `HTTP/1.1` status line, CRLF-terminated headers and the declared
-    /// `Content-Length` only. Refuses to read without an outstanding
-    /// request: retained pipelined or trailing bytes may never be mistaken
-    /// for an unsolicited response — a request must actually have been
-    /// sent for every response this decoder produces.
+    /// `HTTP/1.1` status line, CRLF-terminated headers, and either the
+    /// status-defined empty 204 body or a declared `Content-Length`.
+    /// Refuses to read without an outstanding request: retained pipelined or
+    /// trailing bytes may never be mistaken for an unsolicited response — a
+    /// request must actually have been sent for every response this decoder
+    /// produces.
     ///
     /// # Errors
     /// [`HttpError::Framing`] on any ceiling or framing violation;
@@ -441,26 +442,28 @@ fn parse_status_line(line: &str) -> Result<(&'static str, u16, String), HttpErro
     Ok((VERSION, status, reason.to_owned()))
 }
 
-/// Resolves the body length strictly: duplicate `Content-Length` headers are
-/// refused, only ASCII digits are accepted, a missing value is only accepted
-/// for an explicitly empty 204, and a value above the production ceiling is
-/// refused before any allocation.
+/// Resolves the body length strictly: 204 omits `Content-Length` and has zero
+/// bytes; other responses require one ASCII-decimal value. Duplicate, invalid,
+/// or oversized declarations are refused before any allocation.
 fn parse_content_length(headers: &[(String, String)], status: u16) -> Result<usize, HttpError> {
     let declared: Vec<&str> = headers
         .iter()
         .filter(|(name, _)| name == "content-length")
         .map(|(_, value)| value.as_str())
         .collect();
+    if status == 204 {
+        return if declared.is_empty() {
+            Ok(0)
+        } else {
+            Err(HttpError::Framing(
+                "204 response must not carry Content-Length",
+            ))
+        };
+    }
     match declared.as_slice() {
-        [] => {
-            if status == 204 {
-                Ok(0)
-            } else {
-                Err(HttpError::Framing(
-                    "response without a Content-Length header",
-                ))
-            }
-        }
+        [] => Err(HttpError::Framing(
+            "response without a Content-Length header",
+        )),
         [single] => {
             if single.is_empty() || !single.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Err(HttpError::Framing(
@@ -677,6 +680,18 @@ mod negative_probes {
     }
 
     #[test]
+    fn content_length_on_no_content_is_refused() -> Result<(), HttpError> {
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+        match decode(stub(response)?) {
+            Err(HttpError::Framing(why)) => {
+                assert!(why.contains("204 response"), "{why}");
+                Ok(())
+            }
+            other => panic!("expected 204 framing refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn malformed_status_digits_are_refused() -> Result<(), HttpError> {
         let response = "HTTP/1.1 2000 OK\r\nContent-Length: 0\r\n\r\n";
         match decode(stub(response)?) {
@@ -711,13 +726,13 @@ mod negative_probes {
 
     /// The client issues TWO requests back-to-back; only then does the
     /// server coalesce both responses plus trailing garbage into one write.
-    /// The first decode consumes its declared bytes, the second decode
-    /// consumes the retained pipelined bytes, and the leftover garbage is
-    /// refused once no further request is outstanding.
+    /// The first decode consumes its status-defined empty body, the second
+    /// consumes its declared bytes from the retained buffer, and the leftover
+    /// garbage is refused once no further request is outstanding.
     #[test]
     fn retained_buffer_carries_pipelined_response_and_rejects_trailing_bytes()
     -> Result<(), HttpError> {
-        let first = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+        let first = "HTTP/1.1 204 No Content\r\n\r\n";
         let second = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
         let trailing = "TRAILING";
         let address = pipelined_stub(first, second, trailing)?;
