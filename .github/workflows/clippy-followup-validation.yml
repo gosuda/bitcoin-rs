@@ -9,7 +9,7 @@ permissions:
 
 concurrency:
   group: clippy-followup-validation
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: never
@@ -23,73 +23,60 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 7d384289f6d47a6c44705ad05b7aa14926624e4b
+          ref: fd0d37ae7b2dc0b80b741f3d481c2e8caa88be2c
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - name: Prepare the source-only candidate and reconcile workspace lock entries
+        with:
+          cache-on-failure: true
+      - name: Apply the two diagnostics without changing test semantics
         id: candidate
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/clippy-evidence"
           rustc --version | tee "$RUNNER_TEMP/clippy-evidence/toolchain.txt"
-          if git ls-remote --exit-code --heads origin refs/heads/followup/stable-clippy-cleanup; then
-            git fetch origin refs/heads/followup/stable-clippy-cleanup
-            git diff --quiet 7d384289f6d47a6c44705ad05b7aa14926624e4b FETCH_HEAD -- . ':!crates/node/src/metrics.rs' ':!Cargo.lock'
-            git checkout --detach FETCH_HEAD
-          fi
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
-          path = 'crates/node/src/metrics.rs'
-          base = '7d384289f6d47a6c44705ad05b7aa14926624e4b'
-          original = subprocess.check_output(['git', 'show', f'{base}:{path}'], text=True)
-          old = 'bytes.iter_mut().zip(text.as_bytes().chunks_exact(2))'
-          new = 'bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0)'
-          if original.count(old) != 1:
-              raise SystemExit('expected exactly one chunk iteration preimage')
-          replacement = original.replace(old, new, 1)
-          p = Path(path)
-          if p.read_text() not in (original, replacement):
-              raise SystemExit('candidate contains unrelated metrics changes')
-          p.write_text(replacement)
+          edits = [
+              ('bin/bitcoin-rs/tests/overhaul_reference_set.rs',
+               'a92d9a6f21835b3ae8a08fe8da566e8c20a141e0',
+               'for (at, pair) in bytes.chunks_exact(2).enumerate() {',
+               'for (at, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {'),
+              ('crates/consensus/tests/overhaul_parse_parity.rs',
+               'f6f5918c68e8be999f4d4af1def197c941f921e5',
+               'assert!(parsed.facts().transaction_spans().len() == parsed.transaction_count());',
+               'assert_eq!(parsed.facts().transaction_spans().len(), parsed.transaction_count());'),
+          ]
+          for path, sha, old, new in edits:
+              actual = subprocess.check_output(['git','hash-object',path],text=True).strip()
+              if actual != sha:
+                  raise SystemExit(f'preimage changed: {path}: {actual}')
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected one edit target: {path}')
+              p.write_text(text.replace(old,new,1))
           PY
-          cp Cargo.lock "$RUNNER_TEMP/clippy-evidence/Cargo.lock.before"
-          cargo metadata --format-version=1 > "$RUNNER_TEMP/clippy-metadata.json"
-          python3 - <<'PY'
-          from pathlib import Path
-          import subprocess, tomllib
-          base = '7d384289f6d47a6c44705ad05b7aa14926624e4b'
-          before = tomllib.loads(subprocess.check_output(['git','show',f'{base}:Cargo.lock'],text=True))
-          after = tomllib.loads(Path('Cargo.lock').read_text())
-          def external(lock):
-              return {(p['name'],p['version'],p['source']):p for p in lock['package'] if 'source' in p}
-          def identities(lock):
-              return {(p['name'],p['version'],p.get('source')) for p in lock['package']}
-          if external(before) != external(after) or identities(before) != identities(after) or before['version'] != after['version']:
-              raise SystemExit('lock reconciliation changed an external dependency or package identity')
-          PY
-          rustfmt --edition 2024 crates/node/src/metrics.rs
+          rustfmt --edition 2024 bin/bitcoin-rs/tests/overhaul_reference_set.rs crates/consensus/tests/overhaul_parse_parity.rs
           git diff --check
           python3 - <<'PY'
           import subprocess
-          paths = set(subprocess.check_output(['git','diff','--name-only','7d384289f6d47a6c44705ad05b7aa14926624e4b'],text=True).splitlines())
-          if paths != {'Cargo.lock','crates/node/src/metrics.rs'}:
-              raise SystemExit(f'unexpected candidate scope: {paths}')
+          paths = set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines())
+          if paths != {'bin/bitcoin-rs/tests/overhaul_reference_set.rs','crates/consensus/tests/overhaul_parse_parity.rs'}:
+              raise SystemExit(f'unexpected scope: {paths}')
           PY
-          git diff 7d384289f6d47a6c44705ad05b7aa14926624e4b | tee "$RUNNER_TEMP/clippy-evidence/candidate.patch"
+          git diff | tee "$RUNNER_TEMP/clippy-evidence/correction.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock crates/node/src/metrics.rs
-          if ! git diff --cached --quiet; then
-            git commit -m 'fix(node): satisfy stable Clippy with a consistent workspace lock'
-          fi
+          git add bin/bitcoin-rs/tests/overhaul_reference_set.rs crates/consensus/tests/overhaul_parse_parity.rs
+          git commit -m 'fix(tests): satisfy newly exposed strict Clippy diagnostics'
           git rev-parse HEAD | tee "$RUNNER_TEMP/clippy-evidence/candidate-sha.txt"
-          git ls-tree HEAD Cargo.lock crates/node/src/metrics.rs | tee "$RUNNER_TEMP/clippy-evidence/blobs.txt"
           git push origin HEAD:refs/heads/followup/stable-clippy-cleanup
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/clippy-evidence/source.tar.gz"
       - name: Workspace Clippy
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         shell: bash
@@ -108,17 +95,25 @@ jobs:
         run: |
           set -o pipefail
           cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-evidence/node.log"
-      - name: Metrics tests and workspace formatting
+      - name: Changed test targets and formatting
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         shell: bash
         run: |
           set -uo pipefail
           status=0
-          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: > "$RUNNER_TEMP/clippy-evidence/metrics-tests.log" 2>&1 || status=1
-          tail -n 70 "$RUNNER_TEMP/clippy-evidence/metrics-tests.log"
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity > "$RUNNER_TEMP/clippy-evidence/parity-tests.log" 2>&1 || status=1
+          tail -n 60 "$RUNNER_TEMP/clippy-evidence/parity-tests.log"
+          cargo test --locked -p bitcoin-rs --test overhaul_reference_set > "$RUNNER_TEMP/clippy-evidence/reference-tests.log" 2>&1 || status=1
+          tail -n 60 "$RUNNER_TEMP/clippy-evidence/reference-tests.log"
           cargo fmt --all -- --check > "$RUNNER_TEMP/clippy-evidence/fmt.log" 2>&1 || status=1
-          tail -n 70 "$RUNNER_TEMP/clippy-evidence/fmt.log"
+          tail -n 60 "$RUNNER_TEMP/clippy-evidence/fmt.log"
           exit "$status"
+      - name: Preserve the unresolved metrics test result
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: 2>&1 | tee "$RUNNER_TEMP/clippy-evidence/metrics-tests.log"
       - name: Preserve candidate and all profile results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
