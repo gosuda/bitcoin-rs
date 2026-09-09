@@ -25,6 +25,12 @@ and Core 31.1's
 flag boundary, including assume-valid and prepared block checks.
 Incomplete preview context remains explicitly missing-input context; it is
 not evidence that scripts or relative locks have been validated.
+Package preview retains complete outputs from earlier package transactions as
+prevout facts, including their scripts. The
+`package_prevouts_preserve_sigops_without_mutating_the_pool` regression in
+`crates/rpc/src/handlers/tx.rs` covers P2SH, native witness-v0, and nested witness
+accounting, the selected output index, fee, vsize, and unchanged pool state.
+This accounting requirement does not close the preview script-verification gap.
 
 ## 2. Pinned Reference Version
 
