@@ -173,7 +173,7 @@ fn hash_merkle_bytes(left: &[u8; 32], right: &[u8; 32]) -> Hash256 {
 /// level-synchronous 8-way reducer. Comparing two equal *real* adjacent nodes
 /// at any level flags the tree as mutated; the odd leftover paired with its
 /// duplicate-last copy never does.
-fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
+pub(crate) fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.len() >= AVX2_MERKLE_MIN_LEAVES && detect_avx2().is_some() {
         let mut hashes = txids.to_vec();
         return merkle_root_and_mutation(&mut hashes);
