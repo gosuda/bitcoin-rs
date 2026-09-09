@@ -764,6 +764,16 @@ impl MempoolGateway {
         if let Some(reason) = fact.reject_reason {
             return Err(AdmitError::Policy(reason));
         }
+        // Sigops require complete prevouts; omitted mempool-parent outputs must not
+        // be treated as zero and bypass the standardness limit.
+        if request
+            .tx
+            .input
+            .iter()
+            .any(|input| !request.prevouts.iter().any(|(outpoint, _)| *outpoint == input.previous_output))
+        {
+            return Err(AdmitError::Consensus);
+        }
         // Owner-computed sigop cost from resolved prevouts: a caller-supplied
         // figure never reaches the stored entry.
         let sigop_cost = total_sigop_cost(&request.tx, &request.prevouts);
