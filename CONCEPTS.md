@@ -1,350 +1,345 @@
 # Concepts
 
-Project-specific glossary. Normative rules live in `docs/contracts/`; measured results live with their evidence. Entries marked **Target** describe intended architecture that is not yet present.
+Project-specific vocabulary only. Normative behavior and implementation status live in `docs/contracts/`; measurements live with their evidence. **Target** marks architecture or features not present in the current workspace.
 
 ## Owners
 
 ### Owner table
-One crate owns each domain: `primitives` IDs/encoding/layouts; `script` interpreter and sighash primitives; `consensus` validity; `storage` engines/batches/snapshots/files; `utxo` coins/undo; `chain` header tree and chainwork; `mempool` admission/graph/policy/estimation/orphans; `p2p` transport/sessions/relay/download scheduling; `index` schemas/backfill/readiness/query; `mining` candidate/template state; `rpc` public protocol adapters; `node` configuration/lifecycle/wiring/cross-owner ordering; binary argv/env/config/signals/measurement. `docs/contracts/architecture.md` and gate `g17` own the assignment.
-
-**Target:** `crates/chainstate` becomes the transition owner. That crate is not currently in the workspace.
+One crate owns each domain: `primitives` IDs/encoding/layouts; `script` script execution; `consensus` validity; `storage` engines/batches/snapshots/files; `utxo` coins/undo; `chain` header tree/chainwork; `mempool` admission and pool policy; `p2p` peer protocol/session state; `index` derived indexes; `mining` candidates/templates; `rpc` public protocol adapters; `node` configuration/lifecycle/wiring; binary argv/env/config/signals. `docs/contracts/architecture.md` is authoritative.
 
 ### Five-layer direction
-`ARCH-01`: Layer 0 `primitives`, `script`, `consensus`; Layer 1 `storage`; Layer 2 `chain`, `utxo`, `chainstate`, `mempool`, `p2p`, `index`, `mining`; Layer 3 `rpc`; Layer 4 `node` and binary. Dependencies point only within or downward. The `chainstate` entry is target architecture until that crate exists.
+`ARCH-01` assigns Core, Storage, Services, Surface, and Compose layers. Dependencies point within or downward only.
 
 ### Chainstate owner
-**Target.** `crates/chainstate` serializes chain transitions, owns the durable root, and performs connect/disconnect/recovery. Node coordinates external effects around it. No compatibility facade or checkpoint-worker alias.
+**Target.** The planned `crates/chainstate` owner serializes applied-chain transitions and durable recovery. It is not currently a workspace crate.
 
 ### Storage ladder
-`KvStore` is the only backend-neutral storage trait: reads, ordered/bounded prefix scans, snapshots, batches, deferred/durable writes, and conditional durable writes. `Ok(true)` means committed and durable; `Ok(false)` means condition mismatch with no write; `Err` means backend failure. `ColumnFamily` is the shared logical namespace. Atomic visibility and crash durability are distinct.
+`KvStore` is the backend-neutral storage boundary: reads, ordered/bounded prefix scans, coherent snapshots, atomic batches, deferred/durable writes, and conditional durable writes.
 
 ### Index owner
-`crates/index` owns row schemas, backfill, selective rebuild, capability state, watermarks, and queries. Node only schedules the worker; adapters project owner state.
+The index runtime owns schemas, watermarks, readiness, backfill/rebuild, and queries. Status adapters project that state rather than inventing their own readiness.
 
 ### Mining owner
-`crates/mining` owns selection, template generations/cache, long-poll wakeups, and invalidation. RPC renders protocol results but owns no template cache.
+The mining domain owns candidate selection and template state. RPC renders protocol results; it does not own a second template cache.
 
 ### MempoolGateway
-The node-constructed `Arc<MempoolGateway>` is the single admission path for RPC, P2P, Esplora, packages, and reorg re-admission. It captures a `ReadStamp`, resolves inputs once, verifies outside the pool writer, then rechecks context and commits under one writer acquisition.
+The admission owner described by `POL-02`: transaction preparation, policy/script verification, stale-context recheck, and commit belong behind one gateway. The contract and current tests determine which ingress paths have completed that cutover.
 
 ## Node interfaces
 
 ### Wallet-free RPC boundary
-The node holds no private keys and has no in-tree wallet. Key-free descriptor, PSBT, and bounded UTXO-scan helpers may remain node RPCs for external-wallet workflows.
+The node has no in-tree wallet or private-key custody. Key-free descriptor, PSBT, scan, and broadcast surfaces may support external wallets.
 
 ### Watch-only mining payout
-`--mining-payout-address` resolves to a network-checked coinbase `scriptPubKey`; the node never holds payout keys. Empty configuration keeps transport-only GBT assembly.
+A configured payout address resolves to a network-checked coinbase `scriptPubKey`; the node does not hold its keys.
 
 ### Wallet-facing public surface
-External wallets use native Esplora `/api`, address/script lookups, `POST /tx`, and wallet-free RPCs. They receive no `NodeState`, `UtxoSet`, index handle, or datadir access. See `docs/contracts/wallet-facing.md`.
+The public wallet contract is RPC plus Esplora data/broadcast without exposing `NodeState`, UTXO internals, index handles, or datadir access.
 
 ### REST gateway
-Optional Core-compatible REST shares the JSON-RPC listener and is enabled by `rest=1`. Mixed reads use one coherent view; a moved chain generation yields HTTP 503. See `docs/rest-interface.md`.
+Optional Core-compatible REST shares the RPC listener. `docs/rest-interface.md` and `API-*` own exact behavior.
 
 ### Esplora dialects
-`/api` is public Esplora. `/esplora` is the versioned backend superset. Both project the same node/index state; neither is a separate database or node mode. `/api/v1` belongs to the external mempool application.
+`/api` is the public Esplora surface. `/esplora` is the versioned backend superset. Neither is a separate chain database.
 
 ### Sequence stream
-Core-compatible `pubsequence`: block hash + `C`/`D`; mempool txid + `A`/`R` + little-endian sequence. A mined transaction emits no `R`. Reorg disconnects precede connects. `bitcoin_rs_rpc::zmq` owns payload/transport compatibility; chain effects own emission timing. Default HWM is 1,000.
+Core-compatible ZMQ sequence events: block `C`/`D` and mempool `A`/`R`, with mempool sequence on transaction events. `bitcoin_rs_rpc::zmq` owns framing/transport.
 
 ### Embedded node
-`bitcoin_rs_node::Node` exposes the daemon lifecycle in process. Contract methods may be `async fn` with synchronous bodies; the embedder owns any executor. See `docs/contracts/embedding.md` (`EMB-02`).
+`bitcoin_rs_node::Node` is the in-process lifecycle surface over the same runtime as the daemon. See `EMB-*`.
 
 ### Node network selection
-`BITCOIN_RS_NETWORK` / `--network` selects consensus and bootstrap identity together. Supported names include mainnet, signet, testnet4, regtest, retained testnet3 aliases where documented, and `drynet4`.
+The resolved network selects consensus and peer bootstrap identity together. Current accepted spellings are owned by configuration code and contracts.
 
 ### Configuration precedence
-Low to high: defaults, TOML, `bitcoin.conf`, environment, CLI. `UserConfig` resolves once into validated `NodeConfig`; test clocks/fault controls stay in `RuntimeInputs`.
+Low to high: defaults, TOML, `bitcoin.conf`, environment, CLI. `UserConfig` resolves to validated `NodeConfig`; runtime test controls are separate.
 
-### Product lanes
-Minimal native: `--no-default-features --features fjall`. Default: default features, unpruned fjall, optional indexes off. Oracle: `--features kernel` in a separate target directory. **Target optional-on lane:** BIP324 plus compact filters; BIP324 is not currently wired in this workspace.
+### Build lanes
+The default binary is kernel-free. A minimal native binary uses `--no-default-features --features fjall`; the optional kernel lane uses `--features kernel` in a separate target directory. **Target:** BIP324 has no Cargo feature in this checkout.
 
-## Coherent view and transitions
+## Coherent views and transitions
 
 ### ReadStamp
-Coherent mixed reads carry `{ process_epoch, chain_generation, chain_tip, mempool_sequence, policy_epoch }`; all fields are checked. Height-only or partial stamp keys are invalid.
+A mixed-read identity containing process epoch, chain generation/tip, mempool sequence, and policy epoch. Partial stamps are not equivalent.
 
 ### Chain generation
-Even means stable/open; odd means coordinated chain change in progress. The generation counter does not replace the read fence protecting mutable UTXO resolution.
+Even denotes a stable published chain generation; odd denotes an in-progress coordinated transition. It does not replace required read fencing.
 
 ### Chain-transition reservation
-Exclusive right to begin a chain transition. Reservation is acquired before the pool fence.
+Exclusive authority to begin a coordinated chain change. Reservation precedes the mempool fence.
 
 ### Pool chain-change fence
-`begin_chain_change` / `ChainChangeGuard` closes admission commits and mixed reads during a transition. Reopening is explicit after durable commit and pool reconciliation; drop after error does not reopen it.
+The mempool generation window that closes admission/mixed reads during a chain transition and reopens only through explicit successful publication.
 
 ### Coherent publication
-Durable chain commit precedes mempool reconciliation, stable-generation publication, then best-effort relay/index/ZMQ/observer notification.
+Durable/authoritative transition work precedes mempool reconciliation and stable-generation publication; best-effort observers run afterward.
 
 ### Policy epoch
-`ReadStamp.policy_epoch` changes with `AdmissionPolicy`. Prepared work from an old epoch is stale and must be retried from fresh facts.
+The admission-policy version carried by `ReadStamp`; prepared work under an old epoch is stale.
 
 ## Block parsing and validation
 
 ### ParsedBlock / ParsedTransaction
-Checked borrowed wire layouts in `crates/primitives/src/layout.rs`. Bounds, canonical lengths, segwit marker/flag rules, and trailing bytes are validated before slicing. IDs, weight, positions, and Merkle mutation derive from the layout once.
+Checked borrowed wire layouts over one immutable byte image. Bounds, canonical lengths, segwit framing, and trailing bytes are validated before consumers use spans.
 
 ### PreparedTx / ResolvedCoin
-Prepared verification retains input-ordered resolved coins with value, script, height, and coinbase status. Inputs resolve once; transaction-wide sighash aggregates are cached once. Borrowed pointers into replaceable coin records are forbidden.
+Prepared verification data retaining input-ordered coin facts and shared transaction-level sighash work; no pointer may outlive replaceable coin storage.
 
 ### Validation window states
-`WindowOverlay`: `Missing`, `Existing`, `Created`, `Spent`. Same-block create-then-spend retains a tombstone. The window is bounded by bytes, inputs, retained coin bytes, CPU jobs, and age.
+`Missing`, `Existing`, `Created`, and `Spent` describe the bounded overlay used while validating consecutive blocks.
 
 ### Accepted prefix
-Longest contiguous run of window blocks proved valid under one context. Only that prefix may publish; later completed work cannot skip a failed predecessor.
+The longest contiguous run of prepared blocks valid under one predecessor/context. Later completed work cannot publish across a failed predecessor.
 
 ### Native interpreter
-The mandatory production verifier is pure Rust (`crates/script`) using the reviewed strict-Rust cryptography path. Historical DER/high-S, TapTweak overflow, and hybrid-key parity rules remain explicit.
+With `kernel` disabled, the pure-Rust script path is the complete portable verifier (`VAL-02`). This does not imply that every library currently defaults to native.
 
 ### bitcoinkernel
-`bitcoinkernel 0.2.1` is an opt-in differential oracle in the `kernel` lane, never a silent fallback or default runtime verifier.
+`bitcoinkernel 0.2.1` is the optional kernel engine/oracle. The binary default excludes it; consensus/node library defaults remain governed by `VAL-01` until the recorded promotion changes.
 
 ### Strict-Rust versus kernel-free closure
-Kernel-free means no transitive production `bitcoinkernel`; strict-Rust additionally proves the reviewed Rust validation/crypto path executed. They are separate gates.
+Kernel-free means the dependency is absent. Strict-Rust additionally asserts that the reviewed native verification/crypto path ran. They are separate claims.
 
 ### Guarded hash dispatch
-Runtime SHA256d kernels have independent AVX2, x86 SHA, and ARMv8 SHA2 guards; portable scalar always exists. Merkle batching preserves duplicate-last and mutation rules.
+Runtime SHA256d implementations have independent capability guards; the portable scalar path remains available everywhere.
 
 ### Script-flag exceptions (BIP16Exception)
-Core hardcoded reduced-flag blocks: mainnet 170060 (P2SH), 692261 (Taproot), testnet3 394. `Network::is_bip16_p2sh_exception` reproduces the P2SH exception; Taproot activation is height-gated separately.
+Named historical blocks whose applicable script flags differ from the normal activation set. Source and tests own the exact list.
 
 ### Difficulty-1 target
-Core's network-independent reference target: compact nBits `0x1d00ffff`, not the selected network PoW limit.
+Compact nBits `0x1d00ffff`, Core's network-independent reference target for difficulty calculations.
 
 ### Float value/text parity
-Compatibility preserves IEEE-754 value and operation order. It does not require Core's `%.16g` JSON spelling when shortest round-trip text encodes the same value.
+Equal floating-point value is distinct from identical JSON spelling; compatibility requirements must say which one matters.
 
-### Provably unspendable outputs (UTXO admission)
-UTXO state excludes scripts beginning with `OP_RETURN` or longer than `MAX_SCRIPT_SIZE`; history indexes may retain them.
+### Provably unspendable outputs
+Outputs excluded from live UTXO admission (for example `OP_RETURN` or scripts beyond the live-state limit) while history may still retain them.
 
 ### assumevalid
-At or below a trusted height, script-signature checks may be skipped while all other consensus checks still run. Height zero requests full verification.
+Skipping selected historical script-signature verification below a trusted anchor while retaining the other consensus checks.
 
 ### Hash-pinned assume-valid anchor
-Mainnet anchor: height 938343, hash `00000000000000000000ccebd6d74d9194d8dcdc1d177c478e094bfad51ba5ac`. Skipping applies only if the active header chain contains that exact hash.
+An assumevalid height is usable only when the active header chain contains its pinned block hash.
 
 ### Optimized default posture
-Default measurement posture: fjall, hash-pinned assumevalid, 450 MiB `dbcache`, tx/script indexes off, pruning off, native strict-Rust validation, P2P-owned multi-peer download. Benchmarks must record deviations.
+The benchmark configuration intended to represent the shipped binary. It is a measurement identity, not a claim about library default features.
 
 ## Chain state and durability
 
 ### Durable root
-`DurableHead { format_version, commit_id, tip_hash, height, chain_tx_count, block_segment_end, undo_segment_end }` is authoritative and shares the final atomic coin/metadata batch. Recovery reads it rather than inferring a head from segment files.
+**Target.** One authoritative persisted transition identity tying tip, coin version, and committed body/undo extents together. See `RCV-*` for status and proof.
 
 ### Ordered commit protocol
-Reserve and fence; build forward/undo facts; append and sync body/undo frames; atomically write coins/metadata/durable head; complete backend durability; reconcile mempool; publish stable generation; notify. I/O failure never reports success.
+**Target.** The required ordering from transition reservation through durable state, publication, and post-commit effects. `RCV-02` owns the exact sequence.
 
 ### Orphan append tail
-Segment bytes after the durable-root cursor. They may be truncated during recovery and never promote state by themselves.
+Segment bytes beyond the authoritative committed extent; decodability alone does not promote them.
 
 ### Undo record
-Per-block inverse keyed by height and block hash, encoded by `undo_codec` with `UNDO_FORMAT_VERSION = 1`.
+The exact inverse facts needed to disconnect one block, identified by block identity rather than height alone.
 
 ### Owed derived state
-Every derived owner affected by connect must define disconnect/reconciliation behavior. Coin stats invert explicitly; indexes reconcile from durable-root identity.
+Derived data whose owner must define connect, disconnect, and reconciliation semantics.
 
 ### Streaming reorg
-Disconnect tip-to-fork in bounded exact-inverse chunks, then connect the competing branch through the normal pipeline. Missing required undo fails closed.
+Disconnecting and reconnecting a reorg through bounded ordinary transitions rather than preloading the entire branch.
 
 ### Fresh replay
-Authoritative schema changes increment `CURRENT_SCHEMA` and require an explicitly fresh datadir; incompatible existing datadirs are neither converted nor deleted. Owner-local derived files version and degrade independently.
+Schema policy that refuses incompatible authoritative bytes and rebuilds in a separately named datadir instead of translating them in place.
 
 ### Post-commit chain effects
-RPC block logs, ZMQ, index wakeups, mining generation, and mempool alignment run after committed publication under `ChainFollowers` / `ChainEffects` ownership.
+Relay, index wakeups, mining invalidation, logs, ZMQ, and other derived work dispatched after authoritative publication.
 
 ### Chain control
-Consensus-affecting RPCs request transitions through the same chain-transition authority as sync; they do not mutate the block tree directly.
+Operator/RPC requests that change the active chain must use the same transition authority as synchronization.
 
 ## Mempool
 
 ### AdmissionMode
-`Preview` runs the same preparation/resolution/policy/script path as `Commit` and stops before mutation. `Commit` continues to the one writer acquisition.
+`Preview` evaluates without mutation; `Commit` continues through the owner-held mutation boundary.
 
 ### Admission verdict
-`AdmissionVerdict { stamp, rows, changes }`; `changes` exists only for a committed mutation. A preview is contextual evidence, not a reservation.
+A result carrying per-transaction verdicts, context stamp, and optional committed mutation facts.
 
 ### Typed Busy
-`AdmitError::Busy` follows four stale recheck attempts. Each attempt recaptures chain generation, pool sequence, and policy epoch; stale evidence is never reused.
+The admission result for repeated stale-context rechecks; callers start fresh rather than reuse stale verification evidence.
 
 ### Admission origin
-`AdmissionOrigin`: `Rpc`, `Peer(PeerToken)`, `Esplora`, `Package`, `Reorg`, `Load`. Only retained accepted entries become relay candidates.
+The source category attached to admission (RPC, peer, Esplora, package, reorg, load) so request-specific policy is explicit.
 
 ### Sigop cost
-The gateway computes `total_sigop_cost` from resolved prevouts and enforces `MAX_STANDARD_TX_SIGOPS_COST = 16_000`; ingress never supplies the count.
+Consensus/policy signature-operation accounting derived from transaction and resolved prevout facts, not trusted from ingress metadata.
 
 ### AdmissionPolicy
-One startup-resolved policy value owns relay/dust/datacarrier/package/RBF/TRUC/script limits for the pinned Core 31.1 profile. Contradictory configuration is a startup error.
+The versioned startup-resolved mempool policy value. `POL-*` and `docs/policies/mempool-policy.md` own current supported rules.
 
 ### Replacement profile
-Core 31.1 replacement uses feerate-diagram conditions over candidate and victim clusters with all-or-nothing commit. TRUC v3 topology constraints are included; the modern profile is not simply “BIP125 rules 1-6”.
+The pinned replacement rule set used for RBF/cluster decisions. Version it; do not use “BIP125” as an unqualified synonym for modern policy.
 
 ### Cluster graph
-Spend-graph components carry revision, aggregate fee/size, deterministic linearization/chunks, and bounded rebuild. Ranking uses checked integer cross-products and is shared by eviction, mining, and package limits.
+Connected components of the unconfirmed spend graph plus deterministic fee/size ordering metadata.
 
 ### Generation-safe EntryId
-Slab handles include a generation; stale handles resolve to `None` after slot reuse.
+A pool handle tagged with a generation so slot reuse cannot make a stale handle name an unrelated entry.
 
 ### Orphan pool
-Mempool owns missing-input transactions and recent rejects with bounded quotas, reverse parent index, and peer cleanup. Node only routes peer events.
+Mempool-owned bounded storage for missing-input transactions and recent rejects.
 
 ### Observer bounded delivery
-Optional mutation observers use a capped queue outside domain locks. Overflow records a gap/reconcile signal; canonical estimator accounting is never dropped.
+The design in which optional observers consume bounded mutation delivery and reconcile after gaps rather than forcing unbounded memory growth.
 
 ### Resolution-time sampling
-Estimator numerator and denominator are recorded together when confirmation outcome is known. Unclassifiable removals are `Excluded`, not confirmations.
+Recording estimator outcome when confirmation/removal resolves it, with numerator and denominator classified together.
 
 ### Estimator state
-Versioned owner-local fee-estimator state may reset to insufficient data on corruption/unknown version; it never fabricates a rate.
+Versioned owner-local fee-estimator persistence that may reset to insufficient data without becoming authoritative chainstate.
 
 ## P2P
 
 ### Initial Block Download (IBD)
-One-time download and full validation from the start point to the network's best known tip.
+Initial acquisition and validation from the starting chainstate to the best known chain.
 
-### Sync regimes (download-bound vs processing-bound)
-Measurements name whether wall time is dominated by network delivery or local validation/storage.
+### Sync regimes
+Download-bound measurements are dominated by delivery; processing-bound measurements are dominated by local validation/storage. Benchmarks must name the regime.
 
 ### Apply frontier
-Highest height for which every preceding block has been validated and committed. Downloaded or header-only progress does not advance it.
+Highest height for which all preceding blocks are validated and committed; distinct from header and download progress.
 
 ### Download window
-`P2pService::DownloadWindow` owns in-flight block byte/height budgets, deadlines, retries, and frontier priority. Node supplies demand and validates results; it owns no scheduler copy.
+The bounded set of in-flight block requests and associated retry/frontier state. `P2P-*` owns current scheduling boundaries.
 
 ### Count-and-byte bound
-A variable-size window obeys both item-count and byte caps; one oversized block may proceed alone.
+A variable-sized work window constrained by both item count and bytes.
 
 ### Staller
-A peer that blocks the apply frontier by failing to deliver its assigned frontier block while local apply is not the bottleneck.
+A peer preventing frontier progress by failing to deliver assigned work while local apply is not the bottleneck.
 
 ### Peer lease
-`PeerTable` / `PeerLease` is the peer-lifetime authority. Session generation plus request identity makes stale completions no-ops; each request lease releases exactly once.
+Generation-scoped request/session authority that makes stale completions harmless and terminal release exactly once.
 
 ### Address book
-`crates/p2p/src/address_book.rs` owns bounded tried/new address state, timestamps, addrv2, seeding, intake limits, and owner-local persistence. Corruption degrades to seeded discovery rather than failing authoritative startup.
+**Target.** A bounded persistent peer-discovery owner; no `crates/p2p/src/address_book.rs` exists in this checkout.
 
 ### Compact-block reconstruction
-BIP152 yields `Complete`, `Missing{txids}`, or `Fallback`. Short IDs are not identities; ambiguity requests missing transactions or falls back, and reconstructed blocks still use ordinary validation.
+**Target.** BIP152 reconstruction with missing-transaction request and full-block fallback; current status is owned by `P2P-*` and the policy matrix.
 
 ### v2 transport
-**Target.** Optional BIP324 transport belongs in `connection.rs`, with authenticated failure never downgrading. No `bip324` dependency or Cargo feature is currently wired.
+**Target.** Optional BIP324 encrypted transport. No `bip324` dependency or Cargo feature exists today.
 
 ### Notification configuration
-`NotificationConfig` groups external adapters; each ZMQ endpoint owns its topics and optional HWM override.
+Configuration grouping external notification endpoints, topics, and per-endpoint options.
 
 ## Derived indexes
 
 ### Capability
-Independent projection: `TxLookup`, `ScriptLive`, or `ScriptHistory`. `ScriptIndex(full)` means live + history; `ScriptIndex(utxo)` means live only. Core `txindex` advertisement is explicit, not inferred.
+An independently ready projection such as transaction lookup, live script outputs, or script history.
 
 ### Capability watermark
-Durable `(capability, height, hash, schema, revision)` committed with the rows it describes. Height alone is not identity.
+Durable capability identity including height, block hash, schema, and revision. Height alone is insufficient.
 
 ### Capability state machine
-`Disabled -> Opening -> CatchingUp -> Ready`, plus `RollingBack`, `Rebuilding`, `Failed`, `Shutdown`. Readiness requires health and watermark equality with the queried active tip.
+The owner state vocabulary: disabled/opening/catching-up/ready plus rollback, rebuild, failure, and shutdown states.
 
 ### Capability status
-`CapabilitySnapshot` / `CapabilityStatus` projects index-owner state and one runtime revision across adapters.
+The adapter projection of capability state plus one runtime revision.
 
 ### Unavailable is not empty
-Lagging, rebuilding, disabled, or pruned-away data returns typed `Unavailable`/`Retry`, never successful emptiness.
+A query whose required projection is disabled, stale, rebuilding, or unavailable returns a typed unavailable/retry result rather than successful emptiness.
 
 ### Occurrence key
-Transaction occurrence keys include txid, block identity, and position so duplicate txids and side branches cannot overwrite evidence.
+A transaction-history identity including transaction id, block identity, and position so duplicate txids/branches cannot alias.
 
 ### ScriptLive view
-Compact script-prefix + full-outpoint locators resolve value/script against authoritative coins and stay unqueryable until the final watermark commits.
+A compact live-output locator keyed by script accelerator plus full outpoint and verified against authoritative coins.
 
 ### Consumer cursor
-Durable `{ epoch, sequence, height, hash }` written atomically with the rows it names.
+Durable sequence/chain identity naming the state a derived consumer has applied.
 
 ### Rollback-versus-rebuild cutover
-Depth where an index resets/rebuilds instead of reversing contributions. The 100,000-block baseline must be remeasured on target storage; see `docs/benchmarks/index-rollback-rebuild-cutover.md`.
+The measured depth at which rebuilding a projection is preferred to reversing contributions one block at a time.
 
 ### Compact block filters
-BIP158 filters/BIP157 headers are index-owned derived data served through P2P. A pruned node without required source data does not advertise them.
+Derived BIP157/158 data owned by the index side and advertised only when available under the P2P contract.
 
 ## Mining
 
 ### Generation key
-Template identity is the full `ReadStamp` plus template-policy, fee-delta, and time-validity revisions. Any relevant tip/policy/fee/time change invalidates it.
+The complete identity that makes one cached template reusable: chain/pool stamp plus template policy, fee-delta, and time-validity revisions.
 
 ### Selection
-Selection consumes an immutable pool snapshot and shared cluster/chunk ordering, includes dependencies once, and updates exact integer scores. Modified fees rank; actual fees pay coinbase. Bounded subset search handles near-limit chunks.
+Dependency-aware candidate ordering from an immutable admitted-pool snapshot using exact fee/size accounting.
 
 ### Proposal
-BIP22 proposal validation is nonmutating and distinct from submission. A matching previous hash alone is never a valid proposal verdict.
+Nonmutating BIP22 candidate validation. Submission is a separate state-changing operation.
 
 ## Storage
 
-### UTXO record (v5)
-`UtxoRecord`: transaction-grouped full-txid identity with canonical compressed outputs and `u16` script-length bound. Persist changed grouped records with exact before-images; accelerators are never identity.
+### UTXO record
+Transaction-grouped live-coin storage keyed by full txid identity; accelerators are hints only.
 
 ### Canonical record spelling
-Each logical `UtxoRecord` has one canonical byte encoding, enforced by minimal varints, narrow directory widths, and complementary amount codecs.
+One logical record has one canonical byte representation.
 
 ### Deferred write
-`write_deferred` makes an atomic batch visible before its own fsync; `flush` completes deferred durability.
+An atomic visible write whose crash durability is completed by a later `flush`.
 
 ### Logical owner ledger
-Serialized key/value bytes attributable to a logical owner. It explains data-model size and is separate from physical allocation.
+Serialized bytes attributed to logical storage owners.
 
 ### Physical namespace ledger
-Allocated filesystem blocks per top-level datadir namespace. The default unpruned fjall posture with optional indexes off targets a conservative physical high-water of at most `1_000_000_000_000` decimal bytes at the pinned mainnet stop. `--measure-storage` owns collection; `docs/contracts/storage-footprint.md` owns the gate.
+Allocated filesystem bytes attributed to top-level datadir namespaces; the storage contract owns the budget and proof method.
 
 ### Work-count assertion
-A deterministic count of expensive operations. Wall-clock assertions belong in paired benchmarks.
+A deterministic count of expensive work, distinct from a wall-clock benchmark.
 
 ## Reference and evidence
 
 ### ReferenceSet
-`docs/api/core-compat.toml` and `compat_manifest.rs` pin released Core 31.1 (`v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, archive SHA256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, bitcoind SHA256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`) separately from the 31.99.0 kernel tree via `bitcoinkernel 0.2.1`.
+The machine-readable identity set for released Core, the kernel tree, corpora, and formal tools. `docs/api/core-compat.toml` and compatibility code govern.
 
 ### Compatibility class versus readiness versus evidence
-Manifest implementation status, runtime capability readiness, and executed evidence are independent facts.
+Manifest support status, runtime readiness, and executed evidence are three independent facts.
 
 ### Guard register
-`CONSTRAINTS.md` records CL-01..CL-23, formal-tool pins, and proof inventory; it points to normative owners rather than duplicating policy.
+`CONSTRAINTS.md`, the root index of current constraints and gate/evidence status.
 
 ### Formal models
-`docs/models/{ChainAdmission,PeerLeases,ProjectionMining}.tla` and `.cfg`, checked with Apalache 0.62.2 at K=128. Bounded model checking is evidence for the abstraction, not implementation proof.
+The TLA+ abstractions under `docs/models/`. A bounded model-check result is evidence about the model, not proof of the implementation.
 
 ### Blocked gate
-A check missing a required binary, corpus, digest, identity, or hardware records `BLOCKED`; absence never counts as pass.
+A required check missing an authenticated tool, corpus, hardware target, or other prerequisite. Missing prerequisites do not count as pass.
 
 ## Measurement
 
 ### Product performance cell
-One product domain (`offline`, `p2p`, `muhash`) × corpus (`c150`, `cmodern`) × native architecture × backend. See `docs/contracts/hot-path-attribution.md`.
+One frozen product-domain/corpus/architecture/backend coordinate under `HPA-*`.
 
 ### Hot-path attribution ledger
-`docs/benchmarks/hot-path-ledger.toml` is the single hot-path/overlap/disposition inventory. Nested or parallel stage timings are diagnostics, not additive product wall time.
+The machine inventory in `docs/benchmarks/hot-path-ledger.toml`; nested/concurrent timings are not additive wall time.
 
 ### Evidence identity
-Samples record artifact hash, configuration, corpus, durability, toolchain/features, host, and reference identities.
+Artifact, configuration, corpus, durability, and host/reference identity attached to a measurement sample.
 
 ### Promotion floor
-Keep an optimization only with at least 1.05x median gain on the named cell, three alternating candidate/control runs, <=5% arm instability, gain above host noise, and identical result hashes. Non-target guards are 3% median and 5% p99. Missing target hardware blocks performance proof.
+The minimum measured product improvement and stability required before retaining an optimization; `HPA-13` owns the numbers.
 
 ### Retained benchmark contract
-Permanent benchmarks call shipped production paths with product-shaped workloads and protect current regressions. Workflow `bench-smoke` jobs own CI compilation coverage.
+A permanent benchmark must exercise shipped production behavior and protect a current regression or decision.
 
-### C150
-Historical corpus: mainnet genesis through height 150,000. `docs/contracts/campaign-corpora.md` owns identity and census.
-
-### Cmodern
-Modern corpus: mainnet genesis through height 709,635. `docs/contracts/campaign-corpora.md` owns identity and census.
+### C150 / Cmodern
+Pinned campaign corpora defined by `docs/contracts/campaign-corpora.md`.
 
 ### Matched-harness comparison
-Cross-node ratios require matched block source, validation posture, allocator, CPU pinning, and measurement phase, with interleaved arms on an idle host.
+A cross-system benchmark in which non-target variables are matched before quoting a ratio.
 
 ### Offline full-validation comparator
-Processing-bound Core 31.1 vs bitcoin-rs chainstate build from one hash-pinned archive under full validation, matched index posture, and production durability. See `docs/benchmarks/offline-full-validation.md`.
+The processing-bound Core-versus-bitcoin-rs chainstate comparison defined by its benchmark contract.
 
-### CPU-seconds as a first-class metric
-Throughput work records CPU time as well as wall time so parallelism cannot hide extra compute.
+### CPU-seconds
+Process CPU time recorded beside wall time so parallelism cannot appear free.
 
 ### Contended-harness tuning artefact
-Do not tune parallelism while the harness competes with the node for CPU; that measures contention, not the node.
+A tuning result obtained while the harness competes with the node for CPU; not valid as an isolated-node optimum.
 
 ### CI lane parity
-A branch is green only against workflow commands. `.github/workflows/ci.yml` is the PR gate; `.github/workflows/main.yml` owns main-only oracle work. `cargo deny` failures are defects, not lint noise.
+A branch is green only against the actual workflow commands and current required gates.
