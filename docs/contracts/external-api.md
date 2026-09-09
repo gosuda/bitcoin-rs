@@ -78,7 +78,7 @@ Owners:
 
 ### `API-04`: ZMQ notification contract
 
-- `crates/node/src/zmq_publisher.rs` owns the declared Core topics
+- `crates/rpc/src/zmq.rs` owns the declared Core topics
   `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence`, with Core
   byte order, sequence counters, and connect, disconnect, and mempool
   ordering.

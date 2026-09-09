@@ -113,8 +113,10 @@ The ZMQ sequence observer lives in `crates/rpc/src/zmq.rs`.
 - Existing suites keep their verdicts: `crates/mempool/src/gateway.rs`
   inline tests (`remove_for_block` ordering, generation fencing),
   `crates/node/tests/tx_ingress_e2e.rs`, `crates/node/tests/mining.rs`
-  long-poll wake tests, `crates/node/src/zmq_publisher.rs` payload
-  tests, `crates/node/tests/crash_recovery.rs`.
+  long-poll wake tests, `crates/rpc/src/zmq.rs` payload tests
+  (`block_inclusion_suppresses_r_frames`,
+  `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`),
+  `crates/node/tests/crash_recovery.rs`.
 
 ## Vocabulary
 

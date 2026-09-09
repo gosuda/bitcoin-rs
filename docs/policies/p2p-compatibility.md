@@ -27,7 +27,7 @@ Re-pinning to a newer Core version requires all of:
 
 ## 3. Transport and Envelope
 
-- Bitcoin P2P **v1 envelope baseline** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload. The optional `bip324` feature adds BIP324 v2 framing over the same command surface; see §7.
+- Bitcoin P2P **v1 envelope baseline** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload. BIP324 v2 framing over the same command surface is planned, not present; see §7.
 - Payload bound: `MAX_MESSAGE_PAYLOAD = 32 MiB`. Core caps messages at 4 MiB; bitcoin-rs is deliberately looser so any protocol-maximal block fits. A peer that Core would disconnect for an oversized message may be accepted here; this is a bound difference, not a relay difference. Retained deviation (§7).
 - Network magic and default ports come from `bitcoin_rs_primitives::Network` and are asserted equal to Core's constants per network (mainnet 8333, testnet3 18333, testnet4 48333, signet 38333, regtest 18444).
 - Fork networks sharing a chain may override the message-start bytes with `--p2p-magic` (a bitcoin-rs extension; requires `--network mainnet` semantics and explicit `--connect` peers). Not a Core option; recorded as extension, not parity.
@@ -36,7 +36,7 @@ Re-pinning to a newer Core version requires all of:
 
 An outbound bitcoin-rs connection sends, in order: `version`, `wtxidrelay` (BIP339), `sendaddrv2` (BIP155), `sendheaders` (BIP130). An inbound connection receives `version` and answers with the same four messages, then `verack` completes readiness (`crates/p2p/src/handshake.rs`, `dispatch.rs`).
 
-With the optional `bip324` feature, a BIP324 transport handshake runs before the message handshake. The negotiation outcome is `V2`, `V1Fallback`, or `Rejected{disconnect class}`. An authentication failure is a documented disconnect. It never selects v1, never reinterprets ciphertext as a downgrade, and never reuses cipher or handshake state across sessions (`crates/p2p/src/connection.rs`, `transport_v2.rs`).
+BIP324 v2 transport is planned, not present: v1 only in this plan, so no `bip324` feature or transport handshake exists today (see §7). When it lands, negotiation yields `V2`, `V1Fallback`, or `Rejected{disconnect class}`, and an authentication failure is a documented disconnect.
 
 The `version` message pins:
 
