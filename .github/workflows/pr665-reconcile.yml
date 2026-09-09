@@ -1,0 +1,30 @@
+name: PR 665 reconcile reviewed snapshots
+on:
+  push:
+    branches: [review/pr-665-verification-20260909]
+    paths: [.github/workflows/pr665-reconcile.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact current and reviewed trees
+        run: |
+          git archive --format=tar.gz -o "$RUNNER_TEMP/current.tar.gz" a571ed307c3f9fee318fedde92e6d8e23f1d337b
+          git archive --format=tar.gz -o "$RUNNER_TEMP/candidate.tar.gz" 036c76bd034cdcedbfe1fbc404585cc04d82ea87
+          git diff --stat f8bb0f8d0f49ade933eb558d6722041d37a9c02c a571ed307c3f9fee318fedde92e6d8e23f1d337b > "$RUNNER_TEMP/concurrent.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr665-reconciliation
+          path: |
+            ${{ runner.temp }}/current.tar.gz
+            ${{ runner.temp }}/candidate.tar.gz
+            ${{ runner.temp }}/concurrent.txt
+          retention-days: 3
+          if-no-files-found: error
