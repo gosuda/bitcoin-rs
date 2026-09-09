@@ -28,7 +28,17 @@ jobs:
         with:
           components: rustfmt,clippy
       - name: Apply reviewed P2P edits and update node test consumer
-        run: python3 tooling/.github/extend-p2p.py p2p candidate
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tooling/.github/prepare-pr680-followups.py')
+          text = path.read_text()
+          old = 'Capability metadata belongs to the same connection as the token.\\n'
+          new = 'Capability metadata belongs to the same connection as the token. The\\n'
+          assert text.count(old) == 2, 'unexpected preparer anchor'
+          path.write_text(text.replace(old, new))
+          PY
+          python3 tooling/.github/extend-p2p.py p2p candidate
       - name: Format changed Rust files and publish independent branch
         id: publish
         working-directory: candidate
