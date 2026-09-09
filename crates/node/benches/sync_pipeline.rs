@@ -245,6 +245,7 @@ fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]
         Err(_) => Ledger {
             schema: LEDGER_SCHEMA.into(),
             cells: Vec::new(),
+            contract: std::collections::BTreeMap::new(),
         },
     };
     if !ledger.cells.iter().any(|candidate| candidate.id == cell) {

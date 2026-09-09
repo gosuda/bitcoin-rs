@@ -623,7 +623,7 @@ pub const LEDGER_SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";
 ///
 /// Other top-level tables of that file belong to the attribution contract and
 /// pass through untouched; this type owns only what a run may append to.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ledger {
     /// Must equal [`LEDGER_SCHEMA`].
     pub schema: String,
