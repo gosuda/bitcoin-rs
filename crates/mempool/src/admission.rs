@@ -87,15 +87,34 @@ pub enum SubmitError {
 pub struct OrphanRetry {
     /// Transaction identifier for relay.
     pub txid: Txid,
+    /// Witness identifier of the exact body offered for re-admission.
+    pub wtxid: Wtxid,
     /// Delivering connection metadata; never a socket/connection handle.
     pub source: PeerToken,
     /// The same result a fresh submission receives.
     pub result: Result<SubmitOutcome, SubmitError>,
 }
 
-pub(crate) fn can_hold_orphan(tx: &Tx, policy: &StandardnessPolicy) -> bool {
-    !(tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null())
-        && is_standard_tx(tx, policy).is_ok()
+pub(crate) fn can_hold_orphan(pool: &crate::Mempool, tx: &Tx, policy: &StandardnessPolicy) -> bool {
+    let coinbase = tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null();
+    !(coinbase || has_invalid_mempool_outpoint(pool, tx)) && is_standard_tx(tx, policy).is_ok()
+}
+
+/// A known parent cannot later acquire an output without changing its txid.
+///
+/// The atomic gateway rechecks this against the live pool before classifying
+/// the failure; preparation uses the same rule to distinguish Held outcomes.
+pub(crate) fn has_invalid_mempool_outpoint(pool: &crate::Mempool, tx: &Tx) -> bool {
+    tx.inputs.iter().any(|input| {
+        let outpoint = input.previous_output;
+        pool.transaction_by_txid(&outpoint.txid)
+            .is_some_and(|parent| {
+                usize::try_from(outpoint.vout)
+                    .ok()
+                    .and_then(|index| parent.outputs.get(index))
+                    .is_none()
+            })
+    })
 }
 
 fn resolve_mempool_inputs(
@@ -160,9 +179,7 @@ impl MempoolGateway {
                 }
                 if peer {
                     let lifecycle = self.lifecycle.lock();
-                    if lifecycle.is_rejected(Hash256::from(txid))
-                        || lifecycle.is_rejected(Hash256::from(tx.wtxid()))
-                    {
+                    if lifecycle.rejects_transaction(txid, tx.wtxid()) {
                         return Ok(SubmitOutcome::AlreadyKnown);
                     }
                 }
@@ -171,7 +188,7 @@ impl MempoolGateway {
                     pool.sequence_number(),
                     prevouts,
                     parents,
-                    peer && can_hold_orphan(&tx, &pool.policy_snapshot().standardness),
+                    peer && can_hold_orphan(&pool, &tx, &pool.policy_snapshot().standardness),
                 )
             };
             let Some(snapshot) = chain.snapshot(&tx) else {
@@ -255,6 +272,7 @@ impl MempoolGateway {
         let mut results = Vec::with_capacity(ready.len());
         for held in ready {
             let txid = held.tx.txid();
+            let wtxid = held.tx.wtxid();
             // An intervening eviction or witness refresh retires this claim.
             if !self.lifecycle.lock().orphans.is_current(&held) {
                 continue;
@@ -275,6 +293,7 @@ impl MempoolGateway {
             }
             results.push(OrphanRetry {
                 txid,
+                wtxid,
                 source: held.source,
                 result,
             });
@@ -294,6 +313,9 @@ impl MempoolGateway {
     }
 
     /// Inventory membership includes resident orphans and recent peer rejects.
+    ///
+    /// A txid announcement is suppressed only by a base-transaction rejection;
+    /// a witness-specific rejection suppresses only the corresponding wtxid.
     #[must_use]
     pub fn have_tx(&self, hash: Hash256, wtxid: bool) -> bool {
         let pool = self.pool.read();
@@ -306,7 +328,7 @@ impl MempoolGateway {
             return true;
         }
         let lifecycle = self.lifecycle.lock();
-        lifecycle.is_rejected(hash)
+        lifecycle.rejects_inventory(hash, wtxid)
             || if wtxid {
                 lifecycle.orphans.get_by_wtxid(&Wtxid::from(hash)).is_some()
             } else {
@@ -373,6 +395,7 @@ mod tests {
     use crate::{Mempool, MempoolEntry};
     use bitcoin_rs_primitives::TxIn;
     use parking_lot::{Mutex, RwLock};
+    use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Coins(Vec<(OutPoint, TxOut)>);
@@ -863,5 +886,196 @@ mod tests {
                 assert!(gateway.retry_orphans(&Unavailable, 3).is_empty());
             }
         }
+    }
+
+    #[test]
+    fn known_parent_invalid_output_is_rejected_without_orphan_retention() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let mut malformed = (*child).clone();
+        malformed.inputs[0].previous_output.vout = 1;
+        let malformed = Arc::new(malformed);
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&malformed),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(gateway.is_rejected(Hash256::from(malformed.txid())));
+        assert!(!gateway.read().contains_txid(&malformed.txid()));
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&malformed),
+                AdmissionOrigin::Rpc,
+                None,
+                2,
+                &Coins(vec![])
+            ),
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        let mut variant = (*malformed).clone();
+        variant.inputs[0].witness = vec![vec![0x51]];
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::new(variant),
+                AdmissionOrigin::Peer(source()),
+                None,
+                3,
+                &Unavailable
+            ),
+            Ok(SubmitOutcome::AlreadyKnown)
+        );
+    }
+
+    #[test]
+    fn orphan_retry_removes_known_invalid_outpoint_after_parent_arrival() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        let mut malformed = (*child).clone();
+        malformed.inputs[0].previous_output.vout = 1;
+        let malformed = Arc::new(malformed);
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&malformed),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held {
+                missing_parents: vec![parent.txid()]
+            })
+        );
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let results = gateway.retry_orphans(&Coins(vec![]), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].result,
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(gateway.is_rejected(Hash256::from(malformed.txid())));
+    }
+
+    fn witness_parent_and_child() -> (Tx, Arc<Tx>) {
+        let (mut parent, child) = parent_and_child();
+        let mut tx = (*child).clone();
+        tx.inputs[0].witness = vec![vec![0x51]];
+        let mut script = vec![0x00, 0x20];
+        script.extend_from_slice(&Sha256::digest([0x51]));
+        parent.outputs[0].script_pubkey = script;
+        tx.inputs[0].previous_output.txid = parent.txid();
+        (parent, Arc::new(tx))
+    }
+
+    fn witness_spend() -> (Arc<Tx>, Coins) {
+        let (parent, tx) = witness_parent_and_child();
+        let chain = Coins(vec![(
+            tx.inputs[0].previous_output,
+            parent.outputs[0].clone(),
+        )]);
+        (tx, chain)
+    }
+
+    #[test]
+    fn witness_rejection_preserves_valid_variant_and_legacy_inventory() {
+        // BIP141 P2WSH commits to SHA256(witnessScript), excluding witness
+        // data from txid. Rejection must not suppress a correct script body.
+        for stripped in [false, true] {
+            let gateway = gateway();
+            let (valid, chain) = witness_spend();
+            let mut invalid = (*valid).clone();
+            invalid.inputs[0].witness = if stripped { vec![] } else { vec![vec![0x00]] };
+            let invalid = Arc::new(invalid);
+            assert_eq!(valid.txid(), invalid.txid());
+            assert_ne!(valid.wtxid(), invalid.wtxid());
+            assert_eq!(
+                gateway.submit_transaction(
+                    Arc::clone(&invalid),
+                    AdmissionOrigin::Peer(source()),
+                    None,
+                    1,
+                    &chain
+                ),
+                Err(SubmitError::Consensus)
+            );
+            assert!(!gateway.have_tx(Hash256::from(valid.txid()), false));
+            assert!(!gateway.have_tx(Hash256::from(valid.wtxid()), true));
+            assert!(gateway.have_tx(Hash256::from(invalid.wtxid()), true));
+            assert_eq!(
+                gateway.submit_transaction(
+                    Arc::clone(&invalid),
+                    AdmissionOrigin::Peer(source()),
+                    None,
+                    2,
+                    &Unavailable
+                ),
+                Ok(SubmitOutcome::AlreadyKnown)
+            );
+            assert!(matches!(
+                gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
+                Ok(SubmitOutcome::Committed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn fresh_invalid_witness_preserves_a_different_resident_orphan_variant() {
+        let gateway = gateway();
+        let (parent, valid) = witness_parent_and_child();
+        let chain = Coins(vec![(
+            valid.inputs[0].previous_output,
+            parent.outputs[0].clone(),
+        )]);
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&valid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        let mut invalid = (*valid).clone();
+        invalid.inputs[0].witness = vec![vec![0x00]];
+        let invalid = Arc::new(invalid);
+        let mut attacker = source();
+        attacker.connection_id += 1;
+        assert_eq!(
+            gateway.submit_transaction(invalid, AdmissionOrigin::Peer(attacker), None, 2, &chain),
+            Err(SubmitError::Consensus)
+        );
+        assert_eq!(
+            gateway.get_tx_by_wtxid(valid.wtxid()),
+            Some((*valid).clone())
+        );
+        assert_eq!(
+            gateway
+                .lifecycle
+                .lock()
+                .orphans
+                .get(&valid.txid())
+                .map(|held| held.source),
+            Some(source())
+        );
+        // A mempool parent accept wakes the retained variant without clearing
+        // the rejection cache. Retry must relay the actual accepted wtxid.
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let results = gateway.retry_orphans(&Coins(vec![]), 3);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0].result, Ok(SubmitOutcome::Committed(_))));
+        assert_eq!(results[0].source, source());
+        assert_eq!(results[0].wtxid, valid.wtxid());
+        assert_ne!(
+            Hash256::from(results[0].wtxid),
+            Hash256::from(results[0].txid)
+        );
     }
 }

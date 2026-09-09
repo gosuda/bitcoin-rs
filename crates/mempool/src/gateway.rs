@@ -18,9 +18,10 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{UtxoView, verify_transaction};
+use bitcoin_rs_consensus::{ConsensusError, UtxoView, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_script::script::{is_p2sh, is_witness_program};
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
@@ -149,6 +150,7 @@ pub enum AdmitError {
 /// and `shared` shrinks to run-time composition plus tests.
 use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
+use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
 use crate::rbf::{RbfError, ReplacementCandidate};
 
@@ -646,6 +648,20 @@ impl MempoolGateway {
             self.lifecycle.lock().orphans.remove(txid);
             return Ok(AdmitOutcome::AlreadyKnown);
         }
+        // Missing outputs of a resident parent are base-invalid, not orphans.
+        // This classification follows all state/claim checks and finalizes the
+        // same lifecycle as every other atomic failure, including retry removal.
+        if crate::admission::has_invalid_mempool_outpoint(&pool, &request.tx) {
+            let error =
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MissingInputs);
+            self.record_peer_failure(&pool, request, error, RejectScope::Transaction);
+            return Err(error);
+        }
+        let default_reject_scope = if request.tx.has_witness() {
+            RejectScope::Witness
+        } else {
+            RejectScope::Transaction
+        };
         // 4. Policy evaluation under the same write guard. `evaluate_one`
         //    checks standardness, missing inputs, coinbase, min-relay,
         //    max-fee, and replacement — but NOT package limits (those are
@@ -666,7 +682,7 @@ impl MempoolGateway {
         );
         if let Some(reason) = fact.reject_reason {
             let error = AdmitError::Policy(reason);
-            self.record_peer_failure(&pool, request, error);
+            self.record_peer_failure(&pool, request, error, default_reject_scope);
             return Err(error);
         }
 
@@ -684,7 +700,7 @@ impl MempoolGateway {
             // Coinbase transactions are never admitted via the gateway.
             // Empty prevouts on a non-coinbase tx means the caller did not
             // resolve inputs — reject rather than admit unverified.
-            self.record_peer_failure(&pool, request, AdmitError::Consensus);
+            self.record_peer_failure(&pool, request, AdmitError::Consensus, default_reject_scope);
             return Err(AdmitError::Consensus);
         }
         let chain_view = PrevoutMap(&request.prevouts);
@@ -696,17 +712,33 @@ impl MempoolGateway {
         // state, but failing closed here matches the conservative choice:
         // nothing is admitted when the finality question is unanswerable.
         let Some(finality_height) = request.height.checked_add(1) else {
-            self.record_peer_failure(&pool, request, AdmitError::Consensus);
+            self.record_peer_failure(&pool, request, AdmitError::Consensus, default_reject_scope);
             return Err(AdmitError::Consensus);
         };
-        if let Err(_err) = verify_transaction(
+        if let Err(error) = verify_transaction(
             &request.tx,
             &view,
             finality_height,
             request.locktime_cutoff,
             VerifyFlags::STANDARD,
         ) {
-            self.record_peer_failure(&pool, request, AdmitError::Consensus);
+            // Core's rejection cache keys witness-sensitive failures by wtxid
+            // and preserves other witness variants. A witness-free script
+            // failure spending a witness/P2SH output may be witness-stripped;
+            // retain that uncertainty rather than poisoning legacy inventory.
+            // https://github.com/bitcoin/bitcoin/blob/v31.1/src/node/txdownloadman_impl.cpp
+            let possibly_stripped = matches!(
+                error,
+                ConsensusError::Script { .. } | ConsensusError::Kernel(_)
+            ) && request.prevouts.iter().any(|(_, output)| {
+                is_witness_program(&output.script_pubkey) || is_p2sh(&output.script_pubkey)
+            });
+            let scope = if possibly_stripped {
+                RejectScope::Witness
+            } else {
+                default_reject_scope
+            };
+            self.record_peer_failure(&pool, request, AdmitError::Consensus, scope);
             return Err(AdmitError::Consensus);
         }
 
@@ -739,7 +771,7 @@ impl MempoolGateway {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.record_peer_failure(&pool, request, error);
+                self.record_peer_failure(&pool, request, error, default_reject_scope);
                 return Err(error);
             }
         };
@@ -757,6 +789,7 @@ impl MempoolGateway {
                 AdmitError::Policy(crate::standardness::AcceptanceRejectReason::Replacement(
                     RbfError::Mempool(crate::pool::MempoolError::Full),
                 )),
+                default_reject_scope,
             );
         }
         let mut elected = false;
@@ -871,18 +904,28 @@ impl MempoolGateway {
     /// Finalizes peer-only holding/rejection while the exact admission state
     /// remains locked. Thus a parent commit or chain reset cannot pass between
     /// the verdict and registration of its lifecycle consequences.
-    fn record_peer_failure(&self, pool: &Mempool, request: &AdmissionRequest, error: AdmitError) {
+    fn record_peer_failure(
+        &self,
+        pool: &Mempool,
+        request: &AdmissionRequest,
+        error: AdmitError,
+        scope: RejectScope,
+    ) {
         let AdmissionOrigin::Peer(source) = request.origin else {
             return;
         };
         let hold = error
             == AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MissingInputs)
-            && crate::admission::can_hold_orphan(&request.tx, &pool.policy_snapshot().standardness);
+            && crate::admission::can_hold_orphan(
+                pool,
+                &request.tx,
+                &pool.policy_snapshot().standardness,
+            );
         let mut lifecycle = self.lifecycle.lock();
         if hold {
             lifecycle.orphans.insert(Arc::clone(&request.tx), source);
         } else {
-            lifecycle.reject(&request.tx);
+            lifecycle.reject(&request.tx, scope);
         }
     }
 

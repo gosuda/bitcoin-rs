@@ -10,6 +10,13 @@ use hashbrown::{HashMap, HashSet};
 const DEFAULT_ORPHAN_QUOTA: usize = 100;
 const DEFAULT_REJECT_CAP: usize = 100_000;
 
+/// Whether a failure applies to the base transaction or only this witness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RejectScope {
+    Transaction,
+    Witness,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct HeldOrphan {
     pub(crate) tx: Arc<Tx>,
@@ -129,7 +136,7 @@ impl OrphanPool {
 #[derive(Debug)]
 pub(crate) struct AdmissionLifecycle {
     pub(crate) orphans: OrphanPool,
-    rejects: HashSet<Hash256>,
+    rejects: HashMap<Hash256, RejectScope>,
     reject_order: VecDeque<Hash256>,
     reject_cap: usize,
 }
@@ -137,19 +144,27 @@ impl Default for AdmissionLifecycle {
     fn default() -> Self {
         Self {
             orphans: OrphanPool::new(DEFAULT_ORPHAN_QUOTA),
-            rejects: HashSet::new(),
+            rejects: HashMap::new(),
             reject_order: VecDeque::new(),
             reject_cap: DEFAULT_REJECT_CAP,
         }
     }
 }
 impl AdmissionLifecycle {
-    pub(crate) fn reject(&mut self, tx: &Tx) {
-        self.orphans.remove(tx.txid());
-        for hash in [Hash256::from(tx.txid()), Hash256::from(tx.wtxid())] {
-            if self.rejects.insert(hash) {
-                self.reject_order.push_back(hash);
-            }
+    pub(crate) fn reject(&mut self, tx: &Tx, scope: RejectScope) {
+        let txid = tx.txid();
+        let wtxid = tx.wtxid();
+        if scope == RejectScope::Transaction
+            || self
+                .orphans
+                .get(&txid)
+                .is_some_and(|held| held.tx.wtxid() == wtxid)
+        {
+            self.orphans.remove(txid);
+        }
+        self.cache_reject(Hash256::from(wtxid), RejectScope::Witness);
+        if scope == RejectScope::Transaction {
+            self.cache_reject(Hash256::from(txid), RejectScope::Transaction);
         }
         while self.reject_order.len() > self.reject_cap {
             if let Some(oldest) = self.reject_order.pop_front() {
@@ -157,8 +172,29 @@ impl AdmissionLifecycle {
             }
         }
     }
+    fn cache_reject(&mut self, hash: Hash256, scope: RejectScope) {
+        if let Some(existing) = self.rejects.get_mut(&hash) {
+            if scope == RejectScope::Transaction {
+                *existing = scope;
+            }
+        } else {
+            self.rejects.insert(hash, scope);
+            self.reject_order.push_back(hash);
+        }
+    }
+    /// Base-invalid failures suppress all witnesses; other failures suppress
+    /// only the body actually checked. A stripped body's wtxid may equal txid.
+    pub(crate) fn rejects_transaction(&self, txid: Txid, wtxid: Wtxid) -> bool {
+        self.rejects.get(&Hash256::from(txid)) == Some(&RejectScope::Transaction)
+            || self.rejects.contains_key(&Hash256::from(wtxid))
+    }
+    pub(crate) fn rejects_inventory(&self, hash: Hash256, wtxid: bool) -> bool {
+        self.rejects
+            .get(&hash)
+            .is_some_and(|scope| wtxid || *scope == RejectScope::Transaction)
+    }
     pub(crate) fn is_rejected(&self, hash: Hash256) -> bool {
-        self.rejects.contains(&hash)
+        self.rejects.contains_key(&hash)
     }
     pub(crate) fn rejects_len(&self) -> usize {
         self.rejects.len()
@@ -251,9 +287,9 @@ mod tests {
             ..AdmissionLifecycle::default()
         };
         let first = tx(1, Txid::default());
-        state.reject(&first);
-        state.reject(&tx(2, Txid::default()));
-        state.reject(&tx(3, Txid::default()));
+        state.reject(&first, RejectScope::Transaction);
+        state.reject(&tx(2, Txid::default()), RejectScope::Transaction);
+        state.reject(&tx(3, Txid::default()), RejectScope::Transaction);
         assert_eq!(state.rejects_len(), 2);
         assert!(!state.is_rejected(Hash256::from(first.txid())));
         state.clear_rejects();
