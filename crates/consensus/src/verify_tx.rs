@@ -297,7 +297,6 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
         });
     }
 
-    let _ = 0usize;
     let sigop_cost = total_sigop_cost(tx, &prep.prevouts);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
@@ -836,8 +835,10 @@ pub fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
         }
         let witness_program = if is_witness_program(&prevout.script_pubkey) {
             Some(prevout.script_pubkey.as_slice())
-        } else {
+        } else if is_p2sh(&prevout.script_pubkey) {
             redeem_script.filter(|script| is_witness_program(script))
+        } else {
+            None
         };
         if let Some(program) = witness_program {
             cost = cost.saturating_add(count_segwit(program, &input.witness));

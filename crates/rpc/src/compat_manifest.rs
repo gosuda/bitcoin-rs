@@ -230,6 +230,12 @@ pub enum ReferenceError {
          the kernel tree"
     )]
     IdentityConfusion,
+    /// A corpus is duplicated, unknown, or differs from its frozen stop identity.
+    #[error("corpus `{id}` does not uniquely match the canonical registry")]
+    CorpusIdentityMismatch {
+        /// The rejected corpus identifier.
+        id: String,
+    },
     /// A required corpus is absent from the reference set.
     #[error("the `{id}` corpus is missing from the reference set")]
     MissingCorpus {
@@ -298,6 +304,21 @@ fn corpora(reference: &toml::Table) -> Result<Vec<CorpusPin>, ReferenceError> {
             id: REQUIRED_CORPORA[0].to_owned(),
         })?;
 
+    #[derive(serde::Deserialize)]
+    struct Registry {
+        products: std::collections::BTreeMap<String, FrozenCorpus>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FrozenCorpus {
+        stop_height: u64,
+        stop_hash: String,
+    }
+    let registry: Registry =
+        serde_json::from_str(include_str!("../../../tools/campaign-corpus/products.json"))
+            .map_err(|err| ReferenceError::ManifestUnreadable {
+                detail: format!("canonical corpus registry: {err}"),
+            })?;
+    let mut seen = std::collections::BTreeSet::new();
     let mut corpora = Vec::with_capacity(array.len());
     for value in array {
         let entry = value
@@ -306,6 +327,13 @@ fn corpora(reference: &toml::Table) -> Result<Vec<CorpusPin>, ReferenceError> {
         let id = required_str(entry, "id")?;
         let stop_height = required_u64(entry, "stop_height")?;
         let stop_hash = required_str(entry, "stop_hash")?;
+        if !seen.insert(id.clone())
+            || !registry.products.get(&id).is_some_and(|frozen| {
+                frozen.stop_height == stop_height && frozen.stop_hash == stop_hash
+            })
+        {
+            return Err(ReferenceError::CorpusIdentityMismatch { id });
+        }
         let manifest_sha256 = match entry.get("manifest_sha256") {
             None => None,
             Some(toml::Value::String(text)) => Some(parse_sha256("manifest_sha256", text)?),
@@ -355,6 +383,7 @@ fn required_str(section: &toml::Table, field: &'static str) -> Result<String, Re
     section
         .get(field)
         .and_then(toml::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .ok_or(ReferenceError::VersionLabelOnly { field })
 }
@@ -404,7 +433,7 @@ fn hex_digit(field: &'static str, character: Option<char>) -> Result<u8, Referen
         .ok_or(ReferenceError::DigestMalformed { field })
 }
 
-/// Rejects the one way a reference set can quietly lie: reading the 31.99.x
+/// Rejects reading the 31.99.x
 /// kernel development tree as if it were the released product, or writing a
 /// release whose version is not a `MAJOR.MINOR` product at all.
 fn check_identity_confusion(release: &str, kernel: &str) -> Result<(), ReferenceError> {
@@ -412,7 +441,10 @@ fn check_identity_confusion(release: &str, kernel: &str) -> Result<(), Reference
         && release
             .split('.')
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
-    if release == kernel || !released {
+    let development_tree = kernel
+        .strip_prefix("31.99.")
+        .is_some_and(|patch| !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()));
+    if release == kernel || release == "31.99" || !released || !development_tree {
         return Err(ReferenceError::IdentityConfusion);
     }
     Ok(())

@@ -178,3 +178,52 @@ fn repeated_samples_and_empty_cells_survive_a_round_trip() {
     assert_eq!(measured[0].samples.len(), 2);
     assert_eq!(reparsed.cells.len(), 36);
 }
+
+/// T02: whitespace-only fields do not identify a measured treatment.
+#[test]
+fn blank_identity_fields_are_rejected() {
+    for field in [
+        "path",
+        "owner",
+        "version",
+        "backend",
+        "durability",
+        "hardware",
+        "corpus.id",
+    ] {
+        for blank in ["", " \t\n"] {
+            let mut candidate = sample(0, 10);
+            let value = match field {
+                "path" => &mut candidate.path,
+                "owner" => &mut candidate.owner,
+                "version" => &mut candidate.identity.version,
+                "backend" => &mut candidate.identity.backend,
+                "durability" => &mut candidate.identity.durability,
+                "hardware" => &mut candidate.identity.hardware,
+                _ => &mut candidate.identity.corpus.as_mut().expect("corpus").id,
+            };
+            *value = blank.into();
+            let mut ledger = Ledger::parse(LEDGER_TOML).expect("ledger");
+            assert_eq!(
+                ledger.record(CELL, candidate),
+                Err(EvidenceError::EmptyIdentity(field))
+            );
+        }
+    }
+}
+
+/// T02: owner-local top-level contract tables survive recording and rendering.
+#[test]
+fn unrelated_top_level_contract_tables_survive_recording() {
+    let source = format!("{LEDGER_TOML}\n[review_contract]\nowner = 'node'\nrequired = true\n");
+    let before: toml::Value = toml::from_str(&source).expect("input");
+    let mut ledger = Ledger::parse(&source).expect("ledger");
+    ledger.record(CELL, sample(0, 10)).expect("record");
+    let after: toml::Value = toml::from_str(&ledger.render().expect("render")).expect("output");
+    assert_eq!(before["review_contract"], after["review_contract"]);
+    for (key, value) in before.as_table().expect("table") {
+        if key != "cells" {
+            assert_eq!(Some(value), after.get(key), "lost top-level contract {key}");
+        }
+    }
+}

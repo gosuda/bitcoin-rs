@@ -926,3 +926,34 @@ fn encode_base64(bytes: &[u8]) -> String {
     }
     result
 }
+
+// IDX-02: getcapabilities is a node extension with this exact wire shape.
+#[test]
+fn getcapabilities_serializes_the_source_wake_counter_and_status_row() {
+    use bitcoin_rs_rpc::capabilities::{
+        CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status,
+    };
+    struct Source;
+    impl TxIndexCapabilitySource for Source {
+        fn capability(&self) -> CapabilityStatus {
+            txindex_status(true, CapabilityState::Ready)
+        }
+        fn revision(&self) -> u64 {
+            7
+        }
+    }
+    let mut context = Context::new();
+    context.txindex_status = Some(Arc::new(Source));
+    let handler = Handler::new(Arc::new(context));
+    let response = handler
+        .dispatch("getcapabilities", &json!([]))
+        .expect("capabilities");
+    let wire = sonic_rs::to_string(&response).expect("serialize wire");
+    let decoded: serde_json::Value = serde_json::from_str(&wire).expect("wire JSON");
+    assert_eq!(
+        decoded,
+        serde_json::json!({"revision": 7, "capabilities": [
+            {"id": "txindex", "compiled": true, "enabled": true, "state": "Ready"}
+        ]})
+    );
+}

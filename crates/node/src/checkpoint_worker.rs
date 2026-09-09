@@ -307,11 +307,6 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
 
                 let retention_pressure = publisher.maintain_journal();
                 let pressure_transition = retention_pressure && !prev_pressure;
-                if false {
-                    tracing::info!(
-                        "journal retention pressure: triggering checkpoint publication to drain",
-                    );
-                }
                 prev_pressure = retention_pressure;
 
                 let current_tip = publisher.applied_tip.load();
@@ -321,12 +316,12 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                 };
 
                 if pressure_transition {
-                      tracing::info!(
-                          "journal retention pressure: triggering checkpoint publication to drain",
-                      );
-                  }
+                    tracing::info!(
+                        "journal retention pressure: triggering checkpoint publication to drain",
+                    );
+                }
 
-                  let blocks_advanced = tip.height.saturating_sub(last_published_height);
+                let blocks_advanced = tip.height.saturating_sub(last_published_height);
                 let elapsed = last_published_at.elapsed();
 
                 if !retention_pressure

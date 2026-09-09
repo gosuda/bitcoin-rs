@@ -838,6 +838,58 @@ class ResumeContract(unittest.TestCase):
 
 
 class PartialWrite(unittest.TestCase):
+    # CORP-02: a failed coupled append is not a committed prefix.
+    def test_same_writer_requires_tail_recovery_for_either_stream(self) -> None:
+        for failed_stream in ("archive", "entries"):
+            with self.subTest(failed_stream=failed_stream), tempfile.TemporaryDirectory() as raw:
+                freeze = _fixture_freeze(Path(raw))
+                archive = _FlakyWrites(io.BytesIO())
+                entries = _FlakyWrites(io.BytesIO())
+                writer = corpus.CorpusWriter(freeze, FIX_CORPUS, archive, entries)
+                writer.append(_GENESIS)
+                facts = writer.prefix_facts()
+                (archive if failed_stream == "archive" else entries).poisoned = True
+                with self.assertRaises(OSError):
+                    writer.append(_BLOCK1)
+                self.assertEqual(writer.prefix_facts(), facts)
+                with self.assertRaises(ContractError):
+                    writer.append(_BLOCK1)
+                with self.assertRaises(ContractError):
+                    writer.finish(io.BytesIO())
+                archive.truncate(facts.archive_bytes)
+                entries.truncate(facts.entries_bytes)
+                writer.append(_BLOCK1)
+                writer.append(_BLOCK2)
+                manifest = io.BytesIO()
+                summary = writer.finish(manifest)
+                self.assertEqual(archive.getvalue(), _GOLDEN_ARCHIVE)
+                self.assertEqual(manifest.getvalue(), _GOLDEN_MANIFEST)
+                self.assertEqual(summary.archive_sha256, FIX_ARCHIVE_SHA256)
+
+    # CORP-02: aliases are refused before publication or scratch creation.
+    def test_equal_resolved_destinations_leave_no_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            freeze = _fixture_freeze(root)
+            destination = root / "not-created" / "corpus"
+            alias = destination.parent / ".." / "not-created" / "corpus"
+            with self.assertRaisesRegex(ContractError, "paths must differ"):
+                corpus._run_writer(freeze, FIX_CORPUS, destination, alias, [])
+            self.assertFalse(destination.parent.exists())
+
+    # CORP-02: a stream cannot claim to have written bytes it was not given.
+    def test_impossible_write_counts_are_errors(self) -> None:
+        class InvalidCount:
+            def __init__(self, count):
+                self.count = count
+
+            def write(self, _data):
+                return self.count
+
+        for count in (None, 0, -1, True, 1.5, 4):
+            with self.subTest(count=count), self.assertRaises(OSError):
+                corpus._write_all(InvalidCount(count), b"abc")
+
     def test_poisoned_append_keeps_committed_prefix_and_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

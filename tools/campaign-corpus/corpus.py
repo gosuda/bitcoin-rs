@@ -276,8 +276,8 @@ def _write_all(stream: BinaryIO, data: bytes) -> None:
     view = memoryview(data)
     while view:
         written = stream.write(view)
-        if written is None or written <= 0:
-            raise OSError("stream made no progress")
+        if type(written) is not int or not 0 < written <= len(view):
+            raise OSError("stream returned an invalid write count")
         view = view[written:]
 
 
@@ -288,6 +288,13 @@ class CorpusWriter:
     frozen block-count capacity, previous-header linkage, the rolling archive
     digest, and the canonical entry spool position. It never discovers run
     directories, never deletes or truncates files, and never publishes paths.
+
+    An append commits its cursor and both digests only after both streams
+    accept all bytes. An interrupted append leaves a pending tail: the caller
+    must truncate both streams to prefix_facts() before retrying, or resume
+    from an independently durable prefix after a crash. This codec does not
+    fsync; the coordinator owns flushing, durability and publication. A failed
+    finish likewise requires discarding/truncating the manifest before retry.
     """
 
     def __init__(self, freeze: Freeze, corpus_id: str, archive: BinaryIO, entries: BinaryIO) -> None:
@@ -335,17 +342,19 @@ class CorpusWriter:
                 raise ContractError(f"{self._chosen.corpus_id} stop hash does not match the frozen tip")
         meta = FrameMeta(offset=self._offset, payload_length=len(payload))
         header = self._freeze.network_magic + struct.pack("<I", len(payload))
+        line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
+        self._tail_pending = True
         _write_all(self._archive, header)
         _write_all(self._archive, payload)
+        _write_all(self._entries, line)
         self._archive_sha.update(header)
         self._archive_sha.update(payload)
-        line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
-        _write_all(self._entries, line)
         self._entries_sha.update(line)
         self._count += 1
         self._offset += HEADER_LEN + len(payload)
         self._entries_pos += len(line)
         self._last_hash = block_hash
+        self._tail_pending = False
         return meta
 
     def prefix_facts(self) -> PrefixFacts:
@@ -359,6 +368,8 @@ class CorpusWriter:
         )
 
     def finish(self, manifest: BinaryIO) -> CorpusSummary:
+        if self._tail_pending:
+            raise ContractError("unverified append tail: recover the committed prefix before finishing")
         if self._count != self._chosen.block_count:
             raise ContractError(
                 f"{self._chosen.corpus_id} archive has {self._count} blocks, expected {self._chosen.block_count}"
@@ -948,6 +959,8 @@ def _run_writer(
     manifest_path: Path,
     items: Iterable[tuple[str | None, bytes]],
 ) -> None:
+    if archive_path.resolve() == manifest_path.resolve():
+        raise ContractError("archive and manifest paths must differ")
     _refuse_existing(archive_path)
     _refuse_existing(manifest_path)
     archive_path.parent.mkdir(parents=True, exist_ok=True)

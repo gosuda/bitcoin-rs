@@ -3833,6 +3833,12 @@ impl TxIndexCapability {
 }
 
 impl TxIndexCapabilitySource for TxIndexCapability {
+    fn revision(&self) -> u64 {
+        self.runtime
+            .as_ref()
+            .map_or(0, |runtime| runtime.revision())
+    }
+
     fn capability(&self) -> CapabilityStatus {
         let enabled = !self.enabled.is_empty();
         let state = match (&self.lifecycle, &self.runtime) {
@@ -4089,3 +4095,25 @@ mod integration_tests;
 #[allow(clippy::expect_used, clippy::panic)]
 #[path = "txindex_worker_recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+mod capability_revision_tests {
+    use super::*;
+
+    // IDX-02: production status exposes the existing runtime wake counter.
+    #[test]
+    fn capability_revision_tracks_runtime_wakes() {
+        let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);
+        let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
+        let source = TxIndexCapability::new(
+            None,
+            Some(Arc::clone(&runtime)),
+            IndexCapabilities::TX_LOOKUP,
+        );
+        assert_eq!(source.revision(), 0);
+        runtime.wake();
+        assert_eq!(source.revision(), 1);
+        runtime.publish_failed("test failure");
+        assert_eq!(source.revision(), 1, "not a lifecycle version");
+    }
+}

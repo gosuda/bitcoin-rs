@@ -23,7 +23,7 @@ results. Unknown is not false; a missing measurement blocks the owning task.
 | Java | `java -version` observed line: Java 26.0.2.1 |
 | Install root | `${APALACHE_HOME}`, default `target/tools/apalache-0.62.2` (untracked) |
 | Version check | `apalache-mc version` must print `0.62.2`; mismatch is skill rc 11 |
-| Solver | `SMT_SOLVER=z3`; `JVM_ARGS` default `-Xmx4096m` (complete JVM option) |
+| Solver | `SMT_SOLVER=z3`; `JVM_ARGS` default `JVM_ARGS_DEFAULT` in `bin/bitcoin-rs/tests/gates/g20_formal_models.rs` (complete JVM option) |
 | Step bound | K = 128 (`--length=128`); a verification bound, not a production limit |
 
 The docker tag `ghcr.io/apalache-mc/apalache:main` is a moving branch tag and

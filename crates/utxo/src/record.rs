@@ -505,8 +505,12 @@ impl UtxoRecord {
 
     /// Reloads a record from its stored canonical bytes. A rejected row is
     /// typed corruption, never a partially trusted record.
-    pub(crate) fn from_stored_bytes(bytes: &[u8]) -> Result<Self, UtxoError> {
-        Self::from_encoded(ThinRecordBuf::from_slice(bytes)?)
+    pub(crate) fn from_stored_bytes(txid: Hash256, bytes: &[u8]) -> Result<Self, UtxoError> {
+        let record = Self::from_encoded(ThinRecordBuf::from_slice(bytes)?)?;
+        if record.txid() != txid {
+            return Err(UtxoError::CorruptRecord);
+        }
+        Ok(record)
     }
 
     /// Builds a record from snapshot-owned outputs in their serialized order.

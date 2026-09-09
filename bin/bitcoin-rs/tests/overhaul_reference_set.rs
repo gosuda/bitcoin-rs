@@ -291,3 +291,57 @@ fn every_deviation_entry_states_its_deviation() {
     }
     assert!(deviations > 0, "the manifest must record its deviations");
 }
+
+// REF-03: development-tree syntax is required, not merely inequality.
+#[test]
+fn kernel_identity_requires_a_numeric_31_99_patch() {
+    for version in [
+        "garbage",
+        "31.99.",
+        "31.99.x",
+        "31.99.0.extra",
+        "31.1.0",
+        "32.0.0",
+    ] {
+        let edited = edit_manifest(
+            "core_version = \"31.99.0\"",
+            &format!("core_version = \"{version}\""),
+        );
+        assert_eq!(
+            load_reference_set(&edited),
+            Err(ReferenceError::IdentityConfusion),
+            "{version}"
+        );
+    }
+}
+
+// REF-04: the registry owns full corpus identities, including their stop hash.
+#[test]
+fn corpus_rows_must_uniquely_match_the_canonical_registry() {
+    let set = reference_set().expect("reference set");
+    let pin = &set.corpora[0];
+    for (from, to) in [
+        (
+            "stop_height = 150000".to_owned(),
+            "stop_height = 150001".to_owned(),
+        ),
+        (
+            format!("stop_hash = \"{}\"", pin.stop_hash),
+            format!("stop_hash = \"{}\"", "0".repeat(64)),
+        ),
+        ("id = \"C150\"".to_owned(), "id = \"unknown\"".to_owned()),
+    ] {
+        assert!(matches!(
+            load_reference_set(&edit_manifest(&from, &to)),
+            Err(ReferenceError::CorpusIdentityMismatch { .. })
+        ));
+    }
+    let duplicate = format!(
+        "{MANIFEST_TOML}\n[[reference.corpora]]\nid = \"{}\"\nstop_height = {}\nstop_hash = \"{}\"\n",
+        pin.id, pin.stop_height, pin.stop_hash
+    );
+    assert_eq!(
+        load_reference_set(&duplicate),
+        Err(ReferenceError::CorpusIdentityMismatch { id: pin.id.clone() })
+    );
+}

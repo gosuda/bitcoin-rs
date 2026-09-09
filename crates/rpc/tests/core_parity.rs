@@ -194,8 +194,8 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
 
 /// One keep-alive connection accepts two fully framed requests — the first
 /// answered with 204 and an empty body, the second written in two TCP
-/// fragments and answered with 200 — with every response decoded from
-/// status, headers, and declared `Content-Length`, never from end of stream.
+/// fragments and answered with 200 — with framing decoded from the 204 status
+/// or a declared `Content-Length`, never from end of stream.
 #[test]
 fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error::Error>> {
     let (_node, server) = stand_up()?;

@@ -155,6 +155,8 @@ fn rest_disabled_returns_not_found_without_authentication() -> Result<(), Box<dy
     let address = spawn_with_rest(Auth::basic("alice", "secret"), false)?;
     let response = request_get(address, "/rest/chaininfo.json", "close")?;
     assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(response.contains("Content-Type: text/plain\r\n"));
+    assert!(response.ends_with("\r\n\r\nnot found"));
     Ok(())
 }
 
@@ -171,6 +173,7 @@ fn post_json_rpc_still_requires_and_accepts_authentication()
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02 (listener surface isolation).
 #[test]
 fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -180,6 +183,7 @@ fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02 (listener surface isolation).
 #[test]
 fn public_esplora_success_and_error_responses_allow_cross_origin_reads()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -187,11 +191,12 @@ fn public_esplora_success_and_error_responses_allow_cross_origin_reads()
     for path in ["/api/blocks/tip/height", "/api/not-an-esplora-route"] {
         let response = request_get(address, path, "close")?;
         assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
-        assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
+        assert!(!response.contains("Access-Control-Expose-Headers:"));
     }
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02 (listener surface isolation).
 #[test]
 fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -206,6 +211,7 @@ fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02 (listener surface isolation).
 #[test]
 fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -214,7 +220,7 @@ fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dy
 
     assert!(response.starts_with("HTTP/1.1 204 No Content"));
     assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
-    assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
+    assert!(!response.contains("Access-Control-Expose-Headers:"));
     assert!(response.contains("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"));
     assert!(response.contains("Access-Control-Allow-Headers: Content-Type\r\n"));
     assert!(!response.contains("Content-Length:"));
@@ -222,6 +228,7 @@ fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dy
     Ok(())
 }
 
+// CONTRACT: docs/contracts/wallet-facing.md#WF-02 (listener surface isolation).
 #[test]
 fn options_never_falls_through_to_json_rpc_or_non_public_surfaces()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -232,6 +239,8 @@ fn options_never_falls_through_to_json_rpc_or_non_public_surfaces()
             response.starts_with("HTTP/1.1 404 Not Found"),
             "unexpected OPTIONS response for {path}: {response}"
         );
+        assert!(response.contains("Content-Type: text/plain\r\n"));
+        assert!(response.ends_with("\r\n\r\nnot found"));
         assert!(
             !response.contains("Access-Control-"),
             "CORS leaked on {path}"

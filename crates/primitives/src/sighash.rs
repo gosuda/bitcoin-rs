@@ -26,8 +26,9 @@ use crate::{
 /// the last executed separator to the script end instead, and the caller
 /// strips already-executed separator opcodes out of that subscript
 /// (deletion semantics, `remove_codeseparators` at the checker layer).
-/// `SegWit` v0 has no code-separator handling at all: `BIP143` hashes the
-/// caller's script code verbatim.
+/// `SegWit` v0 does not apply legacy `FindAndDelete`. `BIP143` hashes the
+/// caller-selected `script_code` suffix after the last executed
+/// `OP_CODESEPARATOR` verbatim.
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// BIP342 leaf version byte for tapscript leaves.

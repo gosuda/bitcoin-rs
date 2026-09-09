@@ -2,10 +2,10 @@
 //!
 //! Txindex owns lifecycle and progress. This module owns the `getcapabilities`
 //! wire types and the pull seam RPC needs because it cannot depend on `node`.
-//! Every adapter projection — RPC `getcapabilities`, the embedded API, and the
-//! later REST/Esplora projections — carries one runtime revision taken from
-//! the same snapshot; adapters never invent a separate readiness revision.
-//! See the indexing contract's `IDX-02` for the capability rules.
+//! The revision is the runtime wake counter, not a coherent status-snapshot
+//! token. Lifecycle/progress can change without a wake; consumers must not
+//! infer unchanged status or index-row consistency from an equal counter.
+//! See `docs/contracts/indexing.md` (`IDX-02`) for the exact wire contract.
 
 use serde::{Deserialize, Serialize};
 
@@ -68,14 +68,9 @@ pub struct CapabilityStatus {
 /// Point-in-time status report for concrete node capabilities.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapabilitySnapshot {
-    /// One runtime revision for the whole projection.
-    ///
-    /// The revision identifies the runtime state behind every row, so callers
-    /// comparing snapshots never mix rows from different runtime states. All
-    /// status adapters report this single value from the same source.
-    /// Deserialization defaults to `0` so snapshots serialized before the
-    /// field existed still parse.
-    #[serde(default)]
+    /// Runtime wake counter observed while assembling the report, or zero
+    /// without a source. It does not version all lifecycle/progress changes
+    /// and is not a coherent snapshot token or an index query cache key.
     pub revision: u64,
     /// Status rows in the node's stable capability order.
     pub capabilities: Vec<CapabilityStatus>,
@@ -86,11 +81,8 @@ pub trait TxIndexCapabilitySource: Send + Sync {
     /// Compiled/enabled/lifecycle row for the txindex capability.
     fn capability(&self) -> CapabilityStatus;
 
-    /// Runtime revision shared by every status adapter projection.
-    ///
-    /// One revision covers all rows served from this source, so adapters
-    /// comparing snapshots agree on the runtime state they describe. The
-    /// default `0` serves sources that do not track a runtime revision yet.
+    /// Runtime wake counter, or zero for a source that does not expose one.
+    /// A matching value does not imply unchanged lifecycle or progress.
     fn revision(&self) -> u64 {
         0
     }

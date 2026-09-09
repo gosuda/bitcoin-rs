@@ -183,11 +183,9 @@ pub(crate) struct HeaderCheck {
     /// Declared divergence names (known-gap fixtures only).
     #[serde(default)]
     pub(crate) gap: Vec<String>,
-    /// `Content-Length` is derived framing, not pinned data: exactly one
-    /// ASCII-decimal header per tuple whose value equals that tuple's
-    /// actual raw body byte length. Bodies that are byte-identical
-    /// therefore get equal lengths for free, and a known-gap body
-    /// difference may legitimately change the length.
+    /// `Content-Length` is derived framing, not pinned data: it is absent on
+    /// 204 responses and otherwise exactly one ASCII-decimal header per tuple
+    /// whose value equals that tuple's actual raw body byte length.
     #[serde(default)]
     pub(crate) body_length: bool,
 }
@@ -496,11 +494,10 @@ fn settle_body_lengths(fixture: &mut Fixture) {
     }
 }
 
-/// Custody rule for one pinned tuple's `Content-Length`: at most one such
-/// header; when the wire body length is derivable it is mandatory and its
-/// ASCII-decimal value must equal it; a literal on a JSON-body tuple is a
-/// guessed value and is refused — the length there is derived framing,
-/// enforced live by the comparator instead.
+/// Custody rule for one pinned tuple's `Content-Length`: a 204 must have an
+/// empty body and omit the header. Otherwise at most one header is accepted;
+/// when the wire body length is derivable its value must match. A literal on
+/// a JSON-body tuple is refused because the wire length cannot be reproduced.
 fn validate_tuple_content_length(
     tuple: &HttpTuple,
     label: &str,
@@ -515,6 +512,18 @@ fn validate_tuple_content_length(
     let fail = |why: String| LoadError::Violation(format!("{}: {label}: {why}", path.display()));
     if declared.len() > 1 {
         return Err(fail("duplicate Content-Length headers".to_owned()));
+    }
+    if tuple.status == 204 {
+        if tuple.body_len != Some(0) {
+            return Err(fail("204 response must have an empty body".to_owned()));
+        }
+        return if declared.is_empty() {
+            Ok(())
+        } else {
+            Err(fail(
+                "204 response must not carry Content-Length".to_owned(),
+            ))
+        };
     }
     match (declared.first(), tuple.body_len) {
         (None, _) => Ok(()),

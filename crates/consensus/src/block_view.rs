@@ -127,14 +127,7 @@ impl BlockFacts {
         let has_witness = txs
             .iter()
             .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()));
-        let count_len = u64::from(compact_size_len(len_u64(txs.len())));
-        let mut stripped = HEADER_LEN.saturating_add(count_len);
-        let mut total = HEADER_LEN.saturating_add(count_len);
-        for tx in txs {
-            stripped = stripped.saturating_add(len_u64(tx.base_size()));
-            total = total.saturating_add(len_u64(tx.total_size()));
-        }
-        let weight = stripped.saturating_mul(3).saturating_add(total);
+        let weight = block_weight(txs);
         let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
         Self {
             txids,
@@ -460,4 +453,16 @@ fn span_len(span: ByteSpan) -> u64 {
 /// mirroring the layout module's widening helper.
 fn len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or_else(|_| unreachable!("usize length fits u64"))
+}
+
+/// Computes only BIP141 weight from the supplied transactions, without hashing.
+pub(crate) fn block_weight(txs: &[Tx]) -> u64 {
+    let count_len = u64::from(compact_size_len(len_u64(txs.len())));
+    let mut stripped = HEADER_LEN.saturating_add(count_len);
+    let mut total = HEADER_LEN.saturating_add(count_len);
+    for tx in txs {
+        stripped = stripped.saturating_add(len_u64(tx.base_size()));
+        total = total.saturating_add(len_u64(tx.total_size()));
+    }
+    stripped.saturating_mul(3).saturating_add(total)
 }

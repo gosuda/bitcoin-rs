@@ -561,6 +561,25 @@ impl Sample {
         if self.identity.corpus.is_none() {
             return Err(EvidenceError::MissingCorpus);
         }
+        for (field, value) in [
+            ("path", self.path.as_str()),
+            ("owner", self.owner.as_str()),
+            ("version", self.identity.version.as_str()),
+            ("backend", self.identity.backend.as_str()),
+            ("durability", self.identity.durability.as_str()),
+            ("hardware", self.identity.hardware.as_str()),
+            (
+                "corpus.id",
+                self.identity
+                    .corpus
+                    .as_ref()
+                    .map_or("", |corpus| corpus.id.as_str()),
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(EvidenceError::EmptyIdentity(field));
+            }
+        }
         self.interval.check()
     }
 
@@ -569,6 +588,8 @@ impl Sample {
     /// Nested and concurrent intervals share instants, so their resources
     /// were consumed once and cannot be added; extrema take the maximum.
     pub fn sum(&self, other: &Self) -> Result<Self, EvidenceError> {
+        self.check()?;
+        other.check()?;
         if self.path != other.path || self.owner != other.owner || self.identity != other.identity {
             return Err(EvidenceError::MismatchedTreatment);
         }
@@ -675,6 +696,9 @@ impl Ledger {
 /// Why evidence was refused.
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum EvidenceError {
+    /// A required identity string contains no non-whitespace characters.
+    #[error("evidence identity field {0} is empty")]
+    EmptyIdentity(&'static str),
     /// A digest was not 64 lowercase hex characters.
     #[error("digest {0:?} is not 64 lowercase hex characters")]
     MalformedDigest(String),

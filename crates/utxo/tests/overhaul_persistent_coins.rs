@@ -9,12 +9,17 @@
 
 #![expect(clippy::expect_used, reason = "test assertions")]
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::{
     ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
 };
 use bitcoin_rs_utxo::set::{
-    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UtxoAdd, UtxoSet,
+    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UtxoAdd,
 };
 
 type Row = ((ColumnFamily, Vec<u8>), Vec<u8>);
@@ -72,20 +77,47 @@ fn two_output_add(txid: Hash256, script_a: &[u8], script_b: &[u8]) -> Vec<UtxoAd
 }
 
 #[derive(Default)]
+struct StoreFaults {
+    fail_read: AtomicBool,
+    fail_write: AtomicBool,
+    fail_after_write: AtomicBool,
+    reject_cas: AtomicBool,
+    fail_flush: AtomicBool,
+    reads: AtomicUsize,
+    read_gate:
+        parking_lot::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+
+#[derive(Clone, Default)]
 struct MemoryStore {
-    rows: parking_lot::RwLock<Vec<Row>>,
+    rows: Arc<parking_lot::RwLock<Vec<Row>>>,
+    faults: Arc<StoreFaults>,
+}
+
+fn injected() -> StorageError {
+    StorageError::InvalidOperation("injected coin storage failure")
 }
 
 impl KvStore for MemoryStore {
     type WriteBatch = MemoryBatch;
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self
+        self.faults.reads.fetch_add(1, Ordering::SeqCst);
+        if self.faults.fail_read.swap(false, Ordering::SeqCst) {
+            return Err(injected());
+        }
+        let value = self
             .rows
             .read()
             .iter()
             .find(|((row_cf, row_key), _value)| *row_cf == cf && row_key == key)
-            .map(|(_row, value)| value.clone()))
+            .map(|(_row, value)| value.clone());
+        let gate = self.faults.read_gate.lock().take();
+        if let Some((entered, release)) = gate {
+            entered.send(()).expect("announce suspended read");
+            release.recv().expect("release suspended read");
+        }
+        Ok(value)
     }
 
     fn iter_prefix<'a>(
@@ -112,8 +144,14 @@ impl KvStore for MemoryStore {
     }
 
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+        if self.faults.fail_write.swap(false, Ordering::SeqCst) {
+            return Err(injected());
+        }
         let mut rows = self.rows.write();
         apply_ops(&mut rows, batch.ops.into_iter());
+        if self.faults.fail_after_write.swap(false, Ordering::SeqCst) {
+            return Err(injected());
+        }
         Ok(())
     }
 
@@ -122,6 +160,12 @@ impl KvStore for MemoryStore {
         conditions: &[WriteCondition<'_>],
         batch: Self::WriteBatch,
     ) -> Result<bool, StorageError> {
+        if self.faults.fail_write.swap(false, Ordering::SeqCst) {
+            return Err(injected());
+        }
+        if self.faults.reject_cas.swap(false, Ordering::SeqCst) {
+            return Ok(false);
+        }
         let mut rows = self.rows.write();
         let matched = conditions.iter().all(|condition| {
             let (cf, key) = condition.location();
@@ -135,10 +179,16 @@ impl KvStore for MemoryStore {
             return Ok(false);
         }
         apply_ops(&mut rows, batch.ops.into_iter());
+        if self.faults.fail_after_write.swap(false, Ordering::SeqCst) {
+            return Err(injected());
+        }
         Ok(true)
     }
 
     fn flush(&self) -> Result<(), StorageError> {
+        if self.faults.fail_flush.swap(false, Ordering::SeqCst) {
+            return Err(injected());
+        }
         Ok(())
     }
 
@@ -211,7 +261,7 @@ fn apply_ops(rows: &mut Vec<Row>, ops: std::vec::IntoIter<MemoryOp>) {
 /// values stay lossless, and the store row returns with the block.
 #[test]
 fn connect_and_disconnect_retain_exact_keys_losslessly() {
-    let set = PersistentUtxoSet::new(UtxoSet::new(), MemoryStore::default());
+    let set = PersistentUtxoSet::new(MemoryStore::default());
     let script_a = [0x51, 0x52, 0x53];
     let script_b = [0x00_u8; 77]; // large distinct script
     let a = txid(1);
@@ -220,12 +270,12 @@ fn connect_and_disconnect_retain_exact_keys_losslessly() {
     set.connect_block(&changes, &hash, CoinDurability::Durable)
         .expect("connect");
 
-    let stored_a = set.ledger().resident.records;
+    let stored_a = set.ledger().expect("ledger").resident.records;
     assert_eq!(stored_a, 1, "one grouped record");
-    let got_a = set.get(&outpoint(a, 0)).expect("output 0");
+    let got_a = set.get(&outpoint(a, 0)).expect("lookup").expect("output 0");
     assert_eq!(got_a.script_pubkey, script_a);
     assert_eq!(got_a.value, 100);
-    let got_b = set.get(&outpoint(a, 1)).expect("output 1");
+    let got_b = set.get(&outpoint(a, 1)).expect("lookup").expect("output 1");
     assert_eq!(got_b.script_pubkey, script_b);
     assert_eq!(got_b.value, 200);
 
@@ -234,16 +284,20 @@ fn connect_and_disconnect_retain_exact_keys_losslessly() {
     let undo = undo_of(&adds);
     set.undo_block(&undo, CoinDurability::Durable)
         .expect("undo");
-    assert!(set.get(&outpoint(a, 0)).is_none());
-    assert!(set.get(&outpoint(a, 1)).is_none());
-    assert_eq!(set.ledger().stored_rows, 0, "row removed with the block");
+    assert!(set.get(&outpoint(a, 0)).expect("lookup").is_none());
+    assert!(set.get(&outpoint(a, 1)).expect("lookup").is_none());
+    assert_eq!(
+        set.ledger().expect("ledger").stored_rows,
+        0,
+        "row removed with the block"
+    );
 }
 
 /// Two txids sharing the accelerator prefix never alias: both records stay
 /// distinct by their full 256-bit identities.
 #[test]
 fn colliding_accelerators_never_alias_records() {
-    let set = PersistentUtxoSet::new(UtxoSet::new(), MemoryStore::default());
+    let set = PersistentUtxoSet::new(MemoryStore::default());
     let a = txid_with_prefix(0xDEAD_BEEF, 1);
     let b = txid_with_prefix(0xDEAD_BEEF, 2);
     let hash = Hash256::from_le_bytes(&[2; 32]);
@@ -260,9 +314,25 @@ fn colliding_accelerators_never_alias_records() {
     )
     .expect("connect b");
 
-    assert_eq!(set.get(&outpoint(a, 0)).expect("a:0").script_pubkey, [0xAA]);
-    assert_eq!(set.get(&outpoint(b, 0)).expect("b:0").script_pubkey, [0xBA]);
-    assert_eq!(set.ledger().stored_rows, 2, "two distinct rows");
+    assert_eq!(
+        set.get(&outpoint(a, 0))
+            .expect("lookup")
+            .expect("a:0")
+            .script_pubkey,
+        [0xAA]
+    );
+    assert_eq!(
+        set.get(&outpoint(b, 0))
+            .expect("lookup")
+            .expect("b:0")
+            .script_pubkey,
+        [0xBA]
+    );
+    assert_eq!(
+        set.ledger().expect("ledger").stored_rows,
+        2,
+        "two distinct rows"
+    );
 }
 
 /// The critical eviction scenario: spend one output of a record the cache
@@ -271,7 +341,7 @@ fn colliding_accelerators_never_alias_records() {
 /// persisted row would be silently truncated to the spending block's view.
 #[test]
 fn evicted_record_survives_partial_spend_byte_identically() {
-    let base = PersistentUtxoSet::new(UtxoSet::new(), MemoryStore::default());
+    let base = PersistentUtxoSet::new(MemoryStore::default());
     let mut set = base;
     let a = txid(7);
     let script_a = [0x51; 33];
@@ -289,11 +359,15 @@ fn evicted_record_survives_partial_spend_byte_identically() {
     set.connect_block(&block(vec![], vec![]), &hash, CoinDurability::Durable)
         .expect("no-op connect triggers eviction");
     assert_eq!(
-        set.ledger().resident.records,
+        set.ledger().expect("ledger").resident.records,
         0,
         "record evicted from the cache"
     );
-    assert_eq!(set.ledger().stored_rows, 1, "record durable in the store");
+    assert_eq!(
+        set.ledger().expect("ledger").stored_rows,
+        1,
+        "record durable in the store"
+    );
 
     // Spend output 0 in a later block: reload-before-snapshot must recover
     // the full record so the after-image keeps output 1.
@@ -303,10 +377,16 @@ fn evicted_record_survives_partial_spend_byte_identically() {
         CoinDurability::Durable,
     )
     .expect("connect spending block");
-    let sibling = set.get(&outpoint(a, 1)).expect("sibling output survived");
+    let sibling = set
+        .get(&outpoint(a, 1))
+        .expect("lookup")
+        .expect("sibling output survived");
     assert_eq!(sibling.script_pubkey, script_b);
     assert_eq!(sibling.value, 200);
-    assert!(set.get(&outpoint(a, 0)).is_none(), "spent output gone");
+    assert!(
+        set.get(&outpoint(a, 0)).expect("lookup").is_none(),
+        "spent output gone"
+    );
 
     // Undo the spending block: both outputs return.
     let mut undo = bitcoin_rs_utxo::set::UndoBatch::default();
@@ -319,11 +399,17 @@ fn evicted_record_survives_partial_spend_byte_identically() {
     set.undo_block(&undo, CoinDurability::Durable)
         .expect("undo");
     assert_eq!(
-        set.get(&outpoint(a, 0)).expect("restored 0").script_pubkey,
+        set.get(&outpoint(a, 0))
+            .expect("lookup")
+            .expect("restored 0")
+            .script_pubkey,
         script_a
     );
     assert_eq!(
-        set.get(&outpoint(a, 1)).expect("restored 1").script_pubkey,
+        set.get(&outpoint(a, 1))
+            .expect("lookup")
+            .expect("restored 1")
+            .script_pubkey,
         script_b
     );
 }
@@ -332,16 +418,20 @@ fn evicted_record_survives_partial_spend_byte_identically() {
 /// row appears in the store) while the undo batch still restores it.
 #[test]
 fn ephemeral_same_block_output_persists_nothing() {
-    let set = PersistentUtxoSet::new(UtxoSet::new(), MemoryStore::default());
+    let set = PersistentUtxoSet::new(MemoryStore::default());
     let a = txid(9);
     let hash = Hash256::from_le_bytes(&[4; 32]);
     let add = UtxoAdd::new(outpoint(a, 0), txout(50, &[0x51]), false, 10);
     let changes = block(vec![add.clone()], vec![outpoint(a, 0)]);
     set.connect_block(&changes, &hash, CoinDurability::Durable)
         .expect("connect ephemeral block");
-    assert_eq!(set.ledger().stored_rows, 0, "no live row ever persisted");
+    assert_eq!(
+        set.ledger().expect("ledger").stored_rows,
+        0,
+        "no live row ever persisted"
+    );
     assert!(
-        set.get(&outpoint(a, 0)).is_none(),
+        set.get(&outpoint(a, 0)).expect("lookup").is_none(),
         "ephemeral output never live"
     );
 
@@ -354,7 +444,7 @@ fn ephemeral_same_block_output_persists_nothing() {
     set.undo_block(&undo, CoinDurability::Durable)
         .expect("undo ephemeral block");
     assert!(
-        set.get(&outpoint(a, 0)).is_none(),
+        set.get(&outpoint(a, 0)).expect("lookup").is_none(),
         "canceled output stays absent after undo"
     );
 }
@@ -363,7 +453,7 @@ fn ephemeral_same_block_output_persists_nothing() {
 /// a deferred durable window owes the store, and `flush` drains them.
 #[test]
 fn ledger_counts_tables_and_retained_versions() {
-    let set = PersistentUtxoSet::new(UtxoSet::new(), MemoryStore::default());
+    let set = PersistentUtxoSet::new(MemoryStore::default());
     let a = txid(11);
     let hash = Hash256::from_le_bytes(&[5; 32]);
     set.connect_block(
@@ -372,7 +462,7 @@ fn ledger_counts_tables_and_retained_versions() {
         CoinDurability::Deferred,
     )
     .expect("deferred connect");
-    let ledger = set.ledger();
+    let ledger = set.ledger().expect("ledger");
     assert_eq!(ledger.stored_rows, 1, "row visible after deferred write");
     assert!(
         ledger.retained_before_image_bytes == 0,
@@ -387,13 +477,13 @@ fn ledger_counts_tables_and_retained_versions() {
         CoinDurability::Deferred,
     )
     .expect("deferred spend");
-    let ledger = set.ledger();
+    let ledger = set.ledger().expect("ledger");
     assert!(
         ledger.retained_before_image_bytes > 0,
         "the durable window owes the prior version"
     );
     set.flush().expect("flush completes durability");
-    let ledger = set.ledger();
+    let ledger = set.ledger().expect("ledger");
     assert_eq!(
         ledger.retained_before_image_bytes, 0,
         "flush drains the retained versions"
@@ -403,7 +493,7 @@ fn ledger_counts_tables_and_retained_versions() {
 /// A guarded durable write against a foreign stored row is a typed
 /// mismatch, never a silent success.
 #[test]
-fn guarded_write_mismatch_is_a_typed_error() {
+fn corrupt_stored_row_is_rejected_before_any_mutation() {
     let store = MemoryStore::default();
     let a = txid(13);
     let hash = Hash256::from_le_bytes(&[6; 32]);
@@ -415,7 +505,7 @@ fn guarded_write_mismatch_is_a_typed_error() {
     foreign.put(ColumnFamily::CoinRecords, key, b"foreign");
     store.write(foreign).expect("seed foreign row");
 
-    let set = PersistentUtxoSet::new(UtxoSet::new(), store);
+    let set = PersistentUtxoSet::new(store);
     let error = set
         .connect_block(
             &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
@@ -424,7 +514,273 @@ fn guarded_write_mismatch_is_a_typed_error() {
         )
         .expect_err("guarded connect must fail");
     assert!(
-        matches!(error, PersistentUtxoError::ConditionMismatch(_)),
-        "expected a typed condition mismatch, got {error:?}"
+        matches!(error, PersistentUtxoError::CorruptStoredRecord(_)),
+        "expected typed corruption, got {error:?}"
     );
+}
+
+/// T10: lookup failures and corrupt full-key identities are not missing coins.
+#[test]
+fn reload_reports_io_and_full_txid_corruption_without_refilling() {
+    let store = MemoryStore::default();
+    let mut set = PersistentUtxoSet::new(store.clone());
+    let a = txid_with_prefix(5, 1);
+    let b = txid_with_prefix(5, 2);
+    set.connect_block(
+        &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+        &Hash256::default(),
+        CoinDurability::Durable,
+    )
+    .expect("seed");
+    let bytes = store
+        .get(
+            ColumnFamily::CoinRecords,
+            bitcoin_rs_primitives::Txid::from(a).0.as_byte_array(),
+        )
+        .expect("read")
+        .expect("row");
+    let mut batch = store.new_batch();
+    batch.put(
+        ColumnFamily::CoinRecords,
+        bitcoin_rs_primitives::Txid::from(b).0.as_byte_array(),
+        &bytes,
+    );
+    store.write(batch).expect("seed miskeyed bytes");
+    set.set_resident_budget(1);
+    store.faults.fail_read.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        set.get(&outpoint(a, 0)),
+        Err(PersistentUtxoError::Storage(_))
+    ));
+    assert!(matches!(
+        set.get(&outpoint(b, 0)),
+        Err(PersistentUtxoError::CorruptStoredRecord(_))
+    ));
+    assert_eq!(set.ledger().expect("ledger").resident.records, 0);
+    for mode in [
+        CoinDurability::Deferred,
+        CoinDurability::Durable,
+        CoinDurability::CasGuarded,
+    ] {
+        assert!(matches!(
+            set.connect_block(
+                &block(vec![], vec![outpoint(b, 0)]),
+                &Hash256::default(),
+                mode
+            ),
+            Err(PersistentUtxoError::CorruptStoredRecord(_))
+        ));
+    }
+    assert_eq!(
+        set.get(&outpoint(a, 0))
+            .expect("healthy row")
+            .expect("coin")
+            .value,
+        100
+    );
+}
+
+/// T10: no cache reads or writes escape an unresolved backend outcome.
+#[test]
+fn storage_failure_closes_cache_until_explicit_backend_recovery() {
+    for applied in [false, true] {
+        let store = MemoryStore::default();
+        let set = PersistentUtxoSet::new(store.clone());
+        let a = txid(33);
+        let adds = block(two_output_add(a, &[0x51], &[0x52]), vec![]);
+        if applied {
+            store.faults.fail_after_write.store(true, Ordering::SeqCst);
+        } else {
+            store.faults.fail_write.store(true, Ordering::SeqCst);
+        }
+        assert!(matches!(
+            set.connect_block(&adds, &Hash256::default(), CoinDurability::Durable),
+            Err(PersistentUtxoError::Storage(_))
+        ));
+        assert!(matches!(
+            set.get(&outpoint(a, 0)),
+            Err(PersistentUtxoError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            set.connect_block(&adds, &Hash256::default(), CoinDurability::Durable),
+            Err(PersistentUtxoError::RecoveryRequired)
+        ));
+        assert!(matches!(
+            set.flush(),
+            Err(PersistentUtxoError::RecoveryRequired)
+        ));
+        let store = set.into_store();
+        store
+            .flush()
+            .expect("resolve this memory backend's completion");
+        let recovered = PersistentUtxoSet::new(store);
+        assert_eq!(
+            recovered
+                .get(&outpoint(a, 0))
+                .expect("recovered lookup")
+                .is_some(),
+            applied
+        );
+    }
+}
+
+/// T10: a CAS refusal neither publishes proposed coins nor prevents a clean retry.
+#[test]
+fn cas_refusal_leaves_old_coins_and_retry_applies_once() {
+    let store = MemoryStore::default();
+    let set = PersistentUtxoSet::new(store.clone());
+    let a = txid(34);
+    let hash = Hash256::default();
+    set.connect_block(
+        &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+        &hash,
+        CoinDurability::Durable,
+    )
+    .expect("seed");
+    let spend = block(vec![], vec![outpoint(a, 0)]);
+    store.faults.reject_cas.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        set.connect_block(&spend, &hash, CoinDurability::CasGuarded),
+        Err(PersistentUtxoError::ConditionMismatch(_))
+    ));
+    assert!(set.get(&outpoint(a, 0)).expect("lookup").is_some());
+    set.connect_block(&spend, &hash, CoinDurability::CasGuarded)
+        .expect("retry");
+    assert!(set.get(&outpoint(a, 0)).expect("lookup").is_none());
+    assert!(set.get(&outpoint(a, 1)).expect("lookup").is_some());
+}
+
+/// T10: validation failure cannot publish a partially mutated shard set.
+#[test]
+fn invalid_mutation_keeps_store_and_cache_unchanged() {
+    let store = MemoryStore::default();
+    let set = PersistentUtxoSet::new(store);
+    let a = txid(35);
+    let hash = Hash256::default();
+    set.connect_block(
+        &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+        &hash,
+        CoinDurability::Durable,
+    )
+    .expect("seed");
+    let invalid = block(
+        vec![UtxoAdd::new(
+            outpoint(txid(36), 0),
+            txout(1, &vec![0x51; 65_536]),
+            false,
+            1,
+        )],
+        vec![outpoint(a, 0)],
+    );
+    assert!(matches!(
+        set.connect_block(&invalid, &hash, CoinDurability::Durable),
+        Err(PersistentUtxoError::Utxo(_))
+    ));
+    assert!(set.get(&outpoint(a, 0)).expect("old output").is_some());
+    assert_eq!(set.ledger().expect("ledger").stored_rows, 1);
+}
+
+/// T10: cache misses are bounded and an absent vout of a resident txid needs no I/O.
+#[test]
+fn reads_obey_budget_and_resident_missing_vouts_do_not_reload() {
+    let store = MemoryStore::default();
+    let mut set = PersistentUtxoSet::new(store.clone());
+    let a = txid(37);
+    set.connect_block(
+        &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+        &Hash256::default(),
+        CoinDurability::Durable,
+    )
+    .expect("seed");
+    let reads = store.faults.reads.load(Ordering::SeqCst);
+    assert!(set.get(&outpoint(a, 99)).expect("missing vout").is_none());
+    assert_eq!(store.faults.reads.load(Ordering::SeqCst), reads);
+    set.set_resident_budget(1);
+    for vout in [0, 1, 0, 1] {
+        assert!(
+            set.get(&outpoint(a, vout))
+                .expect("reloaded coin")
+                .is_some()
+        );
+        assert_eq!(set.ledger().expect("ledger").resident.records, 0);
+    }
+}
+
+/// T10: flush releases previously skipped eviction candidates; failure closes the owner.
+#[test]
+fn flush_evicts_deferred_pins_and_failure_closes_reads() {
+    let store = MemoryStore::default();
+    let mut set = PersistentUtxoSet::new(store.clone());
+    set.set_resident_budget(1);
+    let a = txid(38);
+    set.connect_block(
+        &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+        &Hash256::default(),
+        CoinDurability::Deferred,
+    )
+    .expect("deferred seed");
+    assert_eq!(set.ledger().expect("ledger").resident.records, 1);
+    set.flush().expect("flush");
+    assert_eq!(set.ledger().expect("ledger").resident.records, 0);
+    store.faults.fail_flush.store(true, Ordering::SeqCst);
+    assert!(matches!(set.flush(), Err(PersistentUtxoError::Storage(_))));
+    assert!(matches!(
+        set.get(&outpoint(a, 0)),
+        Err(PersistentUtxoError::RecoveryRequired)
+    ));
+}
+
+/// T10: a suspended refill cannot publish stale coins over a concurrent spend.
+#[test]
+fn refill_and_spend_share_one_transition_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let store = MemoryStore::default();
+    let mut set = PersistentUtxoSet::new(store.clone());
+    let a = txid(39);
+    set.connect_block(
+        &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+        &Hash256::default(),
+        CoinDurability::Durable,
+    )
+    .expect("seed");
+    set.set_resident_budget(1);
+    let set = Arc::new(set);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    *store.faults.read_gate.lock() = Some((entered_tx, release_rx));
+    let reader_set = Arc::clone(&set);
+    let reader = std::thread::spawn(move || reader_set.get(&outpoint(a, 0)));
+    entered_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("refill suspended");
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let writer_set = Arc::clone(&set);
+    let writer = std::thread::spawn(move || {
+        started_tx.send(()).expect("writer started");
+        let result = writer_set.connect_block(
+            &block(vec![], vec![outpoint(a, 0)]),
+            &Hash256::default(),
+            CoinDurability::Durable,
+        );
+        done_tx.send(()).expect("writer finished");
+        result
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("writer attempted");
+    let premature = done_rx.recv_timeout(Duration::from_millis(50));
+    release_tx
+        .send(())
+        .expect("release refill even if assertion will fail");
+    reader.join().expect("reader join").expect("read");
+    writer.join().expect("writer join").expect("spend");
+    assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+    assert!(
+        set.get(&outpoint(a, 0))
+            .expect("post-spend lookup")
+            .is_none()
+    );
+    assert!(set.get(&outpoint(a, 1)).expect("sibling lookup").is_some());
 }

@@ -1,4 +1,4 @@
-use crate::block_view::BlockFacts;
+use crate::block_view::{BlockFacts, block_weight};
 use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
@@ -47,12 +47,13 @@ pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
 ///
 /// `facts` carries the identities, witness IDs, witness presence, weight, and
 /// the Merkle root with its mutation flag derived once from a single parse
-/// (see [`BlockFacts`]); this entry runs the rule sequence without re-walking
-/// or re-serializing the block. The Merkle root verdict keeps its precedence
+/// (see [`BlockFacts`]). Callers must bind these identifiers to this exact block.
+/// Weight is checked independently using the supplied block's size walkers. The Merkle root verdict keeps its precedence
 /// over the mutation verdict, exactly as [`verify_merkle_root_with_txids`]
 /// orders them.
 ///
-/// Performs no allocation or hashing: every input is consumed as derived.
+/// The weight check performs no allocation or hashing. Witness commitment
+/// validation still reduces the supplied witness identifiers.
 pub fn verify_block_rules_precomputed(
     block: &Block,
     context: BlockRuleContext,
@@ -113,8 +114,7 @@ pub fn verify_block_rules_precomputed(
     }
     // Facts are supplied independently of the block; derive the consensus
     // weight from this exact block rather than trusting a mismatched slice.
-    let weight_facts = BlockFacts::from_txids(&block.txs, facts.txids().to_vec());
-    let weight = weight_facts.weight();
+    let weight = block_weight(&block.txs);
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
             weight,

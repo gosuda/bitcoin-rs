@@ -131,7 +131,7 @@ impl RedbStore {
                 write_txn.commit().map_err(StorageError::backend)?;
                 return match fault {
                     crate::PersistFault::FailSync => Err(fault.injected_error()),
-                    crate::PersistFault::LostSync => Ok(()),
+                    crate::PersistFault::LostSync => Err(fault.injected_error()),
                     _ => unreachable!("take_at only releases Sync-boundary faults"),
                 };
             }
@@ -274,8 +274,8 @@ impl KvStore for RedbStore {
             return match fault {
                 // Completion never precedes the persisted write.
                 crate::PersistFault::FailSync => Err(fault.injected_error()),
-                // A lost completion may still report success.
-                crate::PersistFault::LostSync => Ok(true),
+                // An unconfirmed durable completion must never report success.
+                crate::PersistFault::LostSync => Err(fault.injected_error()),
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }
@@ -456,7 +456,7 @@ impl RedbTxIndexStore {
         if let Some(fault) = sync_fault {
             return match fault {
                 crate::PersistFault::FailSync => Err(fault.injected_error()),
-                crate::PersistFault::LostSync => Ok(()),
+                crate::PersistFault::LostSync => Err(fault.injected_error()),
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }
@@ -585,8 +585,8 @@ impl KvStore for RedbTxIndexStore {
             return match fault {
                 // Completion never precedes the persisted write.
                 crate::PersistFault::FailSync => Err(fault.injected_error()),
-                // A lost completion may still report success.
-                crate::PersistFault::LostSync => Ok(true),
+                // An unconfirmed durable completion must never report success.
+                crate::PersistFault::LostSync => Err(fault.injected_error()),
                 _ => unreachable!("take_at only releases Sync-boundary faults"),
             };
         }

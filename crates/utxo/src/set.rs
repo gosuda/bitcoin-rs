@@ -1433,369 +1433,327 @@ pub enum CoinDurability {
 /// Errors from the persisted coin layer.
 #[derive(Debug, Error)]
 pub enum PersistentUtxoError {
-    /// The in-memory UTXO mutation failed; nothing was persisted.
+    /// Preparing a mutation failed; neither the cache nor the store changed.
     #[error("utxo mutation failed: {0}")]
     Utxo(#[from] UtxoError),
-    /// The backing store failed; the in-memory state has already moved and
-    /// the caller must treat this as a fault boundary (T12).
-    #[error("store write failed: {0}")]
+    /// A backend operation failed. A write or flush error closes this instance
+    /// because the store may contain either the prior or the complete new batch.
+    #[error("coin storage operation failed: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
-    /// A guarded durable write found the stored row in an unexpected state.
+    /// A guarded write applied nothing. Affected cache entries are invalidated.
     #[error("guarded coin write found a mismatched row for txid {0}")]
     ConditionMismatch(Txid),
-    /// A stored record failed canonical validation on reload.
+    /// Stored bytes are invalid or identify a different full txid than their key.
     #[error("stored coin record failed validation for txid {0}")]
     CorruptStoredRecord(Txid),
+    /// A prior write or flush has an unresolved outcome; discard this instance
+    /// and recover the backend before constructing a fresh cache.
+    #[error("coin storage recovery is required after an unconfirmed write")]
+    RecoveryRequired,
 }
 
-/// Byte-level ledger of a [`PersistentUtxoSet`]: resident tables plus the
-/// retained before-image versions the durable window owes the store.
+/// Resident cache and retained predecessor accounting for persisted coins.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CoinLedger {
-    /// Resident shard-table accounting (the cache).
+    /// Resident shard-table accounting, including fixed table overhead.
     pub resident: UtxoMemoryReport,
-    /// Bytes of retained before-images held between the in-memory commit
-    /// and the store's durable completion.
+    /// One retained predecessor per changed txid in the deferred window.
     pub retained_before_image_bytes: usize,
     /// Distinct txid rows in the backing store.
     pub stored_rows: usize,
 }
 
-/// An [`UtxoSet`] whose changed grouped records persist incrementally to a
-/// T09 storage ladder, with a byte-bounded resident cache.
+/// Incrementally persisted grouped coins with a bounded resident cache (T10).
 ///
-/// Identity is the full 256-bit txid; shard keys are accelerators only.
-/// Each connect or disconnect first reloads any affected record that the
-/// cache evicted (the stored row is the truth the before-image must see),
-/// snapshots exact before-images for the affected txids, commits the
-/// in-memory set, and persists only the changed rows. A `None -> None`
-/// change (an output created and spent inside the same block) persists
-/// nothing while the undo batch retains both halves, so disconnect stays
-/// exact.
+/// The store, not an externally supplied in-memory set, owns the coin rows.
+/// One mutex covers cache reads/refills, mutation preparation, backend commit,
+/// cache publication, and flush. Changes are prepared using the ordinary UTXO
+/// mutation code over just the affected records, without publishing them.
+/// After successful persistence the already-validated replacements enter the
+/// cache. A CAS refusal publishes nothing; any ambiguous write/flush failure
+/// closes the instance until the caller recovers its store explicitly.
+///
+/// This is a coin-row layer, not an atomic chainstate head/undo coordinator.
+/// It does not accept listeners or permit independent writes to its backing
+/// store while in use. A nonzero cache budget evicts whole records after reads
+/// as well as writes; retained deferred predecessors and fixed table overhead
+/// may exceed that budget until `flush`.
 pub struct PersistentUtxoSet<S: bitcoin_rs_storage::KvStore> {
-    set: UtxoSet,
     store: S,
+    state: Mutex<PersistentCoins>,
     resident_budget_bytes: usize,
-    resident_order: Mutex<std::collections::VecDeque<Hash256>>,
-    retained_before_images: Mutex<hashbrown::HashMap<Hash256, Option<Vec<u8>>>>,
 }
 
-impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
-    /// Wraps `set` over `store` with an unbounded resident cache.
-    pub fn new(set: UtxoSet, store: S) -> Self {
-        Self {
-            set,
-            store,
-            resident_budget_bytes: 0,
-            resident_order: Mutex::new(std::collections::VecDeque::new()),
-            retained_before_images: Mutex::new(hashbrown::HashMap::new()),
+#[derive(Default)]
+struct PersistentCoins {
+    set: UtxoSet,
+    resident_order: std::collections::VecDeque<Hash256>,
+    retained_before_images: hashbrown::HashMap<Hash256, Option<Vec<u8>>>,
+    failed: bool,
+}
+
+impl PersistentCoins {
+    fn check(&self) -> Result<(), PersistentUtxoError> {
+        if self.failed {
+            Err(PersistentUtxoError::RecoveryRequired)
+        } else {
+            Ok(())
         }
     }
 
-    /// Caps the resident cache at `bytes`; zero lifts the cap. Whole txid
-    /// records with no retained before-image are evicted oldest-first when
-    /// the resident tables exceed the cap.
-    pub fn set_resident_budget(&mut self, bytes: usize) {
-        self.resident_budget_bytes = bytes;
+    fn forget(&mut self, txid: Hash256) {
+        let key = UtxoKey::from_txid(&Txid::from(txid));
+        self.set.shards[usize::from(key.shard())].remove_resident_record(key, txid);
+        self.resident_order.retain(|seen| *seen != txid);
     }
 
-    /// Connects one block: reload evicted affected records, in-memory
-    /// commit, then changed-records-only persistence under the chosen
-    /// durability mode.
+    fn publish(&mut self, txid: Hash256, record: Option<crate::record::UtxoRecord>) {
+        self.forget(txid);
+        if let Some(record) = record {
+            let key = record.key();
+            self.set.shards[usize::from(key.shard())].insert_encoded_record(key, record);
+            self.resident_order.push_back(txid);
+        }
+    }
+
+    fn evict_over_budget(&mut self, budget: usize) {
+        if budget == 0 {
+            return;
+        }
+        // Inspect each candidate once. Keep pinned entries queued so a later
+        // successful flush can evict them instead of losing their tracking.
+        for _ in 0..self.resident_order.len() {
+            if self.set.memory_report().accounted_bytes() <= budget {
+                break;
+            }
+            let Some(txid) = self.resident_order.pop_front() else {
+                break;
+            };
+            if self.retained_before_images.contains_key(&txid) {
+                self.resident_order.push_back(txid);
+            } else {
+                let key = UtxoKey::from_txid(&Txid::from(txid));
+                self.set.shards[usize::from(key.shard())].remove_resident_record(key, txid);
+            }
+        }
+    }
+}
+
+impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
+    /// Opens an empty cache over the store's existing authoritative coin rows.
+    pub fn new(store: S) -> Self {
+        Self {
+            store,
+            state: Mutex::new(PersistentCoins::default()),
+            resident_budget_bytes: 0,
+        }
+    }
+
+    /// Consumes this cache, returning the backend for explicit recovery.
+    ///
+    /// After an ambiguous failure the caller must resolve/reopen the backend
+    /// and its chainstate commit identity before reusing the rows. Merely
+    /// constructing another cache is not proof of crash durability.
+    pub fn into_store(self) -> S {
+        self.store
+    }
+
+    /// Caps resident bytes; zero lifts the cap. Deferred predecessors remain
+    /// pinned until a successful flush. Fixed table overhead is not evictable.
+    pub fn set_resident_budget(&mut self, bytes: usize) {
+        self.resident_budget_bytes = bytes;
+        self.state.get_mut().evict_over_budget(bytes);
+    }
+
+    /// Persists one connected block before publishing its changed cache rows.
     pub fn connect_block(
         &self,
         changes: &BlockChanges,
         block_hash: &Hash256,
         mode: CoinDurability,
     ) -> Result<(), PersistentUtxoError> {
-        let affected = Self::affected_txids(
-            changes.adds.iter().map(|add| add.outpoint.txid),
-            &changes.removes,
-        );
-        self.reload_evicted(&affected)?;
-        let before = self.snapshot_images(&affected);
-        self.set
-            .commit_block(changes, block_hash)
-            .map_err(PersistentUtxoError::Utxo)?;
-        let after = self.snapshot_after_images(&affected);
-        self.persist_changed(&before, &after, mode)?;
-        self.note_residency(&after);
-        self.evict_over_budget();
-        Ok(())
+        tracing::trace!(%block_hash, "persist grouped coin changes");
+        self.commit(&changes.adds, &changes.removes, mode)
     }
 
-    /// Disconnects one block: reload evicted affected records, exact inverse
-    /// in memory, then the symmetric row updates in the store.
+    /// Persists the exact inverse mutations before publishing cache rows.
     pub fn undo_block(
         &self,
         undo: &UndoBatch,
         mode: CoinDurability,
     ) -> Result<(), PersistentUtxoError> {
-        let affected =
-            Self::affected_txids(undo.restores.iter().map(|r| r.outpoint.txid), &undo.removes);
-        self.reload_evicted(&affected)?;
-        let before = self.snapshot_images(&affected);
-        self.set
-            .undo_block(undo)
-            .map_err(PersistentUtxoError::Utxo)?;
-        let after = self.snapshot_after_images(&affected);
-        self.persist_changed(&before, &after, mode)?;
-        self.note_residency(&after);
-        self.evict_over_budget();
-        Ok(())
+        self.commit(&undo.restores, &undo.removes, mode)
     }
 
-    /// Completes the durability of every deferred write and drains the
-    /// retained before-images. Callers that chose
-    /// [`CoinDurability::Deferred`] must call this before treating the
-    /// connect as durable.
-    pub fn flush(&self) -> Result<(), PersistentUtxoError> {
-        self.store.flush().map_err(PersistentUtxoError::Storage)?;
-        self.retained_before_images.lock().clear();
-        Ok(())
-    }
-
-    /// Looks up one outpoint: resident shard first, then the store, which
-    /// reloads a byte-identical record into the cache on a miss.
-    #[must_use]
-    pub fn get(&self, outpoint: &OutPoint) -> Option<TxOut> {
-        if let Some(txout) = self.set.get(outpoint) {
-            return Some(txout);
-        }
-        self.reload_record(&outpoint.txid.into())
-            .map_err(|_| ())
-            .ok()?;
-        self.set.get(outpoint)
-    }
-
-    /// The byte ledger: resident tables plus retained versions plus stored
-    /// row count.
-    pub fn ledger(&self) -> CoinLedger {
-        let retained_bytes = self
-            .retained_before_images
-            .lock()
-            .values()
-            .map(|image| image.as_ref().map_or(0, Vec::len))
-            .sum();
-        let mut stored_rows = 0_usize;
-        if let Ok(iter) = self.store.iter_prefix(coin_records(), b"") {
-            for item in iter.flatten() {
-                let _ = item;
-                stored_rows += 1;
-            }
-        }
-        CoinLedger {
-            resident: self.set.memory_report(),
-            retained_before_image_bytes: retained_bytes,
-            stored_rows,
-        }
-    }
-
-    /// The distinct txids a change touches: grouped adds plus the txids of
-    /// spent outpoints.
-    fn affected_txids(adds: impl Iterator<Item = Txid>, removes: &[OutPoint]) -> Vec<Hash256> {
-        let mut seen = hashbrown::HashSet::new();
-        let mut affected = Vec::new();
-        for txid in adds
-            .map(Hash256::from)
-            .chain(removes.iter().map(|op| op.txid.into()))
-        {
-            if seen.insert(txid) {
-                affected.push(txid);
-            }
-        }
-        affected
-    }
-
-    /// Reloads every affected record the cache evicted but the store still
-    /// holds. Without this, a before-image would read `None` for an evicted
-    /// record and the commit would persist a truncated row over the good
-    /// stored one.
-    fn reload_evicted(&self, affected: &[Hash256]) -> Result<(), PersistentUtxoError> {
-        for txid in affected {
-            if self.record_bytes(txid).is_none() {
-                self.reload_record(txid)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn snapshot_images(
+    fn commit(
         &self,
-        affected: &[Hash256],
-    ) -> hashbrown::HashMap<Hash256, Option<Vec<u8>>> {
-        let mut images = hashbrown::HashMap::with_capacity(affected.len());
-        for txid in affected {
-            images.insert(*txid, self.record_bytes(txid));
-        }
-        images
-    }
-
-    /// After-images map a record whose live outputs are all gone to `None`:
-    /// the shard may keep a zero-output record transiently, but the store
-    /// row must not outlive the last spend of its txid.
-    fn snapshot_after_images(
-        &self,
-        affected: &[Hash256],
-    ) -> hashbrown::HashMap<Hash256, Option<Vec<u8>>> {
-        let mut images = self.snapshot_images(affected);
-        for (_txid, image) in &mut images {
-            if let Some(bytes) = image {
-                if let Ok(record) = crate::record::UtxoRecord::from_stored_bytes(bytes)
-                    && record.is_empty()
-                {
-                    *image = None;
-                }
-            }
-        }
-        images
-    }
-
-    fn record_bytes(&self, txid: &Hash256) -> Option<Vec<u8>> {
-        let key = UtxoKey::from_txid(&Txid::from(*txid));
-        self.set.shards[usize::from(key.shard())].record_bytes(key, *txid)
-    }
-
-    /// Persists only the rows whose bytes changed. A `None -> None` row is
-    /// the same-block ephemeral output: nothing is persisted and the undo
-    /// batch alone carries both halves.
-    fn persist_changed(
-        &self,
-        before: &hashbrown::HashMap<Hash256, Option<Vec<u8>>>,
-        after: &hashbrown::HashMap<Hash256, Option<Vec<u8>>>,
+        adds: &[UtxoAdd],
+        removes: &[OutPoint],
         mode: CoinDurability,
     ) -> Result<(), PersistentUtxoError> {
-        let mut batch = self.store.new_batch();
-        let mut guarded: Vec<(Hash256, Option<Vec<u8>>)> = Vec::new();
-        for (txid, after_image) in after {
-            let before_image = before.get(txid).cloned().flatten();
-            if before_image == *after_image {
-                continue; // unchanged row (or the ephemeral None->None case)
+        let mut state = self.state.lock();
+        state.check()?;
+        let mut affected: Vec<Hash256> = adds
+            .iter()
+            .map(|add| add.outpoint.txid.into())
+            .chain(removes.iter().map(|op| op.txid.into()))
+            .collect();
+        affected.sort_unstable();
+        affected.dedup();
+
+        let staged = UtxoSet::new();
+        let mut before = Vec::with_capacity(affected.len());
+        for txid in &affected {
+            let key = UtxoKey::from_txid(&Txid::from(*txid));
+            let image = match state.set.shards[usize::from(key.shard())].record_bytes(key, *txid) {
+                Some(bytes) => Some(bytes),
+                None => self
+                    .store
+                    .get(coin_records(), Txid::from(*txid).0.as_byte_array())?,
+            };
+            if let Some(bytes) = &image {
+                let record = Self::decode(*txid, bytes)?;
+                staged.shards[usize::from(key.shard())].insert_encoded_record(key, record);
             }
-            let key = Txid::from(*txid);
-            let key = key.0.as_byte_array();
-            match after_image {
-                Some(bytes) => batch.put(coin_records(), key, bytes),
-                None => {
-                    batch.delete(coin_records(), key);
-                }
-            }
-            if mode == CoinDurability::CasGuarded {
-                guarded.push((*txid, before_image));
-            }
+            before.push(image);
         }
-        match mode {
-            CoinDurability::Durable => {
-                self.store
-                    .write_durable(batch)
-                    .map_err(PersistentUtxoError::Storage)?;
+        // Fallible record building happens only in this private staging set.
+        staged.commit_adds_and_removes(adds, removes)?;
+        let mut batch = self.store.new_batch();
+        let mut replacements = Vec::with_capacity(affected.len());
+        let mut changed = Vec::new();
+        for (index, txid) in affected.iter().enumerate() {
+            let key = UtxoKey::from_txid(&Txid::from(*txid));
+            let record = staged.shards[usize::from(key.shard())]
+                .record_bytes(key, *txid)
+                .map(|bytes| Self::decode(*txid, &bytes))
+                .transpose()?
+                .filter(|record| !record.is_empty());
+            let after = record
+                .as_ref()
+                .map(crate::record::UtxoRecord::encoded_bytes);
+            if after != before[index].as_deref() {
+                let row_key = Txid::from(*txid);
+                match after {
+                    Some(bytes) => batch.put(coin_records(), row_key.0.as_byte_array(), bytes),
+                    None => batch.delete(coin_records(), row_key.0.as_byte_array()),
+                }
+                changed.push(index);
             }
-            CoinDurability::CasGuarded if !guarded.is_empty() => {
-                let key_bytes: Vec<Vec<u8>> = guarded
+            replacements.push(record);
+        }
+
+        // Also fail closed if an engine panics while the commit is in flight.
+        state.failed = true;
+        match mode {
+            CoinDurability::Deferred => self.store.write_deferred(batch)?,
+            CoinDurability::Durable => self.store.write_durable(batch)?,
+            CoinDurability::CasGuarded => {
+                let keys: Vec<Txid> = affected.iter().copied().map(Txid::from).collect();
+                // Guard every input row, not only changed rows: no-op spends
+                // must not silently accept an independently changed before-image.
+                let conditions: Vec<_> = keys
                     .iter()
-                    .map(|(txid, _)| Txid::from(*txid).0.as_byte_array().to_vec())
-                    .collect();
-                let conditions: Vec<bitcoin_rs_storage::WriteCondition<'_>> = guarded
-                    .iter()
-                    .zip(key_bytes.iter())
-                    .map(|((_, before_image), key)| match before_image {
-                        Some(image) => bitcoin_rs_storage::WriteCondition::Equals {
+                    .zip(&before)
+                    .map(|(key, image)| match image {
+                        Some(bytes) => bitcoin_rs_storage::WriteCondition::Equals {
                             cf: coin_records(),
-                            key,
-                            expected: image,
+                            key: key.0.as_byte_array(),
+                            expected: bytes,
                         },
                         None => bitcoin_rs_storage::WriteCondition::Absent {
                             cf: coin_records(),
-                            key,
+                            key: key.0.as_byte_array(),
                         },
                     })
                     .collect();
-                let committed = self
-                    .store
-                    .write_durable_if(&conditions, batch)
-                    .map_err(PersistentUtxoError::Storage)?;
-                if !committed {
-                    let offender = guarded.first().map_or_else(
-                        || Txid::from(Hash256::default()),
-                        |(txid, _)| Txid::from(*txid),
-                    );
-                    return Err(PersistentUtxoError::ConditionMismatch(offender));
-                }
-            }
-            _ => {
-                self.store
-                    .write_deferred(batch)
-                    .map_err(PersistentUtxoError::Storage)?;
-                // Retain the before-images until `flush` completes
-                // durability: the durable window still owes the store
-                // these versions.
-                let mut retained = self.retained_before_images.lock();
-                for (txid, before_image) in before {
-                    if after.get(txid).and_then(Option::as_deref) != before_image.as_deref() {
-                        retained.insert(*txid, before_image.clone());
+                if !self.store.write_durable_if(&conditions, batch)? {
+                    for txid in &affected {
+                        state.forget(*txid);
                     }
+                    state.failed = false;
+                    // An empty condition set cannot mismatch under KvStore.
+                    let txid = keys.first().copied().unwrap_or_default();
+                    return Err(PersistentUtxoError::ConditionMismatch(txid));
                 }
             }
         }
+        if mode == CoinDurability::Deferred {
+            for index in changed {
+                state
+                    .retained_before_images
+                    .insert(affected[index], before[index].take());
+            }
+        }
+        for (txid, record) in affected.into_iter().zip(replacements) {
+            state.publish(txid, record);
+        }
+        state.evict_over_budget(self.resident_budget_bytes);
+        state.failed = false;
         Ok(())
     }
 
-    fn note_residency(&self, after: &hashbrown::HashMap<Hash256, Option<Vec<u8>>>) {
-        let mut order = self.resident_order.lock();
-        for (txid, image) in after {
-            if image.is_some() {
-                if let Some(position) = order.iter().position(|seen| seen == txid) {
-                    order.remove(position);
-                }
-                order.push_back(*txid);
+    /// Completes all deferred durability before releasing predecessor pins.
+    /// An unconfirmed flush closes reads and writes until explicit recovery.
+    pub fn flush(&self) -> Result<(), PersistentUtxoError> {
+        let mut state = self.state.lock();
+        state.check()?;
+        state.failed = true;
+        self.store.flush()?;
+        state.retained_before_images.clear();
+        state.evict_over_budget(self.resident_budget_bytes);
+        state.failed = false;
+        Ok(())
+    }
+
+    /// Looks up a live output. Backend/corruption errors are distinct from an
+    /// absent outpoint. The returned output is owned before cache eviction.
+    pub fn get(&self, outpoint: &OutPoint) -> Result<Option<TxOut>, PersistentUtxoError> {
+        let mut state = self.state.lock();
+        state.check()?;
+        let txid = outpoint.txid.into();
+        // A resident txid with a missing vout is already an authoritative miss;
+        // reloading it could resurrect a spend and needlessly bypass the cache.
+        if !state.set.has_live_outputs_for_txid(&txid) {
+            if let Some(bytes) = self
+                .store
+                .get(coin_records(), outpoint.txid.0.as_byte_array())?
+            {
+                state.publish(txid, Some(Self::decode(txid, &bytes)?));
             }
         }
+        let output = state.set.get(outpoint);
+        state.evict_over_budget(self.resident_budget_bytes);
+        Ok(output)
     }
 
-    /// Evicts oldest resident whole records, never one with a retained
-    /// before-image, until the resident tables fit the budget.
-    fn evict_over_budget(&self) {
-        if self.resident_budget_bytes == 0 {
-            return;
+    /// Reports resident and stored rows; an unreadable store is not an empty one.
+    pub fn ledger(&self) -> Result<CoinLedger, PersistentUtxoError> {
+        let state = self.state.lock();
+        state.check()?;
+        let retained_before_image_bytes = state
+            .retained_before_images
+            .values()
+            .map(|image| image.as_ref().map_or(0, Vec::len))
+            .sum();
+        let mut stored_rows = 0;
+        for row in self.store.iter_prefix(coin_records(), b"")? {
+            row?;
+            stored_rows += 1;
         }
-        let mut order = self.resident_order.lock();
-        while self.set.memory_report().accounted_bytes() > self.resident_budget_bytes {
-            let candidate = loop {
-                let Some(front) = order.front().copied() else {
-                    return;
-                };
-                order.pop_front();
-                if !self.retained_before_images.lock().contains_key(&front) {
-                    break front;
-                }
-            };
-            let key = UtxoKey::from_txid(&Txid::from(candidate));
-            self.set.shards[usize::from(key.shard())].remove_resident_record(key, candidate);
-        }
+        Ok(CoinLedger {
+            resident: state.set.memory_report(),
+            retained_before_image_bytes,
+            stored_rows,
+        })
     }
 
-    /// Reloads one stored record by full txid identity into the cache.
-    /// Returns the record's key on success.
-    fn reload_record(&self, txid: &Hash256) -> Result<UtxoKey, PersistentUtxoError> {
-        let key_bytes = Txid::from(*txid).0.as_byte_array().to_vec();
-        let Some(stored) = self
-            .store
-            .get(coin_records(), &key_bytes)
-            .map_err(PersistentUtxoError::Storage)?
-        else {
-            return Ok(UtxoKey::from_txid(&Txid::from(*txid)));
-        };
-        let Ok(record) = crate::record::UtxoRecord::from_stored_bytes(&stored) else {
-            // An unparseable stored row is left to the write path: a
-            // guarded write fails the condition honestly against the raw
-            // foreign bytes, and an unguarded write overwrites the row with
-            // the in-memory truth.
-            return Ok(UtxoKey::from_txid(&Txid::from(*txid)));
-        };
-        let key = UtxoKey::from_txid(&Txid::from(*txid));
-        self.set.shards[usize::from(key.shard())].insert_encoded_record(key, record);
-        self.resident_order.lock().push_back(*txid);
-        Ok(key)
+    fn decode(
+        txid: Hash256,
+        bytes: &[u8],
+    ) -> Result<crate::record::UtxoRecord, PersistentUtxoError> {
+        crate::record::UtxoRecord::from_stored_bytes(txid, bytes)
+            .map_err(|_| PersistentUtxoError::CorruptStoredRecord(txid.into()))
     }
 }
 

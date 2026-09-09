@@ -1030,7 +1030,7 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    // See docs/benchmarks/muhash-rpc.md for the authoritative measured contract.
+    // See docs/contracts/muhash-rpc.md for the scan and coherence contract.
     // This implementation scans the in-memory UtxoSet.
     let array = if params.is_null() {
         None
@@ -1059,50 +1059,47 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             "Querying specific block heights requires coinstatsindex".to_owned(),
         ));
     }
-    let want_muhash = hash_type == "muhash";
-    let (stats, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
-        let stats =
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, ctx.applied_height(), want_muhash)
-                .map_err(|err| RpcError::Internal(err.to_string()))?;
-        let set_hash = match hash_type {
-            "hash_serialized_3" => Some((
-                "hash_serialized_3",
-                view.hash_serialized_3()
-                    .map_err(|err| RpcError::Internal(err.to_string()))?
-                    .to_string_be(),
-            )),
-            "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-            "none" => None,
-            _ => {
-                return Err(RpcError::InvalidParams(
-                    "hash_type must be one of: hash_serialized_3, muhash, none",
-                ));
-            }
-        };
-        Ok::<_, RpcError>((stats, view.len(), view.record_count(), set_hash))
-    })?;
-    let disk_size = ctx.utxo.with_stable_view(|view| {
-        u64::try_from(view.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
-    });
-    let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
-        if name == "hash_serialized_3" {
-            (Some(hash), None)
-        } else {
-            (None, Some(hash))
-        }
-    });
-    typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
-        height: i64::from(ctx.applied_height()),
-        best_block: ctx.applied_hash().to_string_be(),
-        transactions: Some(i64_saturated_len(transactions)),
-        tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
-        bogo_size: i64_saturated(stats.bogo_size),
-        hash_serialized_3,
-        disk_size: Some(i64_saturated(disk_size)),
-        total_amount: sat_to_btc(stats.total_amount),
-        muhash,
-        total_unspendable_amount: None,
-        block_info: None,
+    if !matches!(hash_type, "hash_serialized_3" | "muhash" | "none") {
+        return Err(RpcError::InvalidParams(
+            "hash_type must be one of: hash_serialized_3, muhash, none",
+        ));
+    }
+    // The shared transition lock binds the scan, memory estimate and applied
+    // tip. Taking independent UTXO views and then reading a tip can mix epochs.
+    ctx.with_stable_chainstate(|| {
+        let height = ctx.applied_height();
+        let best_block = ctx.applied_hash().to_string_be();
+        ctx.utxo.with_stable_view(|view| {
+            let stats =
+                bitcoin_rs_utxo::stats::scan_coin_stats(view, height, hash_type == "muhash")
+                    .map_err(|err| RpcError::Internal(err.to_string()))?;
+            let hash_serialized_3 = if hash_type == "hash_serialized_3" {
+                Some(
+                    view.hash_serialized_3()
+                        .map_err(|err| RpcError::Internal(err.to_string()))?
+                        .to_string_be(),
+                )
+            } else {
+                None
+            };
+            let muhash =
+                (hash_type == "muhash").then(|| stats.muhash.finalize_hash().to_string_be());
+            let disk_size =
+                u64::try_from(view.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
+            typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
+                height: i64::from(height),
+                best_block,
+                transactions: Some(i64_saturated_len(view.record_count())),
+                tx_outs: i64_saturated(u64::try_from(view.len()).unwrap_or(u64::MAX)),
+                bogo_size: i64_saturated(stats.bogo_size),
+                hash_serialized_3,
+                disk_size: Some(i64_saturated(disk_size)),
+                total_amount: sat_to_btc(stats.total_amount),
+                muhash,
+                total_unspendable_amount: None,
+                block_info: None,
+            })
+        })
     })
 }
 
@@ -5511,6 +5508,57 @@ mod scantxoutset_tests {
             panic!("desc missing: {first:?}");
         };
         assert!(desc.starts_with("addr(1111111111111111111114oLvT2)#"));
+    }
+
+    // MRPC-02: no response combines coin rows with another applied tip.
+    #[test]
+    fn gettxoutsetinfo_waits_for_the_shared_chain_transition() {
+        let transition = Arc::new(parking_lot::Mutex::new(()));
+        let ctx = Arc::new(Context::new().with_chain_transition(Arc::clone(&transition)));
+        let guard = transition.lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let scan_ctx = Arc::clone(&ctx);
+        let scanner = std::thread::spawn(move || {
+            started_tx.send(()).expect("start");
+            let result = gettxoutsetinfo(&scan_ctx, &json!(["muhash", null, false]));
+            done_tx.send(()).expect("completion");
+            result
+        });
+        started_rx.recv().expect("scanner started");
+        let premature = done_rx.recv_timeout(std::time::Duration::from_millis(50));
+        commit_test_utxo(
+            &ctx,
+            OutPoint::new(Txid::from(test_txid(201)), 0),
+            TxOut {
+                value: 10_000,
+                script_pubkey: burn_p2pkh_script(),
+            },
+            false,
+            1,
+        );
+        let tip = TipSnapshot {
+            tip_id: NodeId::new(1),
+            height: 1,
+            chainwork: ChainWork::from(1_u64),
+            hash: test_txid(202),
+        };
+        ctx.set_applied_tip(tip.clone());
+        drop(guard);
+        let result = scanner
+            .join()
+            .expect("scanner thread")
+            .expect("coin statistics");
+        assert!(
+            premature.is_err(),
+            "scan must wait for the chain transition"
+        );
+        assert_eq!(result.get("height").and_then(Value::as_u64), Some(1));
+        assert_eq!(result.get("txouts").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            result.get("bestblock").and_then(Value::as_str),
+            Some(tip.hash.to_string_be().as_str())
+        );
     }
 
     #[test]

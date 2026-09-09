@@ -121,10 +121,26 @@ reversed block hash and label `C` (connect) or `D` (disconnect); mempool events
 carry the 32-byte reversed txid, label `A` (admission) or `R` (removal), and the
 8-byte little-endian mempool sequence. A transaction mined in a connected block
 emits no `R`; the block's `C` covers it. Reorg disconnects are emitted
-tip-first before connects. Each socket owns `DEFAULT_ZMQ_HWM = 1_000`.
+tip-first before connects. Each message ends with a separate topic-local
+little-endian `u32` transport counter frame. Each socket owns `DEFAULT_ZMQ_HWM = 1_000`.
 `bitcoin_rs_rpc::zmq` owns the compatibility payload and transport;
 `ChainFollowers` / `ChainEffects` own emission timing relative to committed
 chain transitions.
+
+### Post-commit chain effects
+Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
+ZMQ projections, TxIndex wake, mining generation, and P2P admission. Owned by
+`ChainFollowers` / `ChainEffects`. Dispatched after the tip is published,
+while the chain transition is still held. It cannot fail the authoritative
+transition. Index recovery still uses `ChainEventPublisher` hints (`EVT-02`);
+this is not a second event log.
+
+### Authoritative peer table
+The single owner of live peer connections and their published handshake
+metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
+address, cancels predecessors atomically on replacement, prevents stale
+connection handles from evicting newer sessions via connection-identity checks,
+and ties handshake metadata strictly to the live connection identity.
 
 ### Embedded node
 The typed in-process surface (`bitcoin_rs_node::Node`) over the same lifecycle

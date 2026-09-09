@@ -184,6 +184,14 @@ pub enum AcceptanceRejectReason {
     /// One or more inputs are unavailable.
     #[error("missing-inputs")]
     MissingInputs,
+    /// Prevout-aware signature operations exceed the standard transaction limit.
+    #[error("bad-txns-too-many-sigops")]
+    TooManySigops {
+        /// Resolved signature-operation cost.
+        cost: u32,
+        /// Maximum standard cost.
+        max: u32,
+    },
     /// Fee rate is below the live min-relay / mempool-min floor.
     #[error("min relay fee not met")]
     MinRelayFeeNotMet,
@@ -355,6 +363,11 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::MissingInputs)
     } else if let Err(err) = is_standard_tx(tx, policy) {
         Some(AcceptanceRejectReason::NonStandard(err))
+    } else if context.sigop_cost > crate::accept::MAX_STANDARD_TX_SIGOPS_COST {
+        Some(AcceptanceRejectReason::TooManySigops {
+            cost: context.sigop_cost,
+            max: crate::accept::MAX_STANDARD_TX_SIGOPS_COST,
+        })
     } else if fee_rate < mempool_min_fee_sat_per_kvb {
         Some(AcceptanceRejectReason::MinRelayFeeNotMet)
     } else if max_feerate_sat_per_kvb.is_some_and(|max| fee_rate > max) {
