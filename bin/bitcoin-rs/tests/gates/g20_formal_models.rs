@@ -458,13 +458,17 @@ fn execute_and_capture(
 }
 
 fn configured_smt_encoding(root: &Path) -> String {
-    let constraints = fs::read_to_string(root.join(CONSTRAINTS))
-        .expect("read canonical formal-tool configuration");
+    let constraints =
+        fs::read_to_string(root.join(CONSTRAINTS)).expect("read canonical formal-tool configuration");
     let prefix = "| SMT encoding | `";
     let suffix = "` (";
     constraints
         .lines()
-        .find_map(|line| line.strip_prefix(prefix)?.split_once(suffix).map(|(value, _)| value))
+        .find_map(|line| {
+            line.strip_prefix(prefix)?
+                .split_once(suffix)
+                .map(|(value, _)| value)
+        })
         .filter(|value| !value.is_empty())
         .unwrap_or(SMT_ENCODING_DEFAULT)
         .to_string()
@@ -472,7 +476,6 @@ fn configured_smt_encoding(root: &Path) -> String {
 
 fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
     let mut args = vec![
-
         "check".to_string(),
         format!("--config=docs/models/{model}.cfg"),
     ];
