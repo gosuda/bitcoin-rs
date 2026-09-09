@@ -516,7 +516,7 @@ mod tests {
         assert!(gateway.stable_generation().is_none());
         assert!(gateway.retry_orphans(&chain, 1).is_empty());
         assert_eq!(gateway.get_tx(child.txid()).as_ref(), Some(child.as_ref()));
-        assert!(gateway.is_orphan(&child.txid()));
+        assert_eq!(gateway.orphan_count(), 1);
         assert_eq!(gateway.read().sequence_number(), 0);
 
         change.finish()?;

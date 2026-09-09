@@ -146,7 +146,8 @@ Known deltas from Core 31.1:
   `gateway_inventory_filters_and_serves_txid_and_wtxid` exercises the
   `TxInventory` implementation over the shared gateway. `src/inv.rs` tests
   `missing_parents_use_txids_and_deduplicate_repeated_inputs`,
-  `stale_missing_parent_source_cannot_send_to_or_cancel_replacement`, and
+  `stale_missing_parent_source_cannot_send_to_or_cancel_replacement`,
+  `cancelled_missing_parent_source_does_not_enqueue_a_request`, and
   `missing_parent_request_keeps_outbound_saturation_policy` cover txid parent
   requests and live-connection identity. `src/tx_relay.rs` tests
   `peer_relay_reaches_replacement_and_cancels_only_saturated_peer` and

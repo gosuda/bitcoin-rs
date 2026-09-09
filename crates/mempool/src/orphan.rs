@@ -1,7 +1,6 @@
-//! Gateway-owned resident peer transactions awaiting another admission attempt.
-//! Readiness indexes the same bounded store. The live contract is FIFO retention
-//! bounded by both transaction count and aggregate transaction weight; witness
-//! refresh preserves FIFO position.
+//! Gateway-owned orphan residency and peer rejection bookkeeping.
+//!
+//! The owner contract is `MPL-04` in `docs/contracts/mempool-mutations.md`.
 
 use crate::mutation::PeerToken;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
@@ -97,7 +96,7 @@ impl OrphanPool {
         self.clear_ready(txid);
         for input in &tx.inputs {
             let prevout = input.previous_output;
-            if !prevout.is_null() && prevout != bitcoin_rs_primitives::OutPoint::default() {
+            if !prevout.is_null() {
                 self.by_parent.entry(prevout.txid).or_default().insert(txid);
             }
         }

@@ -1059,7 +1059,8 @@ mod tests {
                     ),
                     Ok(SubmitOutcome::Held { .. })
                 ));
-                assert!(gateway.is_orphan(&tx.txid()));
+                assert_eq!(gateway.orphan_count(), 1);
+                assert_eq!(gateway.get_tx(tx.txid()).as_ref(), Some(tx.as_ref()));
             } else {
                 assert!(
                     gateway

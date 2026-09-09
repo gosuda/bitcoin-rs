@@ -127,12 +127,21 @@ state (`crates/mempool/src/orphan.rs`).
   state, under pool-then-lifecycle lock order. An accepted parent cannot
   commit between the missing-input verdict and registration of its child.
   The gateway stores orphan bodies, txid/wtxid indexes, parent indexes,
-  and ready IDs as one ownership unit. Retention is count-bounded FIFO
-  without expiry; witness refresh preserves FIFO position. These private
-  defaults and indexes have one owner in `orphan.rs`; RPC missing-input
-  rejections do not populate peer orphan state. An out-of-range output index
+  and ready IDs as one ownership unit. FIFO retention is bounded by both
+  count and aggregate BIP141 transaction weight, using `DEFAULT_ORPHAN_QUOTA`
+  and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`. Insertions, witness
+  refreshes, and removals update the resident weight; FIFO eviction restores
+  both bounds. Witness refresh preserves FIFO position; expiry is not
+  implemented. These private defaults and indexes have one owner; RPC
+  missing-input rejections do not populate peer orphan state. An out-of-range output index
   on a resident mempool parent is rejected under the same token and retry-claim
   checks, rather than retained as an orphan awaiting an impossible parent.
+- Orphan retention excludes null outpoints: a zero transaction hash with
+  output index `u32::MAX`, matching
+  [Core 31.1's `COutPoint::IsNull`](https://github.com/bitcoin/bitcoin/blob/v31.1/src/primitives/transaction.h).
+  Rust's `OutPoint::default()` is `(zero txid, index 0)`, which is non-null.
+  Such unresolved inputs follow ordinary missing-parent requests and parent
+  indexing instead of being silently omitted from retry tracking.
 - Recent rejects use one bounded FIFO with an identity scope for each hash.
   Witness-scoped refusals suppress only the checked wtxid; transaction-scoped
   refusals additionally suppress the txid. Legacy inventory does not consult
@@ -198,7 +207,14 @@ state (`crates/mempool/src/orphan.rs`).
   `known_parent_invalid_output_is_rejected_without_orphan_retention`,
   `orphan_retry_removes_known_invalid_outpoint_after_parent_arrival`,
   `witness_rejection_preserves_valid_variant_and_legacy_inventory`,
-  `fresh_invalid_witness_preserves_a_different_resident_orphan_variant`.
+  `fresh_invalid_witness_preserves_a_different_resident_orphan_variant`,
+  `nonexistent_mempool_output_is_rejected_without_holding_or_mutating`,
+  `absent_parent_is_held_but_its_nonexistent_output_is_rejected_on_retry`,
+  `stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan`,
+  `rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid`,
+  `rejected_stripped_body_does_not_suppress_its_valid_witness_variant`,
+  `zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint`,
+  `null_input_in_a_non_coinbase_transaction_is_not_held`.
 - `crates/rpc/src/context.rs` (`admission_chain_tests`):
   `stable_chainstate_reader_does_not_block_transaction_admission`,
   `cached_unconfirmed_transaction_is_still_admitted_from_a_peer`,
@@ -208,7 +224,10 @@ state (`crates/mempool/src/orphan.rs`).
   `zero_quota_retains_no_body_or_index`,
   `witness_refresh_keeps_fifo_position_and_source_identity`,
   `readiness_is_deduplicated_and_removed_with_eviction`,
-  `rejects_are_bounded_and_chain_reset_clears_both_indexes`.
+  `rejects_are_bounded_and_chain_reset_clears_both_indexes`,
+  `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`,
+  `rejecting_another_witness_preserves_the_resident_body_and_ready_work`,
+  `transaction_scoped_rejection_releases_the_resident_variants_weight`.
 - `crates/mempool/src/reconsider.rs` (inline tests):
   `restored_coins_and_ordered_candidates_price_the_batch`,
   `unavailable_parent_never_offers_outputs_to_a_child`,
