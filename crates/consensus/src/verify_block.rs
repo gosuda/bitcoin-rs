@@ -2,19 +2,19 @@
 
 use bitcoin_rs_primitives::{Block, Tx, Txid};
 
-use crate::block_view::BlockFacts;
 use crate::ConsensusError;
+use crate::block_view::BlockFacts;
 
-#[allow(dead_code)]
+#[allow(dead_code, unreachable_pub)]
 mod legacy {
     include!("verify_block_impl.rs");
 }
 
+pub(crate) use legacy::merkle_root_and_mutation_borrowed;
 pub use legacy::{
     BlockRuleContext, block_has_witness, block_merkle_root_matches_txids,
     block_witness_commitment_matches, verify_merkle_root_with_txids,
 };
-pub(crate) use legacy::merkle_root_and_mutation_borrowed;
 
 /// BIP141 maximum block weight in weight units.
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
