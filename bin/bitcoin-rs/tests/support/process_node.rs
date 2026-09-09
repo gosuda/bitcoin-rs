@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::reference_set::reference_set;
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::{Address, Block, Network, OutPoint, PrivateKey};
-use bitcoin_rs_rpc::compat_manifest::reference_set;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

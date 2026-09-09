@@ -1435,4 +1435,109 @@ mod tests {
         assert!(!gateway.read().contains_txid(&tx.txid()));
         assert!(gateway.is_rejected(Hash256::from(tx.txid())));
     }
+
+    struct InputStructureChain {
+        coins: Coins,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AdmissionChain for InputStructureChain {
+        fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.coins.snapshot(tx)
+        }
+    }
+
+    fn assert_input_structure_rejection(mut tx: Tx, coins: Coins) {
+        let gateway = gateway();
+        let chain = InputStructureChain {
+            coins,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        tx.inputs[0].witness = vec![vec![1]];
+        let tx = Arc::new(tx);
+        let origin = AdmissionOrigin::Peer(source());
+        assert_eq!(
+            gateway.submit_transaction(Arc::clone(&tx), origin, None, 1, &chain),
+            Err(SubmitError::Consensus)
+        );
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.read().sequence_number(), 0);
+        assert!(gateway.have_tx(Hash256::from(tx.txid()), false));
+        assert!(gateway.get_tx(tx.txid()).is_none());
+
+        let mut alternate = (*tx).clone();
+        alternate.inputs[0].witness = vec![vec![2]];
+        assert_eq!(alternate.txid(), tx.txid());
+        assert_ne!(alternate.wtxid(), tx.wtxid());
+        let alternate = Arc::new(alternate);
+        assert_eq!(
+            gateway.submit_transaction(Arc::clone(&alternate), origin, None, 2, &chain),
+            Ok(SubmitOutcome::AlreadyKnown)
+        );
+        assert_eq!(chain.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.read().sequence_number(), 0);
+
+        gateway.chain_changed(&[]);
+        assert_eq!(
+            gateway.submit_transaction(alternate, origin, None, 3, &chain),
+            Err(SubmitError::Consensus)
+        );
+        assert_eq!(chain.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.read().sequence_number(), 0);
+    }
+
+    // MPL-04; Core v31.1 CheckTransaction rejects duplicate/null outpoints
+    // independently of witness bytes and without requiring previous outputs:
+    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_check.cpp
+    #[test]
+    fn input_structure_duplicate_rejection_is_shared_across_witnesses() {
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[91; 32])), 0);
+        for resolved in [false, true] {
+            let mut tx = standard_spend(outpoint, 3);
+            tx.inputs.push(tx.inputs[0].clone());
+            let coins = if resolved {
+                vec![(
+                    outpoint,
+                    TxOut {
+                        value: 10_000,
+                        script_pubkey: vec![0x51],
+                    },
+                )]
+            } else {
+                vec![]
+            };
+            assert_input_structure_rejection(tx, Coins(coins));
+        }
+    }
+
+    #[test]
+    fn input_structure_null_rejection_is_shared_across_witnesses() {
+        let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[92; 32])), 0);
+        let mut tx = standard_spend(outpoint, 4);
+        let mut null_input = tx.inputs[0].clone();
+        null_input.previous_output = OutPoint::new(Txid::default(), u32::MAX);
+        tx.inputs.push(null_input);
+        assert_input_structure_rejection(tx, Coins(vec![]));
+    }
+
+    #[test]
+    fn input_structure_rpc_rejection_does_not_populate_peer_caches() {
+        let gateway = gateway();
+        let mut tx = standard_spend(OutPoint::default(), 5);
+        tx.inputs.push(tx.inputs[0].clone());
+        tx.inputs[0].witness = vec![vec![1]];
+        assert_eq!(
+            gateway.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, 1, &Coins(vec![])),
+            Err(SubmitError::Consensus)
+        );
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.read().sequence_number(), 0);
+    }
 }
