@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
-main = "51ed6b123bda3b775aabc008ad581c338b96da79"
+main = "5936baddf37442521c142ae2f3be17af4df75f6c"
 assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() == main
 
 def read(path, expected):
@@ -65,7 +65,7 @@ assert "package_prevouts_preserve_contextual_sigops_without_mutating_the_pool" n
 (root / path).write_text(text)
 
 path = "docs/policies/mempool-policy.md"
-text = read(path, "712361cbb3e81c1332576a56f610a15c31150640")
+text = read(path, "535e62202bb3ea145cd583c2d28c7ac49c117a68")
 anchor = "- A policy change that alters any §3 row"
 text = replace(text, anchor, """- **Package-parent accounting**: `package_prevouts_preserve_sigops_without_mutating_the_pool`
   in `crates/rpc/src/handlers/tx.rs` checks nonzero output selection for

@@ -32,7 +32,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MAIN: 51ed6b123bda3b775aabc008ad581c338b96da79
+          MAIN: 5936baddf37442521c142ae2f3be17af4df75f6c
           OLD: f1d64d79ac27a0ab8b7a55be85aa2a7e5d4cd5ef
           BRANCH: fix/pr680-package-prevout-accounting-20260910
         run: |
@@ -75,7 +75,9 @@ jobs:
           assert pr['head']['sha'] == os.environ['OLD'], 'PR head moved; refusing publication'
           assert pr['head']['ref'] == os.environ['BRANCH']
           PY
-          git push origin "$commit:refs/heads/$BRANCH"
+          # Both ancestry checks above require a fast-forward. The exact lease
+          # additionally refuses concurrent deletion or replacement of the ref.
+          git push --force-with-lease="refs/heads/$BRANCH:$OLD" origin "$commit:refs/heads/$BRANCH"
           echo "sha=$commit" >> "$GITHUB_OUTPUT"
           printf 'PR710 source commit: `%s`\n\nMerged main: `%s`\n\nOnly existing-test and proof-inventory changes remain.\n' "$commit" "$MAIN" >> "$GITHUB_STEP_SUMMARY"
   p2p:
@@ -84,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 190805f01acd9d65092a9c9d485f53a5a67ba979
+          ref: 2edf1d885e504b31d0560ebc22fd0a9e345771e3
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
