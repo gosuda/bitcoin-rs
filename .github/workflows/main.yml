@@ -40,6 +40,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Provision pinned Core and Apalache fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
       # Node / binary tests run with the full-node feature set. -p is
       # required because `--workspace --features` silently ignores --features
       # in a virtual workspace (no root [package] section in the top-level
