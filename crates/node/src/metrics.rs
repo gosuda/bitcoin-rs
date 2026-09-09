@@ -323,6 +323,8 @@ mod tests {
 
     use super::*;
 
+    static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn process_start_is_recorded_once_and_uptime_advances() {
         use std::thread;
@@ -416,6 +418,7 @@ mod tests {
 
     #[test]
     fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let occupied = TcpListener::bind(unused_ephemeral())
             .unwrap_or_else(|error| panic!("occupy port: {error}"));
@@ -448,6 +451,7 @@ mod tests {
 
     #[test]
     fn scrape_returns_prometheus_text_with_recorded_metrics() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let server = MetricsServer::bind(unused_ephemeral(), shutdown)
             .unwrap_or_else(|error| panic!("bind metrics: {error}"));
@@ -467,6 +471,7 @@ mod tests {
 
     #[test]
     fn two_sequential_servers_in_one_process_both_serve() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let first = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown))
             .unwrap_or_else(|error| panic!("first: {error}"));
@@ -487,6 +492,7 @@ mod tests {
 
     #[test]
     fn shutdown_exits_the_listener_thread() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown))
             .unwrap_or_else(|error| panic!("bind: {error}"));
@@ -499,6 +505,7 @@ mod tests {
 
     #[test]
     fn run_retries_metrics_bind_after_occupied_address() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let occupied =
             TcpListener::bind(unused_ephemeral()).unwrap_or_else(|error| panic!("occupy: {error}"));
