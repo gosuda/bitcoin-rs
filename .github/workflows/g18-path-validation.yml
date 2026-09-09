@@ -1,0 +1,165 @@
+name: g18-path-validation
+
+on:
+  push:
+    branches: [automation/reference-extraction-20260910]
+    paths: [.github/workflows/g18-path-validation.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g18-path-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.format.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 0daa3fd0a832a6c8b232b5fd41e798265787f696
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt
+      - name: Format only the changed gate without replacing concurrent work
+        id: format
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          def run(*args):
+              return subprocess.check_output(args, text=True).strip()
+
+          expected = '0daa3fd0a832a6c8b232b5fd41e798265787f696'
+          branch = 'fix/g18-declared-sample-paths'
+          gate = 'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs'
+          assert run('git', 'rev-parse', 'HEAD') == expected
+          remote = run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}').split()[0]
+          assert remote == expected, 'PR branch moved; refusing stale format edit'
+          subprocess.run(['rustfmt', '--edition', '2024', gate], check=True)
+          changed = run('git', 'diff', '--name-only').splitlines()
+          assert changed in ([], [gate]), changed
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          if changed:
+              subprocess.run(['git', 'diff', '--', gate], check=True)
+              subprocess.run(['git', 'add', '--', gate], check=True)
+              subprocess.run(['git', '-c', 'user.name=github-actions[bot]',
+                              '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
+                              'commit', '-m', 'style(g18): format path-membership regressions'], check=True)
+              subprocess.run(['git', 'push', 'origin', f'HEAD:refs/heads/{branch}'], check=True)
+          sha = run('git', 'rev-parse', 'HEAD')
+          print('FORMATTED_HEAD=' + sha)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'sha={sha}\n')
+          PY
+
+  validate:
+    needs: format
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.format.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        id: toolchain
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Record exact source and check formatting and scope
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          rustc --version --verbose
+          cargo fmt --all -- --check
+          git diff --exit-code
+          python3 - <<'PY'
+          import subprocess
+          base = '6838258a3dbca18e78e1995cd5c274d52460167b'
+          changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
+          assert set(changed) == {
+              'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs',
+              'docs/contracts/hot-path-attribution.md',
+          }, changed
+          print('Only the gate and its owning contract changed; production code and ledger data are unchanged')
+          PY
+      - name: Prove the old gate accepts and the new gate rejects an undeclared sample
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import tomllib
+
+          base = '6838258a3dbca18e78e1995cd5c274d52460167b'
+          gate = Path('bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs')
+          ledger = Path('docs/benchmarks/hot-path-ledger.toml')
+          original_gate = gate.read_bytes()
+          original_ledger = ledger.read_bytes()
+          text = original_ledger.decode()
+          offset = text.rfind('samples = []')
+          assert offset >= 0 and not text[offset + len('samples = []'):].strip()
+          sample = (
+              'samples = [{ path = "not.declared", owner = "node", elapsed_ns = 1, '
+              'interval = { kind = "inside", start_ns = 0, end_ns = 1 }, '
+              'identity = { binary_sha256 = "' + '11' * 32 + '", version = "test", '
+              'config_sha256 = "' + '22' * 32 + '", backend = "redb", '
+              'durability = "test-only", hardware = "test arm64", '
+              'corpus = { id = "Cmodern", manifest_sha256 = "' + '33' * 32 + '" } } }]\n'
+          )
+          amended = text[:offset] + sample
+          decoded = tomllib.loads(amended)
+          baseline = tomllib.loads(text)
+          assert decoded['cells'][:-1] == baseline['cells'][:-1]
+          assert decoded['cells'][-1]['id'] == 'muhash.cmodern.arm64.redb'
+          assert decoded['cells'][-1]['samples'][0]['path'] == 'not.declared'
+          command = ['cargo', 'test', '--locked', '-p', 'bitcoin-rs', '--no-default-features',
+                     '--features', 'fjall', '--test', 'g18_hot_path_ledger',
+                     'cell_histories_match_the_matrix_and_runtime_schema', '--', '--exact', '--nocapture']
+          try:
+              ledger.write_text(amended)
+              gate.write_bytes(subprocess.check_output(['git', 'show', f'{base}:{gate}']))
+              old = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              print('BASE_GATE_NEGATIVE_CONTROL\n' + old.stdout, flush=True)
+              assert old.returncode == 0 and '1 passed' in old.stdout, 'Could not reproduce old false acceptance'
+              gate.write_bytes(original_gate)
+              fixed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              print('FIXED_GATE_NEGATIVE_CONTROL\n' + fixed.stdout, flush=True)
+              assert fixed.returncode != 0, 'New gate still accepts undeclared sample'
+              assert 'contains undeclared sample path `not.declared`' in fixed.stdout, 'Failure was not path validation'
+              print('CONFIRMED: identical validly encoded sample accepted before, rejected after')
+          finally:
+              gate.write_bytes(original_gate)
+              ledger.write_bytes(original_ledger)
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          PY
+      - name: Full G18 gate and evidence regressions
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test g18_hot_path_ledger --test overhaul_evidence
+      - name: Workspace strict Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
+      - name: Native consensus strict Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+      - name: Native node strict Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: Verify tests did not mutate the published tree
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: git diff --exit-code
