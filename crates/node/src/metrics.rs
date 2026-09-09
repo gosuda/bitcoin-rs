@@ -629,6 +629,9 @@ pub struct Ledger {
     pub schema: String,
     /// Every declared cell, measured or not.
     pub cells: Vec<Cell>,
+    /// Top-level attribution-contract tables owned outside the benchmark tool.
+    #[serde(flatten)]
+    pub contract: std::collections::BTreeMap<String, toml::Value>,
 }
 
 impl Ledger {
