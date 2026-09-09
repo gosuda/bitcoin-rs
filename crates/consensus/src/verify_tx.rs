@@ -5,12 +5,10 @@ use std::time::Instant;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 
 use crate::block_view::BlockView;
+use crate::sigops::transaction_sigop_cost;
 #[cfg(not(feature = "kernel"))]
 use bitcoin_rs_script::Interpreter;
-use bitcoin_rs_script::script::instructions;
-use bitcoin_rs_script::{
-    Instruction, VerifyFlags, count_segwit, count_tx_legacy, is_p2sh, is_witness_program, opcode,
-};
+use bitcoin_rs_script::VerifyFlags;
 use rayon::prelude::*;
 
 use crate::rust_path::UtxoView;
@@ -291,7 +289,7 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
     }
 
     let _ = 0usize;
-    let sigop_cost = total_sigop_cost(tx, &prep.prevouts);
+    let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -756,34 +754,6 @@ fn check_input(
     }
 }
 
-fn cached_prevout_lookup(
-    prevouts: &[(OutPoint, TxOut)],
-    cursor: &mut usize,
-    outpoint: &OutPoint,
-) -> Option<TxOut> {
-    if prevouts.is_empty() {
-        return None;
-    }
-    if *cursor >= prevouts.len() {
-        *cursor = 0;
-    }
-    if let Some((cached_outpoint, txout)) = prevouts.get(*cursor)
-        && cached_outpoint == outpoint
-    {
-        *cursor = (*cursor).saturating_add(1);
-        return Some(txout.clone());
-    }
-    let (index, txout) =
-        prevouts
-            .iter()
-            .enumerate()
-            .find_map(|(index, (cached_outpoint, txout))| {
-                (cached_outpoint == outpoint).then_some((index, txout))
-            })?;
-    *cursor = index.saturating_add(1);
-    Some(txout.clone())
-}
-
 fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
     tx.outputs.iter().try_fold(0u64, |sum, output| {
         let next = sum
@@ -795,64 +765,6 @@ fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
             Ok(next)
         }
     })
-}
-
-fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
-    let mut cost = count_tx_legacy(tx).saturating_mul(4);
-    let mut cursor = 0_usize;
-    for input in &tx.inputs {
-        let Some(prevout) = cached_prevout_lookup(prevouts, &mut cursor, &input.previous_output)
-        else {
-            continue;
-        };
-        let redeem_script = last_push(&input.script_sig);
-        if is_p2sh(&prevout.script_pubkey) {
-            if let Some(redeem) = redeem_script {
-                cost = cost.saturating_add(count_accurate(redeem).saturating_mul(4));
-            }
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem_script.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(count_segwit(program, &input.witness));
-        }
-    }
-    cost
-}
-
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
-}
-
-fn count_accurate(script: &[u8]) -> u32 {
-    let mut count = 0_u32;
-    let mut pushed_number = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY)) => {
-                count = count.saturating_add(1);
-                pushed_number = None;
-            }
-            Ok(Instruction::Op(opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY)) => {
-                count = count.saturating_add(u32::from(pushed_number.unwrap_or(20)));
-                pushed_number = None;
-            }
-            Ok(Instruction::Op(op)) => pushed_number = opcode::decode_pushnum(op),
-            Ok(Instruction::PushBytes(_)) => pushed_number = None,
-            Err(_) => break,
-        }
-    }
-    count
 }
 
 #[cfg(test)]
@@ -913,6 +825,44 @@ mod tests {
         fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
             self.get(outpoint).cloned()
         }
+    }
+
+    #[test]
+    fn assume_valid_keeps_prevout_aware_sigop_limit_checks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cost = crate::MAX_BLOCK_SIGOPS_COST + 1;
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[9; 32])), 0);
+        let tx = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: vec![vec![0xac; usize::try_from(cost)?]],
+            }],
+            outputs: vec![TxOut {
+                value: 9_000,
+                script_pubkey: Vec::new(),
+            }],
+            lock_time: 0,
+        };
+        let prevouts = hashbrown::HashMap::from([(
+            outpoint,
+            TxOut {
+                value: 10_000,
+                script_pubkey: [vec![0x00, 0x20], vec![1; 32]].concat(),
+            },
+        )]);
+        // The assume-valid path skips script execution, not sigop accounting.
+        // Its internal VerifyFlags::NONE must not disable BIP141 counting.
+        assert_eq!(
+            super::verify_transaction_non_script(&tx, &prevouts, 0, 0),
+            Err(ConsensusError::SigopsLimit {
+                cost,
+                max: crate::MAX_BLOCK_SIGOPS_COST
+            }),
+        );
+        Ok(())
     }
 
     #[test]
@@ -1965,7 +1915,9 @@ mod tests {
     fn decode_hex(hex: &str) -> Vec<u8> {
         assert!(hex.len().is_multiple_of(2), "hex string has odd length");
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digits = std::str::from_utf8(pair).unwrap_or_else(|_| panic!("hex ascii"));
                 u8::from_str_radix(digits, 16).unwrap_or_else(|_| panic!("hex digit"))

@@ -80,7 +80,7 @@ fn compute_tapbranch_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
 pub fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256) -> Hash256 {
     let mut k = *tapleaf_hash.as_byte_array();
     let path = control.get(TAPROOT_CONTROL_BASE_SIZE..).unwrap_or(&[]);
-    for node in path.chunks_exact(TAPROOT_CONTROL_NODE_SIZE) {
+    for node in path.as_chunks::<TAPROOT_CONTROL_NODE_SIZE>().0 {
         let mut sibling = [0_u8; TAPROOT_CONTROL_NODE_SIZE];
         sibling.copy_from_slice(node);
         k = compute_tapbranch_hash(&k, &sibling);

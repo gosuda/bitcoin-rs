@@ -29,6 +29,9 @@ ownership and cites proof under the
 - Peer connection sessions and `PeerLease` lifecycle are owned by `crates/p2p`.
 - The node-side synchronization coordinator consumes peer lifecycle events
   without duplicating connection replacement or cancellation rules.
+- Parent requests validate the delivering connection and enqueue under the
+  same peer-table authority that serializes replacement. Requests from an
+  already cancelled lease enqueue nothing.
 
 ### `P2P-03`: Demonstrated best-known-height credit and request eligibility
 
@@ -57,6 +60,11 @@ ownership and cites proof under the
 
 ## Proven by
 
+- `crates/p2p/src/inv.rs` test
+  `cancelled_missing_parent_source_does_not_enqueue_a_request` and
+  `crates/p2p/src/peer_table.rs` test
+  `with_current_rejects_stale_source_and_holds_live_identity` protect
+  cancellation and identity-checked enqueue (P2P-02).
 - `crates/p2p/tests/core_compat.rs`:
   - `cargo test -p bitcoin-rs-p2p --test core_compat` pins the command
     inventory against the policy table, rust-bitcoin v1 envelopes, handshake

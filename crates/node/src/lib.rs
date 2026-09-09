@@ -54,13 +54,8 @@ pub mod state;
 pub mod storage_footprint;
 /// Block download orchestrator.
 pub mod sync;
-/// Inbound P2P transaction admission policy: orphan map and recent-rejects.
-pub mod tx_admission;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
-/// Outbound transaction relay worker: announce accepted txs to peers
-/// excluding the source connection.
-pub mod tx_relay;
 mod txindex_worker;
 /// Prevout lookups across a window of consecutive blocks.
 mod window_overlay;

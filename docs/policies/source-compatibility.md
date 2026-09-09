@@ -46,7 +46,7 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
 
 ## 4. Workspace Versioning and Semver Commitment
 
-All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.4.0`).
+All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.5.0`).
 
 | Workspace Crate | Path | Description |
 | :--- | :--- | :--- |
@@ -93,4 +93,3 @@ maintainer decision and matching migration policy before adding a reader.
 - On-disk storage schemas do not maintain backward-compatibility translation shims.
 - When key-value column families, block file encodings, or checkpoint formats change, the system does not convert old databases in place.
 - Datadir schema markers, resync requirements, and checkpoint commit/recovery semantics are defined by the canonical [datadir migration policy](db-migration.md). This policy does not duplicate those on-disk rules.
-

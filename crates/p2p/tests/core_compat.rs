@@ -73,12 +73,12 @@ fn genesis_block() -> Result<Block, Box<dyn Error>> {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut chunks = hex.as_bytes().chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("odd hex length".into());
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in &mut chunks {
+    for pair in chunks {
         let high = hex_nibble(pair[0])?;
         let low = hex_nibble(pair[1])?;
         bytes.push((high << 4) | low);
@@ -573,7 +573,8 @@ fn outbound_handshake_sends_version_then_core_feature_set() {
 
 #[test]
 fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), Box<dyn Error>> {
-    let mut peer = ready_peer(Magic::REGTEST)?;
+    let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
+    dispatch_inbound(&mut peer, &version_for_handshake())?;
     assert!(!peer.capabilities.send_headers);
     assert!(!peer.capabilities.addr_v2);
 
@@ -584,6 +585,17 @@ fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), Box<dyn 
     assert!(peer.capabilities.send_headers);
     assert!(peer.capabilities.addr_v2);
     assert!(peer.wtxid_relay.peer_supported());
+    dispatch_inbound(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
+}
+
+#[test]
+fn late_wtxidrelay_is_ignored_after_verack() -> Result<(), Box<dyn Error>> {
+    let mut peer = ready_peer(Magic::REGTEST)?;
+    assert!(!peer.wtxid_relay.peer_supported());
+    dispatch_inbound(&mut peer, &Message::WtxidRelay)?;
+    assert!(!peer.wtxid_relay.peer_supported());
     assert_eq!(peer.state, PeerState::Ready);
     Ok(())
 }

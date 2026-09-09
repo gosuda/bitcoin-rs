@@ -57,17 +57,17 @@ pub trait ChainQuery: Send + Sync {
 /// Read-only transaction inventory view used by the Inv filter and the
 /// `getdata` tx responder.
 ///
-/// Implemented by the node's admission layer ([`TxAdmission`] in the node
-/// crate); the p2p crate never owns mempool, orphan, or rejection state.
+/// Implemented here for the mempool gateway; the p2p crate owns the protocol
+/// adapter while mempool owns admission, orphan, and rejection state.
 /// The dispatch path consults this trait to suppress redundant `getdata`
 /// requests for transactions the node already holds and to serve
 /// transaction bodies in reply to `getdata`.
 pub trait TxInventory: Send + Sync {
     /// Returns `true` when the node already holds the transaction identified
     /// by `hash` — in the mempool, the orphan map, or the recent-rejects
-    /// cache. `wtxid_relay` is `true` when the peer negotiated BIP339, in
-    /// which case `hash` is a wtxid; otherwise it is a txid.
-    fn have_tx(&self, hash: Hash256, wtxid_relay: bool) -> bool;
+    /// cache. `hash_is_wtxid` follows the inventory item's type: `WTx`
+    /// carries a wtxid, while `Transaction`/`WitnessTransaction` carry a txid.
+    fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
     /// Returns the witness transaction body for `txid`, or `None` when the
     /// node does not have it. Used to answer `getdata` for txid-typed items.
@@ -76,6 +76,20 @@ pub trait TxInventory: Send + Sync {
     /// Returns the witness transaction body for `wtxid`, or `None` when the
     /// node does not have it. Used to answer BIP339 `getdata` (`WTx`) items.
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
+}
+
+impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
+    fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
+        Self::have_tx(self, hash, hash_is_wtxid)
+    }
+
+    fn get_tx(&self, txid: Txid) -> Option<Tx> {
+        Self::get_tx(self, txid)
+    }
+
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        Self::get_tx_by_wtxid(self, wtxid)
+    }
 }
 
 /// Chainless dispatch: collects the protocol responses and returns them.
@@ -122,9 +136,8 @@ pub fn dispatch_inbound_with_chain<S>(
 /// When `tx_inventory` is `Some`, the `inv` arm suppresses `getdata` for
 /// transactions the node already holds (mempool, orphan map, or
 /// recent-rejects) and the `getdata` arm serves tx bodies for tx-typed
-/// items the node has, reporting the rest as `notfound`. BIP339: when the
-/// peer advertised wtxid relay, tx inventory hashes are interpreted as
-/// wtxids; otherwise as txids.
+/// items the node has, reporting the rest as `notfound`. Inventory types
+/// identify txids or wtxids independently of the peer's outbound preference.
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -148,12 +161,10 @@ pub fn dispatch_inbound_full<S>(
         Message::Inv(items) => {
             step(peer, message)?;
             let response = match tx_inventory {
-                Some(inv) => {
-                    let wtxid_relay = peer.wtxid_relay.peer_supported();
-                    request_inventory_filtered(items, &|item| {
-                        inventory_tx_hash(item).is_some_and(|hash| inv.have_tx(hash, wtxid_relay))
-                    })
-                }
+                Some(inv) => request_inventory_filtered(items, &|item| {
+                    inventory_tx_hash(item)
+                        .is_some_and(|hash| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
+                }),
                 None => request_inventory(items),
             };
             if let Some(response) = response {
@@ -903,7 +914,7 @@ mod tests {
     }
 
     impl TxInventory for FakeTxInventory {
-        fn have_tx(&self, hash: Hash256, _wtxid_relay: bool) -> bool {
+        fn have_tx(&self, hash: Hash256, _hash_is_wtxid: bool) -> bool {
             self.have_hashes.contains(hash.as_byte_array())
         }
 
@@ -936,6 +947,164 @@ mod tests {
                 script_pubkey: vec![0x6A],
             }],
             lock_time: 0,
+        }
+    }
+
+    #[test]
+    fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
+        use std::sync::Arc;
+
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
+        };
+        use parking_lot::RwLock;
+
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+        );
+        let mut tx = dummy_tx(0x42);
+        tx.inputs[0].witness = vec![vec![0x01]];
+        let txid_item =
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
+        let wtxid_item = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()));
+        assert_ne!(tx.txid().as_bytes(), tx.wtxid().as_bytes());
+        assert!(
+            gateway
+                .insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::new(tx.clone()), 100, 10_000, 1, 0),
+                )
+                .is_ok()
+        );
+
+        for (item, wtxid_relay) in [(txid_item, false), (wtxid_item, true)] {
+            let mut peer = ready_peer();
+            if wtxid_relay {
+                peer.wtxid_relay.mark_peer_supported();
+            }
+            assert!(
+                dispatch_collect_full(&mut peer, &Message::Inv(vec![item]), None, Some(&gateway),)
+                    .is_empty()
+            );
+        }
+
+        // BIP339 MSG_WTX resolves the witness hash; txid requests keep their
+        // own lookup even on a wtxid-relay connection. Unknowns remain notfound.
+        let missing = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xFF; 32]));
+        let mut peer = ready_peer();
+        peer.wtxid_relay.mark_peer_supported();
+        assert_eq!(
+            dispatch_collect_full(
+                &mut peer,
+                &Message::GetData(vec![txid_item, wtxid_item, missing]),
+                None,
+                Some(&gateway),
+            ),
+            vec![
+                Message::Tx(tx.clone()),
+                Message::Tx(tx),
+                Message::NotFound(vec![missing])
+            ],
+        );
+    }
+
+    #[test]
+    fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+        use std::sync::Arc;
+
+        use bitcoin_rs_mempool::{
+            AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry,
+            MempoolGateway, MempoolLimits, PeerToken, SubmitOutcome,
+        };
+        use parking_lot::RwLock;
+
+        struct MissingCoins;
+        impl AdmissionChain for MissingCoins {
+            fn snapshot(&self, _tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+                Some(ChainAdmissionSnapshot {
+                    prevouts: Vec::new(),
+                    height: 0,
+                    locktime_cutoff: 0,
+                    confirmed: false,
+                })
+            }
+        }
+
+        for orphan in [false, true] {
+            let gateway = MempoolGateway::new(
+                Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+                None,
+            );
+            let mut tx = dummy_tx(0x51);
+            tx.inputs[0].script_sig.clear();
+            tx.inputs[0].witness = vec![vec![0x51]];
+            tx.outputs[0].script_pubkey = vec![0x6a, 4, 1, 2, 3, 4];
+            let tx = Arc::new(tx);
+            let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+            let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+            assert_ne!(txid.as_byte_array(), wtxid.as_byte_array());
+            if orphan {
+                let source = PeerToken {
+                    addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    connection_id: 1,
+                };
+                assert!(matches!(
+                    gateway.submit_transaction(
+                        Arc::clone(&tx),
+                        AdmissionOrigin::Peer(source),
+                        None,
+                        0,
+                        &MissingCoins,
+                    ),
+                    Ok(SubmitOutcome::Held { .. })
+                ));
+                assert_eq!(gateway.orphan_count(), 1);
+                assert_eq!(gateway.get_tx(tx.txid()).as_ref(), Some(tx.as_ref()));
+            } else {
+                assert!(
+                    gateway
+                        .insert_entry(
+                            AdmissionOrigin::Rpc,
+                            MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0),
+                        )
+                        .is_ok()
+                );
+            }
+            for (local_requested, remote_requested, item) in [
+                (true, false, Inventory::WTx(wtxid)),
+                (false, true, Inventory::Transaction(txid)),
+                (false, true, Inventory::WitnessTransaction(txid)),
+            ] {
+                let mut peer = ready_peer();
+                if local_requested {
+                    peer.wtxid_relay.mark_local_advertised();
+                }
+                if remote_requested {
+                    peer.wtxid_relay.mark_peer_supported();
+                }
+                assert!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::Inv(vec![item]),
+                        None,
+                        Some(&gateway),
+                    )
+                    .is_empty(),
+                    "inventory type must select the held body's identity in either relay direction"
+                );
+
+                let unknown = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xff; 32]));
+                assert_eq!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::Inv(vec![item, unknown]),
+                        None,
+                        Some(&gateway),
+                    ),
+                    vec![Message::GetData(vec![unknown])]
+                );
+            }
         }
     }
 

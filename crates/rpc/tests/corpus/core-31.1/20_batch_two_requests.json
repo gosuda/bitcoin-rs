@@ -156,8 +156,8 @@
         {
           "jsonrpc": "2.0",
           "result": {
-            "version": 400,
-            "subversion": "/bitcoin-rs:0.4.0/",
+            "version": 500,
+            "subversion": "/bitcoin-rs:0.5.0/",
             "protocolversion": 70016,
             "localservices": "0000000000000009",
             "localservicesnames": [

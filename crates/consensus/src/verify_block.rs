@@ -243,7 +243,11 @@ fn merkle_root_and_mutation(hashes: &mut Vec<Txid>) -> Option<(Txid, bool)> {
     let kernel = detect_avx2();
     let mut mutated = false;
     while hashes.len() > 1 {
-        mutated |= hashes.chunks_exact(2).any(|pair| pair[0] == pair[1]);
+        mutated |= hashes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| pair[0] == pair[1]);
         next_merkle_level(hashes, kernel.as_ref());
     }
     Some((hashes[0], mutated))
@@ -391,7 +395,11 @@ fn merkle_root_and_mutation_scalar(hashes: &mut Vec<Txid>) -> Option<(Txid, bool
     }
     let mut mutated = false;
     while hashes.len() > 1 {
-        mutated |= hashes.chunks_exact(2).any(|pair| pair[0] == pair[1]);
+        mutated |= hashes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| pair[0] == pair[1]);
         next_merkle_level_scalar(hashes);
     }
     Some((hashes[0], mutated))
