@@ -1,21 +1,34 @@
-//! Scenario tests for incrementally persisted grouped coin records (T10).
+//! Scenario tests for incrementally persisted grouped coin records (T10) and `RCV-04A`.
 //!
 //! These pin the persisted coin layer: connect and disconnect retain exact
 //! full keys with lossless scripts and values, colliding accelerators never
 //! alias two records, eviction reloads byte-identical records (spending one
 //! output of an evicted record never truncates its siblings), ephemeral
-//! same-block outputs persist nothing while undo stays exact, and the byte
-//! ledger counts resident tables plus retained versions.
+//! same-block outputs persist nothing while undo stays exact, the byte
+//! ledger counts resident tables plus retained versions, and persistent
+//! transition regressions follow `docs/contracts/recovery.md::RCV-04A`.
 
 #![expect(clippy::expect_used, reason = "test assertions")]
+
+use std::{
+    sync::{
+        Arc, Barrier, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::Duration,
+};
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::{
     ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
 };
 use bitcoin_rs_utxo::set::{
-    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UtxoAdd, UtxoSet,
+    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UtxoAdd,
+    UtxoChangeEvents, UtxoChangeListener, UtxoInserted, UtxoRemoved, UtxoSet,
 };
+
+const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 type Row = ((ColumnFamily, Vec<u8>), Vec<u8>);
 
@@ -64,6 +77,15 @@ fn undo_of(adds: &[UtxoAdd]) -> bitcoin_rs_utxo::set::UndoBatch {
     undo
 }
 
+fn one_output_add(txid: Hash256) -> Vec<UtxoAdd> {
+    vec![UtxoAdd::new(
+        outpoint(txid, 0),
+        txout(100, &[0x51]),
+        false,
+        1,
+    )]
+}
+
 fn two_output_add(txid: Hash256, script_a: &[u8], script_b: &[u8]) -> Vec<UtxoAdd> {
     vec![
         UtxoAdd::new(outpoint(txid, 0), txout(100, script_a), false, 10),
@@ -71,10 +93,17 @@ fn two_output_add(txid: Hash256, script_a: &[u8], script_b: &[u8]) -> Vec<UtxoAd
     ]
 }
 
+#[derive(Clone)]
+struct FlushGate {
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
 #[derive(Clone, Default)]
 struct MemoryStore {
-    rows: std::sync::Arc<parking_lot::RwLock<Vec<Row>>>,
-    fault: std::sync::Arc<parking_lot::Mutex<Option<Fault>>>,
+    rows: Arc<parking_lot::RwLock<Vec<Row>>>,
+    fault: Arc<parking_lot::Mutex<Option<Fault>>>,
+    next_flush: Arc<parking_lot::Mutex<Option<FlushGate>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,6 +120,15 @@ enum Fault {
 impl MemoryStore {
     fn arm(&self, fault: Fault) {
         *self.fault.lock() = Some(fault);
+    }
+
+    fn block_next_flush(&self) -> FlushGate {
+        let gate = FlushGate {
+            entered: Arc::new(Barrier::new(2)),
+            release: Arc::new(Barrier::new(2)),
+        };
+        *self.next_flush.lock() = Some(gate.clone());
+        gate
     }
 
     fn take(&self, fault: Fault) -> bool {
@@ -187,7 +225,13 @@ impl KvStore for MemoryStore {
     }
 
     fn flush(&self) -> Result<(), StorageError> {
-        self.fail(Fault::Flush)
+        self.fail(Fault::Flush)?;
+        let gate = self.next_flush.lock().take();
+        if let Some(gate) = gate {
+            gate.entered.wait();
+            gate.release.wait();
+        }
+        Ok(())
     }
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
@@ -765,7 +809,7 @@ fn concurrent_partial_spends_preserve_siblings_and_store_cache_agreement() {
         .expect("seed");
     set.set_resident_budget(1);
     set.flush().expect("evict");
-    let barrier = std::sync::Barrier::new(9);
+    let barrier = Barrier::new(9);
     std::thread::scope(|scope| {
         for worker in 0..8 {
             let set = &set;
@@ -798,4 +842,167 @@ fn concurrent_partial_spends_preserve_siblings_and_store_cache_agreement() {
             reopened.get(&outpoint(a, vout)).expect("store read")
         );
     }
+}
+
+#[test]
+fn real_durable_write_releases_earlier_deferred_pins() {
+    for mode in [CoinDurability::Durable, CoinDurability::CasGuarded] {
+        let store = MemoryStore::default();
+        let set = PersistentUtxoSet::new(UtxoSet::new(), store);
+        let a = txid(26);
+        let b = txid(27);
+
+        set.connect_block(&block(one_output_add(a), vec![]), &a, CoinDurability::Durable)
+            .expect("seed first record");
+        set.connect_block(
+            &block(vec![], vec![outpoint(a, 0)]),
+            &a,
+            CoinDurability::Deferred,
+        )
+        .expect("defer first-record spend");
+        assert!(
+            set.ledger()
+                .expect("deferred ledger")
+                .retained_before_image_bytes
+                > 0,
+            "deferred overwrite must retain its before-image"
+        );
+
+        set.connect_block(&block(one_output_add(b), vec![]), &b, mode)
+            .expect("real durability boundary on second record");
+        assert_eq!(
+            set.ledger()
+                .expect("durable ledger")
+                .retained_before_image_bytes,
+            0,
+            "a real durable write must complete every earlier deferred write"
+        );
+    }
+}
+
+struct ReentrantListener {
+    target: Arc<OnceLock<Weak<PersistentUtxoSet<MemoryStore>>>>,
+    called: Arc<AtomicBool>,
+    rejected: Arc<AtomicBool>,
+}
+
+impl ReentrantListener {
+    fn probe(&self, op: &OutPoint) {
+        let set = self
+            .target
+            .get()
+            .and_then(Weak::upgrade)
+            .expect("persistent set installed");
+        let hash = txid(999);
+        let rejected = matches!(
+            set.get(op),
+            Err(PersistentUtxoError::ReentrantOperation)
+        ) && matches!(
+            set.ledger(),
+            Err(PersistentUtxoError::ReentrantOperation)
+        ) && matches!(
+            set.flush(),
+            Err(PersistentUtxoError::ReentrantOperation)
+        ) && matches!(
+            set.connect_block(
+                &BlockChanges::default(),
+                &hash,
+                CoinDurability::Durable,
+            ),
+            Err(PersistentUtxoError::ReentrantOperation)
+        ) && matches!(
+            set.undo_block(
+                &bitcoin_rs_utxo::set::UndoBatch::default(),
+                CoinDurability::Durable,
+            ),
+            Err(PersistentUtxoError::ReentrantOperation)
+        );
+        self.rejected.store(rejected, Ordering::SeqCst);
+        self.called.store(true, Ordering::SeqCst);
+    }
+}
+
+impl UtxoChangeListener for ReentrantListener {
+    fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]) {
+        if let Some(first) = insertions.first() {
+            self.probe(first.op);
+        }
+    }
+
+    fn on_remove_coins(&self, _removals: &[UtxoRemoved]) {}
+
+    fn on_committed_event_batches(&self, _batches: &[UtxoChangeEvents<'_>]) {}
+}
+
+#[test]
+fn blocked_flush_does_not_block_resident_reads() {
+    let store = MemoryStore::default();
+    let set = PersistentUtxoSet::new(UtxoSet::new(), store.clone());
+    let a = txid(28);
+    set.connect_block(&block(one_output_add(a), vec![]), &a, CoinDurability::Durable)
+        .expect("seed persisted resident coin");
+
+    let gate = store.block_next_flush();
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| set.flush().expect("blocked flush completes"));
+        gate.entered.wait();
+
+        scope.spawn(|| {
+            tx.send(set.get(&outpoint(a, 0)))
+                .expect("send resident read");
+        });
+
+        // RCV-04A: this is a deadlock detector, not a latency requirement.
+        let read_while_blocked = rx.recv_timeout(DEADLOCK_TIMEOUT);
+        gate.release.wait();
+        let output = read_while_blocked
+            .expect("resident read waited for backing-store flush")
+            .expect("resident read succeeds")
+            .expect("resident output");
+        assert_eq!(output.value, 100);
+    });
+}
+
+#[test]
+fn listener_reentry_is_rejected_instead_of_deadlocking() {
+    let target = Arc::new(OnceLock::new());
+    let called = Arc::new(AtomicBool::new(false));
+    let rejected = Arc::new(AtomicBool::new(false));
+    let store = MemoryStore::default();
+
+    let mut raw = UtxoSet::new();
+    raw.set_listener(Box::new(ReentrantListener {
+        target: Arc::clone(&target),
+        called: Arc::clone(&called),
+        rejected: Arc::clone(&rejected),
+    }));
+
+    let set = Arc::new(PersistentUtxoSet::new(raw, store.clone()));
+    assert!(target.set(Arc::downgrade(&set)).is_ok());
+    store.arm(Fault::BeforeWrite);
+
+    let worker_set = Arc::clone(&set);
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let a = txid(29);
+        tx.send(worker_set.connect_block(
+            &block(one_output_add(a), vec![]),
+            &a,
+            CoinDurability::Durable,
+        ))
+        .expect("send outer mutation result");
+    });
+
+    // RCV-04A: the timeout converts a regression back to self-deadlock into a test failure.
+    let result = rx
+        .recv_timeout(DEADLOCK_TIMEOUT)
+        .expect("listener reentry deadlocked the outer mutation");
+    handle.join().expect("outer mutation thread");
+    assert!(matches!(result, Err(PersistentUtxoError::Storage(_))));
+    assert!(called.load(Ordering::SeqCst), "listener was invoked");
+    assert!(
+        rejected.load(Ordering::SeqCst),
+        "reentrant persistent operations must fail fast"
+    );
 }
