@@ -323,7 +323,11 @@ fn declared_sample_paths_preserve_repetitions_and_empty_cells() {
     assert_eq!(ledger.cells.len(), CELL_COUNT);
     for cell in &ledger.cells {
         if cell.id == cell_id {
-            let recorded: Vec<&str> = cell.samples.iter().map(|sample| sample.path.as_str()).collect();
+            let recorded: Vec<&str> = cell
+                .samples
+                .iter()
+                .map(|sample| sample.path.as_str())
+                .collect();
             assert_eq!(recorded, paths);
         } else {
             assert!(cell.samples.is_empty());
@@ -342,7 +346,14 @@ fn additional_declared_sample_paths_are_allowed() {
 #[test]
 fn undeclared_sample_paths_are_rejected_in_later_histories() {
     let cell_id = "muhash.cmodern.arm64.redb";
-    for path in ["not.declared", "", " ", "CELL.WALL", "cell.wall.extra", "probe.assume_valid"] {
+    for path in [
+        "not.declared",
+        "",
+        " ",
+        "CELL.WALL",
+        "cell.wall.extra",
+        "probe.assume_valid",
+    ] {
         let ledger = ledger_with_sample_paths(cell_id, &["cell.wall", path]);
         assert_eq!(check_sample_paths(&ledger), Err((cell_id, path)));
     }
@@ -505,7 +516,8 @@ fn levers_and_forbidden_probes_are_complete() {
         assert!(
             ids.contains(lever.path.as_str()),
             "lever `{}` path `{}` is missing",
-            lever.id
+            lever.id,
+            lever.path
         );
         assert!(
             known(&lever.disposition, &DISPOSITIONS),
