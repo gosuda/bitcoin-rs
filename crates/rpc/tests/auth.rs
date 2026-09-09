@@ -181,6 +181,43 @@ fn non_rest_get_returns_not_found_without_authentication() -> Result<(), Box<dyn
 }
 
 #[test]
+fn esplora_success_and_error_responses_allow_cross_origin_reads()
+-> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    for path in ["/api/blocks/tip/height", "/api/not-an-esplora-route"] {
+        let response = request_get(address, path, "close")?;
+        assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
+        assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
+    }
+    Ok(())
+}
+
+#[test]
+fn esplora_cors_headers_do_not_leak_to_other_listener_surfaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    let response = request_get(address, "/", "close")?;
+
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(!response.contains("Access-Control-"));
+    Ok(())
+}
+
+#[test]
+fn esplora_options_returns_cors_preflight_response() -> Result<(), Box<dyn std::error::Error>> {
+    let address = spawn(Auth::basic("alice", "secret"))?;
+    let response = request_options(address, "/api/blocks/tip/height")?;
+
+    assert!(response.starts_with("HTTP/1.1 204 No Content"));
+    assert!(response.contains("Access-Control-Allow-Origin: *\r\n"));
+    assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
+    assert!(response.contains("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"));
+    assert!(response.contains("Access-Control-Allow-Headers: Content-Type\r\n"));
+    assert!(response.ends_with("\r\n\r\n"));
+    Ok(())
+}
+
+#[test]
 fn rest_keep_alive_serves_two_requests() -> Result<(), Box<dyn std::error::Error>> {
     let address = spawn_with_rest(Auth::basic("alice", "secret"), true)?;
     let mut stream = TcpStream::connect(address)?;
@@ -277,6 +314,22 @@ fn request_post(
         stream,
         "POST / HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Length: {}\r\nConnection: {connection}\r\n\r\n{body}",
         body.len()
+    )?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
+}
+
+fn request_options(
+    address: std::net::SocketAddr,
+    path: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stream = TcpStream::connect(address)?;
+    write!(
+        stream,
+        "OPTIONS {path} HTTP/1.1\r\nHost: localhost\r\nOrigin: https://wallet.example\r\n\
+         Access-Control-Request-Method: GET\r\nConnection: close\r\n\r\n"
     )?;
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut response = String::new();

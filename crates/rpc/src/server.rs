@@ -15,6 +15,10 @@ use crate::handlers::Handler;
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
 const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
 const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
+const ESPLORA_CORS_HEADERS: &str = "Access-Control-Allow-Origin: *\r\n\
+Access-Control-Expose-Headers: X-Total-Results\r\n";
+const ESPLORA_PREFLIGHT_HEADERS: &str = "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+Access-Control-Allow-Headers: Content-Type\r\n";
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
@@ -159,17 +163,29 @@ fn serve_connection(
             }
             HttpRoute::EsploraGet { path, query } => {
                 let response = crate::esplora::route(handler, path, query);
-                write_response(reader.get_mut(), &response, keep_alive)?;
+                write_esplora_response(reader.get_mut(), &response, keep_alive)?;
             }
             HttpRoute::EsploraPost { path } => {
                 match crate::esplora::route_post(handler, path, &request.body) {
                     Some(response) => {
-                        write_response(reader.get_mut(), &response, keep_alive)?;
+                        write_esplora_response(reader.get_mut(), &response, keep_alive)?;
                     }
                     None => {
-                        write_status(reader.get_mut(), 404, "Not Found", b"not found", keep_alive)?;
+                        write_esplora_status(
+                            reader.get_mut(),
+                            404,
+                            "Not Found",
+                            b"not found",
+                            keep_alive,
+                        )?;
                     }
                 }
+            }
+            HttpRoute::EsploraOptions => {
+                write_esplora_preflight(reader.get_mut(), keep_alive)?;
+            }
+            HttpRoute::NotFound => {
+                write_status(reader.get_mut(), 404, "Not Found", b"not found", keep_alive)?;
             }
             HttpRoute::JsonRpc => {
                 if !auth.validate_header(request.authorization.as_deref()) {
@@ -237,7 +253,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
+    if !matches!(method, "POST" | "GET" | "OPTIONS") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
@@ -286,7 +302,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     }
 
     let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
+        ("GET" | "OPTIONS", length) => length.unwrap_or(0),
         (_, Some(length)) => length,
         (_, None) => {
             return Err(io::Error::new(
@@ -526,6 +542,8 @@ enum HttpRoute<'a> {
     Rest { path: &'a str, query: &'a str },
     EsploraGet { path: &'a str, query: &'a str },
     EsploraPost { path: &'a str },
+    EsploraOptions,
+    NotFound,
     JsonRpc,
 }
 
@@ -533,7 +551,9 @@ fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
     match method {
         "GET" if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
-        "GET" => HttpRoute::EsploraGet { path, query },
+        "GET" if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraGet { path, query },
+        "GET" => HttpRoute::NotFound,
+        "OPTIONS" if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraOptions,
         _ if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraPost { path },
         _ => HttpRoute::JsonRpc,
     }
@@ -555,6 +575,75 @@ fn write_response(
     )?;
     stream.write_all(&response.body)?;
     stream.flush()
+}
+
+fn write_esplora_response(
+    stream: &mut TcpStream,
+    response: &crate::rest::Response,
+    keep_alive: bool,
+) -> io::Result<()> {
+    write_esplora_headers(
+        stream,
+        response.status,
+        response.reason,
+        response.content_type,
+        response.body.len(),
+        keep_alive,
+        "",
+    )?;
+    stream.write_all(&response.body)?;
+    stream.flush()
+}
+
+fn write_esplora_status(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &[u8],
+    keep_alive: bool,
+) -> io::Result<()> {
+    write_esplora_headers(
+        stream,
+        status,
+        reason,
+        "text/plain",
+        body.len(),
+        keep_alive,
+        "",
+    )?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+fn write_esplora_preflight(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
+    write_esplora_headers(
+        stream,
+        204,
+        "No Content",
+        "text/plain",
+        0,
+        keep_alive,
+        ESPLORA_PREFLIGHT_HEADERS,
+    )?;
+    stream.flush()
+}
+
+fn write_esplora_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    content_length: usize,
+    keep_alive: bool,
+    extra_headers: &str,
+) -> io::Result<()> {
+    let connection = if keep_alive { "keep-alive" } else { "close" };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n\
+         {ESPLORA_CORS_HEADERS}{extra_headers}Content-Length: {content_length}\r\n\
+         Connection: {connection}\r\n\r\n"
+    )
 }
 
 #[cfg(test)]
@@ -631,15 +720,17 @@ mod tests {
                 path: "/esplora/internal/txs"
             }
         );
+        assert_eq!(
+            classify("OPTIONS", "/api/blocks/tip/height"),
+            HttpRoute::EsploraOptions
+        );
+        assert_eq!(
+            classify("OPTIONS", "/esplora/internal/txs"),
+            HttpRoute::EsploraOptions
+        );
         assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
         assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
-        assert_eq!(
-            classify("GET", "/blocks/tip/height"),
-            HttpRoute::EsploraGet {
-                path: "/blocks/tip/height",
-                query: ""
-            }
-        );
+        assert_eq!(classify("GET", "/blocks/tip/height"), HttpRoute::NotFound);
     }
 
     #[test]
