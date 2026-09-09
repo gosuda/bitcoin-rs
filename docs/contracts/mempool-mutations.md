@@ -1,5 +1,10 @@
 # Mempool mutations contract
 
+Current mutation records plus target lifecycle extensions. Bounded observer
+delivery, nonblocking callbacks, persistent estimator state, and the full orphan
+owner migration are not all implemented. Planned tests below are obligations,
+not evidence of completion.
+
 The canonical mempool lifecycle, its records, and the observer delivery
 built on them. Owners: `MempoolGateway` in `crates/mempool/src/gateway.rs`;
 `MutationResult`, `MutationOutcome`, `RemovalReason`, and
@@ -30,9 +35,10 @@ The ZMQ sequence observer lives in `crates/rpc/src/zmq.rs`.
   descendants of a refused parent stay withheld. The gateway rechecks
   existing entries for invalidated lock points and spend assumptions,
   and clears chain-sensitive recent-reject entries on generation change.
-- Publication completes before observer delivery. A slow or blocked
-  observer parks only its own drain path. It never holds the pool write
-  lock and never blocks a chain transition.
+- Publication precedes observer delivery and callbacks run outside the pool
+  writer. Today an elected caller drains callbacks inline, so a slow observer
+  can block that caller, including a chain transition. Isolated nonblocking
+  delivery is a target, not a guarantee of the present queue.
 
 ### `MPL-02`: Mempool-owned orphans
 
@@ -64,6 +70,10 @@ The ZMQ sequence observer lives in `crates/rpc/src/zmq.rs`.
   entries. An entry the same commit evicted is never announced.
 
 ### `MPL-04`: Bounded observer delivery with gaps
+
+**Target.** The gateway's pending `VecDeque` is currently unbounded and the
+first publisher can drain inline. ZMQ socket high-water marks do not bound this
+queue. The required replacement must preserve canonical accounting:
 
 - The publish queue is bounded. Overflow records sticky gap counters and
   a reconcile signal instead of growing memory. Delivery runs outside
@@ -113,7 +123,7 @@ The ZMQ sequence observer lives in `crates/rpc/src/zmq.rs`.
 - Existing suites keep their verdicts: `crates/mempool/src/gateway.rs`
   inline tests (`remove_for_block` ordering, generation fencing),
   `crates/node/tests/tx_ingress_e2e.rs`, `crates/node/tests/mining.rs`
-  long-poll wake tests, `crates/node/src/zmq_publisher.rs` payload
+  long-poll wake tests, `crates/rpc/src/zmq.rs` payload
   tests, `crates/node/tests/crash_recovery.rs`.
 
 ## Vocabulary

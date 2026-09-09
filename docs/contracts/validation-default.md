@@ -1,71 +1,47 @@
 # Validation default contract
 
-The node validates natively by default. `bitcoinkernel` is an explicit
-opt-in oracle and is never a silent fallback.
+## Current status
 
-## Clauses
+Promotion has **not** happened. `g19_validation_default` records `KeepKernel`.
+`crates/consensus` and `crates/node` still enable `kernel` by default. The binary
+is kernel-free by default; that is not evidence that all product defaults were
+promoted. See the actual feature manifests and the image build separately.
 
-### `VAL-01`: Native strict-Rust validation is the default
+### `VAL-01`: Coordinated default promotion (target)
 
-- The library, binary, and released image build with native Rust
-  validation by default.
-- `bitcoinkernel` is not built into the default artifact. It is an
-  opt-in feature.
-- Default builds compile with `--no-default-features --features fjall` and
-  carry no kernel dependency in the binary's transitive graph.
-- The default validation path is `crates/consensus` and `crates/script`
-  using the strict-Rust cryptography from `crates/script`.
+Promote the library, binary, and released image together only after the evidence
+below is complete. The target default is strict-Rust validation without a
+transitive kernel dependency. `--no-default-features --features fjall` selects
+a candidate build; it does not describe today's library defaults.
 
-### `VAL-02`: `bitcoinkernel` is an explicit oracle
+### `VAL-02`: Explicit oracle (target)
 
-- The `bitcoinkernel` crate is an oracle used only for differential
-  comparison, not for consensus authority.
-- Native and oracle artifacts are built independently, with separate
-  `CARGO_TARGET_DIR` and distinct artifact identities.
-- A kernel result never overrides a native result except in an explicit
-  comparison mode. The kernel result is not published as a chain
-  authority.
-- The kernel feature requires an explicit operator choice. It is not
-  enabled by any default profile.
+Keep native and kernel comparison artifacts in separate `CARGO_TARGET_DIR`s,
+with distinct identities. After promotion, kernel support remains explicit and
+must not silently override a native result. Today's default kernel-enabled
+library path must not be described as oracle-only.
 
 ### `VAL-03`: Promotion is measured and reversible
 
-- The `g19_validation_default` gate flips from kernel to native only after
-  all of the following hold:
-  1. Native parsing, identifier, weight, and Merkle computation match the
-     oracle for the full pinned replay and invalid corpora.
-  2. Full contextual and script parity is achieved against the pinned
-     Core 31.1 reference with zero unexplained mismatches and counted
-     exclusions.
-  3. The strict-Rust cryptographic path passes full signed-spend apply
-     measurement and independent vector verification.
-  4. Stable signed-spend and full-replay evidence is regenerated on the
-     actual final strict artifact; earlier candidate results are not
-     reused.
-- The binary, library, and image defaults flip together with matching
-  manifests and packaging in one changeset.
-- `g19` verdict flips only with evidence recorded in
-  `docs/benchmarks/native-validation-default.md`.
+Required evidence: parsing and contextual/script parity on the pinned valid and
+invalid corpora; independently checked strict-Rust cryptographic vectors; stable
+signed-spend and full-replay measurements on the final artifact; and kernel-free
+closure for each promoted product. Record exclusions and unexplained mismatches.
 
-## Proven by
+`g19_validation_default` checks the recorded verdict against feature defaults.
+It does **not** run those experiments or certify their results. Changing its
+constant is not promotion evidence. Keep `KeepKernel` while required evidence is
+missing or a prerequisite gate is blocked.
 
-- `bin/bitcoin-rs/tests/gates/g19_validation_default.rs` (existing): owns
-  the default promotion verdict.
-- `bin/bitcoin-rs/tests/overhaul_default_closure.rs` (planned): proves the
-  default binary, library, and image are transitively kernel-free and that
-  the oracle remains explicitly available.
-- `crates/script/tests/overhaul_native_crypto.rs` (planned): strict-Rust
-  cryptography, including ECDSA, Schnorr, and Taproot boundary vectors.
-- `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): full
-  contextual and script parity against the Core 31.1 reference.
-- `crates/consensus/tests/overhaul_parse_parity.rs` (planned): one-pass
-  native identifier, weight, and Merkle parity with the oracle.
-- `docs/benchmarks/native-crypto-decision.md` (planned): records the T16
-  strict-Rust cryptographic decision and signed-spend measurement.
-- `docs/benchmarks/native-validation-default.md` (planned): records the
-  measured T17 promotion verdict and the kernel-free closure evidence.
+## Evidence owners
 
-## Vocabulary
+- `bin/bitcoin-rs/tests/gates/g19_validation_default.rs`: feature/default guard.
+- `bin/bitcoin-rs/tests/overhaul_default_closure.rs`: dependency-closure checks,
+  not a signed-spend benchmark.
+- `crates/consensus/tests/overhaul_parse_parity.rs`: golden-fixture parity,
+  not full product-replay parity.
+- [Native validation decision](../benchmarks/native-validation-default.md):
+  measured results, missing campaigns, and retained verdict.
 
-Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
-strict-Rust validation, oracle, default promotion.
+The broader strict-crypto, consensus-matrix, and product promotion campaigns
+remain required work, not proofs supplied by this document.

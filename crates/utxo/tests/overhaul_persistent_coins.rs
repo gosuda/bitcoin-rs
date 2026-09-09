@@ -14,7 +14,7 @@ use bitcoin_rs_storage::{
     ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
 };
 use bitcoin_rs_utxo::set::{
-    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UtxoAdd,
+    BlockChanges, CoinDurability, PersistentUtxoError, PersistentUtxoSet, UndoBatch, UtxoAdd,
 };
 
 type Row = ((ColumnFamily, Vec<u8>), Vec<u8>);
@@ -581,7 +581,7 @@ fn write_failure_requires_recovery_before_serving_or_retrying() {
         Err(PersistentUtxoError::RecoveryRequired)
     ));
     assert!(matches!(
-        coins.undo_block(&Default::default(), CoinDurability::Durable),
+        coins.undo_block(&UndoBatch::default(), CoinDurability::Durable),
         Err(PersistentUtxoError::RecoveryRequired)
     ));
     assert!(matches!(

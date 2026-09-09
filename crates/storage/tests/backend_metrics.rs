@@ -163,6 +163,7 @@ fn assert_gauge_eq(recorder: &LabeledRecorder, key: &str, expected: u64) {
     );
 }
 
+#[cfg(feature = "fjall")]
 #[test]
 fn fjall_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();

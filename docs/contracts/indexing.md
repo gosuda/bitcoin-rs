@@ -5,7 +5,12 @@ asynchronous reconciliation across restarts, reorganizations, and
 selective rebuilds. The index owner, not the node, hosts the runtime.
 Node wires lifecycle; RPC projects status.
 
-Owners:
+Current runtime ownership is `crates/node/src/txindex_worker.rs`. The index-local
+runtime and unified query fences below are targets. The capability adapter now
+projects the attached worker's wake revision, but that diagnostic counter is not
+an atomic snapshot or proof that separately read capability rows are coherent.
+
+Target owners:
 - `crates/index/src/runtime.rs`: lifecycle, reconcile legs, watermark
   production, and query fencing.
 - `crates/index/src/index.rs`, `crates/index/src/types.rs`: schemas and

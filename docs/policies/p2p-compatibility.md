@@ -15,7 +15,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 | Reference implementation | Bitcoin Core |
 | Pinned version | **31.1** (`crates/p2p/src/compat.rs::PINNED_CORE_VERSION`) |
 | Protocol version advertised | `70016` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`) |
-| Transport | v1 envelope is the baseline; BIP324 v2 is optional behind the `bip324` feature, default off (§7) |
+| Transport | v1 only; BIP324 is a target with no Cargo feature or dependency today (§7) |
 
 ### 2.1 Version-Bump Rules
 
@@ -27,7 +27,7 @@ Re-pinning to a newer Core version requires all of:
 
 ## 3. Transport and Envelope
 
-- Bitcoin P2P **v1 envelope baseline** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload. The optional `bip324` feature adds BIP324 v2 framing over the same command surface; see §7.
+- Bitcoin P2P **v1 envelope baseline** (`crates/p2p/src/wire.rs`): 4-byte network magic, 12-byte NUL-padded command, `u32` little-endian payload length, 4-byte checksum (first 4 bytes of double-SHA256 of the payload), then the payload. BIP324 framing is planned, not implemented; see §7.
 - Payload bound: `MAX_MESSAGE_PAYLOAD = 32 MiB`. Core caps messages at 4 MiB; bitcoin-rs is deliberately looser so any protocol-maximal block fits. A peer that Core would disconnect for an oversized message may be accepted here; this is a bound difference, not a relay difference. Retained deviation (§7).
 - Network magic and default ports come from `bitcoin_rs_primitives::Network` and are asserted equal to Core's constants per network (mainnet 8333, testnet3 18333, testnet4 48333, signet 38333, regtest 18444).
 - Fork networks sharing a chain may override the message-start bytes with `--p2p-magic` (a bitcoin-rs extension; requires `--network mainnet` semantics and explicit `--connect` peers). Not a Core option; recorded as extension, not parity.
@@ -36,14 +36,15 @@ Re-pinning to a newer Core version requires all of:
 
 An outbound bitcoin-rs connection sends, in order: `version`, `wtxidrelay` (BIP339), `sendaddrv2` (BIP155), `sendheaders` (BIP130). An inbound connection receives `version` and answers with the same four messages, then `verack` completes readiness (`crates/p2p/src/handshake.rs`, `dispatch.rs`).
 
-With the optional `bip324` feature, a BIP324 transport handshake runs before the message handshake. The negotiation outcome is `V2`, `V1Fallback`, or `Rejected{disconnect class}`. An authentication failure is a documented disconnect. It never selects v1, never reinterprets ciphertext as a downgrade, and never reuses cipher or handshake state across sessions (`crates/p2p/src/connection.rs`, `transport_v2.rs`).
+BIP324 transport negotiation is a target only. No `bip324` feature or
+`transport_v2.rs` exists; the current handshake runs over v1 transport.
 
 The `version` message pins:
 
 | Field | Value | Core 31.1 comparison |
 | :--- | :--- | :--- |
 | `version` | `70016` | matches Core's latest protocol version |
-| `services` | `NETWORK \| WITNESS`, plus `COMPACT_FILTERS` when the compact-filter capability is enabled | honest to capabilities: Core advertises `NETWORK_LIMITED` by default and `COMPACT_FILTERS`/`BLOOM` with the corresponding index or flag; we do not prune, so `NETWORK_LIMITED` stays off, and a disabled capability is never advertised (§7) |
+| `services` | `NETWORK \| WITNESS` | No pruning, compact-filter serving, or bloom service is advertised (§7). |
 | `relay` | `true` | matches a default full-relay node |
 | `user_agent` | `/bitcoin-rs:<version>/` | distinct subver string; Core records it in `getpeerinfo.subver` |
 | `timestamp` | `0` | deviation: we do not send a real clock; Core 31 does not misbehave-score time offsets (live interop evidence), but this remains a recorded deviation |
@@ -68,22 +69,22 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
 | `ping` | Answered with `pong` echoing the nonce, ready peers only; pongs feed peer RTT stats. |
 | `pong` | ignored | Completes outstanding ping RTT accounting. |
-| `inv` | The node announces new blocks and accepted transactions with `inv`. Inbound `inv` gets `getdata` for announced vectors the node does not already hold. Transaction inventory is filtered through the node's admission view (mempool, orphan state, recent rejects); a wtxid-relay peer announcing `MSG_WTX` is asked for `MSG_WTX`. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
-| `getdata` | Blocks stream from the active chain; transaction inventory is served from the mempool and orphan state. With compact blocks negotiated, a compact request may serve the body path and a full block stays the fallback (§7). Misses resolve to one trailing `notfound`. Bound: 50 000 vectors. |
+| `inv` | Accepted transactions are announced to eligible peers other than their source; proactive block announcements are absent. Inbound inventory requests missing objects through `getdata`, with wtxid negotiation and a 50 000-vector bound. |
+| `getdata` | Serves full blocks from the active chain and transactions from the mempool/orphan view. Missing objects produce a trailing `notfound`. Compact-block serving is not implemented. Bound: 50 000 vectors. |
 | `notfound` | ignored | Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
 | `headers` | sink | Forwarded to the node's header-sync pipeline. Bound: ≤ 2 000 headers per message. |
-| `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. Full blocks are the canonical body path alongside compact reconstruction (§7). |
+| `block` | sink | Forwarded to the node block pipeline with original wire bytes. There is no compact-block reconstruction path. |
 | `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel; the ingress consumer admits through the one mempool gateway and announces accepted transactions as `inv(tx)` to peers other than the source. A full channel drops the body so this peer's read loop can still service ping, headers, and blocks; a dropped body stays requestable and is not marked permanently known. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
-| `getaddr` | Answered from the bounded persistent address book (§7). Core answers with an `addr` burst; we answer with bounded `addr`/`addrv2` entries per negotiated format. Discovery state carries its own discovery-owned version and survives restart. |
-| `addr` / `addrv2` | Decoded (bound: 1 000 entries, Core `MAX_ADDR_TO_SEND`) and stored in the bounded persistent address book. Intake has per-message and total caps. Stored entries serve later `getaddr` requests; invalid entries are dropped. |
+| `getaddr` | ignored | No persistent address manager or address response is implemented. |
+| `addr` / `addrv2` | ignored | Decoded with a 1 000-entry bound; no persistent intake or discovery table. |
 | `feefilter` | Enforced for transaction relay announcements (BIP133): a peer whose filter exceeds a transaction's fee rate receives no announcement. We do not send a `feefilter`. Deviation retained. |
-| `sendcmpct` | BIP152 preference recorded per peer and honored in negotiation (§7). We announce compact-block relay, so compatible Core peers send compact blocks; the full block is the fallback. |
-| `cmpctblock` / `getblocktxn` / `blocktxn` | BIP152 implemented (§7). Reconstruction matches short IDs against the peer's announced transaction set, honors prefilled indexes, and requests missing transactions with `getblocktxn`. Ambiguous short IDs or failed exchange validation fall back to a full block. Every reconstructed block enters the ordinary validation path; a short ID is never an authenticated transaction identity. |
+| `sendcmpct` | ignored | No production BIP152 relay negotiation. |
+| `cmpctblock` / `getblocktxn` / `blocktxn` | ignored | Decoded, but not reconstructed or served. BIP152 remains a target (§7). |
 | `merkleblock` / `filterload` / `filteradd` / `filterclear` | ignored | BIP37. We do not advertise `NODE_BLOOM`, so a default Core peer never sends them; if one does, they are ignored. |
-| `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | BIP157/158 compact-filter serving, optional behind the compact-filter capability (§7). When the capability is enabled with retained data, the index owner precomputes filters and this surface serves bounded bytes, including checkpoint headers. When it is off, nothing is advertised and a default Core peer sends none. |
+| `getcfilters` / `cfilter` / `getcfheaders` / `cfheaders` / `getcfcheckpt` / `cfcheckpt` | ignored | Compact-filter serving and advertisement are not implemented. |
 | `reject` | Decoded, never sent. Core 31 no longer emits `reject` for transaction acceptance results. |
 | `alert` | Decoded as opaque bytes, ignored. The command is dead in Core. |
 
@@ -119,9 +120,9 @@ Explicit deltas from Core 31.1. Each item is intentional and safe:
 
 1. **BIP324 v2 transport (target, not present)**: v1 only in this plan; the v2 transport (T28) is out of scope, so no `bip324` feature, dependency, or workspace pin exists today. The target design is an optional non-default feature (`default-features = false`, tokio off): when off, the node advertises nothing and sends no negotiation messages; when on, negotiation ends in `V2`, `V1Fallback`, or `Rejected{disconnect class}`. An authentication failure closes the attempt with its documented disconnect class. It is never reinterpreted as permission to downgrade to v1. Cipher and handshake state are never reused across sessions.
 2. **BIP330 `sendtxrcncl`**: still unimplemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology (bitcoin-rs dials Core; Core sees an inbound peer) never receives it, because Core sends `sendtxrcncl` to outbound peers only.
-3. **Proactive block announcements**: present. The node announces new blocks to its peers with `inv`, `headers` (BIP130 when negotiated), or `cmpctblock` (BIP152 when negotiated). Accepted transactions are announced as `inv(tx)` to peers other than the source (§5). The announcement choice follows negotiation; compact blocks are a bandwidth and latency optimization, never a consensus shortcut.
+3. **Proactive block announcements**: absent. Accepted transactions are relayed to eligible peers other than their source; new blocks are not proactively announced through `inv`, `headers`, or compact-block relay.
 4. **Address management (target, not present)**: the persistent address book is a planned owner, not an implemented one: no `crates/p2p/src/address_book.rs` exists today. The target design is a bounded store with tried and new candidate tables with timestamps and rate bounds, IPv4/IPv6 and selected addrv2 formats, DNS-seed and bootstrap policy, and explicit proxy behavior. `getaddr` served from it, bounded intake per message and in total, discovery state persisted under a discovery-owned version field surviving restart. A corrupt or unknown discovery version degrades to seeded or empty discovery with a typed reseed or rebuild status; it never fails authoritative startup. A rejected discovery file stays in place until an explicit authorized rebuild; no legacy reader exists.
-5. **Service bits**: honest to capabilities. Always `NETWORK | WITNESS`; `NETWORK_LIMITED` stays off because the node does not prune. `NODE_COMPACT_FILTERS` is advertised only when the compact-filter capability is enabled with retained data. `NODE_BLOOM` stays off. A disabled capability is never advertised.
+5. **Service bits**: `NETWORK | WITNESS` only. `NETWORK_LIMITED`, `NODE_COMPACT_FILTERS`, and `NODE_BLOOM` stay off; the corresponding services are not implemented.
 6. **Compact blocks (target, not present)**: BIP152 v1/v2 with `sendcmpct` preference negotiation, short-ID reconstruction, prefilled and missing indexes, and full-block fallback is the planned design; no `crates/p2p/src/compact_block.rs` exists today. Reconstruction output enters the ordinary validation path; no partial or unvalidated block ever commits.
 7. **Timestamp**: `version.timestamp` is always 0 (§4).
 8. **Idle timeout** 60 s vs Core's 20 minutes (§6).
@@ -131,7 +132,7 @@ Explicit deltas from Core 31.1. Each item is intentional and safe:
 ## 8. Verification
 
 - **Deterministic fixtures**: `crates/p2p/tests/core_compat.rs` pins the command inventory against this table and against rust-bitcoin's v1 envelope (`RawNetworkMessage`), the handshake fields and service bits, per-network magic/ports and framing, getheaders/headers semantics and bounds, inv/getdata relay round-trips with `notfound`, the reject-or-ignore matrix of §6, and the peer-visible behavior across a chain switch (reorg) and a restart at the `ChainQuery` seam: a rebuilt query serves byte-identical answers, a switched active branch serves the new branch from the fork point and `notfound`s stale bodies. Run with `cargo test -p bitcoin-rs-p2p --test core_compat`.
-- **Peer contract (planned)**: `crates/p2p/tests/overhaul_peer_contract.rs` (`planned`): handshake exception table, unknown command to its documented disconnect class, oversized payload disconnects (never hangs), discovery state surviving restart, bounded address intake, outbound diversity, and honest service bits. Each assertion fails pre-change for its intended reason.
+- **Peer contract (planned)**: `crates/p2p/tests/overhaul_peer_contract.rs` (`planned`): handshake exception table, unknown commands ignored after readiness and rejected before readiness, oversized payload disconnects (never hangs), discovery state surviving restart, bounded address intake, outbound diversity, and honest service bits. Each assertion fails pre-change for its intended reason.
 - **Download owner (planned)**: `crates/p2p/tests/overhaul_download_owner.rs` (`planned`): one production download scheduler in `P2pService`; the union of requeued requests equals the freed set after disconnect; stale-session completions are ignored by generation and release no new lease; control traffic stays serviceable under block and transaction queue pressure.
 - **Compact blocks (planned)**: `crates/p2p/tests/overhaul_compact_blocks.rs` (`planned`): BIP152 negotiation matrix, prefilled and missing indexes, short-ID collision fallback, byte-equal validation outcome versus ordinary block delivery, and invalidation of incomplete reconstruction on header or parent change.
 - **Optional protocols (planned)**: `crates/p2p/tests/overhaul_optional_protocols.rs` (`planned`): BIP324 vectors, `V2`/`V1Fallback`/`Rejected` negotiation, partial I/O, and the compact-filter wire path, each proven in an enabled lane against the default-off lane that advertises nothing.

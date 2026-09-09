@@ -72,8 +72,8 @@ Owners:
 - Formats are `json` (`application/json`), `hex` (`text/plain`), and
   `bin` (`application/octet-stream`). A disabled gateway and an unknown
   path return 404. Malformed parameters return 400. A well-formed but
-  unknown block hash returns an empty 200, matching the pinned Core
-  behavior.
+  unknown block hash returns 404 on block and block-part routes. Header
+  queries may return an empty 200; do not generalize that route's semantics.
 
 ### `API-04`: ZMQ notification contract
 
@@ -81,8 +81,10 @@ Owners:
   `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence`, with Core
   byte order, sequence counters, and connect, disconnect, and mempool
   ordering.
-- The `sequence` body frame is reversed txid (32 bytes), label byte (1),
-  and little-endian sequence (8): 41 bytes total. `BlockInclusion` emits
+- `sequence` A/R bodies contain reversed txid (32 bytes), label (1), and
+  little-endian mempool sequence (8): 41 bytes. C/D bodies contain the block
+  hash and label only: 33 bytes. The four-byte transport counter is a separate
+  trailing frame for both forms. `BlockInclusion` emits
   no `R` frame; every other removal reason does. One event per change, in
   commit order (`mempool-mutations.md` `MPL-03`).
 - Delivery is bounded and optional. Queue overflow records a sticky gap
@@ -186,6 +188,10 @@ Owners:
 
 ### `API-10`: Broadcast and preview through the admission gateway
 
+**Target.** Current Esplora `POST /tx` delegates to `sendrawtransaction`, using
+RPC origin and limits. Preview still uses a separate policy evaluator rather
+than the gateway verifier. The unified behavior below is not implemented:
+
 - `sendrawtransaction`, `testmempoolaccept`, Esplora `POST /tx`, package
   submissions, and P2P ingress all reach the single `MempoolGateway`
   (`mempool-policy.md` `POL-02`). Each call carries an explicit
@@ -203,6 +209,11 @@ The wallet-facing subset of this surface is owned by
 [wallet-facing.md](wallet-facing.md).
 
 ### `API-11`: Coherent reads, capability errors, and cancellation
+
+**Target, only partially implemented.** In particular, Esplora `script_activity`
+combines index activity and mempool state without a shared `ReadStamp`; concurrent
+transitions can mix views. Existing response-shape tests do not prove coherence.
+The required guarantees are:
 
 - Every mixed chain-and-mempool read carries a `ReadStamp`
   (`architecture.md`). A caller never composes a view from a separately

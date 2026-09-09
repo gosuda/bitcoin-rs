@@ -6,20 +6,20 @@ This document owns the loopback P2P lanes of the target node (gate G7): determin
 
 | Cell | Owner | Metric | Status |
 |---|---|---|---|
-| `replay.live_ibd_loopback` | `P2pService` download window plus commit spine | wall to pinned stop, blocks/s, peak RSS, versus Core `v31.1` fed identical frames | `planned_not_executed` |
+| `replay.live_ibd_loopback` | current node-owned download window; proposed P2P owner | wall to pinned stop, blocks/s, peak RSS, versus Core `v31.1` fed identical frames | `planned_not_executed` |
 | `propagation.block` | `p2p` | announce to validated publication on the receiving node, with and without compact-block reconstruction | `planned_not_executed` |
 | `propagation.tx` | `p2p`, `mempool` | accepted-and-retained transaction reaches an eligible second peer, never the source; fee filter, relay flag and wtxid negotiation honored | `planned_not_executed` |
 | `p2p.requeue_exactness` | `P2pService`, `PeerTable` | on disconnect the requeued set equals the freed set; stale-session completion is a typed no-op | `planned_not_executed` |
 | `p2p.control_under_pressure` | `p2p` | control class serviced within bounded work while bulk queues saturate; drops accounted | `planned_not_executed` |
-| `p2p.optional_off` | `p2p` | with `bip324` and compact filters disabled: no service bits, no negotiation messages, validation identical (`g19` agrees) | `planned_not_executed` |
+| `p2p.optional_off` | `p2p` | with `bip324` and compact filters disabled: no service bits, no negotiation messages, validation equivalence requires a separate comparison | `planned_not_executed` |
 
-Every lane runs the same artifact under both `--features fjall` and `--features fjall,bip324` where the lane concerns transport; the two states must agree on validation. Disconnect classes, payload bounds and handshake exceptions are compared against the pinned Core contract in `crates/p2p/tests/core_compat.rs`.
-
-```bash
-cargo test --locked -p bitcoin-rs-p2p --test overhaul_download_owner -- --nocapture
-cargo test --locked -p bitcoin-rs-p2p --test overhaul_compact_blocks -- --nocapture
-cargo test --locked -p bitcoin-rs-p2p --test overhaul_optional_protocols -- --nocapture
-```
+The transport comparison is blocked on implementing BIP324. `bip324` is not
+an available Cargo feature, so no enabled/disabled transport campaign is
+currently runnable. A future pair needs separately identified artifacts and
+identical validation inputs; `g19` is not transport-equivalence evidence.
+The `overhaul_download_owner`, `overhaul_compact_blocks`, and
+`overhaul_optional_protocols` test targets are planned and do not exist today.
+Current wire checks run with `cargo test -p bitcoin-rs-p2p --test core_compat`.
 
 ## Required identities per sample
 

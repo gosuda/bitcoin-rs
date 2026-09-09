@@ -97,10 +97,11 @@ This is an evidence tool pin. No checker run is claimed by this page.
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
   floating or unpinned. The 1 TB budget applies only to that pinned default
   lane.
-- A reference with only a version label or a mismatched binary digest is
-  rejected with a typed `ReferenceError` variant (`VersionLabelOnly`,
-  `DigestMalformed`, `IdentityConfusion`, `MissingCorpus`) from
-  `crates/rpc/src/compat_manifest.rs`.
+- `load_reference_set` checks manifest shape, required identities, digest
+  syntax, distinct release/development versions, and canonical corpus endpoints.
+  It does not open a binary or compare its bytes with a digest. A well-formed
+  but incorrect digest is not detectable by that loader. Artifact attestation
+  belongs to the campaign harness before it launches or trusts a process.
 - The 31.1 product reference and the 31.99.0 kernel tree are distinct. No
   test may claim product parity against the kernel tree identity.
 - Known deviations are explicit. No status in the manifest upgrades to
@@ -111,7 +112,7 @@ This is an evidence tool pin. No checker run is claimed by this page.
 - `docs/api/core-compat.toml` and `crates/rpc/src/compat_manifest.rs`
   (existing): the machine-readable reference record.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
-  digest-mismatch identities, and pins `corpus_custody()` honesty.
+  malformed-digest and noncanonical-corpus identities, and pins `corpus_custody()` honesty.
 
 ## Vocabulary
 

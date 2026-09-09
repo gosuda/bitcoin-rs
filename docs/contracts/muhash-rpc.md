@@ -42,6 +42,10 @@ keep the original FileRef identity.
 
 ### `MRPC-04`: Coherent whole-UTXO read
 
+**Target, not implemented by the current handler.** It scans UTXOs and obtains
+height/best-block separately. Existing digest fixtures do not prove a non-torn
+answer under a concurrent transition. The required change and evidence are:
+
 - The scan runs over one coherent view stamped with `ReadStamp`
   (`architecture.md`). The reported `height` and `best_block` come from
   the same stamp as the scanned set. The handler never composes the

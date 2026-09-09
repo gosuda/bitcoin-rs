@@ -2,9 +2,9 @@
 //!
 //! Txindex owns lifecycle and progress. This module owns the `getcapabilities`
 //! wire types and the pull seam RPC needs because it cannot depend on `node`.
-//! Every adapter projection — RPC `getcapabilities`, the embedded API, and the
-//! later REST/Esplora projections — carries one runtime revision taken from
-//! the same snapshot; adapters never invent a separate readiness revision.
+//! The runtime revision is a wake counter, not an atomic snapshot token. The
+//! revision and capability row are read separately; consumers must not use it
+//! as a chain/index consistency fence.
 //! See the indexing contract's `IDX-02` for the capability rules.
 
 use serde::{Deserialize, Serialize};
@@ -68,13 +68,9 @@ pub struct CapabilityStatus {
 /// Point-in-time status report for concrete node capabilities.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapabilitySnapshot {
-    /// One runtime revision for the whole projection.
-    ///
-    /// The revision identifies the runtime state behind every row, so callers
-    /// comparing snapshots never mix rows from different runtime states. All
-    /// status adapters report this single value from the same source.
-    /// Deserialization defaults to `0` so snapshots serialized before the
-    /// field existed still parse.
+    /// Runtime wake revision, or zero when the source does not track one.
+    /// This diagnostic value is read separately from the capability row.
+    /// Deserialization defaults to zero for older reports.
     #[serde(default)]
     pub revision: u64,
     /// Status rows in the node's stable capability order.
@@ -86,11 +82,7 @@ pub trait TxIndexCapabilitySource: Send + Sync {
     /// Compiled/enabled/lifecycle row for the txindex capability.
     fn capability(&self) -> CapabilityStatus;
 
-    /// Runtime revision shared by every status adapter projection.
-    ///
-    /// One revision covers all rows served from this source, so adapters
-    /// comparing snapshots agree on the runtime state they describe. The
-    /// default `0` serves sources that do not track a runtime revision yet.
+    /// Diagnostic runtime wake revision, not a coherent-state fence.
     fn revision(&self) -> u64 {
         0
     }
