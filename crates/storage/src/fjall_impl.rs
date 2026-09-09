@@ -102,27 +102,14 @@ impl FjallStore {
 
         // Apply boundary: the engine commit that lands the batch atomically.
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
-            return match fault {
-                crate::PersistFault::FailApply => Err(fault.injected_error()),
-                crate::PersistFault::LostApply => {
-                    // The engine write is dropped. Only paths that promise no
-                    // crash durability may report success.
-                    if durability == Some(PersistMode::SyncAll) {
-                        Err(fault.injected_error())
-                    } else {
-                        Ok(())
-                    }
-                }
-                crate::PersistFault::PartialApply => {
-                    // A strict prefix is staged into the engine batch and the
-                    // boundary then faults: the never-committed batch leaves
-                    // no family with a partial view.
-                    let mut fjall_batch = self.db.batch();
-                    self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops))?;
-                    Err(fault.injected_error())
-                }
-                _ => unreachable!("take_at only releases Apply-boundary faults"),
-            };
+            if fault == crate::PersistFault::PartialApply {
+                // A strict prefix is staged into the engine batch and the
+                // boundary then faults: the never-committed batch leaves
+                // no family with a partial view.
+                let mut fjall_batch = self.db.batch();
+                self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops))?;
+            }
+            return Err(fault.injected_error());
         }
 
         if durability == Some(PersistMode::SyncAll) {
@@ -132,12 +119,7 @@ impl FjallStore {
                 let mut fjall_batch = self.db.batch();
                 self.stage_ops(&mut fjall_batch, batch.ops)?;
                 fjall_batch.commit().map_err(StorageError::backend)?;
-                return match fault {
-                    crate::PersistFault::FailSync | crate::PersistFault::LostSync => {
-                        Err(fault.injected_error())
-                    }
-                    _ => unreachable!("take_at only releases Sync-boundary faults"),
-                };
+                return Err(fault.injected_error());
             }
         }
 
@@ -256,11 +238,7 @@ impl KvStore for FjallStore {
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "fjall").increment(1);
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
-            return match fault {
-                crate::PersistFault::FailFlush => Err(fault.injected_error()),
-                crate::PersistFault::LostFlush => Ok(()),
-                _ => unreachable!("take_at only releases Flush-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         // Fjall journals are crash-consistent before fsync; SyncAll requests full durability.
         self.db
