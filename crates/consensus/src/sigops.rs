@@ -5,6 +5,7 @@
 //! remain owned by `bitcoin-rs-script`.
 
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
+use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{
     Instruction, instructions, is_p2sh, is_push_only, is_witness_program,
 };
@@ -15,13 +16,15 @@ use hashbrown::HashMap;
 ///
 /// The counting rules are documented in the repository's
 /// [mempool policy](https://github.com/gosuda/bitcoin-rs/blob/main/docs/policies/mempool-policy.md).
-/// This function does not verify scripts or select activation flags.
+/// This function does not verify scripts or select activation flags. Witness
+/// costs require the caller's active `VerifyFlags::WITNESS`; legacy and P2SH
+/// accounting retain the repository's existing always-on BIP16 policy.
 ///
 /// Callers may supply incomplete or unordered prevouts and must retain their
 /// own missing-input and validation status. Input order permits a linear pass
 /// without allocation; other input orders build one borrowed lookup index.
 #[must_use]
-pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
+pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -> u32 {
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     // Core's coinbase cost never includes previous-output or witness sigops.
     if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
@@ -56,13 +59,15 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
         if let Some(script) = redeem {
             cost = cost.saturating_add(count_accurate(script).saturating_mul(4));
         }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(count_segwit(program, &input.witness));
+        if flags.contains(VerifyFlags::WITNESS) {
+            let witness_program = if is_witness_program(&prevout.script_pubkey) {
+                Some(prevout.script_pubkey.as_slice())
+            } else {
+                redeem.filter(|script| is_witness_program(script))
+            };
+            if let Some(program) = witness_program {
+                cost = cost.saturating_add(count_segwit(program, &input.witness));
+            }
         }
     }
     cost
@@ -120,6 +125,7 @@ mod tests {
                         script_pubkey: p2sh,
                     }
                 )],
+                VerifyFlags::STANDARD,
             ),
             0
         );
@@ -167,7 +173,10 @@ mod tests {
                     script_pubkey,
                 },
             )];
-            assert_eq!(super::transaction_sigop_cost(&tx, &prevouts), expected);
+            assert_eq!(
+                super::transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
+                expected
+            );
         }
     }
 
@@ -202,8 +211,14 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(super::transaction_sigop_cost(&tx, &prevouts), 3);
-        assert_eq!(super::transaction_sigop_cost(&tx, &[]), 0);
+        assert_eq!(
+            super::transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
+            3
+        );
+        assert_eq!(
+            super::transaction_sigop_cost(&tx, &[], VerifyFlags::STANDARD),
+            0
+        );
     }
 
     /// BIP141 charges one sigop for each resolved P2WPKH input. Interleaved
@@ -238,8 +253,82 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(transaction_sigop_cost(&tx, &prevouts), INPUTS / 2);
+        assert_eq!(
+            transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
+            INPUTS / 2
+        );
         prevouts.reverse();
-        assert_eq!(transaction_sigop_cost(&tx, &prevouts), INPUTS / 2);
+        assert_eq!(
+            transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
+            INPUTS / 2
+        );
+    }
+    /// Core v31.1 `CountWitnessSigOps` returns zero without WITNESS.
+    /// P2SH is explicitly enabled in both contexts; the repository's separate
+    /// always-on P2SH policy is not changed by this BIP141 activation check.
+    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L1974-L1997>
+    #[test]
+    fn witness_sigop_cost_follows_the_active_bip141_flags() {
+        let p2sh = [
+            vec![opcode::OP_HASH160, 0x14],
+            vec![1; 20],
+            vec![opcode::OP_EQUAL],
+        ]
+        .concat();
+        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
+        let p2wsh = [vec![0x00, 0x20], vec![2; 32]].concat();
+        let multisig = vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG];
+        let cases = [
+            (p2sh.clone(), push_data(&multisig), Vec::new(), 12, 12),
+            (p2wpkh, Vec::new(), Vec::new(), 4, 5),
+            (p2wsh.clone(), Vec::new(), vec![multisig.clone()], 4, 6),
+            (p2sh, push_data(&p2wsh), vec![multisig], 4, 6),
+        ];
+        for (script_pubkey, script_sig, witness, inactive_cost, active_cost) in cases {
+            let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[1; 32])), 0);
+            let tx = Tx {
+                version: 2,
+                inputs: vec![TxIn {
+                    previous_output: outpoint,
+                    script_sig,
+                    sequence: u32::MAX,
+                    witness,
+                }],
+                outputs: vec![TxOut {
+                    value: 9_000,
+                    script_pubkey: vec![opcode::OP_CHECKSIG],
+                }],
+                lock_time: 0,
+            };
+            let prevouts = [(
+                outpoint,
+                TxOut {
+                    value: 10_000,
+                    script_pubkey,
+                },
+            )];
+            assert_eq!(
+                transaction_sigop_cost(&tx, &prevouts, VerifyFlags::P2SH),
+                inactive_cost
+            );
+            // Preserve the repository's existing P2SH accounting policy even
+            // for callers whose execution flags omit P2SH.
+            assert_eq!(
+                transaction_sigop_cost(&tx, &prevouts, VerifyFlags::NONE),
+                inactive_cost
+            );
+            assert_eq!(
+                transaction_sigop_cost(
+                    &tx,
+                    &prevouts,
+                    VerifyFlags::P2SH.union(VerifyFlags::WITNESS)
+                ),
+                active_cost
+            );
+            assert_eq!(
+                transaction_sigop_cost(&tx, &prevouts, VerifyFlags::STANDARD),
+                active_cost
+            );
+        }
     }
 }

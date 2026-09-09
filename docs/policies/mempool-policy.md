@@ -13,11 +13,16 @@ facts using `bitcoin_rs_consensus::transaction_sigop_cost` for transaction-level
 counting, implemented in `crates/consensus/src/sigops.rs`. Primitive script
 counters remain in `bitcoin_rs_script::sigops`. Consensus verification, submission, preview, and
 reorg preparation share that transaction counter without a second validation
-engine. Legacy and P2SH sigops carry the witness scale factor; witness-v0
+engine. Consensus supplies the active verification flags; submission, preview,
+and reorg accounting use `VerifyFlags::STANDARD`. Witness costs require an
+active `WITNESS` flag, while existing P2SH accounting is unchanged. Legacy and P2SH sigops carry the witness scale factor; witness-v0
 sigops carry unit cost, following
 [BIP141](https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops)
 and Core 31.1's
 [`GetTransactionSigOpCost`](https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp).
+`witness_sigop_cost_follows_the_active_bip141_flags` and
+`assume_valid_and_prepared_sigop_checks_follow_witness_activation` prove the
+flag boundary, including assume-valid and prepared block checks.
 Incomplete preview context remains explicitly missing-input context; it is
 not evidence that scripts or relative locks have been validated.
 

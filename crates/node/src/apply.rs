@@ -2318,7 +2318,6 @@ fn prove_window<'a>(
         // same reason the script checks are batched across blocks rather than
         // split within one.
         let mut units = Vec::with_capacity(prepared.len());
-        let mut flags: Vec<bitcoin_rs_script::VerifyFlags> = Vec::with_capacity(prepared.len());
         for (index, ((block, unit), context)) in blocks
             .iter()
             .zip(prepared.iter_mut())
@@ -2348,22 +2347,17 @@ fn prove_window<'a>(
                 &mut unit.view,
                 context.height,
                 context.locktime_cutoff,
+                context.flags,
                 &unit.kernel_block,
             ) {
-                Ok(checks) => {
-                    units.push(checks);
-                    // Pushed together with the unit so the two stay aligned:
-                    // collecting flags from every context would misalign them
-                    // against a units list that skipped some.
-                    flags.push(context.flags);
-                }
+                Ok(checks) => units.push(checks),
                 Err(_) => return Vec::new(),
             }
         }
         metrics::histogram!("node.window.checks_seconds")
             .record(checks_started.elapsed().as_secs_f64());
         let verify_started = quanta::Instant::now();
-        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units, &flags);
+        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
         metrics::histogram!("node.window.verify_seconds")
             .record(verify_started.elapsed().as_secs_f64());
         if verdict.is_err() {
@@ -3555,6 +3549,7 @@ fn run_non_script_checks_only(
     txids: &[Txid],
     height: u32,
     locktime_cutoff: u32,
+    flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     if !tx_plan.needs_local_utxo_overlay {
         block.txs.par_iter().try_for_each(|tx| {
@@ -3567,6 +3562,7 @@ fn run_non_script_checks_only(
                 &*resolved,
                 height,
                 locktime_cutoff,
+                flags,
             )
         })?;
         return Ok(());
@@ -3583,6 +3579,7 @@ fn run_non_script_checks_only(
             &view,
             height,
             locktime_cutoff,
+            flags,
         )?;
         view.spend_inputs(tx);
         view.add_outputs(tx_index, *txid, tx.outputs.len())?;
@@ -3630,6 +3627,7 @@ fn verify_block_transactions(
             view.txids(),
             context.height,
             context.locktime_cutoff,
+            context.flags,
         );
     }
     // Full-verify: resolve every transaction's prevouts serially in block order
