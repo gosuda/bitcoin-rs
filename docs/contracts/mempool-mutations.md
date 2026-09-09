@@ -171,7 +171,8 @@ state (`crates/mempool/src/orphan.rs`).
   `DisconnectedCandidates` in `crates/mempool/src/reconsider.rs` owns
   candidate accounting and an index into earlier offered transaction bodies.
   It resolves full previous outputs, including scripts, from restored coins
-  or those retained bodies and uses the shared fee/vsize/sigop accounting.
+  or those retained bodies and uses the shared fee/vsize preparation and
+  consensus-owned transaction sigop accounting.
   Node supplies ordered transactions and its coin view while retaining the
   chain transition.
   The batch deliberately runs under the reserved odd generation rather

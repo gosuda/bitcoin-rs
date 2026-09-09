@@ -5,10 +5,10 @@ use std::time::Instant;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 
 use crate::block_view::BlockView;
+use crate::sigops::transaction_sigop_cost;
 #[cfg(not(feature = "kernel"))]
 use bitcoin_rs_script::Interpreter;
 use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::sigops::count_tx_sigop_cost;
 use rayon::prelude::*;
 
 use crate::rust_path::UtxoView;
@@ -289,7 +289,7 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
     }
 
     let _ = 0usize;
-    let sigop_cost = count_tx_sigop_cost(tx, &prep.prevouts);
+    let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -1915,7 +1915,9 @@ mod tests {
     fn decode_hex(hex: &str) -> Vec<u8> {
         assert!(hex.len().is_multiple_of(2), "hex string has odd length");
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digits = std::str::from_utf8(pair).unwrap_or_else(|_| panic!("hex ascii"));
                 u8::from_str_radix(digits, 16).unwrap_or_else(|_| panic!("hex digit"))

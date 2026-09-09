@@ -8,12 +8,9 @@
 //! data pushes are skipped, and a malformed push ends the count (Core's
 //! `if (!GetOp(pc, opcode)) break;`).
 
-use bitcoin_rs_primitives::{Block, OutPoint, Tx, TxOut};
+use bitcoin_rs_primitives::{Block, Tx};
 
-use crate::script::{
-    EarlyEndOfScript, Instruction, instructions, is_p2sh, is_p2wpkh, is_p2wsh, is_push_only,
-    is_witness_program, opcode,
-};
+use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
 /// Counts legacy sigops in a script (Core's `GetSigOpCount(false)`).
 pub fn count_legacy(script: &[u8]) -> u32 {
@@ -64,73 +61,6 @@ pub fn count_tx_legacy(tx: &Tx) -> u32 {
         count = count.saturating_add(count_legacy(&output.script_pubkey));
     }
     count
-}
-
-/// Counts BIP141 transaction sigop cost against resolved previous outputs.
-///
-/// Legacy and P2SH sigops cost four units; witness-v0 sigops cost one. Nested
-/// witness programs require a P2SH prevout and a push-only scriptSig. Taproot
-/// retains its separate per-input budget. These are counting rules, not script
-/// verification or activation decisions; callers retain their validation flags
-/// and activation checks. Missing prevouts contribute no contextual sigops.
-///
-/// Prevouts may be incomplete or unordered. Input order permits a linear pass
-/// without allocation, which is the normal admission/consensus preparation order.
-/// The rules follow BIP141 and Core v31.1 `GetTransactionSigOpCost`,
-/// `CScript::GetSigOpCount` and `CountWitnessSigOps`.
-#[must_use]
-pub fn count_tx_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
-    let mut cost = count_tx_legacy(tx).saturating_mul(4);
-    // Core's coinbase cost never includes previous-output or witness sigops.
-    if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
-        return cost;
-    }
-    let mut cursor = 0;
-    for input in &tx.inputs {
-        let prevout = if let Some((outpoint, output)) = prevouts.get(cursor)
-            && *outpoint == input.previous_output
-        {
-            cursor += 1;
-            output
-        } else if let Some((index, (_, output))) = prevouts
-            .iter()
-            .enumerate()
-            .find(|(_, (outpoint, _))| *outpoint == input.previous_output)
-        {
-            cursor = index + 1;
-            output
-        } else {
-            continue;
-        };
-        let redeem = if is_p2sh(&prevout.script_pubkey) && is_push_only(&input.script_sig) {
-            last_push(&input.script_sig)
-        } else {
-            None
-        };
-        if let Some(script) = redeem {
-            cost = cost.saturating_add(count_accurate(script).saturating_mul(4));
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(count_segwit(program, &input.witness));
-        }
-    }
-    cost
-}
-
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
 }
 
 /// Counts the legacy sigop cost of a whole block without prevout resolution.
@@ -280,92 +210,5 @@ mod tests {
             txs: vec![tx.clone(), tx],
         };
         assert_eq!(count_block(&block), 42);
-    }
-    /// Core v31.1 counts P2SH and nested witness only behind a P2SH output
-    /// with a push-only scriptSig. The library oracle differs on the first
-    /// malformed-script vector, so these expectations come directly from Core.
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp#L170-L189>
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L1974-L1997>
-    #[test]
-    fn transaction_sigop_cost_uses_prevout_type_and_push_only_redeem_rules() {
-        let p2sh = [
-            vec![opcode::OP_HASH160, 0x14],
-            vec![1; 20],
-            vec![opcode::OP_EQUAL],
-        ]
-        .concat();
-        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
-        let cases = [
-            (
-                p2sh.clone(),
-                [vec![opcode::OP_DUP], push_data(&[opcode::OP_CHECKSIG])].concat(),
-                0,
-            ),
-            (
-                vec![crate::eval::OP_DROP, opcode::OP_PUSHNUM_1],
-                push_data(&p2wpkh),
-                0,
-            ),
-            (p2sh, push_data(&p2wpkh), 1),
-        ];
-        for (script_pubkey, script_sig, expected) in cases {
-            let tx = Tx {
-                version: 2,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::new(Txid::default(), 0),
-                    script_sig,
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
-                }],
-                outputs: vec![TxOut {
-                    value: 1,
-                    script_pubkey: Vec::new(),
-                }],
-                lock_time: 0,
-            };
-            let prevouts = [(
-                tx.inputs[0].previous_output,
-                TxOut {
-                    value: 2,
-                    script_pubkey,
-                },
-            )];
-            assert_eq!(super::count_tx_sigop_cost(&tx, &prevouts), expected);
-        }
-    }
-
-    #[test]
-    fn transaction_sigop_cost_resolves_partial_and_unordered_prevouts() {
-        let tx = Tx {
-            version: 2,
-            inputs: (0..3)
-                .map(|vout| TxIn {
-                    previous_output: OutPoint::new(Txid::default(), vout),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: vec![vec![pushnum(2), opcode::OP_CHECKMULTISIG]],
-                })
-                .collect(),
-            outputs: Vec::new(),
-            lock_time: 0,
-        };
-        let prevouts = [
-            (
-                tx.inputs[2].previous_output,
-                TxOut {
-                    value: 2,
-                    script_pubkey: [vec![0x00, 0x20], vec![3; 32]].concat(),
-                },
-            ),
-            (
-                tx.inputs[0].previous_output,
-                TxOut {
-                    value: 2,
-                    script_pubkey: [vec![0x00, 0x14], vec![4; 20]].concat(),
-                },
-            ),
-        ];
-        assert_eq!(super::count_tx_sigop_cost(&tx, &prevouts), 3);
-        assert_eq!(super::count_tx_sigop_cost(&tx, &[]), 0);
     }
 }
