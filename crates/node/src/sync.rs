@@ -7424,7 +7424,9 @@ mod tests {
                 hashes.push(*last);
             }
             hashes = hashes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let mut buffer = [0_u8; 64];
                     buffer[..32].copy_from_slice(&pair[0]);

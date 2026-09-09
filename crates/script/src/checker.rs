@@ -1221,7 +1221,9 @@ mod tests {
 
     fn hex_decode(s: &str) -> Vec<u8> {
         s.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| {
                 let hex = std::str::from_utf8(chunk).expect("hex chars are ASCII");
                 u8::from_str_radix(hex, 16).unwrap_or_else(|e| panic!("hex decode: {e}"))

@@ -911,7 +911,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, RpcError> {
 
     let chunk_count = bytes.len() / 4;
     let mut out = Vec::with_capacity(chunk_count * 3);
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let last = index + 1 == chunk_count;
         let pad2 = chunk[2] == b'=';
         let pad3 = chunk[3] == b'=';
@@ -2698,8 +2698,6 @@ mod acceptance_tests {
 mod combinepsbt_tests {
     use alloc::sync::Arc;
 
-    use sonic_rs::JsonValueTrait as _;
-
     use super::*;
 
     fn empty_psbt_str() -> String {
@@ -2738,10 +2736,8 @@ mod combinepsbt_tests {
 mod finalizepsbt_tests {
     use alloc::sync::Arc;
 
-    use bitcoin::hashes::Hash as _;
     use bitcoin::sighash::SighashCache;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use sonic_rs::JsonValueTrait as _;
 
     use super::*;
 

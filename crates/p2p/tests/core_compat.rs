@@ -73,12 +73,12 @@ fn genesis_block() -> Result<Block, Box<dyn Error>> {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut chunks = hex.as_bytes().chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("odd hex length".into());
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in &mut chunks {
+    for pair in chunks {
         let high = hex_nibble(pair[0])?;
         let low = hex_nibble(pair[1])?;
         bytes.push((high << 4) | low);

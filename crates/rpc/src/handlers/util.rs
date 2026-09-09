@@ -1702,7 +1702,6 @@ mod descriptor_checksum_tests {
 #[cfg(test)]
 mod deriveaddresses_tests {
     use alloc::sync::Arc;
-    use sonic_rs::JsonContainerTrait as _;
 
     use super::*;
 
