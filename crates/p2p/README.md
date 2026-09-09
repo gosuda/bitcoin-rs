@@ -34,10 +34,10 @@ download scheduler, outbound transaction relay, and RPC methods (`getpeerinfo`,
 `getnetworkinfo`, `disconnectnode`) — observe and mutate live connections exclusively
 through `PeerTable`.
 
-`TxInventory` adapts gateway queries to inbound peer requests. Transaction
-ownership follows
+Transaction inventory, parent requests, and outbound relay are P2P consumers of the
+shared transaction lifecycle. The authoritative cross-crate ownership split is
 [ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary);
-supported wire behavior follows
+peer-visible inventory and relay behavior are defined in
 [P2P compatibility](../../docs/policies/p2p-compatibility.md).
 
 `PeerManager` owns DNS resolver and seed configuration and bootstraps outbound

@@ -20,8 +20,8 @@ the ZMQ protocol and transport; node constructs its `ZmqPublisher`, attaches the
 mempool observer, and orders publication with committed chain effects. `signal`
 and `shutdown` bridge process signals into graceful shutdown.
 
-`tx_ingress` wires peer submissions and committed results into the node runtime.
-Transaction ownership and lifecycle boundaries follow
+For transactions, node supplies the chain view and wires the runtime workers and
+committed-result handoffs. The authoritative cross-crate ownership split is
 [ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
 
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
