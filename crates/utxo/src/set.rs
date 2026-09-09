@@ -1443,9 +1443,6 @@ pub enum PersistentUtxoError {
     /// A guarded durable write found the stored row in an unexpected state.
     #[error("guarded coin write found a mismatched row for txid {0}")]
     ConditionMismatch(Txid),
-    /// A stored record failed canonical validation on reload.
-    #[error("stored coin record failed validation for txid {0}")]
-    CorruptStoredRecord(Txid),
 }
 
 /// Byte-level ledger of a [`PersistentUtxoSet`]: resident tables plus the
