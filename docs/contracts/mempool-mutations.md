@@ -70,10 +70,12 @@ state (`crates/mempool/src/orphan.rs`).
   `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
 - `Mempool::sequence_number` advances exactly once per emitted change while
   the write lock is held. A failed insert, a no-op removal, and a clear of
-  an empty pool assign nothing.
+  an empty pool assign nothing. The `u64` counter wraps from `u64::MAX` to
+  `0` rather than dropping a committed change.
 - `MutationResult::sequence_of(index)` returns a sequence only for a change
   present in that result. Empty results and out-of-range indices return
-  `None`; in-range lookups retain checked sequence arithmetic.
+  `None`; in-range offsets use the same wrapping `u64` arithmetic as the
+  sequence counter.
 
 ### `MPL-03`: ZeroMQ sequence event payload mapping
 
