@@ -1,14 +1,8 @@
-//! T03 — Enforce owner boundaries before moving code.
+//! ARCH-01/ARCH-02/ARCH-08 ownership boundary checks.
 //!
-//! This test validates:
-//!
-//! 1. The five-layer one-way dependency direction on real `cargo metadata`.
-//! 2. Synthetic upward dependency edges fail the gate.
-//! 3. Synthetic storage-engine leaks outside `bitcoin-rs-storage` fail the gate.
-//! 4. No production code outside `crates/mempool/src/` calls a mutating
-//!    `Mempool` method or acquires the pool write lock.
-//! 5. Known `NodeState` forwarding wrappers around `P2pService` handles are
-//!    exactly the set approved for T24/T28 collapse; any new wrapper fails.
+//! The suite validates dependency direction, storage-engine confinement,
+//! single mempool mutation ownership, and the frozen P2P forwarding-wrapper
+//! inventory.
 
 #![expect(
     clippy::expect_used,
@@ -116,10 +110,6 @@ fn mempool_writer_source_scan_passes() {
     );
 }
 
-/// Known forwarding wrappers in `NodeState` that clone or delegate to
-/// `P2pService` handles. They are approved boundaries for T24/T28 because
-/// collapsing them requires migrating P2P callers across the node and RPC
-/// surface.
 const KNOWN_P2P_FORWARDING_WRAPPERS: &[&str] = &[
     "peer_table",
     "banned_subnets",
@@ -155,8 +145,6 @@ fn p2p_forwarding_wrapper_audit_is_frozen() {
         "new NodeState forwarding wrappers must be collapsed or approved: {unexpected:?}"
     );
 
-    // Every known wrapper must still exist in the source; if one was collapsed
-    // without removing it from this list, the list has drifted.
     let missing: Vec<_> = KNOWN_P2P_FORWARDING_WRAPPERS
         .iter()
         .filter(|w| !found.iter().any(|f| f.as_str() == **w))
@@ -197,9 +185,6 @@ fn scan_node_p2p_forwarding_wrappers() -> Vec<String> {
             continue;
         }
 
-        // `#[cfg(test)]` stops scanning only when it introduces a test *module*.
-        // `#[test]` introduces a unit-test function and stops scanning from that
-        // point onward. Intervening attributes like `#[allow(...)]` are skipped.
         if trimmed.starts_with("#[cfg(test)]") {
             let mut is_test_module = false;
             for next in lines.iter().skip(index + 1) {
@@ -242,13 +227,12 @@ fn scan_node_p2p_forwarding_wrappers() -> Vec<String> {
             }
         }
 
-        // Scope to `impl NodeState {`. Leave when another `impl` starts, or a
-        // `}` at the same indentation as the `impl` closes it.
-        if in_impl_node_state {
-            if leading_spaces == 0 && (trimmed.starts_with("impl ") || trimmed.starts_with('}')) {
-                in_impl_node_state = false;
-                current_method = None;
-            }
+        if in_impl_node_state
+            && leading_spaces == 0
+            && (trimmed.starts_with("impl ") || trimmed.starts_with('}'))
+        {
+            in_impl_node_state = false;
+            current_method = None;
         }
         if trimmed.starts_with("impl NodeState {") || trimmed == "impl NodeState" {
             in_impl_node_state = true;
@@ -259,23 +243,15 @@ fn scan_node_p2p_forwarding_wrappers() -> Vec<String> {
             continue;
         }
 
-        // Very coarse method-boundary detection: a `pub fn` at the top level
-        // of the `impl NodeState` block.
         if trimmed.starts_with("pub fn ") || trimmed.starts_with("pub(crate) fn ") {
             if let Some(name) = trimmed.split("fn ").nth(1) {
                 current_method = name.split('(').next().map(|s| s.trim().to_owned());
-                // `open` is the node constructor; `new` is not in `impl NodeState`
-                // but guard both so the audit stays robust if the impl is reorganized.
-                if current_method.as_deref() == Some("open")
-                    || current_method.as_deref() == Some("new")
-                {
+                if matches!(current_method.as_deref(), Some("open" | "new")) {
                     current_method = None;
                 }
             }
         }
 
-        // Detect the wrapper pattern: the method body reaches into a P2P-owned
-        // field or calls a `P2pService` handle accessor.
         let p2p_field = line.contains("p2p_outbound_tx")
             || line.contains("p2p_outbound_rx")
             || line.contains("inbound_blocks_rx")
@@ -292,12 +268,11 @@ fn scan_node_p2p_forwarding_wrappers() -> Vec<String> {
             || line.contains("self.p2p.inbound_blocks_rx()")
             || line.contains("self.p2p.inbound_tx_rx()");
 
-        if p2p_field || p2p_call {
-            if let Some(method) = current_method.as_ref() {
-                if !wrappers.contains(method) {
-                    wrappers.push(method.clone());
-                }
-            }
+        if (p2p_field || p2p_call)
+            && let Some(method) = current_method.as_ref()
+            && !wrappers.contains(method)
+        {
+            wrappers.push(method.clone());
         }
     }
 
