@@ -1785,9 +1785,7 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
         else {
             return Ok(UtxoKey::from_txid(&Txid::from(*txid)));
         };
-        let record = crate::record::UtxoRecord::from_stored_bytes(&stored)
-              .map_err(|_| PersistentUtxoError::CorruptStoredRecord(Txid::from(*txid)))?;
-          /*
+        let Ok(record) = crate::record::UtxoRecord::from_stored_bytes(&stored) else {
             // An unparseable stored row is left to the write path: a
             // guarded write fails the condition honestly against the raw
             // foreign bytes, and an unguarded write overwrites the row with
@@ -1795,8 +1793,7 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
             return Ok(UtxoKey::from_txid(&Txid::from(*txid)));
         };
         let key = UtxoKey::from_txid(&Txid::from(*txid));
-        */
-          self.set.shards[usize::from(key.shard())].insert_encoded_record(key, record);
+        self.set.shards[usize::from(key.shard())].insert_encoded_record(key, record);
         self.resident_order.lock().push_back(*txid);
         Ok(key)
     }
