@@ -1,24 +1,27 @@
 # Reference set contract
 
 A readable projection of the `[reference]` record in
-`docs/api/core-compat.toml` and the corresponding record in
-`bin/bitcoin-rs/tests/support/reference_set.rs`. `ReferenceSet` is the identity record
-inside the compatibility manifest. It is not a separate registry and not a
-new public type.
+`docs/api/core-compat.toml` and its typed validation in
+`bin/bitcoin-rs/tests/support/reference_set.rs`. `ReferenceSet` is the parsed
+identity record used by the test and formal gates. It is not a separate
+registry and not a new public type.
 
-This page is a readable projection only. On conflict, the two manifest files
-`docs/api/core-compat.toml` and `bin/bitcoin-rs/tests/support/reference_set.rs` govern.
+This page is a readable projection only. On conflict,
+`docs/api/core-compat.toml` governs the reference values and
+`bin/bitcoin-rs/tests/support/reference_set.rs` governs their typed validation.
 A version label alone is never custody.
 
 ## Clauses
 
-### `REF-01`: Manifest files govern
+### `REF-01`: Manifest values and parser validation govern
 
-- The `[reference]` record in `docs/api/core-compat.toml` and the
-  corresponding record in `bin/bitcoin-rs/tests/support/reference_set.rs` are the
-  machine-readable authorities.
+- The `[reference]` record in `docs/api/core-compat.toml` is the
+  machine-readable authority for reference identity values.
+- `bin/bitcoin-rs/tests/support/reference_set.rs` is the typed parser that
+  enforces required identities, digest formats, corpus presence, and product
+  versus kernel-tree separation.
 - `docs/contracts/reference-set.md` is a readable projection. It does not
-  override the manifest files on conflict.
+  override the manifest values or parser validation on conflict.
 - A version label alone is never custody. A reference must carry source and
   binary identities.
 
@@ -72,9 +75,9 @@ The product corpora are defined in
   UTXO total.
 
 `manifest_sha256` is optional and absent from the manifest until the archive
-exists; `corpus_custody()` in `bin/bitcoin-rs/tests/support/reference_set.rs` reports such
-a corpus as `Blocked { missing: "manifest_sha256" }` rather than inventing a
-digest.
+exists; `corpus_custody()` in
+`bin/bitcoin-rs/tests/support/reference_set.rs` reports such a corpus as
+`Blocked { missing: "manifest_sha256" }` rather than inventing a digest.
 
 Each corpus archive uses the Core-framed format with a manifest digest
 produced at export time. A length-prefixed diagnostic file is not a product
@@ -108,8 +111,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 ## Proven by
 
-- `docs/api/core-compat.toml` and `bin/bitcoin-rs/tests/support/reference_set.rs`
-  (existing): the machine-readable reference record.
+- `docs/api/core-compat.toml`: the machine-readable reference identity values.
+- `bin/bitcoin-rs/tests/support/reference_set.rs`: typed parsing and custody
+  validation for those values.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
   digest-mismatch identities, and pins `corpus_custody()` honesty.
 
