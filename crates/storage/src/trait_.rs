@@ -118,13 +118,17 @@ pub enum PersistFault {
     /// than reporting completion.
     FailSync,
     /// Lost durability completion: the sync step is silently dropped after
-    /// the batch applied. The call may report success; a reopen observes the
-    /// whole batch or none of it, never a cross-family mix.
+    /// the batch applied. Reachable only through the fault harness
+    /// ([`KvStore::arm_persist_fault`]), never synthesized by a production
+    /// path: the call may report success, and classification happens at
+    /// reopen, which observes the whole batch or none of it, never a
+    /// cross-family mix.
     LostSync,
     /// `flush` faults without completing deferred durability: the call
     /// returns `Err`.
     FailFlush,
-    /// Lost flush: `flush` returns `Ok` without performing the sync; a reopen
+    /// Lost flush: `flush` returns `Ok` without performing the sync, reachable
+    /// only through the fault harness like [`PersistFault::LostSync`]; a reopen
     /// observes each earlier batch whole or not at all.
     LostFlush,
 }
@@ -204,9 +208,11 @@ impl PersistFaultSlot {
 /// [`Self::write_deferred`] make a batch visible without promising it
 /// survived a crash; only [`Self::write_durable`], [`Self::write_durable_if`],
 /// and a successful [`Self::flush`] complete durability. A durability
-/// completion never precedes the persisted writes it vouches for: when the
-/// persistence step is lost or faults, the call surfaces `Err` instead of
-/// reporting completion.
+/// completion never precedes the persisted writes it vouches for: an
+/// observed persistence fault surfaces as `Err` instead of reporting
+/// completion. A silently lost completion is simulated only by the fault
+/// harness ([`PersistFault::LostSync`], [`PersistFault::LostFlush`]) and
+/// is caught by reopen and identity checks, never by the return value.
 ///
 /// [`Self::snapshot`] captures one point-in-time view across families and
 /// never mixes pre-batch and post-batch state. [`Self::snapshot`] plus
@@ -279,8 +285,9 @@ pub trait KvStore: Send + Sync + 'static {
     /// The default implementation applies the batch via [`Self::write_deferred`] and then
     /// calls [`Self::flush`]. Backends may override this with a single synchronous atomic
     /// commit that is both applied and durable before returning. `Ok(())` vouches that the
-    /// required bytes are persisted: a lost or faulted persistence step surfaces as `Err`,
-    /// so completion never precedes the persisted write.
+    /// required bytes are persisted: an observed lost or faulted persistence step
+    /// surfaces as `Err`, so completion never precedes the persisted write; a
+    /// harness-simulated silent loss is classified at reopen, not by the return.
     fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         self.write_deferred(batch)?;
         self.flush()
@@ -298,8 +305,10 @@ pub trait KvStore: Send + Sync + 'static {
     /// condition names, observes any batch effect, and the durable pre-batch state
     /// survives reopen unchanged. An unknown family, failed lookup, or backend error
     /// while evaluating any condition propagates as `Err` and is never reported as a
-    /// mismatch; a fault at the persistence boundary likewise surfaces as `Err`, never
-    /// as `Ok(true)`. Evaluation and commit are atomic with respect to every writer the
+    /// mismatch; an observed fault at the persistence boundary likewise surfaces as
+    /// `Err`, never as `Ok(true)`. A harness-simulated silent loss
+    /// ([`PersistFault::LostSync`]) may still report `Ok(true)`; it is caught by
+    /// reopen and identity checks. Evaluation and commit are atomic with respect to every writer the
     /// backend permits to coexist on the same database: the backend holds one write
     /// boundary across all condition reads and the commit.
     fn write_durable_if(
@@ -313,6 +322,8 @@ pub trait KvStore: Send + Sync + 'static {
     /// `Err` means durability completion was not established: the affected
     /// writes stay visible in-process and each recovers whole or not at all
     /// across families after a reopen, never as a cross-family mix.
+    /// A harness-simulated silent loss ([`PersistFault::LostFlush`]) may
+    /// still report `Ok`; it is classified at reopen.
     fn flush(&self) -> Result<(), StorageError>;
 
     /// Captures a point-in-time read snapshot.
