@@ -55,7 +55,11 @@ fn signed_spend() -> (Tx, Vec<TxOut>) {
     };
     for (index, key) in keys.iter().enumerate() {
         let hash = SighashCache::new(&oracle)
-            .taproot_key_spend_signature_hash(index, &Prevouts::All(&prevouts), TapSighashType::Default)
+            .taproot_key_spend_signature_hash(
+                index,
+                &Prevouts::All(&prevouts),
+                TapSighashType::Default,
+            )
             .unwrap_or_else(|error| panic!("oracle BIP341 digest: {error}"));
         let signature = secp.sign_schnorr_no_aux_rand(
             &Message::from_digest(*hash.as_byte_array()),
@@ -123,8 +127,9 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     assert!(verify(&altered_tx, &prevouts, 0).is_err());
 }
 
-/// The public interpreter may receive replacement witness bytes from a vector
-/// caller. It must verify those bytes without changing the caller's transaction.
+/// The replacement-byte contract is documented by [`Interpreter::execute`] in
+/// `crates/script/src/interpreter.rs`: supplied witness bytes are verified without
+/// changing the caller's transaction.
 #[test]
 fn supplied_witness_is_verified_without_mutating_the_transaction() {
     let (tx, prevouts) = signed_spend();
@@ -149,7 +154,9 @@ fn supplied_witness_is_verified_without_mutating_the_transaction() {
     assert_eq!(corrupted_tx.inputs[0].witness, stored_witness);
 }
 
-/// The input-boundary contract returns the typed error before indexing prevouts.
+/// The [`ScriptError::InputIndexOutOfRange`] contract in
+/// `crates/script/src/interpreter.rs` requires [`Interpreter::execute_with_prevouts`]
+/// to return the typed error before indexing prevouts.
 #[test]
 fn invalid_input_index_is_a_typed_error() {
     let (tx, prevouts) = signed_spend();
