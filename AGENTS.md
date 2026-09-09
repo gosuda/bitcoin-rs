@@ -17,6 +17,9 @@ and `docs/contracts/`, not in this file.
   procedure and an explicitly authorized fresh directory, never an implicit reset.
 - Remove superseded code with its replacement and migrate affected callers. Keep
   compatibility adapters only where a current public contract requires them.
+- `docs/policies/source-compatibility.md` §3.4 owns TLS transport and provider
+  policy. Review TLS configuration and dependency features against it, and keep
+  `deny.toml` aligned with that policy.
 - Test observable behavior against named current contracts and independent pinned
   references. Missing tools, corpora, or identities block their checks; they do not
   make a passing result. Preserve historical evidence as historical evidence.
