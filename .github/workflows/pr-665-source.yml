@@ -1,0 +1,39 @@
+name: PR 665 source snapshot
+
+on:
+  push:
+    branches: [review/pr-665-workspace]
+    paths: ['.github/workflows/pr-665-source.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: tools
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d10455da83725690429d85cd8c184c99a18580e7
+          path: source
+          persist-credentials: false
+      - name: Archive pinned inputs
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          git -C source archive HEAD | gzip > snapshot/source.tar.gz
+          git -C tools archive HEAD .review | gzip > snapshot/review-tools.tar.gz
+          git -C source rev-parse HEAD > snapshot/SOURCE_COMMIT
+          cd snapshot
+          sha256sum *.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-665-source
+          path: snapshot/
+          retention-days: 1
+          if-no-files-found: error
