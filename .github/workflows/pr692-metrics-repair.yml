@@ -16,14 +16,17 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Preserve repair script and switch to pinned main
+      - name: Preserve repair scripts and switch to pinned main
         run: |
           cp .github/scripts/pr692_metrics_repair.py "$RUNNER_TEMP/pr692_metrics_repair.py"
-          git fetch origin main
-          git checkout -B fix/pr692-startup-metrics-20260910 2aab3aefa78016d30dd26ddbb9c10314ce4c8e41
-          test "$(git rev-parse HEAD)" = "2aab3aefa78016d30dd26ddbb9c10314ce4c8e41"
+          cp .github/scripts/pr692_metrics_repair_v2.py "$RUNNER_TEMP/pr692_metrics_repair_v2.py"
+          git fetch origin main fix/pr692-startup-metrics-20260910
+          git checkout -B fix/pr692-startup-metrics-20260910 f846c7fbeed40e70431cf83ab4f2cb656bf9ea0b
+          test "$(git rev-parse HEAD)" = "f846c7fbeed40e70431cf83ab4f2cb656bf9ea0b"
       - name: Apply startup metrics repair
-        run: python3 "$RUNNER_TEMP/pr692_metrics_repair.py"
+        run: |
+          python3 "$RUNNER_TEMP/pr692_metrics_repair.py"
+          python3 "$RUNNER_TEMP/pr692_metrics_repair_v2.py"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt,clippy
@@ -33,6 +36,7 @@ jobs:
           cargo fmt --all
           git diff --check
           cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=1
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib run::tests::late_start_failure_releases_metrics_identity_and_keeps_startup_metrics -- --exact --test-threads=1
           cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: Publish verified follow-up branch
         run: |
@@ -40,4 +44,4 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates/node/src/metrics.rs crates/node/src/run.rs
           git commit -m 'fix(node): make startup metrics transactional across threads'
-          git push --force-with-lease origin HEAD:fix/pr692-startup-metrics-20260910
+          git push origin HEAD:fix/pr692-startup-metrics-20260910
