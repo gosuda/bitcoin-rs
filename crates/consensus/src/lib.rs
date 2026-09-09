@@ -46,10 +46,10 @@ pub mod block_view;
 pub mod kernel;
 /// Portable Rust validator.
 pub mod rust_path;
-/// Consensus transaction sigop-cost accounting.
-pub mod sigops;
 /// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
+/// Consensus transaction sigop-cost accounting.
+pub mod sigops;
 /// Block rule checks.
 pub mod verify_block;
 /// Transaction rule checks.
@@ -141,46 +141,123 @@ pub enum ConsensusError {
     #[error("block first transaction is not coinbase")]
     MissingCoinbase,
     /// A non-first transaction is coinbase.
-    #[error("block contains multiple coinbase transactions")]
-    MultipleCoinbase,
-    /// Transaction merkle root does not match the block header.
+    #[error("block transaction {tx_index} is coinbase outside position 0")]
+    ExtraCoinbase {
+        /// Transaction index.
+        tx_index: usize,
+    },
+    /// Block merkle tree has a duplicate subtree mutation.
+    #[error("block merkle tree contains a duplicate transaction mutation")]
+    MerkleMutation,
+    /// Block merkle root does not match transaction ids.
     #[error("block merkle root mismatch")]
-    MerkleRootMismatch,
-    /// Block weight exceeds the BIP141 maximum.
+    MerkleRoot,
+    /// The coinbase claims more than the subsidy plus the fees the block earned.
+    ///
+    /// Bitcoin Core's `bad-cb-amount`. Nothing else bounds what a coinbase may
+    /// pay itself, so this is the rule that keeps a miner from creating money.
+    #[error("coinbase pays {paid} sats but only {allowed} sats are available")]
+    CoinbaseAmount {
+        /// Total value the coinbase outputs claim.
+        paid: u64,
+        /// Block subsidy plus the fees of the block's other transactions.
+        allowed: u64,
+    },
+    /// Summing a block's values overflowed the satoshi range.
+    #[error("block value total overflows the satoshi range")]
+    BlockValueOverflow,
+    /// Block witness commitment does not match.
+    #[error("block witness commitment mismatch")]
+    WitnessCommitment,
+    /// Block weight exceeds consensus maximum.
     #[error("block weight {weight} exceeds max {max}")]
-    BlockWeightExceeded {
+    BlockWeight {
         /// Observed block weight.
         weight: u64,
         /// Consensus maximum block weight.
         max: u64,
     },
-    /// Block transaction vector and resolved-prevout matrix lengths differ.
-    #[error("resolved prevout matrix has {actual} rows for {expected} transactions")]
-    PrevoutMatrixSize {
-        /// Number of transactions in the block.
-        expected: usize,
-        /// Number of resolved-prevout rows supplied.
-        actual: usize,
-    },
-    /// Block subsidy/fee total or another money-valued consensus arithmetic overflowed.
-    #[error("consensus money arithmetic overflow")]
-    MoneyOverflow,
-    /// A BIP-specific rule failed.
+    /// BIP rule check failed.
     #[error("{bip}: {reason}")]
     Bip {
-        /// Short BIP identifier.
+        /// BIP identifier.
         bip: &'static str,
-        /// Human-readable rule failure.
+        /// Failure reason.
         reason: String,
     },
-    /// Kernel-backed verification failed outside an input-script verdict.
-    #[error("kernel verification failed: {0}")]
+    /// Block-level verification received the wrong number of prevout rows.
+    #[error("block prevout matrix has {actual} rows for {expected} transactions")]
+    PrevoutMatrixSize {
+        /// Number of block transactions that require rows.
+        expected: usize,
+        /// Number of supplied prevout rows.
+        actual: usize,
+    },
+    /// Kernel path failed or is not configured for the requested operation.
+    #[error("kernel validation failed: {0}")]
     Kernel(String),
+    /// Consensus encoding or decoding failed.
+    #[error("consensus encoding failed: {0}")]
+    Encoding(String),
 }
 
-/// Consensus maximum money in satoshis (21 million BTC).
+/// Maximum valid money supply in satoshis.
 pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
-/// BIP141 block weight limit.
-pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
-/// Consensus transaction/block sigop-cost limit.
+
+/// Coinbase subsidy at `height`, in satoshis.
+///
+/// Bitcoin Core's `GetBlockSubsidy`. `halving_interval` comes from the network
+/// (`Network::subsidy_halving_interval`) rather than being fixed at 210 000,
+/// because regtest halves every 150 blocks — hard-coding the mainnet interval
+/// would compute the wrong subsidy on the one network where a halving is
+/// reachable in a test.
+#[must_use]
+pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
+    const INITIAL_SUBSIDY_SATS: u64 = 50 * 100_000_000;
+
+    if halving_interval == 0 {
+        return INITIAL_SUBSIDY_SATS;
+    }
+    let halvings = height / halving_interval;
+    // Core stops at 64 shifts; past that the subsidy is zero and shifting a
+    // u64 by 64 or more is undefined.
+    if halvings >= 64 {
+        return 0;
+    }
+    INITIAL_SUBSIDY_SATS >> halvings
+}
+
+/// Verifies that a block's coinbase claims no more than it earned.
+///
+/// `fees` is the sum over the block's non-coinbase transactions of input value
+/// minus output value; `coinbase_out` is what the coinbase pays itself. Core
+/// applies this in `ConnectBlock` and rejects with `bad-cb-amount`.
+///
+/// Paying *less* than the maximum is allowed, as it is in Core — the
+/// difference is simply destroyed.
+///
+/// # Errors
+///
+/// Returns [`ConsensusError::CoinbaseAmount`] when the coinbase claims more
+/// than the subsidy plus `fees`, or [`ConsensusError::BlockValueOverflow`] if
+/// that sum leaves the satoshi range.
+pub const fn verify_coinbase_amount(
+    coinbase_out: u64,
+    fees: u64,
+    height: u32,
+    halving_interval: u32,
+) -> Result<(), ConsensusError> {
+    let Some(allowed) = block_subsidy(height, halving_interval).checked_add(fees) else {
+        return Err(ConsensusError::BlockValueOverflow);
+    };
+    if coinbase_out > allowed {
+        return Err(ConsensusError::CoinbaseAmount {
+            paid: coinbase_out,
+            allowed,
+        });
+    }
+    Ok(())
+}
+
+/// Maximum block sigop cost after segwit scaling.
 pub const MAX_BLOCK_SIGOPS_COST: u32 = 80_000;
