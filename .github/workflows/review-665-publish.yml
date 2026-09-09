@@ -1,0 +1,104 @@
+name: Prepare PR 665 patch merge
+on:
+  push:
+    branches: [review/pr-665-publish-860f1b93]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: work
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: transfer
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 860f1b93a1341985562e2bb8787d07642431dc91
+          path: work
+      - name: Reconstruct and verify reviewed tree
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 57532f2d4b18d48dac7bb7d450226961f2988bde
+          git restore --source=57532f2d4b18d48dac7bb7d450226961f2988bde --staged --worktree -- .gitignore AGENTS.md crates/node/src/apply.rs crates/node/src/sync.rs crates/rpc/tests/core_parity.rs crates/rpc/tests/corpus/core-31.1/06_notification_no_id.json crates/rpc/tests/support/compare.rs crates/rpc/tests/support/fixture.rs crates/rpc/tests/support/http.rs crates/rpc/tests/support/mod.rs
+          python3 - <<'PY'
+          import base64, hashlib, pathlib, subprocess, tomllib, zlib
+          patch = zlib.decompress(base64.b64decode(pathlib.Path('../transfer/publish.patch.zlib.b64').read_text(), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '3cbbee76a415883cb707cd847044d22923d6419b4fa6031418eb0ac26ca0e15f'
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          tree = subprocess.check_output(['git', 'write-tree'], text=True).strip()
+          assert tree == '39122158184baac6288f7284594fc124cc9c96ad', tree
+          for path in pathlib.Path('.').rglob('*.toml'):
+              if '.git' not in path.parts:
+                  tomllib.loads(path.read_text())
+          reference = tomllib.loads(pathlib.Path('docs/api/core-compat.toml').read_text())['reference']
+          assert reference['release']['core_version'] == '31.1'
+          assert [row['id'] for row in reference['corpora']] == ['C150', 'Cmodern']
+          assert reference['corpora'][0]['manifest_sha256']
+          assert reference['formal_tool']['version'] == '0.62.2'
+          print('Exact reviewed tree and authoritative reference groups verified:', tree)
+          PY
+          git diff --cached --check
+          mkdir -p "$RUNNER_TEMP/review-665-results"
+          python3 tools/campaign-corpus/test_corpus.py 2>&1 | tee "$RUNNER_TEMP/review-665-results/corpus.log"
+      - name: Publish candidate commit only
+        id: candidate
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          commit=$(git commit-tree 39122158184baac6288f7284594fc124cc9c96ad -p 860f1b93a1341985562e2bb8787d07642431dc91 -p 57532f2d4b18d48dac7bb7d450226961f2988bde <<'MSG'
+          Merge main and apply saved PR 665 review patches
+
+          Preserve the six newer PR commits and integrate main through 57532f2d.
+          Retain canonical release and corpus pins while removing duplicate TOML.
+          Simplify agent guidance and ignore rules; remove duplicate gate code.
+          Preserve newer block-weight and JVM-default fixes. Fix checkpoint
+          pressure reporting and corpus write-tail recovery. Return errors for
+          lost durable completions, including guarded redb writes, and cover
+          them in the durability matrix. Reconcile API clause identifiers with
+          main's fixture provenance contract.
+
+          Verified exact tree reconstruction, TOML parsing, diff whitespace,
+          and 76 corpus tests. Broader review findings remain outstanding;
+          this commit does not claim complete Rust or formal verification.
+          MSG
+          )
+          git push origin "$commit:refs/heads/review/pr-665-patch-candidate-860f1b93"
+          git reset --hard "$commit"
+          printf 'sha=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          printf 'candidate=%s\ntree=%s\npr_parent=%s\nmain_parent=%s\n' "$commit" 39122158184baac6288f7284594fc124cc9c96ad 860f1b93a1341985562e2bb8787d07642431dc91 57532f2d4b18d48dac7bb7d450226961f2988bde | tee "$RUNNER_TEMP/review-665-results/identity.txt"
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt
+      - name: Check Rust formatting
+        id: fmt
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo fmt --all -- --check 2>&1 | tee "$RUNNER_TEMP/review-665-results/fmt.log"
+      - name: Check durable storage matrix
+        id: storage
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-storage --no-default-features --features fjall,redb --test overhaul_atomic_durability 2>&1 | tee "$RUNNER_TEMP/review-665-results/storage.log"
+      - name: Record individual check outcomes
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/review-665-results"
+          printf 'candidate=%s\nformatting=%s\nstorage=%s\n' '${{ steps.candidate.outcome }}' '${{ steps.fmt.outcome }}' '${{ steps.storage.outcome }}' | tee "$RUNNER_TEMP/review-665-results/outcomes.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: review-665-publish-results
+          path: ${{ runner.temp }}/review-665-results/
+          retention-days: 7
+          if-no-files-found: error
