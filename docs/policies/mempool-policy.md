@@ -18,6 +18,9 @@ sigops carry unit cost, following
 [BIP141](https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops)
 and Core 31.1's
 [`GetTransactionSigOpCost`](https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp).
+RPC package preparation retains full outputs, including scripts, from earlier
+package transactions when resolving descendant accounting. Value-only synthetic
+outputs must not erase P2SH or witness costs.
 Incomplete preview context remains explicitly missing-input context; it is
 not evidence that scripts or relative locks have been validated.
 
@@ -129,6 +132,10 @@ Explicit deltas from Core 31.1, each intentional and known:
   `reconsidered_prevout_cost_reaches_the_mining_sigop_budget`
   (`crates/mining/tests/coinbase_template.rs`) checks the stored reorg cost
   against template selection's sigop budget.
+- **Package-parent accounting**: `package_prevouts_preserve_contextual_sigops_without_mutating_the_pool`
+  in `crates/rpc/src/handlers/tx.rs` checks native and nested witness/P2SH
+  costs against BIP141 and rust-bitcoin, preserves missing-output classification,
+  and leaves pool membership and sequence unchanged.
 - A policy change that alters any §3 row must update its fixture in the same commit; a fixture that no longer compiles against the doc is the defect (anti-shim rule).
 
 See also [docs/contracts/mempool-policy.md](../contracts/mempool-policy.md) for the contracts index and precedence rule.

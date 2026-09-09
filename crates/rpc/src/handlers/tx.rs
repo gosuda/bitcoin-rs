@@ -783,7 +783,7 @@ fn package_contexts(
     pool: &bitcoin_rs_mempool::Mempool,
     txs: &[Tx],
 ) -> Vec<MempoolPackageTxContext> {
-    let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
+    let mut package_outputs: HashMap<OutPoint, &TxOut> = HashMap::new();
     let mut contexts = Vec::with_capacity(txs.len());
 
     for tx in txs {
@@ -795,15 +795,8 @@ fn package_contexts(
                 missing_inputs = true;
                 continue;
             }
-            let key = (input.previous_output.txid, input.previous_output.vout);
-            if let Some(value) = package_outputs.get(&key) {
-                prevouts.push((
-                    input.previous_output,
-                    TxOut {
-                        value: *value,
-                        script_pubkey: Vec::new(),
-                    },
-                ));
+            if let Some(&output) = package_outputs.get(&input.previous_output) {
+                prevouts.push((input.previous_output, output.clone()));
                 continue;
             }
             if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
@@ -820,14 +813,12 @@ fn package_contexts(
             missing_inputs = true;
         }
 
-        // Package outputs deliberately retain the existing value-only facts;
-        // completing preview script verification is a separate contract.
         contexts.push(prepared_context(tx, &prevouts, missing_inputs));
 
         let txid = tx.txid();
         for (vout, output) in tx.outputs.iter().enumerate() {
             let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert((txid, vout), output.value);
+            package_outputs.insert(OutPoint::new(txid, vout), output);
         }
     }
 
@@ -1072,6 +1063,87 @@ mod tests {
                 .collect();
         }
         layer.first().copied().unwrap_or_default()
+    }
+
+    /// POL-01 / BIP141: package prevouts retain scripts for contextual sigop cost.
+    /// This exercises accounting, not the separately scoped preview script checks.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
+    #[test]
+    fn package_prevouts_preserve_contextual_sigops_without_mutating_the_pool() {
+        let p2sh = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
+        let p2wsh = [vec![0x00, 0x20], vec![3; 32]].concat();
+        let multisig = vec![0x52, 0xae];
+        let cases = [
+            (p2wpkh, Vec::new(), Vec::new(), 5),
+            (p2sh.clone(), super::push_data(&multisig), Vec::new(), 12),
+            (p2wsh.clone(), Vec::new(), vec![multisig.clone()], 6),
+            (p2sh, super::push_data(&p2wsh), vec![multisig], 6),
+        ];
+        for (prevout_script, script_sig, witness, expected) in cases {
+            let ctx = Context::new();
+            let pool = ctx.mempool.read();
+            let sequence = pool.sequence_number();
+            let parent = Tx {
+                version: 2,
+                lock_time: 0,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0),
+                    script_sig: Vec::new(),
+                    sequence: u32::MAX,
+                    witness: Vec::new(),
+                }],
+                outputs: vec![TxOut {
+                    value: 9_000,
+                    script_pubkey: prevout_script,
+                }],
+            };
+            let child = Tx {
+                version: 2,
+                lock_time: 0,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(parent.txid(), 0),
+                    script_sig,
+                    sequence: u32::MAX,
+                    witness,
+                }],
+                outputs: vec![TxOut {
+                    value: 8_000,
+                    script_pubkey: vec![0xac],
+                }],
+            };
+            // Independent rust-bitcoin accounting, with explicit BIP141 costs:
+            // one legacy output CHECKSIG costs four; input costs are 1, 8, 2, 2.
+            let oracle: bitcoin::Transaction =
+                bitcoin::consensus::deserialize(&consensus_bytes(&child))
+                    .expect("accounting fixture must decode in the independent oracle");
+            let oracle_output = bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(parent.outputs[0].value),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                    parent.outputs[0].script_pubkey.clone(),
+                ),
+            };
+            assert_eq!(
+                u64::try_from(oracle.total_sigop_cost(|_| Some(oracle_output.clone()))),
+                Ok(expected)
+            );
+            let txs = [parent, child];
+            let contexts = super::package_contexts(&ctx, &pool, &txs);
+            assert!(contexts[0].missing_inputs);
+            assert!(!contexts[1].missing_inputs);
+            assert_eq!(contexts[1].fee, 1_000);
+            assert_eq!(u64::from(contexts[1].vsize), txs[1].vsize());
+            assert_eq!(u64::from(contexts[1].sigop_cost), expected);
+
+            // An existing package parent cannot fabricate a nonexistent output.
+            let mut missing = txs[1].clone();
+            missing.inputs[0].previous_output.vout = 1;
+            let contexts = super::package_contexts(&ctx, &pool, &[txs[0].clone(), missing]);
+            assert!(contexts[1].missing_inputs);
+            assert_eq!(contexts[1].fee, 0);
+            assert_eq!(pool.sequence_number(), sequence);
+            assert!(pool.is_empty());
+        }
     }
 
     #[test]
