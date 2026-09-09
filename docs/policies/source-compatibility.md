@@ -8,11 +8,14 @@ This policy applies to every crate in the `bitcoin-rs` workspace (`crates/*`) an
 
 ## 2. Toolchain and Language Edition
 
-Language and toolchain settings are locked centrally in `rust-toolchain.toml` and root `Cargo.toml`.
+The repository development toolchain is selected by `rust-toolchain.toml`.
+Language edition and the compatibility floor are owned by the root `Cargo.toml`,
+with Clippy's compatibility behavior mirrored in `clippy.toml`.
 
 | Setting | Value | Configuration Source |
 | :--- | :--- | :--- |
-| Minimum Supported Rust Version (MSRV) | `1.95.0` | `rust-toolchain.toml`, `Cargo.toml` (`rust-version`) |
+| Development Rust toolchain | `stable` | `rust-toolchain.toml` |
+| Minimum Supported Rust Version (MSRV) | `1.95.0` | `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`) |
 | Rust Language Edition | `2024` | `Cargo.toml` (`workspace.package.edition`) |
 | Strict Workspace Lints | Enabled | `Cargo.toml` (`workspace.lints`) |
 
@@ -21,7 +24,7 @@ Language and toolchain settings are locked centrally in `rust-toolchain.toml` an
 - MSRV increases only under these conditions:
   1. A required upstream dependency bumps its MSRV floor beyond `1.95.0`.
   2. A new standard library feature or compiler capability is strictly necessary for consensus correctness or performance.
-- An MSRV bump requires updating `rust-toolchain.toml`, root `Cargo.toml` (`rust-version`), and workspace documentation simultaneously.
+- An MSRV bump requires updating root `Cargo.toml` (`rust-version`), `clippy.toml` (`msrv`), and workspace documentation simultaneously. The repository development toolchain remains `stable`.
 
 ## 3. Dependency Policy
 
