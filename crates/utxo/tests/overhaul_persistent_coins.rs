@@ -437,7 +437,8 @@ fn ledger_counts_tables_and_retained_versions() {
     );
     assert_eq!(ledger.resident.records, 1, "record resident");
 
-    // Finish the creation window before retaining an existing row.
+    // CONTRACT: PersistentUtxoSet::flush commits the deferred durability window
+    // before a mutation can retain the committed row's before-image.
     set.flush().expect("commit initial creation");
 
     // A mutation under Deferred retains the prior version's bytes.
