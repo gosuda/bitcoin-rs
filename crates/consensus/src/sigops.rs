@@ -136,7 +136,7 @@ mod tests {
     /// Core v31.1 activates nested witness accounting only behind P2SH.
     /// These expectations come directly from Core's witness sigop rules.
     /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp#L170-L189>
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L1974-L1997>
+    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L2139-L2166>
     #[test]
     fn transaction_sigop_cost_uses_prevout_type_and_push_only_redeem_rules() {
         let p2sh = [
@@ -269,7 +269,7 @@ mod tests {
     /// Core v31.1 `CountWitnessSigOps` returns zero without WITNESS.
     /// P2SH is explicitly enabled in both contexts; the repository's separate
     /// always-on P2SH policy is not changed by this BIP141 activation check.
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L1974-L1997>
+    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L2139-L2166>
     #[test]
     fn witness_sigop_cost_follows_the_active_bip141_flags() {
         let p2sh = [

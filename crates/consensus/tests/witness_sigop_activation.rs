@@ -3,7 +3,7 @@
 //! Contract: BIP141, "Witness program" and "Sigops":
 //! <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki>
 //! Core v31.1 counts witness sigops only with WITNESS enabled:
-//! <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L1974-L1997>
+//! <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/interpreter.cpp#L2139-L2166>
 //! `VerifyFlags::filled` owns this library's CLEANSTACK -> WITNESS -> P2SH
 //! implications. The kernel must apply them before masking out policy bits.
 
