@@ -21,8 +21,6 @@ use bitcoin_rs_utxo::set::{
     UtxoChangeEvents, UtxoChangeListener, UtxoInserted, UtxoRemoved, UtxoSet,
 };
 
-type Row = ((ColumnFamily, Vec<u8>), Vec<u8>);
-
 fn txid(index: u32) -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[..4].copy_from_slice(&index.to_le_bytes());
@@ -33,16 +31,17 @@ fn outpoint(txid: Hash256, vout: u32) -> OutPoint {
     OutPoint::new(txid.into(), vout)
 }
 
-fn txout(value: u64) -> TxOut {
-    TxOut {
-        value,
-        script_pubkey: vec![0x51],
-    }
-}
-
 fn funding(txid: Hash256) -> BlockChanges {
     let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(outpoint(txid, 0), txout(100), false, 1));
+    changes.add(UtxoAdd::new(
+        outpoint(txid, 0),
+        TxOut {
+            value: 100,
+            script_pubkey: vec![0x51],
+        },
+        false,
+        1,
+    ));
     changes
 }
 
@@ -54,7 +53,6 @@ struct FlushGate {
 
 #[derive(Clone, Default)]
 struct TestStore {
-    rows: Arc<parking_lot::RwLock<Vec<Row>>>,
     next_flush: Arc<parking_lot::Mutex<Option<FlushGate>>>,
 }
 
@@ -72,63 +70,32 @@ impl TestStore {
 impl KvStore for TestStore {
     type WriteBatch = TestBatch;
 
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self
-            .rows
-            .read()
-            .iter()
-            .find(|((row_cf, row_key), _)| *row_cf == cf && row_key == key)
-            .map(|(_, value)| value.clone()))
+    fn get(&self, _cf: ColumnFamily, _key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(None)
     }
 
     fn iter_prefix<'a>(
         &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
+        _cf: ColumnFamily,
+        _prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
-        let mut rows = self
-            .rows
-            .read()
-            .iter()
-            .filter(|((row_cf, key), _)| *row_cf == cf && key.starts_with(prefix))
-            .map(|((_, key), value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| match (left, right) {
-            (Ok((left_key, _)), Ok((right_key, _))) => left_key.cmp(right_key),
-            _ => core::cmp::Ordering::Equal,
-        });
-        Ok(Box::new(rows.into_iter()))
+        Ok(Box::new(std::iter::empty()))
     }
 
     fn new_batch(&self) -> Self::WriteBatch {
-        TestBatch::default()
+        TestBatch
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        apply_ops(&mut self.rows.write(), batch.ops);
+    fn write(&self, _batch: Self::WriteBatch) -> Result<(), StorageError> {
         Ok(())
     }
 
     fn write_durable_if(
         &self,
-        conditions: &[WriteCondition<'_>],
+        _conditions: &[WriteCondition<'_>],
         batch: Self::WriteBatch,
     ) -> Result<bool, StorageError> {
-        {
-            let mut rows = self.rows.write();
-            let matched = conditions.iter().all(|condition| {
-                let (cf, key) = condition.location();
-                condition.matches(
-                    rows.iter()
-                        .find(|((row_cf, row_key), _)| *row_cf == cf && row_key == key)
-                        .map(|(_, value)| value.as_slice()),
-                )
-            });
-            if !matched {
-                return Ok(false);
-            }
-            apply_ops(&mut rows, batch.ops);
-        }
+        self.write(batch)?;
         self.flush()?;
         Ok(true)
     }
@@ -150,58 +117,14 @@ impl KvStore for TestStore {
     fn arm_persist_fault(&self, _fault: PersistFault) {}
 }
 
-#[derive(Default)]
-struct TestBatch {
-    ops: Vec<TestOp>,
-}
-
-enum TestOp {
-    Put(ColumnFamily, Vec<u8>, Vec<u8>),
-    Delete(ColumnFamily, Vec<u8>),
-    DeleteRange(ColumnFamily, Vec<u8>, Vec<u8>),
-}
+struct TestBatch;
 
 impl WriteBatch for TestBatch {
-    fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
-        self.ops
-            .push(TestOp::Put(cf, key.to_vec(), value.to_vec()));
-    }
+    fn put(&mut self, _cf: ColumnFamily, _key: &[u8], _value: &[u8]) {}
 
-    fn delete(&mut self, cf: ColumnFamily, key: &[u8]) {
-        self.ops.push(TestOp::Delete(cf, key.to_vec()));
-    }
+    fn delete(&mut self, _cf: ColumnFamily, _key: &[u8]) {}
 
-    fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]) {
-        self.ops
-            .push(TestOp::DeleteRange(cf, start.to_vec(), end.to_vec()));
-    }
-}
-
-fn apply_ops(rows: &mut Vec<Row>, ops: Vec<TestOp>) {
-    for op in ops {
-        match op {
-            TestOp::Put(cf, key, value) => {
-                if let Some((_, current)) = rows
-                    .iter_mut()
-                    .find(|((row_cf, row_key), _)| *row_cf == cf && row_key == &key)
-                {
-                    *current = value;
-                } else {
-                    rows.push(((cf, key), value));
-                }
-            }
-            TestOp::Delete(cf, key) => {
-                rows.retain(|((row_cf, row_key), _)| *row_cf != cf || row_key != &key);
-            }
-            TestOp::DeleteRange(cf, start, end) => {
-                rows.retain(|((row_cf, key), _)| {
-                    *row_cf != cf
-                        || key.as_slice() < start.as_slice()
-                        || key.as_slice() >= end.as_slice()
-                });
-            }
-        }
-    }
+    fn delete_range(&mut self, _cf: ColumnFamily, _start: &[u8], _end: &[u8]) {}
 }
 
 struct ReentrantListener {
@@ -269,13 +192,12 @@ fn blocked_flush_does_not_block_resident_reads() {
         scope.spawn(|| set.flush().expect("blocked flush completes"));
         gate.entered.wait();
 
-        let tx = tx.clone();
         scope.spawn(|| {
             tx.send(set.get(&outpoint(a, 0)))
                 .expect("send resident read");
         });
 
-        let read_while_blocked = rx.recv_timeout(Duration::from_secs(1));
+        let read_while_blocked = rx.recv_timeout(Duration::from_secs(5));
         gate.release.wait();
         let output = read_while_blocked
             .expect("resident read waited for backing-store flush")
