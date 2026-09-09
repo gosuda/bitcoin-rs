@@ -820,6 +820,9 @@ mod tests {
         }
     }
 
+    // Activation contract: BIP141, "Sigops" (https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops),
+    // as implemented by Bitcoin Core v31.1 in src/validation.cpp:
+    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/validation.cpp
     #[test]
     fn assume_valid_and_prepared_sigop_checks_follow_witness_activation()
     -> Result<(), Box<dyn std::error::Error>> {
