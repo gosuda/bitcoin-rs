@@ -1,4 +1,4 @@
-//! REF-01..REF-07: reference identities used by process and formal gates.
+//! Reference identities and validation used by the process and formal gates.
 //! The production RPC module owns the embedded manifest, not test orchestration.
 
 use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
