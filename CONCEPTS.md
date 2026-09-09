@@ -120,7 +120,8 @@ The Core-compatible `pubsequence` ZMQ topic. Block events carry the 32-byte
 reversed block hash and label `C` (connect) or `D` (disconnect); mempool events
 carry the 32-byte reversed txid, label `A` (admission) or `R` (removal), and the
 8-byte little-endian mempool sequence. A transaction mined in a connected block
-emits no `R`; the block's `C` covers it. Reorg disconnects are emitted
+emits no `R`; the block's `C` covers it. Every event concludes with a topic-local
+little-endian `u32` sequence counter frame. Reorg disconnects are emitted
 tip-first before connects. Each socket owns `DEFAULT_ZMQ_HWM = 1_000`.
 `bitcoin_rs_rpc::zmq` owns the compatibility payload and transport;
 `ChainFollowers` / `ChainEffects` own emission timing relative to committed

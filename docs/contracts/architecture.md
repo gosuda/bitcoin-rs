@@ -72,19 +72,33 @@ Owners:
 
 ### `ARCH-01`: Five-layer one-way dependency direction
 
-- Every workspace crate is assigned to an approved layer from 0 to 4.
-- A crate may depend only on crates in the same layer or in a strictly lower layer.
-- Edges pointing upward or across forbidden boundaries fail the `g17_dependency_direction` gate.
-- Crate layer assignments are:
-  - Layer 0 (Core): `bitcoin-rs-primitives`, `bitcoin-rs-script`, `bitcoin-rs-consensus`.
-  - Layer 1 (Storage): `bitcoin-rs-storage`.
-  - Layer 2 (Services): `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`, `bitcoin-rs-mining`.
-  - Layer 3 (Surface): `bitcoin-rs-rpc`, including the Bitcoin Core-compatible ZMQ protocol and transport.
-  - Layer 4 (Compose): `bitcoin-rs-node`, `bitcoin-rs`.
-- `chainstate` sits in Layer 2 because it depends on `chain`, `utxo`, `consensus`, and `storage`.
-- `chain` and `utxo` remain in Layer 2 because they depend on `storage` for block index records, undo storage, and UTXO snapshots.
-- `mining` sits in Layer 2 because it depends on `mempool` for candidate selection and on `chain` for candidate header and work context.
-- Layer numbers do not justify speculative new crates or thin wrapper layers. A boundary exists only when it isolates external dependencies, enforces safety or consensus boundaries, or separates independent runtime lifecycles.
+- Every workspace crate is assigned to an approved layer (0 to 4).
+- A crate may depend only on crates in the same layer or a strictly lower layer.
+  Edges pointing upward or across forbidden boundaries fail the
+  `g17_dependency_direction` gate.
+- Crate layer assignments:
+  - **Layer 0 (Core)**: `bitcoin-rs-primitives`, `bitcoin-rs-script`,
+    `bitcoin-rs-consensus`. Pure protocol types, consensus verification, and
+    script interpreter logic. Layer 0 crates have zero dependencies on storage,
+    network, or filesystem I/O.
+  - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
+    batching primitives, and backend engine drivers.
+  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-utxo`,
+    `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
+    `bitcoin-rs-mining`. Domain services and capability runtimes.
+    `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
+    block index records, undo storage, and UTXO snapshots. `chain` also
+    depends on `consensus` for BIP9 parameters and the BIP113 locktime
+    cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
+    candidate selection and `chain` for candidate header/work/time context.
+  - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
+    handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
+  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
+    subsystem lifecycle coordination, and CLI binary entry points.
+- **Explicit non-goal**: Layer numbers do not justify speculative new crates or
+  thin wrapper layers. A boundary exists only when it isolates external
+  dependencies, enforces safety/consensus boundaries, or separates independent
+  runtime lifecycles.
 
 ### `ARCH-02`: Exclusive storage engine dependency ownership
 
@@ -108,14 +122,23 @@ Owners:
 ### `ARCH-05`: Node composition and orchestration boundary
 
 - `bitcoin-rs-node` (Layer 4) is the assembly and lifecycle orchestration layer.
-- It wires together storage backends, consensus validators, the mempool gateway, P2P listeners, index reconciliation workers, and RPC services into an executable node runtime.
-- Domain mechanics belong to domain crates:
-  - consensus rules live in `consensus` and `script`;
-  - mempool admission and mutation sequencing live in `mempool`;
-  - connection lifecycle and request scheduling live in `p2p`;
-  - template assembly and the BIP22/BIP23 JSON contract live in `mining`;
-  - index schemas and backfill live in `index`.
-- `bitcoin-rs-node` owns runtime startup and shutdown sequencing, configuration resolution and validation, `UserConfig` to `NodeConfig` overlay, and process-level cache budgeting.
+- It wires together storage backends, consensus validators, mempool gateway, P2P
+  listeners, index reconciliation workers, and RPC services into an executable
+  node runtime.
+- Domain mechanics belong to domain crates: consensus rules in consensus/script,
+  mempool admission and mutation sequencing in mempool, connection lifecycle in
+  p2p, template assembly and the mining control contract in mining, and index
+  schemas in their owning crates. `bitcoin-rs-mining` owns `Candidate`,
+  `BlockTemplate`, `MiningInfo`, and `MiningControl`. RPC maps those types onto
+  BIP22/BIP23 JSON and does not cache templates or long-poll.
+- `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
+  resolution and validation (`UserConfig` layers → `NodeConfig`), the mining
+  generation coordinator keyed by `(applied_tip_hash, mempool_sequence)`,
+  watch-only coinbase payout configuration (`MiningConfig::payout_script`), and
+  process-level cache budgeting (`dbcache` distribution across chainstate and
+  txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
+  TOML parsing. Applied-tip mutation is owned by the chainstate facade
+  (`ARCH-07`), not by a public field bag of subsystem handles.
 - `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
   transport, mempool sequence projection, and live notifier enumeration.
   `bitcoin-rs-node` constructs and wires the publisher and continues to own when
@@ -123,8 +146,12 @@ Owners:
   `getzmqnotifications`; node does not keep a parallel notifier metadata model.
   The `g17_dependency_direction` gate pins the external `zmq` dependency to the
   surface crate and permits node only to forward `bitcoin-rs-rpc/zmq`.
-- Applied-tip mutation is owned by the `chainstate` owner, not by a public field bag of subsystem handles.
 - The composition root (`NodeState`, `BlockSync`, reorg logic, mining) dispatches `ChainFollowers` while the `ChainTransition` is still held, then calls `finish` to release the chain transition reservation. Convenience methods that finish before returning (`apply_block`, `disconnect_block`) do not dispatch followers. RPC, `BlockLog`, hash/zmq, `TxIndex` wake, sequence `C`/`D`, mining generation, and admission run from that dispatch. Mempool eviction stays inside `apply`.
+- `UserConfig::overlay` applies a later layer field-wise: a set field replaces
+  the earlier value; an unset field leaves it. Nested override structs merge
+  the same way, including `ChainstateJournalOverrides` and `MiningOverrides`. Proof:
+  `crates/node/src/config.rs` tests `user_config_overlay_lets_set_fields_win` and
+  `mining_payout_overlay_lets_the_later_address_win`.
 
 ### `ARCH-06`: Hierarchy change and exception process
 
