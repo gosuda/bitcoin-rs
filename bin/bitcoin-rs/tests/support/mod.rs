@@ -1,4 +1,4 @@
-//! Shared process custody for the public-process product proofs.
+//! Shared verification support for integration tests and gates.
 
 #![expect(
     clippy::expect_used,
