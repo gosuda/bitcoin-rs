@@ -1,41 +1,104 @@
-name: PR 665 review workspace
+name: PR 665 review checks
 
 on:
   push:
     branches: [review/pr-665-workspace]
+    paths: ['.review/**']
 
 permissions:
   contents: read
 
 jobs:
-  snapshot:
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
+    outputs:
+      prepared: ${{ steps.patch.outputs.prepared }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          path: review-tools
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          path: source
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
           components: rustfmt,clippy
-      - name: Prepare pinned offline workspace
-        shell: bash
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: source -> target
+          shared-key: pr-665-review
+          cache-on-failure: true
+      - name: Apply review fixes
+        run: python3 review-tools/.review/apply.py source
+      - name: Format and capture exact candidate
+        id: patch
+        working-directory: source
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/pr-665-workspace"
-          git archive --format=tar HEAD | zstd -T0 -o "$RUNNER_TEMP/pr-665-workspace/source.tar.zst"
-          cargo fetch --locked --target x86_64-unknown-linux-gnu
-          toolchain="$(rustc --print sysroot)"
-          tar -C "$toolchain" -I 'zstd -T0' -cf "$RUNNER_TEMP/pr-665-workspace/toolchain.tar.zst" bin lib libexec
-          tar -C "$HOME/.cargo" -I 'zstd -T0' -cf "$RUNNER_TEMP/pr-665-workspace/registry.tar.zst" registry
-          printf '%s\n' f8bb0f8d0f49ade933eb558d6722041d37a9c02c > "$RUNNER_TEMP/pr-665-workspace/SOURCE_COMMIT"
-          cd "$RUNNER_TEMP/pr-665-workspace"
-          sha256sum *.tar.zst > SHA256SUMS
+          cargo fmt --all
+          git diff --check
+          git add -A
+          mkdir -p ../candidate
+          git diff --cached --binary > ../candidate/review.patch
+          git write-tree > ../candidate/REVIEW_TREE
+          git rev-parse HEAD > ../candidate/SOURCE_COMMIT
+          git diff --cached --stat
+          echo prepared=true >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr-665-offline-workspace
-          path: ${{ runner.temp }}/pr-665-workspace/
+          name: pr-665-candidate
+          path: candidate/
           retention-days: 1
-          compression-level: 0
           if-no-files-found: error
+      - name: Storage fault matrix
+        working-directory: source
+        run: cargo test --locked -p bitcoin-rs-storage --no-default-features --features fjall,redb,mdbx,rocksdb --test overhaul_atomic_durability
+      - name: Persistent coin regressions
+        if: always() && steps.patch.outputs.prepared == 'true'
+        working-directory: source
+        run: cargo test --locked -p bitcoin-rs-utxo --test overhaul_persistent_coins
+      - name: Native consensus regressions
+        if: always() && steps.patch.outputs.prepared == 'true'
+        working-directory: source
+        run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib --test overhaul_parse_parity --test overhaul_prepared_inputs
+      - name: Storage, UTXO, and consensus lints
+        if: always() && steps.patch.outputs.prepared == 'true'
+        working-directory: source
+        run: |
+          status=0
+          cargo clippy --locked -p bitcoin-rs-storage --all-targets --no-default-features --features fjall,redb,mdbx,rocksdb -- -D warnings || status=1
+          cargo clippy --locked -p bitcoin-rs-utxo --all-targets -- -D warnings || status=1
+          cargo clippy --locked -p bitcoin-rs-consensus --all-targets --no-default-features -- -D warnings || status=1
+          exit "$status"
+  stage:
+    needs: check
+    if: always() && needs.check.outputs.prepared == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pr-665-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Stage candidate on an isolated branch
+        env:
+          CANDIDATE: ${{ runner.temp }}/candidate
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(cat "$CANDIDATE/SOURCE_COMMIT")"
+          git apply --index "$CANDIDATE/review.patch"
+          test "$(git write-tree)" = "$(cat "$CANDIDATE/REVIEW_TREE")"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: PR 665 review candidate'
+          git push origin "HEAD:refs/heads/review/pr-665-fixes-$GITHUB_RUN_NUMBER"
+          git rev-parse HEAD
