@@ -94,6 +94,126 @@ struct WorkspaceMetadata {
     classified: usize,
 }
 
+fn assert_internal_dependencies_point_down(normal_deps: &BTreeMap<String, Vec<String>>) {
+    let mut checked_edges = 0_usize;
+    for (name, edges) in normal_deps {
+        let layer = approved_layer(name);
+        for dep in edges {
+            let dep_layer = approved_layer(dep);
+            assert!(
+                dep_layer <= layer,
+                "dependency direction violation: `{name}` (layer {layer}) depends on \
+                 `{dep}` (layer {dep_layer}); edges must point down the layer model"
+            );
+            checked_edges += 1;
+        }
+    }
+    assert!(
+        checked_edges > 0,
+        "no internal edges were checked; the metadata parse is suspect"
+    );
+}
+
+fn assert_storage_owns_engine_dependencies(engine_deps: &BTreeMap<String, Vec<String>>) {
+    for (name, engines) in engine_deps {
+        assert!(
+            name == STORAGE_CRATE || engines.is_empty(),
+            "engine dependencies {engines:?} must be named by `{STORAGE_CRATE}` only; \
+             found on `{name}`"
+        );
+    }
+}
+
+fn assert_rpc_owns_zmq_dependency(
+    zmq_deps: &BTreeMap<String, Vec<String>>,
+    features: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+) {
+    for (name, dependencies) in zmq_deps {
+        assert!(
+            name == RPC_CRATE || dependencies.is_empty(),
+            "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
+        );
+    }
+    assert!(
+        features[RPC_CRATE]["zmq"]
+            .iter()
+            .any(|entry| entry == "dep:zmq"),
+        "the RPC `zmq` feature must enable its owned external dependency"
+    );
+    assert!(
+        features[NODE_CRATE]["zmq"]
+            .iter()
+            .any(|entry| entry == "bitcoin-rs-rpc/zmq"),
+        "the node `zmq` feature must forward the RPC surface feature"
+    );
+    assert!(
+        features[NODE_CRATE]["zmq"]
+            .iter()
+            .all(|entry| entry != "dep:zmq"),
+        "the node `zmq` feature must not enable a direct external dependency"
+    );
+}
+
+fn assert_rpc_is_storage_independent(
+    normal_deps: &BTreeMap<String, Vec<String>>,
+    features: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+) {
+    let rpc_edges = normal_deps.get(RPC_CRATE).expect("rpc in metadata");
+    for dep in rpc_edges {
+        assert_ne!(
+            dep.as_str(),
+            STORAGE_CRATE,
+            "rpc must not depend on the storage crate; it consumes node capabilities \
+             through query traits"
+        );
+        assert!(
+            !ENGINE_CRATES.contains(&dep.as_str()),
+            "rpc must not name the engine dependency `{dep}`"
+        );
+    }
+    let rpc_features = features.get(RPC_CRATE).expect("rpc features");
+    for (feature, implies) in rpc_features {
+        let forwards = BACKEND_FEATURES.contains(&feature.as_str())
+            || implies.iter().any(|entry| {
+                BACKEND_FEATURES
+                    .iter()
+                    .any(|backend| entry.contains(backend))
+            });
+        assert!(
+            !forwards,
+            "rpc feature `{feature}` still forwards a storage backend"
+        );
+    }
+}
+
+fn assert_backend_feature_forwarding_is_confined(
+    features: &BTreeMap<String, BTreeMap<String, Vec<String>>>,
+) {
+    for (name, feature_map) in features {
+        if name == STORAGE_CRATE || name == RPC_CRATE {
+            continue;
+        }
+        let carries_choice = approved_layer(name) >= 2;
+        for (feature, implies) in feature_map {
+            let forwards = BACKEND_FEATURES.contains(&feature.as_str())
+                || implies.iter().any(|entry| {
+                    let entry = entry.trim_start_matches("dep:");
+                    BACKEND_FEATURES
+                        .iter()
+                        .any(|backend| entry.split('/').next() == Some(backend))
+                });
+            if !forwards || carries_choice || implies.is_empty() {
+                continue;
+            }
+            panic!(
+                "`{name}` forwards the backend feature `{feature}`; backend feature \
+                 forwarding above storage is allowed only on node, the binary, and \
+                 the services-tier adapters"
+            );
+        }
+    }
+}
+
 fn workspace_metadata() -> WorkspaceMetadata {
     let output = Command::new(env!("CARGO"))
         .args([
@@ -183,92 +303,22 @@ fn workspace_dependency_direction_is_one_way() {
     );
 
     // 1. Every normal bitcoin-rs edge points to the same or a lower layer.
-    let mut checked_edges = 0_usize;
-    for (name, edges) in &normal_deps {
-        let layer = approved_layer(name);
-        for dep in edges {
-            let dep_layer = approved_layer(dep);
-            assert!(
-                dep_layer <= layer,
-                "dependency direction violation: `{name}` (layer {layer}) depends on \
-                 `{dep}` (layer {dep_layer}); edges must point down the layer model"
-            );
-            checked_edges += 1;
-        }
-    }
-    assert!(
-        checked_edges > 0,
-        "no internal edges were checked; the metadata parse is suspect"
-    );
+    assert_internal_dependencies_point_down(&normal_deps);
 
     // 2. No crate outside storage names a storage-engine dependency (any
     //    dependency kind counts: an engine must not leak in as a dev-dep
     //    either).
-    for (name, engines) in &engine_deps {
-        assert!(
-            name == STORAGE_CRATE || engines.is_empty(),
-            "engine dependencies {engines:?} must be named by `{STORAGE_CRATE}` only; \
-             found on `{name}`"
-        );
-    }
+    assert_storage_owns_engine_dependencies(&engine_deps);
 
     // The Surface tier owns the external ZMQ implementation. Node may forward
     // the surface feature, but must not regain a direct libzmq dependency.
-    for (name, dependencies) in &zmq_deps {
-        assert!(
-            name == RPC_CRATE || dependencies.is_empty(),
-            "the external ZMQ dependency must be owned by `{RPC_CRATE}`; found on `{name}`"
-        );
-    }
-    assert!(
-        features[RPC_CRATE]["zmq"]
-            .iter()
-            .any(|entry| entry == "dep:zmq"),
-        "the RPC `zmq` feature must enable its owned external dependency"
-    );
-    assert!(
-        features[NODE_CRATE]["zmq"]
-            .iter()
-            .any(|entry| entry == "bitcoin-rs-rpc/zmq"),
-        "the node `zmq` feature must forward the RPC surface feature"
-    );
-    assert!(
-        features[NODE_CRATE]["zmq"]
-            .iter()
-            .all(|entry| entry != "dep:zmq"),
-        "the node `zmq` feature must not enable a direct external dependency"
-    );
+    assert_rpc_owns_zmq_dependency(&zmq_deps, &features);
 
     // 3. RPC names no storage backend at all: no non-test dependency edge on
     //    the storage crate (the bench-only dev-dependency that feeds the
     //    `txoutproof` fixture is documented in the rpc manifest) and no
     //    forwarded backend feature.
-    let rpc_edges = normal_deps.get(RPC_CRATE).expect("rpc in metadata");
-    for dep in rpc_edges {
-        assert_ne!(
-            dep.as_str(),
-            STORAGE_CRATE,
-            "rpc must not depend on the storage crate; it consumes node capabilities \
-             through query traits"
-        );
-        assert!(
-            !ENGINE_CRATES.contains(&dep.as_str()),
-            "rpc must not name the engine dependency `{dep}`"
-        );
-    }
-    let rpc_features = features.get(RPC_CRATE).expect("rpc features");
-    for (feature, implies) in rpc_features {
-        let forwards = BACKEND_FEATURES.contains(&feature.as_str())
-            || implies.iter().any(|entry| {
-                BACKEND_FEATURES
-                    .iter()
-                    .any(|backend| entry.contains(backend))
-            });
-        assert!(
-            !forwards,
-            "rpc feature `{feature}` still forwards a storage backend"
-        );
-    }
+    assert_rpc_is_storage_independent(&normal_deps, &features);
 
     // 4. Backend feature forwarding is confined to the tiers that must carry
     //    the operator's backend choice: node and the binary (operator-facing
@@ -276,27 +326,5 @@ fn workspace_dependency_direction_is_one_way() {
     //    features exist so `-p` selection propagates into storage). The RPC
     //    surface forwards none, and workspace-selection marker features that
     //    gate no code are tolerated.
-    for (name, feature_map) in &features {
-        if name == STORAGE_CRATE || name == RPC_CRATE {
-            continue;
-        }
-        let carries_choice = approved_layer(name) >= 2;
-        for (feature, implies) in feature_map {
-            let forwards = BACKEND_FEATURES.contains(&feature.as_str())
-                || implies.iter().any(|entry| {
-                    let entry = entry.trim_start_matches("dep:");
-                    BACKEND_FEATURES
-                        .iter()
-                        .any(|backend| entry.split('/').next() == Some(backend))
-                });
-            if !forwards || carries_choice || implies.is_empty() {
-                continue;
-            }
-            panic!(
-                "`{name}` forwards the backend feature `{feature}`; backend feature \
-                 forwarding above storage is allowed only on node, the binary, and \
-                 the services-tier adapters"
-            );
-        }
-    }
+    assert_backend_feature_forwarding_is_confined(&features);
 }
