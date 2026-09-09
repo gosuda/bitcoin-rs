@@ -588,7 +588,10 @@ fn write_failure_requires_recovery_before_serving_or_retrying() {
         Err(PersistentUtxoError::RecoveryRequired)
     ));
     assert!(matches!(
-        coins.undo_block(&Default::default(), CoinDurability::Durable),
+        coins.undo_block(
+            &bitcoin_rs_utxo::set::UndoBatch::default(),
+            CoinDurability::Durable
+        ),
         Err(PersistentUtxoError::RecoveryRequired)
     ));
     assert!(matches!(

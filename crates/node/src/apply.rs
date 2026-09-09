@@ -2782,7 +2782,9 @@ fn apply_block_admitted<'b>(
         bitcoin_rs_consensus::BlockRuleContext {
             segwit_active: softfork_state.segwit_active,
         },
-        view.facts(),
+        view.txids(),
+        view.computed_witness_ids().unwrap_or_default(),
+        view.facts().has_witness(),
     );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
