@@ -230,6 +230,7 @@ dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin-rs-node",
+ "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
  "clap",
  "mimalloc",
@@ -237,6 +238,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "toml 1.1.5+spec-1.1.0",
 ]
 

@@ -317,7 +317,10 @@ fn kernel_block_entry_matches_oracle_identities() {
         // trailing bytes like the decoder it replaced.
         assert_eq!(facts.transaction_spans().len(), facts.tx_count());
         assert!(facts.wtxids().is_some());
-        assert!(parsed.facts().transaction_spans().len() == parsed.transaction_count());
+        assert_eq!(
+            parsed.facts().transaction_spans().len(),
+            parsed.transaction_count()
+        );
         let mut padded = bytes.clone();
         padded.push(0x00);
         assert!(
