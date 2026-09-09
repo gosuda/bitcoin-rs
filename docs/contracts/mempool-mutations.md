@@ -142,8 +142,9 @@ state (`crates/mempool/src/orphan.rs`).
   Rust's `OutPoint::default()` is `(zero txid, index 0)`, which is non-null.
   Such unresolved inputs follow ordinary missing-parent requests and parent
   indexing instead of being silently omitted from retry tracking.
-- For standard transactions, the gateway checks input structure before
-  missing-input policy can retain a peer body. The consensus-owned `verify_transaction_input_outpoints` check. Duplicate inputs
+- For standard transactions, the gateway runs the consensus-owned
+  `verify_transaction_input_outpoints` check before missing-input policy can
+  retain a peer body. Duplicate inputs
   and null outpoints in non-coinbase transactions reject as `Consensus` and
   use transaction-scoped caching even when witness data is present or coins
   are missing. Parent arrival or a different witness cannot repair these
