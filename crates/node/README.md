@@ -15,10 +15,10 @@ from one branch to another. The chainstate facade serializes connect,
 disconnect, and window apply behind `ChainTransition`. Owning crates expose
 the domain surfaces `node` wires:
 chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
-and the txindex worker's private block-source bridge. Notifications leave
-through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPublisher`
-/ `NoOpZmqPublisher` implementations and the `TxIndexRuntime` worker; `signal` and
-`shutdown` bridge process signals into graceful shutdown.
+and the txindex worker's private block-source bridge. The RPC surface crate owns
+the ZMQ protocol and transport; node constructs its `ZmqPublisher`, attaches the
+mempool observer, and orders publication with committed chain effects. `signal`
+and `shutdown` bridge process signals into graceful shutdown.
 
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
 See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability

@@ -13,7 +13,7 @@ workspace = true
 
 [features]
 default = []
-zmq = []
+zmq = ["dep:zmq"]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true
@@ -38,6 +38,8 @@ thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
 corepc-types.workspace = true
+anyhow.workspace = true
+zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall"] }

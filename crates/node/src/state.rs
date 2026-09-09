@@ -11,7 +11,6 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
-    ZmqNotification,
 };
 #[cfg(any(
     not(feature = "rocksdb"),
@@ -1458,7 +1457,6 @@ pub struct NodeState {
     txindex_status: Arc<crate::txindex_worker::TxIndexCapability>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
-    active_zmq_notifications: Vec<ZmqNotification>,
     mempool: Arc<RwLock<Mempool>>,
     /// The single mutation gateway in front of `mempool`.
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
@@ -1589,18 +1587,6 @@ impl NodeState {
         let block_body_store = storage.block_body_store(Arc::clone(&block_files));
 
         let zmq_endpoints = config.zmq_endpoints();
-        let active_zmq_notifications: Vec<_> = zmq_endpoints
-            .iter()
-            .flat_map(|endpoint| {
-                endpoint.topics.iter().map(|topic| {
-                    ZmqNotification::new(
-                        topic.notifier_type(),
-                        endpoint.endpoint.clone(),
-                        endpoint.effective_hwm(),
-                    )
-                })
-            })
-            .collect();
         #[cfg(feature = "zmq")]
         let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_endpoints.is_empty() {
             Arc::new(crate::NoOpZmqPublisher)
@@ -1835,9 +1821,7 @@ impl NodeState {
                 gateway
                     .attach_observer_leg(
                         "sequence",
-                        Arc::new(crate::zmq_publisher::MempoolSequenceObserver::new(
-                            publisher,
-                        )),
+                        Arc::new(bitcoin_rs_rpc::zmq::MempoolSequenceObserver::new(publisher)),
                     )
                     .map_err(anyhow::Error::msg)?;
             } else if let Some(observer) = mempool_observer.cloned() {
@@ -1968,7 +1952,6 @@ impl NodeState {
             txindex_status,
             prune_service,
             zmq_publisher,
-            active_zmq_notifications,
             mempool,
             mempool_gateway,
             mining_generation,
@@ -2200,12 +2183,6 @@ impl NodeState {
     #[must_use]
     pub fn zmq_publisher(&self) -> Arc<dyn crate::ZmqPublisher> {
         Arc::clone(&self.zmq_publisher)
-    }
-
-    /// Returns active ZMQ notification metadata for RPC reporting.
-    #[must_use]
-    pub fn active_zmq_notifications(&self) -> Vec<ZmqNotification> {
-        self.active_zmq_notifications.clone()
     }
 
     /// Returns the shared mempool handle.
@@ -3004,6 +2981,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "zmq")]
     #[test]
     fn zmq_publisher_handle_reports_active_metadata() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -3011,29 +2989,29 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p.listen.clear();
         config.notifications.zmq = vec![
-            crate::zmq_publisher::ZmqEndpointConfig {
+            bitcoin_rs_rpc::zmq::ZmqEndpointConfig {
                 endpoint: "inproc://state-zmq-block".to_owned(),
                 topics: vec![
-                    crate::zmq_publisher::ZmqTopic::HashBlock,
-                    crate::zmq_publisher::ZmqTopic::RawBlock,
+                    bitcoin_rs_rpc::zmq::ZmqTopic::HashBlock,
+                    bitcoin_rs_rpc::zmq::ZmqTopic::RawBlock,
                 ],
                 hwm: Some(17),
             },
-            crate::zmq_publisher::ZmqEndpointConfig {
+            bitcoin_rs_rpc::zmq::ZmqEndpointConfig {
                 endpoint: "inproc://state-zmq-tx".to_owned(),
                 topics: vec![
-                    crate::zmq_publisher::ZmqTopic::HashTx,
-                    crate::zmq_publisher::ZmqTopic::RawTx,
+                    bitcoin_rs_rpc::zmq::ZmqTopic::HashTx,
+                    bitcoin_rs_rpc::zmq::ZmqTopic::RawTx,
                 ],
                 hwm: Some(20),
             },
         ];
         let state = NodeState::open(config, None)?;
 
-        let notifications = state.active_zmq_notifications();
+        let notifications = state.zmq_publisher().active_notifiers();
         let notification_types: Vec<_> = notifications
             .iter()
-            .map(|notification| notification.notification_type.as_str())
+            .map(|notification| notification.topic.notifier_type())
             .collect();
         let hwms: Vec<_> = notifications
             .iter()
