@@ -230,7 +230,6 @@ dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin-rs-node",
- "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
  "clap",
  "mimalloc",
@@ -310,6 +309,7 @@ name = "bitcoin-rs-mempool"
 version = "0.5.0"
 dependencies = [
  "arc-swap",
+ "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
@@ -393,6 +393,7 @@ dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bytemuck",

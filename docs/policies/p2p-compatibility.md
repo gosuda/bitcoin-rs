@@ -58,7 +58,7 @@ Rules, each enforced by the FSM (`crates/p2p/src/fsm.rs`) and identical to Core'
 The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (**36**). That table is the authority for names and status; this section is the Core-comparison commentary and is checked for set equality of command names. The status for each command is defined only by `COMMANDS`; the table below records behavior and Core comparison.
 
 | Command | Behavior and Core 31.1 comparison |
-| :--- | :--- |
+| :--- | :--- | :--- |
 | `version` | negotiated | §4. |
 | `verack` | negotiated | §4. |
 | `wtxidrelay` | negotiated | BIP339. Sent in handshake; inbound marks the peer wtxid-relay capable. |
@@ -66,14 +66,14 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
 | `ping` | Answered with `pong` echoing the nonce, ready peers only; pongs feed peer RTT stats. |
 | `pong` | ignored | Completes outstanding ping RTT accounting. |
-| `inv` | Answered with `getdata` for announced vectors the node does not already hold. Transaction inventory is filtered through the node's admission view (mempool, orphan map, recent-rejects); a wtxid-relay peer announcing `MSG_WTX` is asked for `MSG_WTX`. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
+| `inv` | Answered with `getdata` for announced vectors the node does not already hold. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, orphans, recent rejects); a wtxid-relay peer announcing `MSG_WTX` is asked for `MSG_WTX`. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
 | `getdata` | Blocks stream from the active chain; transaction inventory is served from the mempool / orphan map. Misses resolve to one trailing `notfound`. Bound: 50 000 vectors. |
 | `notfound` | ignored | Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
 | `headers` | sink | Forwarded to the node's header-sync pipeline. Bound: ≤ 2 000 headers per message. |
 | `block` | sink | Forwarded to the node's block pipeline with the original wire bytes preserved. |
-| `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel; the ingress consumer admits through the one mempool gateway and announces accepted transactions as `inv(tx)` to peers other than the source. A full channel drops the body so this peer's read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
+| `tx` | sink | Forwarded from a Ready peer into the node's bounded ingress channel. Mempool prepares and retries admission through its one gateway; node connects committed peer accepts to P2P's relay queue, which announces the negotiated inventory type excluding the exact delivering connection. P2P requests missing parents from that live connection using txid-typed `getdata`; mempool owns orphan retention and retry. A full ingress channel drops the body so the peer read loop can still service ping, headers, and blocks. No protocol response, no disconnect. |
 | `mempool` | ignored | BIP35 mempool snapshot request; Core answers with an `inv` of relay-pool transactions. Deviation: silent. |
 | `getaddr` | ignored | No address gossip: Core answers with an `addr` burst. Deviation: silent. |
 | `addr` / `addrv2` | ignored | Decoded (bound: 1 000 entries, Core `MAX_ADDR_TO_SEND`); never gossiped onward. |
@@ -86,6 +86,24 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `alert` | Decoded as opaque bytes, ignored. The command is dead in Core. |
 
 Any command outside this table decodes as `Unknown` and follows §6 — which is also how the one Core 31 command absent above, `sendtxrcncl` (BIP330), is handled.
+
+Transaction announcements target only connections with published handshake
+metadata. A peer that negotiated `wtxidrelay` receives `MSG_WTX` with the
+accepted transaction's actual wtxid; other ready peers receive `MSG_TX` with
+its txid, following [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
+RPC/reorg mutation observers resolve the retained entry's wtxid and skip
+entries removed before observer delivery. Missing-parent requests use txids,
+which BIP339 permits for unannounced parents. Sources advertising `NODE_WITNESS`
+receive `MSG_WITNESS_TX` requests so the returned parent includes its witness;
+other sources receive `MSG_TX`, following
+[BIP144](https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay). Relay queue
+saturation drops the newest announcement without blocking admission;
+per-peer outbound saturation cancels that connection's lease.
+
+The inventory view respects the reject cache's identity scope: witness-only
+refusals suppress the exact wtxid, not legacy txid inventory or another
+witness variant. The cache and retry lifecycle are governed by
+[MPL-04](../contracts/mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing).
 
 ## 6. Message Policy: Reject-or-Ignore, Disconnect Where Core Disconnects
 
@@ -113,11 +131,11 @@ Structural invariants, verified by the deterministic fixtures (`crates/p2p/tests
 
 ## 7. Deviation Ledger
 
-Explicit deltas from Core 31.1, each intentional and safe:
+Known deltas from Core 31.1:
 
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
-3. **Proactive block announcements**: absent. We do not broadcast `inv`/`headers`/`cmpctblock` for new blocks. Accepted transactions are announced as `inv(tx)` (§5). Live relay of Core-originated blocks into bitcoin-rs is exercised by the interop lane (§8).
+3. **Proactive block announcements**: absent. We do not broadcast `inv`/`headers`/`cmpctblock` for new blocks. Accepted transactions are announced with the negotiated inventory type (§5). Live relay of Core-originated blocks into bitcoin-rs is exercised by the interop lane (§8).
 4. **Address management**: no `getaddr` answers, no addr gossip, no DNS-seed-free peer discovery beyond configured `--connect`/`--addnode` surfaces.
 5. **Service bits**: we advertise exactly `NETWORK | WITNESS`. No `NODE_BLOOM`, `NODE_COMPACT_FILTERS`, or `NODE_NETWORK_LIMITED` — honest, since none of those services exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
@@ -127,8 +145,26 @@ Explicit deltas from Core 31.1, each intentional and safe:
 ## 8. Verification
 
 - **Deterministic fixtures**: `crates/p2p/tests/core_compat.rs` pins the command inventory against this table and against rust-bitcoin's v1 envelope (`RawNetworkMessage`), the handshake fields and service bits, per-network magic/ports and framing, getheaders/headers semantics and bounds, inv/getdata relay round-trips with `notfound`, the reject-or-ignore matrix of §6, and the peer-visible behavior across a chain switch (reorg) and a restart at the `ChainQuery` seam: a rebuilt query serves byte-identical answers, a switched active branch serves the new branch from the fork point and `notfound`s stale bodies. Run with `cargo test -p bitcoin-rs-p2p --test core_compat`.
+- **Transaction consumers**: `crates/p2p/src/dispatch.rs` test
+  `gateway_inventory_filters_and_serves_txid_and_wtxid` exercises the
+  `TxInventory` implementation over the shared gateway. `src/inv.rs` tests
+  `missing_parents_use_txids_and_deduplicate_repeated_inputs`,
+  `missing_parents_request_witness_by_service_not_announcement_preference`,
+  `stale_missing_parent_source_cannot_send_to_or_cancel_replacement`,
+  `cancelled_missing_parent_source_does_not_enqueue_a_request`, and
+  `missing_parent_request_keeps_outbound_saturation_policy` cover txid parent
+  requests and live-connection identity. `src/tx_relay.rs` tests
+  `peer_relay_reaches_replacement_and_cancels_only_saturated_peer` and
+  `disconnected_relay_worker_does_not_count_queue_saturation` cover relay
+  delivery and saturation ownership.
+  `relay_waits_for_handshake_and_selects_the_peers_inventory_type` and
+  `local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries`
+  cover negotiated announcements and actual retained witness identity.
+  Run with `cargo test -p bitcoin-rs-p2p --lib`.
 - **Fuzz**: `fuzz/fuzz_targets/p2p_message.rs` drives every payload decoder named by `COMMANDS` (a missing inventory row is a decoder no fuzz input can reach).
 - **Live lane (cut, env-gated)**: `scripts/run-p2p-core-interop.sh --bitcoind-command <cmd>` drives a real Bitcoin Core 31.x (regtest) plus a bitcoin-rs node through the initial sync, mines extra blocks after the handshake to prove the node follows Core's announcements while connected (bitcoin-rs itself sends no proactive block announcements; see the deviation ledger), records Core's own `getpeerinfo` view of us (services bits, subver) into an evidence JSON, and runs the `#[ignore]`d verifier `crates/p2p/tests/core_interop_live.rs`. The lane is never run in CI (no bitcoind on CI hosts); its evidence belongs under `docs/benchmarks/` when a Core bump is pinned.
+  It does not exchange unconfirmed transactions or verify transaction relay,
+  orphan retries, or outbound BIP339 behavior.
 - Node-level reorg is implemented: `crates/node/src/reorg.rs` (`switch_to_branch`, `invalidate_block`) moves the applied tip off a losing branch, and sync calls `switch_to_branch` when a higher-work header branch wins (`crates/node/src/sync.rs`). The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
 
-See also [docs/contracts/p2p-wire.md](../contracts/p2p-wire.md) for the target contract, planned owners, and precedence rule.
+See also [docs/contracts/p2p-wire.md](../contracts/p2p-wire.md) for the contracts index and precedence rule.

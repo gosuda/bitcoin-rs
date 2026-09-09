@@ -77,7 +77,9 @@ impl Num3072 {
     fn from_le_bytes(bytes: &[u8; BYTE_LEN]) -> Self {
         let mut limbs = [0_u64; LIMBS];
         for (idx, chunk) in bytes.as_chunks::<8>().0.iter().enumerate() {
-            limbs[idx] = u64::from_le_bytes(*chunk);
+            let mut limb = [0_u8; 8];
+            limb.copy_from_slice(chunk);
+            limbs[idx] = u64::from_le_bytes(limb);
         }
         Self { limbs }
     }
@@ -113,7 +115,7 @@ impl Num3072 {
     fn to_le_bytes(self) -> [u8; BYTE_LEN] {
         let mut out = [0_u8; BYTE_LEN];
         for (chunk, limb) in out.as_chunks_mut::<8>().0.iter_mut().zip(self.limbs) {
-            *chunk = limb.to_le_bytes();
+            chunk.copy_from_slice(&limb.to_le_bytes());
         }
         out
     }
@@ -342,7 +344,8 @@ fn element(data: &[u8]) -> Num3072 {
 }
 
 #[inline(always)]
-fn write_chacha_block_as_limbs(limbs: &mut [u64; 8], base_state: &[u32; 16], counter: u32) {
+fn write_chacha_block_as_limbs(limbs: &mut [u64], base_state: &[u32; 16], counter: u32) {
+    debug_assert_eq!(limbs.len(), 8);
     let mut state = *base_state;
     state[12] = counter;
     let mut working = state;
@@ -545,9 +548,9 @@ fn chacha20_block_words(key_words: &[u32; 8], counter: u32) -> [u32; 16] {
 }
 
 #[cfg(test)]
-fn chacha20_block(words: &[u32; 16], out: &mut [u8; 64]) {
+fn chacha20_block(words: &[u32; 16], out: &mut [u8]) {
     for (chunk, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
-        *chunk = word.to_le_bytes();
+        chunk.copy_from_slice(&word.to_le_bytes());
     }
 }
 

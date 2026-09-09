@@ -48,7 +48,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
         return Err(format!("odd-length hex input: {hex}"));
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let high = nibble(pair[0])?;
         let low = nibble(pair[1])?;
         out.push(high << 4 | low);
