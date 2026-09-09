@@ -11,7 +11,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      actions: read
     outputs:
       candidate: ${{ steps.commit.outputs.candidate }}
     steps:
@@ -19,17 +18,26 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Reconstruct reviewed follow-up tree
+      - name: Reconcile exact reviewed changes with current PR
         shell: bash
         run: |
           set -euo pipefail
-          cp .review/followup*.json "$RUNNER_TEMP/"
-          git checkout --detach db1504be00f994a7d3d214a8ecb3c0ea6e25181a
+          cp .review/reconcile*.json "$RUNNER_TEMP/"
+          git checkout --detach a571ed307c3f9fee318fedde92e6d8e23f1d337b
+          git restore --source=036c76bd034cdcedbfe1fbc404585cc04d82ea87 -- \
+            bin/bitcoin-rs/tests/overhaul_evidence.rs bin/bitcoin-rs/tests/overhaul_reference_set.rs \
+            crates/consensus/src/block_view.rs crates/consensus/tests/overhaul_parse_parity.rs \
+            crates/mempool/src/gateway.rs crates/node/src/metrics.rs crates/rpc/src/compat_manifest.rs \
+            crates/storage/src/fjall_impl.rs crates/storage/src/redb_impl.rs crates/storage/src/rocksdb_impl.rs \
+            crates/storage/src/trait_.rs crates/storage/tests/backend_metrics.rs crates/storage/tests/storage_footprint.rs \
+            crates/utxo/src/set.rs crates/utxo/src/shard.rs crates/utxo/tests/overhaul_persistent_coins.rs \
+            docs/benchmarks/muhash-rpc.md docs/benchmarks/native-validation-default.md docs/benchmarks/p2p-loopback.md \
+            docs/contracts/mempool-mutations.md docs/contracts/mempool-policy.md docs/contracts/recovery.md docs/contracts/reference-set.md
           python3 - <<'PY'
           import json, os
           from pathlib import Path
           seen = set()
-          for source in sorted(Path(os.environ['RUNNER_TEMP']).glob('followup*.json')):
+          for source in sorted(Path(os.environ['RUNNER_TEMP']).glob('reconcile*.json')):
               for name, edits in json.loads(source.read_text()).items():
                   path = Path(name)
                   if path.is_absolute() or '..' in path.parts or name in seen:
@@ -39,12 +47,12 @@ jobs:
                   for start, count, replacement in reversed(edits):
                       lines[start:start + count] = replacement.splitlines(keepends=True)
                   path.write_text(''.join(lines))
-          if len(seen) != 21:
-              raise SystemExit(f'expected 21 reviewed files, got {len(seen)}')
+          if len(seen) != 19:
+              raise SystemExit(f'expected 19 additional reviewed paths, got {len(seen)}')
           PY
           git diff --check
           git add -u
-          test "$(git write-tree)" = 7a1a2f976b8761460802d6216a89ddab5442b8d2
+          test "$(git write-tree)" = af4eb0abdbe1d37363a4a9d3b0cb1d1bbb959cad
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
           components: rustfmt
@@ -61,29 +69,21 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Remove misleading implementation claims and fix isolated test feature boundaries' -m 'Separate implemented behavior from target contracts; retain KeepKernel and blocked formal gates. Restore P2P-03 height-credit identity, remove nonexistent transport commands, correct ZMQ/REST/lifecycle descriptions, and distinguish declared evidence from artifact attestation. Fix backend-only test compilation and enable the admission test seam only for node development dependencies.'
+          git commit -m 'Simplify coin ownership and persistence; fix admission, query and evidence fences' -m 'Reconciled with a571ed3, preserving intervening capability deletion, MDBX shared commit boundary, storage test refactor, lifecycle and protocol documentation, formal capture fixes, and CI changes. Exclusive mutable coin-cache ownership replaces independent locks; typed failures fence ambiguous state. Reject lost writes/flushes, verify whole-batch receipts, recheck stale rejection verdicts, share weight arithmetic, and validate complete evidence identities and matrix histories. Reuse the existing chain-transition guard for coherent gettxoutsetinfo reads. Add contract-linked regressions and remove misleading target/implementation claims. No default promotion or formal/product proof is claimed.'
           candidate=$(git rev-parse HEAD)
           branch="review/pr-665-candidate-${GITHUB_RUN_ID}"
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin "HEAD:refs/heads/$branch"
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           echo "Source-only candidate: $candidate on $branch" >> "$GITHUB_STEP_SUMMARY"
-          git diff --binary f8bb0f8d0f49ade933eb558d6722041d37a9c02c HEAD > "$RUNNER_TEMP/reviewed.patch"
+          git diff --binary HEAD^ HEAD > "$RUNNER_TEMP/reviewed.patch"
           git archive --format=tar.gz -o "$RUNNER_TEMP/reviewed-source.tar.gz" HEAD
-      - name: Preserve previous backend failure logs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for job in 102498030244 102498030368; do
-            gh api "repos/gosuda/bitcoin-rs/actions/jobs/$job/logs" > "$RUNNER_TEMP/previous-$job.log"
-          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pr665-final-source
           path: |
             ${{ runner.temp }}/reviewed.patch
             ${{ runner.temp }}/reviewed-source.tar.gz
-            ${{ runner.temp }}/previous-*.log
           retention-days: 3
           if-no-files-found: error
   rust:
@@ -116,24 +116,29 @@ jobs:
           set -euo pipefail
           exec > >(tee "$RUNNER_TEMP/checks.log") 2>&1
           echo "Candidate: $(git rev-parse HEAD); lane: $LANE"
+          rustc --version
           case "$LANE" in
             core)
               cargo test --locked -p bitcoin-rs-utxo --no-default-features --test overhaul_persistent_coins
               cargo test --locked -p bitcoin-rs-utxo --no-default-features --doc
               cargo test --locked -p bitcoin-rs-mempool
+              cargo test --locked -p bitcoin-rs-primitives --test overhaul_layout
               cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs
               cargo clippy --locked -p bitcoin-rs-utxo -p bitcoin-rs-mempool --no-default-features --all-targets -- -D warnings
-              cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs -- -D warnings
               cargo test --locked -p bitcoin-rs-p2p --test core_compat --test wire_codec --test handshake_roundtrip
               ;;
             evidence)
-              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
+              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set --test g18_hot_path_ledger --test g19_validation_default
+              cargo test --locked -p bitcoin-rs-rpc --lib coin_queries_wait_for_one_consistent_utxo_and_tip_transition
+              cargo test --locked -p bitcoin-rs-rpc --lib gettxoutsetinfo
               cargo test --locked -p bitcoin-rs-rpc --test handler_smoke --test manifest_coverage
-              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set -- -D warnings
+              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set --test g18_hot_path_ledger -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-rpc --lib -- -D warnings
               python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
               ;;
             node)
-              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib capability_revision_tests
+              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test overhaul_config_status
               cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib run::tests
               cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --lib -- -D warnings
               ;;
