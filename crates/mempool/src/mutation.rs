@@ -216,18 +216,11 @@ mod tests {
     use super::*;
 
     // MPL-02 (docs/contracts/mempool-mutations.md): each emitted change owns
-    // one sequence; a position beyond that batch owns none.
+    // one sequence when arithmetic fits; positions outside the batch own none.
     #[test]
     fn sequence_of_only_returns_sequences_for_committed_changes() {
-        let result = MutationResult {
-            changes: vec![
-                change(&Txid::default(), MutationOutcome::Accepted),
-                change(
-                    &Txid::default(),
-                    MutationOutcome::Removed(RemovalReason::Replaced),
-                ),
-                change(&Txid::default(), MutationOutcome::Accepted),
-            ],
+        let mut result = MutationResult {
+            changes: vec![change(&Txid::default(), MutationOutcome::Accepted); 3],
             sequence_base: 41,
         };
         assert_eq!(result.sequence_of(0), Some(41));
@@ -240,6 +233,10 @@ mod tests {
                 "out-of-bounds index {index}"
             );
         }
+
+        result.sequence_base = u64::MAX;
+        assert_eq!(result.sequence_of(0), Some(u64::MAX));
+        assert_eq!(result.sequence_of(1), None);
     }
 
     // MPL-02 (docs/contracts/mempool-mutations.md): an empty mutation assigns
