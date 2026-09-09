@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: c982caa4cc527bae11706afa960bab11d26dd586
+          ref: 6417d90e1f595ced7ddc3b7bea7ad115fffde56e
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -43,16 +43,25 @@ jobs:
           from pathlib import Path
           import subprocess
           base = '51ed6b123bda3b775aabc008ad581c338b96da79'
-          gate = 'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs'
+          edits = {
+              'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs': [
+                  (b'/// HPA-05: the declared inventory may extend REQUIRED_PATHS.',
+                   b'/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.'),
+              ],
+              'crates/script/tests/verifier_boundaries.rs': [
+                  (b'let mut altered_tx = tx.clone();', b'let mut altered_tx = tx;'),
+                  (b'let mut corrupted_tx = tx.clone();', b'let mut corrupted_tx = tx;'),
+              ],
+          }
           changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
-          assert changed == [gate], changed
-          previous = subprocess.check_output(['git', 'show', f'{base}:{gate}'])
-          current = Path(gate).read_bytes()
-          old = b'/// HPA-05: the declared inventory may extend REQUIRED_PATHS.'
-          new = b'/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.'
-          assert previous.count(old) == 1
-          assert previous.replace(old, new, 1) == current
-          print('Exact one-line Rustdoc correction; all executable code and ledger data match merged main')
+          assert set(changed) == set(edits), changed
+          for path, replacements in edits.items():
+              expected = subprocess.check_output(['git', 'show', f'{base}:{path}'])
+              for old, new in replacements:
+                  assert expected.count(old) == 1
+                  expected = expected.replace(old, new, 1)
+              assert expected == Path(path).read_bytes(), path
+          print('Exact three-line correction; all assertions, production code, and ledger data are unchanged')
           PY
       - name: Prove the old gate accepts and the new gate rejects an undeclared sample
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
@@ -107,6 +116,9 @@ jobs:
       - name: Full G18 gate and evidence regressions
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test g18_hot_path_ledger --test overhaul_evidence
+      - name: Script unit tests, verifier boundaries and Core vectors
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo test --locked -p bitcoin-rs-script --lib --test verifier_boundaries --test core_vectors
       - name: Workspace strict Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
