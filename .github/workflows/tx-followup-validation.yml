@@ -19,11 +19,11 @@ env:
 jobs:
   structural-rejection:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 8fc8120193dba00d422dc2be74b1c6d48d335f2e
+          ref: 456ca80cb7d816c04a3fee51c1c30a51433d7f76
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -59,19 +59,30 @@ jobs:
           cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e > "$RUNNER_TEMP/tx-evidence/ingress.log" 2>&1 || status=1
           tail -n 40 "$RUNNER_TEMP/tx-evidence/ingress.log"
           exit "$status"
-      - name: Strict affected-crate Clippy and formatting
+      - name: Workspace Clippy
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          set -uo pipefail
-          status=0
-          cargo clippy --locked -p bitcoin-rs-mempool --all-targets -- -D warnings > "$RUNNER_TEMP/tx-evidence/clippy-mempool.log" 2>&1 || status=1
-          tail -n 50 "$RUNNER_TEMP/tx-evidence/clippy-mempool.log"
-          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings > "$RUNNER_TEMP/tx-evidence/clippy-consensus.log" 2>&1 || status=1
-          tail -n 50 "$RUNNER_TEMP/tx-evidence/clippy-consensus.log"
-          cargo fmt --all -- --check > "$RUNNER_TEMP/tx-evidence/fmt.log" 2>&1 || status=1
-          tail -n 50 "$RUNNER_TEMP/tx-evidence/fmt.log"
-          exit "$status"
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee "$RUNNER_TEMP/tx-evidence/clippy-workspace.log"
+      - name: Native consensus Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/tx-evidence/clippy-consensus.log"
+      - name: Native node Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/tx-evidence/clippy-node.log"
+      - name: Workspace formatting
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all -- --check 2>&1 | tee "$RUNNER_TEMP/tx-evidence/fmt.log"
       - name: Kernel-enabled mempool and consensus suites
         if: ${{ !cancelled() }}
         shell: bash
