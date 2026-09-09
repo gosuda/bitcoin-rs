@@ -1,8 +1,11 @@
 //! Core-compatible projection of concrete service status.
 //!
 //! Txindex owns lifecycle and progress. This module owns the `getcapabilities`
-//! wire types and the one-method pull seam RPC needs because it cannot depend
-//! on `node`. See the indexing contract's `IDX-02` for the capability rules.
+//! wire types and the pull seam RPC needs because it cannot depend on `node`.
+//! Every adapter projection — RPC `getcapabilities`, the embedded API, and the
+//! later REST/Esplora projections — carries one runtime revision taken from
+//! the same snapshot; adapters never invent a separate readiness revision.
+//! See the indexing contract's `IDX-02` for the capability rules.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,6 +68,15 @@ pub struct CapabilityStatus {
 /// Point-in-time status report for concrete node capabilities.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapabilitySnapshot {
+    /// One runtime revision for the whole projection.
+    ///
+    /// The revision identifies the runtime state behind every row, so callers
+    /// comparing snapshots never mix rows from different runtime states. All
+    /// status adapters report this single value from the same source.
+    /// Deserialization defaults to `0` so snapshots serialized before the
+    /// field existed still parse.
+    #[serde(default)]
+    pub revision: u64,
     /// Status rows in the node's stable capability order.
     pub capabilities: Vec<CapabilityStatus>,
 }
@@ -73,6 +85,15 @@ pub struct CapabilitySnapshot {
 pub trait TxIndexCapabilitySource: Send + Sync {
     /// Compiled/enabled/lifecycle row for the txindex capability.
     fn capability(&self) -> CapabilityStatus;
+
+    /// Runtime revision shared by every status adapter projection.
+    ///
+    /// One revision covers all rows served from this source, so adapters
+    /// comparing snapshots agree on the runtime state they describe. The
+    /// default `0` serves sources that do not track a runtime revision yet.
+    fn revision(&self) -> u64 {
+        0
+    }
 }
 
 /// Construct the stable txindex row from its enablement and lifecycle state.
@@ -96,6 +117,7 @@ pub fn disabled_txindex() -> CapabilityStatus {
 #[must_use]
 pub fn txindex_snapshot(source: Option<&dyn TxIndexCapabilitySource>) -> CapabilitySnapshot {
     CapabilitySnapshot {
+        revision: source.map_or(0, TxIndexCapabilitySource::revision),
         capabilities: vec![
             source.map_or_else(disabled_txindex, TxIndexCapabilitySource::capability),
         ],
@@ -129,5 +151,30 @@ mod tests {
             snapshot.capabilities,
             vec![txindex_status(true, CapabilityState::Ready)]
         );
+    }
+
+    struct Revisioned(u64);
+
+    impl TxIndexCapabilitySource for Revisioned {
+        fn capability(&self) -> CapabilityStatus {
+            txindex_status(true, CapabilityState::Ready)
+        }
+
+        fn revision(&self) -> u64 {
+            self.0
+        }
+    }
+
+    #[test]
+    // CONTRACT: docs/contracts/indexing.md#IDX-02
+    fn one_runtime_revision_flows_from_the_source() {
+        let snapshot = txindex_snapshot(Some(&Revisioned(7)));
+        assert_eq!(snapshot.revision, 7);
+
+        let untracked = txindex_snapshot(Some(&ReadyEnabled));
+        assert_eq!(untracked.revision, 0);
+
+        let detached = txindex_snapshot(None);
+        assert_eq!(detached.revision, 0);
     }
 }

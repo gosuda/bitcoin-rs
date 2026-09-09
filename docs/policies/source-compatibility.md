@@ -12,7 +12,7 @@ Language and toolchain settings are locked centrally in `rust-toolchain.toml` an
 
 | Setting | Value | Configuration Source |
 | :--- | :--- | :--- |
-| Minimum Supported Rust Version (MSRV) | `1.95.0` | `rust-toolchain.toml`, `Cargo.toml` (`rust-version`) |
+| Pinned Rust toolchain (MSRV) | `1.95.0` | `rust-toolchain.toml` (`channel`), `Cargo.toml` (`rust-version`) |
 | Rust Language Edition | `2024` | `Cargo.toml` (`workspace.package.edition`) |
 | Strict Workspace Lints | Enabled | `Cargo.toml` (`workspace.lints`) |
 
@@ -39,11 +39,21 @@ Language and toolchain settings are locked centrally in `rust-toolchain.toml` an
 - Upgrading a workspace dependency to a new major version requires:
   1. Audit of upstream security, performance, and API changes.
   2. Compilation and verification across all four storage backend features (`fjall`, `rocksdb`, `mdbx`, `redb`).
-  3. Verification against the `kernel` consensus feature path.
+  3. Verification against the `kernel` oracle feature path (opt-in only; see §3.3).
+
+### 3.3 Pinned Optional Dependencies and the Strict-Rust Lane
+- Strict-Rust validation is mandatory for release. The promoted binary, library, and image must validate without native consensus code. `bitcoinkernel` stays pinned at `0.2.1` (kernel tree 31.99.0) as the opt-in differential oracle only. It is never a silent fallback for a native failure, and it is never a policy pin.
+- `k256` is pinned at `0.14.0` as the strict-Rust arithmetic and ECDSA lane. Its high-level Schnorr `Signature` type is withdrawn from use: it stores a `NonZeroScalar` and cannot represent the whole BIP340 input domain. BIP340 verification uses one general protocol operation over the library's maintained arithmetic primitives. The workspace adds no custom field or group arithmetic. An overflowing TapTweak is canonically rejected, never reduced.
+- `bip324` is the planned v2-transport pin (absent today; T28 is out of scope for this plan): when it lands, `=0.11.0` in `[workspace.dependencies]` with `default-features = false` and `features = ["std"]`. Its `tokio` feature stays off; the §3.1 runtime ban applies. Member crates inherit it with `{ workspace = true, optional = true }`. The optional feature `bip324` is off by default and forwards `p2p` to `node` to `binary`. Only the sans-I/O `Handshake` and `CipherSession` types are used, inside the existing `crates/p2p/src/connection.rs` owner. No socket or runtime integration and no custom ECDH, ElligatorSwift, or ChaCha20Poly1305 code is permitted.
+
+### 3.4 Lockfile, Audit, and TLS Rules
+- Every Cargo invocation uses `--locked`. A `Cargo.lock` change lands in the same reviewed atomic commit as its manifest or workspace change. Never use `--offline` to hide a missing crate, and never use `--frozen` as a substitute for `--locked`.
+- `deny.toml` keeps exactly one `bitcoin_hashes` skip once `bip324` lands (no such skip exists today): the exact resolved newer version pulled in by `bip324 0.11.0`, recorded as an exact version and never a range, with `bip324` as its sole reverse dependency. The consensus `bitcoin_hashes` copy stays unskipped. `bitcoin`, `secp256k1`, and `secp256k1-sys` keep their no-skip status. All TLS bans stay in force.
+- TLS, where a dependency requires it, uses the Rustls family only. `openssl`, `openssl-sys`, and `native-tls` are prohibited.
 
 ## 4. Workspace Versioning and Semver Commitment
 
-All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.4.0`).
+All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version`. The current target is `0.5.0`. The `0.4.0` to `0.5.0` bump is staged at the boundary-freeze change (task T03) and lands in one atomic commit together with the `Cargo.lock` update. Member crates inherit the workspace version. A version bump and its lockfile update never split across commits.
 
 | Workspace Crate | Path | Description |
 | :--- | :--- | :--- |
@@ -62,8 +72,8 @@ All crates in `bitcoin-rs` share a single workspace version managed by `[workspa
 | `bitcoin-rs` | `bin/bitcoin-rs` | Command-line node binary |
 
 ### 4.1 Semver Rules
-- During `0.x.y` releases, public API breaking changes require a minor version bump (e.g., `0.4.0` to `0.5.0`).
-- Patch updates (e.g., `0.4.0` to `0.4.1`) must contain only non-breaking bug fixes, performance optimizations, or internal refactoring.
+- During `0.x.y` releases, public API breaking changes require a minor version bump (the `0.4.0` to `0.5.0` bump staged at T03 covers the approved boundary cuts).
+- Patch updates (e.g., `0.5.0` to `0.5.1`) must contain only non-breaking bug fixes, performance optimizations, or internal refactoring.
 
 ## 5. Anti-Shim Principle and Deprecation Policy
 
@@ -83,11 +93,10 @@ maintainer decision and matching migration policy before adding a reader.
 
 ### 5.2 RPC Deprecation Policy
 - `bitcoin-rs-rpc` does not provide deprecation windows or compatibility shims for RPC endpoints.
-- RPC methods match current Bitcoin Core JSON-RPC schemas directly (`crates/rpc/tests/core_compat.rs`).
+- RPC methods match current Bitcoin Core JSON-RPC schemas directly. `crates/rpc/tests/core_compat.rs` is the schema-proof surface: every dispatched response covered by a `corepc_types` structured type must deserialize into that exact upstream type.
 - If an RPC endpoint or field changes upstream or internally, `bitcoin-rs` updates or removes the method immediately in a clean cutover.
 
 ### 5.3 On-Disk Format Deprecation Policy
 - On-disk storage schemas do not maintain backward-compatibility translation shims.
 - When key-value column families, block file encodings, or checkpoint formats change, the system does not convert old databases in place.
 - Datadir schema markers, resync requirements, and checkpoint commit/recovery semantics are defined by the canonical [datadir migration policy](db-migration.md). This policy does not duplicate those on-disk rules.
-

@@ -25,3 +25,7 @@ Each note records the state of the code and the measurements at its date. Where 
 - [Defer redb block-body index durability to checkpoints](performance-issues/defer-redb-block-body-index-durability.md) (2026-08-03) — a scoped `write_deferred` for the index batch; 405 s to 134 s on the 150k replay.
 - [Allocator parity changes wall time, not CPU time](performance/allocator-parity-changes-wall-not-cpu.md) — the mimalloc-versus-system panel that falsified the earlier CPU-deficit premise.
 - [Cross-block script batching: reverted once, then shipped](performance/script-batching-needs-a-split-apply-path.md) — the first attempt cost what it saved; the prepare/commit split, its invariants, and the checkpoint-tail follow-ups.
+
+## Workflow issues
+
+- [Validate temporal action syntax before proof runs](workflow-issues/validate-temporal-action-syntax-before-proof-runs.md) (2026-09-07): why SANY rejected a logically equivalent bare-action fairness rewrite before temporal translation.

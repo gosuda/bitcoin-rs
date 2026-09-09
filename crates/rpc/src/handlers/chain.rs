@@ -1155,7 +1155,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let snapshot = crate::capabilities::txindex_snapshot(ctx.txindex_status.as_deref());
-    Ok(json!({ "capabilities": snapshot.capabilities }))
+    Ok(json!({ "revision": snapshot.revision, "capabilities": snapshot.capabilities }))
 }
 
 #[derive(Clone, Debug)]

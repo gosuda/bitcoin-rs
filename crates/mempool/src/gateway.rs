@@ -583,14 +583,16 @@ impl MempoolGateway {
     ///
     /// The exact duplicate returns [`AdmitOutcome::AlreadyKnown`] successfully
     /// and creates no envelope, sequence, or publication. For a new
-    /// transaction, policy is evaluated under the same write guard and the
-    /// established `replace_transaction` path performs the mutation —
-    /// preserving under-lock BIP125 and package-limit revalidation. On
-    /// success, one `MutationResult` whose ordered removals precede exactly
-    /// one accepted change is published via the existing commit/publish seam.
-    /// A replacement the post-insert trim shed after commit publishes its
-    /// committed removals and then rejects with the same
-    /// [`AdmitError::Policy`] the pre-commit refusal produced.
+    /// transaction, policy evaluation and script verification run OUTSIDE
+    /// the pool writer (see [`Self::prepare_and_verify`]); the writer is
+    /// then acquired once for the exact generation/sequence recheck and the
+    /// atomic `replace_transaction` mutation — preserving under-lock BIP125
+    /// and package-limit revalidation. On success, one `MutationResult`
+    /// whose ordered removals precede exactly one accepted change is
+    /// published via the existing commit/publish seam. A replacement the
+    /// post-insert trim shed after commit publishes its committed removals
+    /// and then rejects with the same [`AdmitError::Policy`] the pre-commit
+    /// refusal produced.
     ///
     /// Any mismatch or rejection returns before publish-mutex acquisition and
     /// before mutation.
@@ -604,82 +606,55 @@ impl MempoolGateway {
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
-        let mut pool = self.pool.write();
-
-        // 1. Exact chain generation check (even and matches request).
+        // Script verification runs OUTSIDE the pool writer (the lock-order
+        // rule: never hold the mempool write lock during script
+        // verification). The verdict computed here is only evidence; its
+        // validity rests on the exact generation and sequence recheck under
+        // the writer below. Every input the verdict depends on moves one of
+        // those two tokens: chain transitions (height, locktime cutoff)
+        // advance the generation, pool mutations (the mempool overlay the
+        // view reads) advance the sequence. The caller-resolved prevouts are
+        // fixed per request. A mismatch at the recheck is a transient error
+        // the caller retries with fresh facts - the existing convention.
+        //
+        // 1. Chain generation precheck (even and matches request).
         let generation = self.chain_generation.load(Ordering::Acquire);
         if generation != request.expected_generation || !generation.is_multiple_of(2) {
             return Err(AdmitError::GenerationChanged);
         }
+        // Finality is evaluated at the height of the next block the
+        // transaction could be mined in (`height + 1`), exactly Core's
+        // `CheckFinalTxAtTip`. A u32 overflow on the next block height is
+        // not a valid chain state, but failing closed here matches the
+        // conservative choice: nothing is admitted when the finality
+        // question is unanswerable.
+        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
+        let Some((policy, fact)) = self.prepare_and_verify(&request, finality_height)? else {
+            return Ok(AdmitOutcome::AlreadyKnown);
+        };
 
-        // 2. Exact mempool sequence check.
+        let mut pool = self.pool.write();
+
+        // 3. Recheck the complete context under the writer: the chain
+        //    generation and the exact mempool sequence. Anything the
+        //    outside verdicts depended on moves one of these tokens; a
+        //    mismatch discards the evidence and returns the transient
+        //    error for the caller's retry.
+        let generation = self.chain_generation.load(Ordering::Acquire);
+        if generation != request.expected_generation || !generation.is_multiple_of(2) {
+            return Err(AdmitError::GenerationChanged);
+        }
         if pool.sequence_number() != request.expected_sequence {
             return Err(AdmitError::MempoolChanged);
         }
-        // 3. Exact duplicate → AlreadyKnown (no envelope, no sequence, no
+        // 4. Exact duplicate -> AlreadyKnown (no envelope, no sequence, no
         //    publication).
         let txid = request.tx.txid();
         if pool.contains_txid(&txid) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
-        // 4. Policy evaluation under the same write guard. `evaluate_one`
-        //    checks standardness, missing inputs, coinbase, min-relay,
-        //    max-fee, and replacement — but NOT package limits (those are
-        //    enforced by `replace_transaction` below).
-        let policy = pool.policy_snapshot();
-        let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
-            &pool,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
-        let fact = crate::standardness::evaluate_one(
-            &pool,
-            &policy.standardness,
-            &request.tx,
-            request.context,
-            request.max_feerate_sat_per_kvb,
-            mempool_min_fee,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
-        if let Some(reason) = fact.reject_reason {
-            return Err(AdmitError::Policy(reason));
-        }
 
-        // 4b. Consensus verification (finality, duplicate inputs, overspend,
-        //     sigop limits) plus Core's policy script checks over the
-        //     resolved prevouts layered with the mempool. A non-coinbase
-        //     transaction with no resolved prevouts must be rejected
-        //     outright — policy may not have caught it if the caller set
-        //     missing_inputs=false. Scripts run here under
-        //     `VerifyFlags::STANDARD`, matching Core's `PolicyScriptChecks`
-        //     (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp): an
-        //     unrelayable transaction must not occupy pool capacity until
-        //     block connection evicts it.
-        if request.prevouts.is_empty() {
-            // Coinbase transactions are never admitted via the gateway.
-            // Empty prevouts on a non-coinbase tx means the caller did not
-            // resolve inputs — reject rather than admit unverified.
-            return Err(AdmitError::Consensus);
-        }
-        let chain_view = PrevoutMap(&request.prevouts);
-        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
-        // Finality is evaluated at the height of the next block the
-        // transaction could be mined in (`height + 1`), exactly Core's
-        // `CheckFinalTxAtTip`.
-        // A u32 overflow on the next block height is not a valid chain
-        // state, but failing closed here matches the conservative choice:
-        // nothing is admitted when the finality question is unanswerable.
-        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
-        if let Err(_err) = verify_transaction(
-            &request.tx,
-            &view,
-            finality_height,
-            request.locktime_cutoff,
-            VerifyFlags::STANDARD,
-        ) {
-            return Err(AdmitError::Consensus);
-        }
-
-        // 5. Mutate under the same write guard via `replace_transaction`,
+        // 6. Mutate under the same write guard via `replace_transaction`,
         //    which handles BIP125 replacement, package limits, and insert.
         let candidate = ReplacementCandidate::new(
             Arc::clone(&request.tx),
@@ -689,21 +664,15 @@ impl MempoolGateway {
         );
         let outcome = pool
             .replace_transaction(candidate, request.time, request.height, fact.sigop_cost)
-            .map_err(|rbf| {
-                // Map RbfError to the correct AcceptanceRejectReason variant.
-                // `replace_transaction` re-checks replacement and package
-                // limits; its errors must map to the same reason class the
-                // preview would have reported.
-                match rbf {
-                    RbfError::Mempool(crate::pool::MempoolError::Policy(policy_err)) => {
-                        AdmitError::Policy(
-                            crate::standardness::AcceptanceRejectReason::PackageLimit(policy_err),
-                        )
-                    }
-                    other => AdmitError::Policy(
-                        crate::standardness::AcceptanceRejectReason::Replacement(other),
-                    ),
+            .map_err(|rbf| match rbf {
+                RbfError::Mempool(crate::pool::MempoolError::Policy(policy_err)) => {
+                    AdmitError::Policy(crate::standardness::AcceptanceRejectReason::PackageLimit(
+                        policy_err,
+                    ))
                 }
+                other => AdmitError::Policy(
+                    crate::standardness::AcceptanceRejectReason::Replacement(other),
+                ),
             })?;
 
         // 6. Enqueue for publication and elect a drainer if needed. Both
@@ -736,6 +705,77 @@ impl MempoolGateway {
             ));
         }
         Ok(AdmitOutcome::Committed(result))
+    }
+
+    /// Policy evaluation and script verification for one admission request,
+    /// OUTSIDE the pool writer (the lock-order rule: never hold the mempool
+    /// write lock during script verification).
+    ///
+    /// Runs under one read guard, in the callers' pinned precedence order:
+    /// exact duplicate short-circuit, context staleness (sequence), policy
+    /// classification (standardness, missing inputs, coinbase, min-relay,
+    /// max-fee, replacement rules), then consensus verification (finality,
+    /// duplicate inputs, overspend, sigop limits) plus Core's policy script
+    /// checks over the resolved prevouts layered with a read-only view of
+    /// the mempool, under `VerifyFlags::STANDARD`.
+    ///
+    /// Returns `Ok(None)` for an exact duplicate. Otherwise the returned
+    /// owned facts are valid only together with the exact generation and
+    /// sequence recheck under the writer in [`Self::admit_transaction`]:
+    /// chain transitions advance the generation, pool mutations advance the
+    /// sequence, and the caller-resolved prevouts are fixed per request, so
+    /// every input a verdict depends on moves one of those tokens.
+    fn prepare_and_verify(
+        &self,
+        request: &AdmissionRequest,
+        finality_height: u32,
+    ) -> Result<
+        Option<(
+            crate::policy::MempoolPolicySnapshot,
+            crate::standardness::TxAcceptanceFact,
+        )>,
+        AdmitError,
+    > {
+        let pool = self.pool.read();
+        let txid = request.tx.txid();
+        if pool.contains_txid(&txid) {
+            return Ok(None);
+        }
+        // Context staleness outranks policy classification: a stale request
+        // rejects as transient before any policy verdict, the observable
+        // precedence the callers' retry logic keys on.
+        if pool.sequence_number() != request.expected_sequence {
+            return Err(AdmitError::MempoolChanged);
+        }
+        let policy = pool.policy_snapshot();
+        let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
+            &pool,
+            policy.incremental_relay_fee_sat_per_kvb,
+        );
+        let fact = crate::standardness::evaluate_one(
+            &pool,
+            &policy.standardness,
+            &request.tx,
+            request.context,
+            request.max_feerate_sat_per_kvb,
+            mempool_min_fee,
+            policy.incremental_relay_fee_sat_per_kvb,
+        );
+        if let Some(reason) = fact.reject_reason {
+            return Err(AdmitError::Policy(reason));
+        }
+        let chain_view = PrevoutMap(&request.prevouts);
+        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
+        if let Err(_err) = verify_transaction(
+            &request.tx,
+            &view,
+            finality_height,
+            request.locktime_cutoff,
+            VerifyFlags::STANDARD,
+        ) {
+            return Err(AdmitError::Consensus);
+        }
+        Ok(Some((policy, fact)))
     }
 
     /// Commits `pool.remove_for_block` and publishes its result.
