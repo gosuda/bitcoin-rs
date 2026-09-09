@@ -780,11 +780,15 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     bodies.insert(genesis.block_hash(), genesis.clone());
     let chain = FakeChain::new(active, bodies);
     let mut peer = ready_peer(Magic::REGTEST)?;
-    // Inbound inv announcements are answered with getdata echoing the items
-    // verbatim (a wtxid-relay peer announces MSG_WTX and is asked for MSG_WTX).
-    let tx_inv = Inventory::Transaction(Txid::from_byte_array([9u8; 32]));
+    // P2P-01 / BIP144: this handshake advertises NODE_WITNESS, so request
+    // witness serialization without changing the announced transaction's txid.
+    let txid = Txid::from_byte_array([9u8; 32]);
+    let tx_inv = Inventory::Transaction(txid);
     let response = dispatch_collect(&mut peer, &Message::Inv(vec![tx_inv]), Some(&chain))?;
-    assert_eq!(response, vec![Message::GetData(vec![tx_inv])]);
+    assert_eq!(
+        response,
+        vec![Message::GetData(vec![Inventory::WitnessTransaction(txid)])],
+    );
 
     // getdata over known + missing inventory serves blocks and notfounds the rest.
     let genesis_hash = genesis.block_hash();

@@ -24,6 +24,7 @@ results. Unknown is not false; a missing measurement blocks the owning task.
 | Install root | `${APALACHE_HOME}`, default `target/tools/apalache-0.62.2` (untracked) |
 | Version check | `apalache-mc version` must print `0.62.2`; mismatch is skill rc 11 |
 | Solver | `SMT_SOLVER=z3`; `JVM_ARGS` default `-Xmx4096m` (complete JVM option) |
+| SMT encoding | `funArrays` (`--smt-encoding=funArrays`) |
 | Step bound | K = 128 (`--length=128`); a verification bound, not a production limit |
 
 The docker tag `ghcr.io/apalache-mc/apalache:main` is a moving branch tag and
