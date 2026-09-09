@@ -55,7 +55,7 @@ fn digest(text: &str) -> [u8; 32] {
     let bytes = text.as_bytes();
     assert_eq!(bytes.len(), 64, "digest literal must be 64 hex characters");
     let mut out = [0_u8; 32];
-    for (at, pair) in bytes.chunks_exact(2).enumerate() {
+    for (at, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let nibble = |byte: u8| {
             u8::try_from(char::from(byte).to_digit(16).expect("hex nibble")).expect("nibble fits")
         };
