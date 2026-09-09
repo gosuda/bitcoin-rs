@@ -907,6 +907,7 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec!["proposal", "longpoll"]
     );
+    assert_eq!(template.version_bits_required, 0);
     assert!(template.signet.is_none());
     Ok(())
 }
