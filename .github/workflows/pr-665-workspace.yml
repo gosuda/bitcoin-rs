@@ -9,11 +9,11 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 5
     outputs:
-      prepared: ${{ steps.patch.outputs.prepared }}
+      source: ${{ steps.patch.outputs.source }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -21,17 +21,12 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          ref: refactor/architectural-excellence
           path: source
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
-          components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-        with:
-          workspaces: source -> target
-          shared-key: pr-665-review
-          cache-on-failure: true
+          components: rustfmt
       - name: Apply review fixes
         run: python3 review-tools/.review/apply.py source
       - name: Format and capture exact candidate
@@ -47,43 +42,64 @@ jobs:
           git write-tree > ../candidate/REVIEW_TREE
           git rev-parse HEAD > ../candidate/SOURCE_COMMIT
           git diff --cached --stat
-          echo prepared=true >> "$GITHUB_OUTPUT"
+          echo "source=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pr-665-candidate
           path: candidate/
           retention-days: 1
           if-no-files-found: error
+  check:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.source }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pr-665-candidate
+          path: ${{ runner.temp }}/candidate
+      - name: Apply exact candidate
+        run: |
+          git apply --index "$RUNNER_TEMP/candidate/review.patch"
+          test "$(git write-tree)" = "$(cat "$RUNNER_TEMP/candidate/REVIEW_TREE")"
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          shared-key: pr-665-review
+          cache-on-failure: true
       - name: Storage fault matrix
-        working-directory: source
         run: cargo test --locked -p bitcoin-rs-storage --no-default-features --features fjall,redb,mdbx,rocksdb --test overhaul_atomic_durability
       - name: Persistent coin regressions
-        if: always() && steps.patch.outputs.prepared == 'true'
-        working-directory: source
+        if: always()
         run: cargo test --locked -p bitcoin-rs-utxo --test overhaul_persistent_coins
       - name: Native consensus regressions
-        if: always() && steps.patch.outputs.prepared == 'true'
-        working-directory: source
+        if: always()
         run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib --test overhaul_parse_parity --test overhaul_prepared_inputs
       - name: Storage, UTXO, and consensus lints
-        if: always() && steps.patch.outputs.prepared == 'true'
-        working-directory: source
+        if: always()
         run: |
           status=0
           cargo clippy --locked -p bitcoin-rs-storage --all-targets --no-default-features --features fjall,redb,mdbx,rocksdb -- -D warnings || status=1
           cargo clippy --locked -p bitcoin-rs-utxo --all-targets -- -D warnings || status=1
           cargo clippy --locked -p bitcoin-rs-consensus --all-targets --no-default-features -- -D warnings || status=1
+          cargo fmt --all -- --check || status=1
           exit "$status"
   stage:
-    needs: check
-    if: always() && needs.check.outputs.prepared == 'true'
+    needs: prepare
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          ref: ${{ needs.prepare.outputs.source }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: pr-665-candidate
