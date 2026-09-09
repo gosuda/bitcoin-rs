@@ -217,6 +217,7 @@ fn public_esplora_options_returns_cors_preflight_response() -> Result<(), Box<dy
     assert!(response.contains("Access-Control-Expose-Headers: X-Total-Results\r\n"));
     assert!(response.contains("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"));
     assert!(response.contains("Access-Control-Allow-Headers: Content-Type\r\n"));
+    assert!(!response.contains("Content-Length:"));
     assert!(response.ends_with("\r\n\r\n"));
     Ok(())
 }
