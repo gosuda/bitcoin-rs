@@ -1436,8 +1436,8 @@ pub enum PersistentUtxoError {
     /// The in-memory UTXO mutation failed; nothing was persisted.
     #[error("utxo mutation failed: {0}")]
     Utxo(#[from] UtxoError),
-    /// The backing store failed; the in-memory state has already moved and
-    /// the caller must treat this as a fault boundary (T12).
+    /// The backing store failed. The operation's method contract identifies
+    /// whether the failure occurred before or after its in-memory commit point.
     #[error("store write failed: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
     /// A guarded durable write found the stored row in an unexpected state.
@@ -1475,6 +1475,7 @@ pub struct CoinLedger {
 pub struct PersistentUtxoSet<S: bitcoin_rs_storage::KvStore> {
     set: UtxoSet,
     store: S,
+    transition_lock: Mutex<()>,
     resident_budget_bytes: usize,
     resident_order: Mutex<std::collections::VecDeque<Hash256>>,
     retained_before_images: Mutex<hashbrown::HashMap<Hash256, Option<Vec<u8>>>>,
@@ -1486,6 +1487,7 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
         Self {
             set,
             store,
+            transition_lock: Mutex::new(()),
             resident_budget_bytes: 0,
             resident_order: Mutex::new(std::collections::VecDeque::new()),
             retained_before_images: Mutex::new(hashbrown::HashMap::new()),
@@ -1503,20 +1505,22 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
     /// commit, then changed-records-only persistence under the chosen
     /// durability mode.
     ///
-    /// The in-memory commit is irrevocable: once it succeeds, a later
+    /// A storage failure while reloading affected rows occurs before the
+    /// in-memory commit and is safe to retry after the store recovers. Once
+    /// `commit_block` succeeds, the in-memory commit is irrevocable: a later
     /// persistence failure leaves memory ahead of the store. Durability
-    /// arrives only at persistence — callers on `Deferred` must call
-    /// `flush` before treating the connect as durable. A `Storage` error
-    /// is a fault boundary (T12): the caller must not retry the connect
-    /// against the moved in-memory state. A `ConditionMismatch` means a
-    /// guarded write lost its store race; the row on disk is authoritative
-    /// and recovery re-establishes it from the store (T12).
+    /// arrives only at persistence — callers on `Deferred` must call `flush`
+    /// before treating the connect as durable. A post-commit `Storage` error
+    /// is a fault boundary (T12): the caller must not retry the connect against
+    /// the moved in-memory state. A `ConditionMismatch` means a guarded write
+    /// failed a store precondition and requires explicit reconciliation.
     pub fn connect_block(
         &self,
         changes: &BlockChanges,
         block_hash: &Hash256,
         mode: CoinDurability,
     ) -> Result<(), PersistentUtxoError> {
+        let _transition = self.transition_lock.lock();
         let affected = Self::affected_txids(
             changes.adds.iter().map(|add| add.outpoint.txid),
             &changes.removes,
@@ -1540,6 +1544,7 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
         undo: &UndoBatch,
         mode: CoinDurability,
     ) -> Result<(), PersistentUtxoError> {
+        let _transition = self.transition_lock.lock();
         let affected =
             Self::affected_txids(undo.restores.iter().map(|r| r.outpoint.txid), &undo.removes);
         self.reload_evicted(&affected)?;
@@ -1559,22 +1564,31 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
     /// [`CoinDurability::Deferred`] must call this before treating the
     /// connect as durable.
     pub fn flush(&self) -> Result<(), PersistentUtxoError> {
+        let _transition = self.transition_lock.lock();
         self.store.flush().map_err(PersistentUtxoError::Storage)?;
         self.retained_before_images.lock().clear();
         Ok(())
     }
 
     /// Looks up one outpoint: resident shard first, then the store, which
-    /// reloads a byte-identical record into the cache on a miss.
+    /// reloads a byte-identical record into the cache on a miss. Cache-miss
+    /// refill is serialized with connect, undo, and flush and rechecks the
+    /// resident set after acquiring that serialization point.
     #[must_use]
     pub fn get(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        if let Some(txout) = self.set.get(outpoint) {
+            return Some(txout);
+        }
+        let _transition = self.transition_lock.lock();
         if let Some(txout) = self.set.get(outpoint) {
             return Some(txout);
         }
         self.reload_record(&outpoint.txid.into())
             .map_err(|_| ())
             .ok()?;
-        self.set.get(outpoint)
+        let txout = self.set.get(outpoint);
+        self.evict_over_budget();
+        txout
     }
 
     /// The byte ledger: resident tables plus retained versions plus stored
