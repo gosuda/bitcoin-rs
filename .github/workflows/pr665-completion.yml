@@ -2,7 +2,7 @@ name: PR665 completion verification
 on:
   push:
     branches: [review/pr665-completion-ci-20260910]
-    paths: [.github/workflows/pr665-completion.yml, .review/ready]
+    paths: [.github/workflows/pr665-completion.yml]
 permissions:
   contents: read
 jobs:
@@ -16,53 +16,35 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ca42a87c1b32fc9658cc270974ef963e7adc3dd9
+          ref: 8d24469b62ae950656ec55f2bd14a41d3029e5cc
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
           toolchain: stable
           components: rustfmt
-      - name: Repair production dependency and callers without changing consensus rules
+      - name: Correct the two stale fixture calls and use exact digest byte pairs
         run: |
           set -euo pipefail
-          cp Cargo.lock "$RUNNER_TEMP/old.lock"
           python3 - <<'PY'
           from pathlib import Path
-          def replace(name, old, new):
-              p = Path(name)
-              text = p.read_text()
-              assert text.count(old) == 1, (name, text.count(old))
-              p.write_text(text.replace(old, new))
-          replace('crates/utxo/tests/overhaul_persistent_coins.rs',
-              'coins.undo_block(&Default::default(), CoinDurability::Durable)',
-              'coins.undo_block(&bitcoin_rs_utxo::set::UndoBatch::default(), CoinDurability::Durable)')
-          p = Path('crates/node/Cargo.toml')
+          p = Path('crates/node/src/metrics.rs')
           text = p.read_text()
-          assert text.count('toml.workspace = true\n') == 1
-          text = text.replace('toml.workspace = true\n', '')
-          text = text.replace('serde_json.workspace = true\n', 'serde_json.workspace = true\ntoml.workspace = true\n')
+          old = 'text.as_bytes().chunks_exact(2)'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, 'text.as_bytes().as_chunks::<2>().0'))
+          p = Path('crates/consensus/tests/overhaul_parse_parity.rs')
+          text = p.read_text()
+          for block, facts in [('mutated', 'facts'), ('base', 'control_facts')]:
+              old = f'verify_block_rules_precomputed(&{block}, BlockRuleContext::non_contextual(), &{facts})'
+              new = f'verify_block_rules_precomputed(&{block}, BlockRuleContext::non_contextual(), {facts}.txids(), {facts}.wtxids().unwrap_or_default(), {facts}.has_witness())'
+              assert text.count(old) == 1
+              text = text.replace(old, new)
           p.write_text(text)
-          replace('crates/node/src/run.rs',
-              '    let metrics =\n        crate::metrics::start_metrics(state.config().observability.metrics_bind, state.shutdown())?;\n    guard.services.metrics = metrics;',
-              '    if let Some(bind) = state.config().observability.metrics_bind {\n        let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;\n        guard.services.metrics =\n            crate::metrics::start_metrics(Some(bind), state.shutdown(), &identity)?;\n    }')
-          replace('crates/node/src/apply.rs',
-              '        view.facts(),\n    );\n    let block_rules_dur',
-              '        view.txids(),\n        view.computed_witness_ids().unwrap_or_default(),\n        view.facts().has_witness(),\n    );\n    let block_rules_dur')
           PY
-          git diff --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
-          cargo metadata --format-version 1 > /dev/null
-          python3 - <<'PY'
-          import os, pathlib, tomllib
-          old = tomllib.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'old.lock').read_text())
-          new = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
-          def external(doc):
-              return {(p['name'], p['version'], p['source']) for p in doc['package'] if 'source' in p}
-          assert external(new) <= external(old), 'unexpected external dependency change'
-          PY
+          rustfmt --edition 2024 --config skip_children=true crates/node/src/metrics.rs crates/consensus/tests/overhaul_parse_parity.rs
           git diff --check
-          cargo metadata --locked --format-version 1 > /dev/null
-      - name: Commit source-only corrections to the existing follow-up branch
+      - name: Commit verified-scope corrections to the follow-up branch
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,7 +53,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -u
-          git commit -m 'Repair node evidence and consensus caller wiring; keep disabled metrics lazy' -m 'Make the evidence ledger TOML dependency available to production builds. Supply the existing process identity only when metrics are enabled and pass the existing cached transaction facts to the current consensus API. Use the explicit UndoBatch default in the recovery regression.'
+          git commit -m 'Update parse fixtures to cached-facts API and use exact digest byte pairs'
           candidate=$(git rev-parse HEAD)
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin HEAD:refs/heads/review/pr665-followup-34373279168
@@ -108,28 +90,24 @@ jobs:
         with:
           key: pr665-review-${{ matrix.lane }}
           cache-on-failure: true
-      - name: Contract regressions and warnings-as-errors lint
+      - name: Regressions and warnings-as-errors lint
         env:
           LANE: ${{ matrix.lane }}
           CARGO_INCREMENTAL: 0
           CARGO_TERM_COLOR: never
-        shell: bash
         run: |
           set -euo pipefail
           exec > >(tee "$RUNNER_TEMP/verification.log") 2>&1
-          case "$LANE" in
-            coins)
-              cargo test --locked -p bitcoin-rs-utxo --no-default-features
-              cargo clippy --locked -p bitcoin-rs-utxo --no-default-features --all-targets -- -D warnings
-              python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
-              cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity
-              ;;
-            evidence)
-              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
-              cargo test --locked -p bitcoin-rs-rpc --test core_compat --test handler_smoke
-              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set -- -D warnings
-              ;;
-          esac
+          if [ "$LANE" = coins ]; then
+            cargo test --locked -p bitcoin-rs-utxo --no-default-features
+            cargo clippy --locked -p bitcoin-rs-utxo --no-default-features --all-targets -- -D warnings
+            python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
+            cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity
+          else
+            cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
+            cargo test --locked -p bitcoin-rs-rpc --test core_compat --test handler_smoke
+            cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set -- -D warnings
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
