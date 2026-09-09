@@ -1,0 +1,217 @@
+name: ci-repair-candidate
+
+on:
+  push:
+    branches: [work/ci-repair-staging-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-repair-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidate_sha: ${{ steps.publish.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt
+      - name: Construct the identity-checked candidate
+        run: |
+          python3 .ci-repair-prepare.py
+          rustfmt --edition 2024 crates/consensus/src/verify_block.rs bin/bitcoin-rs/tests/gates/g20_formal_models.rs
+          git diff --check
+          mkdir -p "$RUNNER_TEMP/repair-evidence"
+          git diff > "$RUNNER_TEMP/repair-evidence/candidate.patch"
+          rustc --version > "$RUNNER_TEMP/repair-evidence/toolchain.txt"
+      # No repository tests/build scripts execute in this write-capable job.
+      # This token is exposed only to the fixed API publisher below. The
+      # candidate tree starts at BASE_SHA and cannot include staging files.
+      - name: Publish only reviewed source paths to a new candidate branch
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: 3363cff27664d9f9e7bac91f69bc900f70bbf3ea
+          CANDIDATE_BRANCH: ci/repair-stutter-verifier-20260910
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import urllib.request
+
+          repository = os.environ['GITHUB_REPOSITORY']
+          assert repository == 'gosuda/bitcoin-rs'
+          api = f'https://api.github.com/repos/{repository}'
+          headers = {
+              'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+              'Content-Type': 'application/json',
+          }
+          def call(path, data=None):
+              req = urllib.request.Request(api + path,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers=headers, method='GET' if data is None else 'POST')
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+
+          paths = [
+              'crates/consensus/src/verify_block.rs',
+              'docs/models/ChainAdmission.tla',
+              'docs/models/regressions/ChainAdmissionShutdown.tla',
+              'bin/bitcoin-rs/tests/gates/g20_formal_models.rs',
+              'CONSTRAINTS.md',
+          ]
+          base = call('/git/commits/' + os.environ['BASE_SHA'])
+          tree = []
+          identities = {}
+          for name in paths:
+              content = Path(name).read_bytes()
+              identities[name] = hashlib.sha256(content).hexdigest()
+              blob = call('/git/blobs', {'content': content.decode(), 'encoding': 'utf-8'})
+              tree.append({'path': name, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+          tree.append({'path': 'crates/consensus/src/verify_block_impl.rs',
+                       'mode': '100644', 'type': 'blob', 'sha': None})
+          proposed = call('/git/trees', {'base_tree': base['tree']['sha'], 'tree': tree})
+          commit = call('/git/commits', {
+              'message': 'fix: exercise production block rules and restore terminal model stutter\n\nRetain all 24 original verifier tests on the production BlockFacts entry,\nadd missing-facts regressions, and remove the obsolete verifier copy.\nRestore ChainAdmission stuttering for direct INIT/NEXT checking and add\nan independent shutdown regression before the unchanged K=128 proof suite.\n',
+              'tree': proposed['sha'], 'parents': [os.environ['BASE_SHA']],
+          })
+          # Create-only: never rewrite main or overwrite an existing branch.
+          call('/git/refs', {'ref': 'refs/heads/' + os.environ['CANDIDATE_BRANCH'],
+                            'sha': commit['sha']})
+          identities['candidate_sha'] = commit['sha']
+          Path(os.environ['RUNNER_TEMP'], 'repair-evidence', 'identities.json').write_text(
+              json.dumps(identities, indent=2) + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('candidate_sha=' + commit['sha'] + '\n')
+          print('Candidate commit:', commit['sha'])
+          PY
+      - name: Preserve candidate construction evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-repair-construction-${{ github.run_id }}
+          path: ${{ runner.temp }}/repair-evidence/
+          retention-days: 3
+
+  consensus:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Test and lint the actual production verifier
+        run: |
+          mkdir -p target/repair-evidence
+          git rev-parse HEAD > target/repair-evidence/source-sha.txt
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast 2>&1 | tee target/repair-evidence/consensus-tests.txt
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee target/repair-evidence/consensus-clippy.txt
+          cargo clippy --locked -p bitcoin-rs --test g20_formal_models --no-default-features --features fjall -- -D warnings 2>&1 | tee target/repair-evidence/g20-clippy.txt
+          cargo fmt --all -- --check 2>&1 | tee target/repair-evidence/fmt.txt
+      - name: Prove the retained weight test reaches production code
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/consensus/src/verify_block.rs')
+          text = p.read_text()
+          old = '    let weight = facts.weight();'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, '    let weight = 0_u64;', 1))
+          PY
+          set +e
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib verify_block::tests::contextual_rules_always_enforce_block_weight_limit -- --exact > target/repair-evidence/weight-mutant.txt 2>&1
+          status=$?
+          set -e
+          git restore crates/consensus/src/verify_block.rs
+          tail -40 target/repair-evidence/weight-mutant.txt
+          test "$status" -ne 0
+          grep -q 'test result: FAILED' target/repair-evidence/weight-mutant.txt
+          grep -q 'contextual_rules_always_enforce_block_weight_limit.*FAILED' target/repair-evidence/weight-mutant.txt
+          git diff --exit-code
+      - name: Preserve exact-source native validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-repair-consensus-${{ github.run_id }}
+          path: target/repair-evidence/
+          retention-days: 3
+
+  shutdown-model:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.candidate_sha }}
+          persist-credentials: false
+      - name: Provision and verify the exact pinned checker
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      - name: Validate shutdown and detect the missing-stutter mutant
+        env:
+          JVM_ARGS: -Xmx4096m
+          SMT_SOLVER: z3
+        run: |
+          mkdir -p target/repair-evidence/shutdown
+          cp docs/models/ChainAdmission.{tla,cfg} target/repair-evidence/shutdown/
+          cp docs/models/regressions/ChainAdmissionShutdown.tla target/repair-evidence/shutdown/
+          checker="$PWD/target/tools/apalache-0.62.2/bin/apalache-mc"
+          cd target/repair-evidence/shutdown
+          sha256sum *.tla *.cfg > SHA256SUMS
+          args=(check --config=ChainAdmission.cfg --init=ProbeInit --next=ProbeNext --inv=TypeOK,Safety,TransitionSafety,ReachedDone --length=5 --smt-encoding=funArrays)
+          printf '%q ' "$checker" "${args[@]}" > argv.txt
+          printf '\n' >> argv.txt
+          set -o pipefail
+          timeout --kill-after=10s 300s "$checker" "${args[@]}" --out-dir=positive ChainAdmissionShutdown.tla 2>&1 | tee positive.txt
+          grep -q 'The outcome is: NoError' positive.txt
+          grep -q 'EXITCODE: OK' positive.txt
+          # Mutation is only in the isolated copy, never in the commit.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('ChainAdmission.tla')
+          s = p.read_text()
+          old = '  \\/ UNCHANGED vars\n'
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, '', 1))
+          PY
+          set +e
+          timeout --kill-after=10s 300s "$checker" "${args[@]}" --out-dir=negative ChainAdmissionShutdown.tla > negative.txt 2>&1
+          status=$?
+          set -e
+          tail -40 negative.txt
+          echo "$status" > negative-exit-code.txt
+          test "$status" -eq 12
+          grep -q 'The outcome is: Deadlock' negative.txt
+      - name: Preserve pinned model regression evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-repair-shutdown-${{ github.run_id }}
+          path: target/repair-evidence/
+          retention-days: 3
