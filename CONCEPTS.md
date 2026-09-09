@@ -197,9 +197,13 @@ disconnect, or reorg is in progress and admission is closed.
 change is active. `begin_chain_change` takes the pool write lock, stores the
 next odd value, and returns a `ChainChangeGuard` that owns the reservation.
 Only `finish` may compare-exchange the odd value to the reserved even value,
-reopening admission. A failed chain change leaves the generation odd —
-admission stays closed until the operator restarts or the chain change
-completes.
+reopening admission. A clean refusal before the UTXO commit-of-record finishes
+and reopens admission (retryable, no restart); a `UtxoCommit` refusal, panic,
+crash, or torn state leaves the generation odd until recovery establishes a
+consistent chainstate. A generation-settlement failure itself (`finish` CAS
+failure / `GenerationMoved`) is an invariant violation: admission stays closed
+and the failure is surfaced as fatal — the node does not retry until recovery
+or restart re-establishes a consistent gateway.
 
 ### Admission origin
 The `AdmissionOrigin` enum on `MutationEnvelope` that identifies how a
