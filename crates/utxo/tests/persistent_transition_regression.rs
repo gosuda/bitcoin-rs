@@ -1,4 +1,4 @@
-//! Regression coverage for persistent-coin transition boundaries.
+//! Regression coverage for `RCV-04A` in `docs/contracts/recovery.md`.
 
 #![expect(clippy::expect_used, reason = "test assertions")]
 
@@ -197,6 +197,7 @@ fn blocked_flush_does_not_block_resident_reads() {
                 .expect("send resident read");
         });
 
+        // RCV-04A: this is a deadlock detector, not a latency requirement.
         let read_while_blocked = rx.recv_timeout(Duration::from_secs(5));
         gate.release.wait();
         let output = read_while_blocked
