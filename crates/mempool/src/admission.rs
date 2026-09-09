@@ -293,7 +293,8 @@ impl MempoolGateway {
         }
     }
 
-    /// Inventory membership includes resident orphans and recent peer rejects.
+    /// Inventory membership includes resident orphans. Exact-body recent
+    /// rejects suppress only wtxid inventory, never an entire txid family.
     #[must_use]
     pub fn have_tx(&self, hash: Hash256, wtxid: bool) -> bool {
         let pool = self.pool.read();
@@ -306,7 +307,9 @@ impl MempoolGateway {
             return true;
         }
         let lifecycle = self.lifecycle.lock();
-        lifecycle.is_rejected(hash)
+        // A stripped body's wtxid equals its txid. Applying that rejection to
+        // txid inventory would prevent requesting a valid witness variant.
+        (wtxid && lifecycle.is_rejected(hash))
             || if wtxid {
                 lifecycle.orphans.get_by_wtxid(&Wtxid::from(hash)).is_some()
             } else {
@@ -352,12 +355,6 @@ impl MempoolGateway {
     #[must_use]
     pub fn recent_rejects_count(&self) -> usize {
         self.lifecycle.lock().rejects_len()
-    }
-
-    /// Whether a transaction body is parked pending missing inputs.
-    #[must_use]
-    pub fn is_orphan(&self, txid: &Txid) -> bool {
-        self.lifecycle.lock().orphans.contains(txid)
     }
 
     /// Whether a hash belongs to the bounded recent peer rejection cache.
@@ -449,6 +446,7 @@ mod tests {
         assert!(inserted.is_ok());
     }
 
+    // MPL-04: parent readiness belongs to the commit, not observer delivery.
     #[test]
     fn parent_commit_without_observers_retries_orphan_with_original_source() {
         for origin in [
@@ -488,6 +486,7 @@ mod tests {
         }
     }
 
+    // MPL-04: RPC failures do not populate peer lifecycle state.
     #[test]
     fn rpc_missing_inputs_does_not_create_peer_lifecycle_state() {
         let gateway = gateway();
@@ -502,6 +501,7 @@ mod tests {
         assert_eq!(gateway.recent_rejects_count(), 0);
     }
 
+    // MPL-04: nonexistent outputs of resident parents cannot become orphans.
     #[test]
     fn nonexistent_mempool_output_is_rejected_without_holding_or_mutating() {
         for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Peer(source())] {
@@ -527,6 +527,7 @@ mod tests {
         }
     }
 
+    // MPL-04: arrival resolves missing ancestry without retaining invalid outputs.
     #[test]
     fn absent_parent_is_held_but_its_nonexistent_output_is_rejected_on_retry() {
         let gateway = gateway();
@@ -558,6 +559,7 @@ mod tests {
         assert!(gateway.retry_orphans(&Coins(vec![]), 3).is_empty());
     }
 
+    // MPL-04: only the resident body's claim may mutate its lifecycle state.
     #[test]
     fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
         let gateway = gateway();
@@ -613,6 +615,7 @@ mod tests {
         assert_eq!(gateway.recent_rejects_count(), 0);
     }
 
+    // MPL-04: witness rejection does not poison another body with the same txid.
     #[test]
     fn rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid() {
         let gateway = gateway();
@@ -638,12 +641,14 @@ mod tests {
         );
         assert!(gateway.have_tx(Hash256::from(invalid.wtxid()), true));
         assert!(!gateway.have_tx(Hash256::from(valid.wtxid()), true));
+        assert!(!gateway.have_tx(Hash256::from(valid.txid()), false));
         assert!(matches!(
             gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
             Ok(SubmitOutcome::Committed(_))
         ));
     }
 
+    // MPL-04: stripped-body rejects cannot suppress txid inventory or valid admission.
     #[test]
     fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
         use bitcoin::hashes::{Hash as _, sha256};
@@ -663,20 +668,33 @@ mod tests {
         let mut valid = (*child).clone();
         valid.inputs[0].witness = vec![witness_script];
         let valid = Arc::new(valid);
+        let stripped_wtxid = child.wtxid();
         assert_eq!(child.txid(), valid.txid());
-        assert_ne!(child.wtxid(), valid.wtxid());
+        assert_ne!(stripped_wtxid, valid.wtxid());
         assert_eq!(
             gateway.submit_transaction(child, AdmissionOrigin::Peer(source()), None, 1, &chain),
             Err(SubmitError::Consensus)
         );
         assert!(gateway.is_rejected(Hash256::from(valid.txid())));
         assert!(!gateway.is_rejected(Hash256::from(valid.wtxid())));
+        assert!(gateway.have_tx(Hash256::from(stripped_wtxid), true));
+        assert!(!gateway.have_tx(Hash256::from(valid.txid()), false));
+        assert!(!gateway.have_tx(Hash256::from(valid.wtxid()), true));
         assert!(matches!(
-            gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
+            gateway.submit_transaction(
+                Arc::clone(&valid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                2,
+                &chain
+            ),
             Ok(SubmitOutcome::Committed(_))
         ));
+        assert!(gateway.have_tx(Hash256::from(valid.txid()), false));
+        assert!(gateway.have_tx(Hash256::from(valid.wtxid()), true));
     }
 
+    // MPL-04: shared preparation carries BIP141 accounting into committed entries.
     #[test]
     fn submission_carries_prepared_fee_size_and_weighted_sigops_into_entry() {
         for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Peer(source())] {
@@ -703,6 +721,7 @@ mod tests {
         }
     }
 
+    // MPL-04: chain notifications clear rejects but cannot consume odd-generation work.
     #[test]
     fn chain_change_with_no_pool_mutation_clears_rejects_and_preserves_odd_ready_work() {
         let gateway = gateway();
@@ -751,6 +770,7 @@ mod tests {
         assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
     }
 
+    // MPL-04: exhausted retries remain resident and retry only on a later poll.
     #[test]
     fn exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll() {
         let gateway = gateway();
@@ -805,6 +825,7 @@ mod tests {
         }
     }
 
+    // MPL-04: preparation cannot lose a parent commit between resolution and holding.
     #[test]
     fn parent_commit_between_resolution_and_hold_cannot_lose_the_only_wake() {
         let gateway = gateway();
@@ -855,6 +876,7 @@ mod tests {
         }
     }
 
+    // MPL-04: changed generation invalidates rejection facts before publication.
     #[test]
     fn changed_chain_rebuilds_invalid_facts_before_recording_peer_rejection() {
         let gateway = gateway();
@@ -881,6 +903,7 @@ mod tests {
         }
     }
 
+    // MPL-04: confirmed-chain facts suppress peers, not RPC admission by cache lookup.
     #[test]
     fn confirmed_lookup_suppresses_peers_but_is_not_rpc_membership() {
         let gateway = gateway();
@@ -906,6 +929,7 @@ mod tests {
         ));
     }
 
+    // MPL-04: only standard, non-coinbase missing-input bodies may be held.
     #[test]
     fn coinbase_and_nonstandard_missing_transactions_are_not_held() {
         let gateway = gateway();
@@ -968,6 +992,7 @@ mod tests {
         }
     }
 
+    // MPL-04: retired retry claims cannot commit, hold, reject, or requeue work.
     #[test]
     fn refreshed_or_evicted_retry_claim_cannot_commit_hold_reject_or_requeue() {
         // Exercise final commit, missing-input hold, invalid-script rejection,
