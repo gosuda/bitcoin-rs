@@ -29,39 +29,66 @@ jobs:
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - name: Prepare the source-only candidate
+      - name: Prepare the source-only candidate and reconcile workspace lock entries
         id: candidate
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/clippy-evidence"
           rustc --version | tee "$RUNNER_TEMP/clippy-evidence/toolchain.txt"
+          if git ls-remote --exit-code --heads origin refs/heads/followup/stable-clippy-cleanup; then
+            git fetch origin refs/heads/followup/stable-clippy-cleanup
+            git diff --quiet 7d384289f6d47a6c44705ad05b7aa14926624e4b FETCH_HEAD -- . ':!crates/node/src/metrics.rs' ':!Cargo.lock'
+            git checkout --detach FETCH_HEAD
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import subprocess
           path = 'crates/node/src/metrics.rs'
-          expected = '801775b321dd24bd4e29c35daf91460dffa309e5'
-          actual = subprocess.check_output(['git', 'hash-object', path], text=True).strip()
-          if actual != expected:
-              raise SystemExit(f'metrics preimage changed: {actual}')
-          p = Path(path)
-          text = p.read_text()
+          base = '7d384289f6d47a6c44705ad05b7aa14926624e4b'
+          original = subprocess.check_output(['git', 'show', f'{base}:{path}'], text=True)
           old = 'bytes.iter_mut().zip(text.as_bytes().chunks_exact(2))'
           new = 'bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0)'
-          if text.count(old) != 1:
+          if original.count(old) != 1:
               raise SystemExit('expected exactly one chunk iteration preimage')
-          p.write_text(text.replace(old, new, 1))
+          replacement = original.replace(old, new, 1)
+          p = Path(path)
+          if p.read_text() not in (original, replacement):
+              raise SystemExit('candidate contains unrelated metrics changes')
+          p.write_text(replacement)
+          PY
+          cp Cargo.lock "$RUNNER_TEMP/clippy-evidence/Cargo.lock.before"
+          cargo metadata --format-version=1 > "$RUNNER_TEMP/clippy-metadata.json"
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, tomllib
+          base = '7d384289f6d47a6c44705ad05b7aa14926624e4b'
+          before = tomllib.loads(subprocess.check_output(['git','show',f'{base}:Cargo.lock'],text=True))
+          after = tomllib.loads(Path('Cargo.lock').read_text())
+          def external(lock):
+              return {(p['name'],p['version'],p['source']):p for p in lock['package'] if 'source' in p}
+          def identities(lock):
+              return {(p['name'],p['version'],p.get('source')) for p in lock['package']}
+          if external(before) != external(after) or identities(before) != identities(after) or before['version'] != after['version']:
+              raise SystemExit('lock reconciliation changed an external dependency or package identity')
           PY
           rustfmt --edition 2024 crates/node/src/metrics.rs
           git diff --check
-          test "$(git diff --name-only)" = crates/node/src/metrics.rs
-          git diff | tee "$RUNNER_TEMP/clippy-evidence/candidate.patch"
+          python3 - <<'PY'
+          import subprocess
+          paths = set(subprocess.check_output(['git','diff','--name-only','7d384289f6d47a6c44705ad05b7aa14926624e4b'],text=True).splitlines())
+          if paths != {'Cargo.lock','crates/node/src/metrics.rs'}:
+              raise SystemExit(f'unexpected candidate scope: {paths}')
+          PY
+          git diff 7d384289f6d47a6c44705ad05b7aa14926624e4b | tee "$RUNNER_TEMP/clippy-evidence/candidate.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/node/src/metrics.rs
-          git commit -m 'fix(node): use fixed-size digest chunks for current-stable Clippy'
+          git add Cargo.lock crates/node/src/metrics.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix(node): satisfy stable Clippy with a consistent workspace lock'
+          fi
           git rev-parse HEAD | tee "$RUNNER_TEMP/clippy-evidence/candidate-sha.txt"
-          git ls-tree HEAD crates/node/src/metrics.rs | tee "$RUNNER_TEMP/clippy-evidence/blobs.txt"
+          git ls-tree HEAD Cargo.lock crates/node/src/metrics.rs | tee "$RUNNER_TEMP/clippy-evidence/blobs.txt"
           git push origin HEAD:refs/heads/followup/stable-clippy-cleanup
       - name: Workspace Clippy
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
