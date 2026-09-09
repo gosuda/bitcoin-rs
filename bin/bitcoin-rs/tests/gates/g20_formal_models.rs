@@ -38,6 +38,7 @@ const JAR: &str = "lib/apalache.jar";
 const JVM_ARGS_DEFAULT: &str = "-Xmx4096m";
 const SMT_SOLVER_DEFAULT: &str = "z3";
 const TIMEOUT_SECS: u64 = 3600;
+const OUTPUT_TAIL_BYTES: usize = 1024 * 1024;
 const OUTCOME_NO_ERROR: &str = "The outcome is: NoError";
 const EXITCODE_OK: &str = "EXITCODE: OK";
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -358,12 +359,61 @@ fn collect_evidence(root: &Path, out_dir: &Path, n: u8) -> Vec<PathBuf> {
     evidence
 }
 
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn read_bounded_tail(mut reader: impl Read) -> CapturedOutput {
+    let mut tail = Vec::with_capacity(OUTPUT_TAIL_BYTES);
+    let mut scratch = [0_u8; 8192];
+    let mut truncated = false;
+
+    loop {
+        match reader.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(read) => {
+                let chunk = &scratch[..read];
+                if chunk.len() >= OUTPUT_TAIL_BYTES {
+                    tail.clear();
+                    tail.extend_from_slice(&chunk[chunk.len() - OUTPUT_TAIL_BYTES..]);
+                    truncated = true;
+                    continue;
+                }
+                let overflow = tail.len().saturating_add(chunk.len()).saturating_sub(OUTPUT_TAIL_BYTES);
+                if overflow != 0 {
+                    drop(tail.drain(..overflow));
+                    truncated = true;
+                }
+                tail.extend_from_slice(chunk);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let marker = format!("\n[g20 output capture read error: {error}]\n");
+                let marker = marker.as_bytes();
+                let overflow = tail.len().saturating_add(marker.len()).saturating_sub(OUTPUT_TAIL_BYTES);
+                if overflow != 0 {
+                    drop(tail.drain(..overflow));
+                    truncated = true;
+                }
+                tail.extend_from_slice(marker);
+                break;
+            }
+        }
+    }
+
+    CapturedOutput {
+        bytes: tail,
+        truncated,
+    }
+}
+
 fn execute_and_capture(
     cmd: &mut Command,
     exe: &Path,
     model: &str,
     kind: CheckKind,
-) -> (Option<i32>, Vec<u8>, Vec<u8>) {
+) -> (Option<i32>, CapturedOutput, CapturedOutput) {
     let mut child = match spawn_or_chmod(cmd, exe) {
         Ok(c) => c,
         Err(e) => panic!("g20: cannot spawn apalache-mc for {model} {kind:?} (skill rc 14): {e}"),
@@ -372,18 +422,8 @@ fn execute_and_capture(
     let stdout_handle = child.stdout.take().expect("stdout pipe");
     let stderr_handle = child.stderr.take().expect("stderr pipe");
 
-    let out_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut reader = stdout_handle;
-        let _ = reader.read_to_end(&mut buf).ok();
-        buf
-    });
-    let err_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let mut reader = stderr_handle;
-        let _ = reader.read_to_end(&mut buf).ok();
-        buf
-    });
+    let out_thread = thread::spawn(move || read_bounded_tail(stdout_handle));
+    let err_thread = thread::spawn(move || read_bounded_tail(stderr_handle));
 
     let timeout = Duration::from_secs(TIMEOUT_SECS);
     let start = Instant::now();
@@ -464,12 +504,19 @@ fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
             .join(", ")
     ));
     run_text.push_str("# --- stdout ---\n");
-    run_text.push_str(&String::from_utf8_lossy(&stdout));
+    if stdout.truncated {
+        run_text.push_str("# [stdout truncated to bounded diagnostic tail]\n");
+    }
+    run_text.push_str(&String::from_utf8_lossy(&stdout.bytes));
     run_text.push_str("# --- stderr ---\n");
-    run_text.push_str(&String::from_utf8_lossy(&stderr));
+    if stderr.truncated {
+        run_text.push_str("# [stderr truncated to bounded diagnostic tail]\n");
+    }
+    run_text.push_str(&String::from_utf8_lossy(&stderr.bytes));
     fs::write(&run_file, run_text).expect("write run-<n>.txt");
 
-    let combined = String::from_utf8_lossy(&stdout).to_string() + &String::from_utf8_lossy(&stderr);
+    let combined = String::from_utf8_lossy(&stdout.bytes).to_string()
+        + &String::from_utf8_lossy(&stderr.bytes);
 
     let trace = if let Some(p) = evidence.iter().find(|p| {
         p.file_name()
