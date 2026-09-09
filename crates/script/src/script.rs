@@ -335,6 +335,10 @@ pub fn is_multisig(script: &[u8]) -> bool {
 /// division by 1000 at the end only).
 #[must_use]
 pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
+    // Scripts over the consensus execution limit are unspendable, as in Core.
+    if script.len() > 10_000 {
+        return 0;
+    }
     let script_size = varint_size(script.len()).saturating_add(script.len());
     let size = if is_op_return(script) {
         0
@@ -343,7 +347,8 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     } else {
         32 + 4 + 1 + 107 + 4 + 8 + script_size
     };
-    dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX)) / 1000
+    let product = dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
+    product.saturating_add(999) / 1000
 }
 
 /// Encodes `data` as a minimal canonical push (direct push for 1..=75 bytes,
