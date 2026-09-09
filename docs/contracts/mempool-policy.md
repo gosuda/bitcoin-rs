@@ -17,7 +17,10 @@ holds a second admission evaluator.
 ### `POL-01`: Core 31.1 policy pin and versioned `AdmissionPolicy`
 
 - The pinned reference is released Bitcoin Core 31.1. The gateway
-  enforces this pin set:
+  enforces this pin set. Pin values are Core truth and never edited
+  to match implementation progress; rows the implementation has not
+  yet reached are recorded as deviations in
+  `docs/policies/mempool-policy.md` (§3 status column and §5 ledger).
 
   | Pin | Required value |
   |---|---|
