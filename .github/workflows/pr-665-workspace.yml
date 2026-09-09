@@ -28,7 +28,11 @@ jobs:
         with:
           components: rustfmt
       - name: Apply review fixes
-        run: python3 review-tools/.review/apply.py source
+        run: |
+          set -euo pipefail
+          for script in review-tools/.review/apply*.py; do
+            python3 "$script" source
+          done
       - name: Format and capture exact candidate
         id: patch
         working-directory: source
@@ -75,9 +79,9 @@ jobs:
           cache-on-failure: true
       - name: Storage fault matrix
         run: cargo test --locked -p bitcoin-rs-storage --no-default-features --features fjall,redb,mdbx,rocksdb --test overhaul_atomic_durability
-      - name: Persistent coin regressions
+      - name: UTXO tests
         if: always()
-        run: cargo test --locked -p bitcoin-rs-utxo --test overhaul_persistent_coins
+        run: cargo test --locked -p bitcoin-rs-utxo
       - name: Native consensus regressions
         if: always()
         run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib --test overhaul_parse_parity --test overhaul_prepared_inputs
