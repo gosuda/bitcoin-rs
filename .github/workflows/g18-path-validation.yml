@@ -17,68 +17,13 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.prepare.outputs.sha }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: 59e149b5eea2e802fc050eef822904d0897a825d
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          components: rustfmt
-      - name: Apply only the reviewed Rustdoc correction and formatting
-        id: prepare
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          import subprocess
-
-          def run(*args):
-              return subprocess.check_output(args, text=True).strip()
-
-          expected = '59e149b5eea2e802fc050eef822904d0897a825d'
-          branch = 'fix/g18-declared-sample-paths'
-          path = Path('bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs')
-          assert run('git', 'rev-parse', 'HEAD') == expected
-          assert run('git', 'hash-object', str(path)) == 'dd20968ca4ee96e465471d20f74af1f1dcf4f978'
-          assert run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}').split()[0] == expected
-          text = path.read_text()
-          old = '/// HPA-05: the declared inventory may extend REQUIRED_PATHS.'
-          new = '/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.'
-          assert text.count(old) == 1
-          path.write_text(text.replace(old, new, 1))
-          subprocess.run(['rustfmt', '--edition', '2024', str(path)], check=True)
-          marker = '#[test]\nfn unmeasured_cells_cannot_claim_a_noise_floor()'
-          assert path.read_text().split(marker, 1)[1] == text.split(marker, 1)[1], 'Unrelated gate changed'
-          assert run('git', 'diff', '--name-only').splitlines() == [str(path)]
-          subprocess.run(['git', 'diff', '--check'], check=True)
-          subprocess.run(['git', 'diff', '--', str(path)], check=True)
-          subprocess.run(['git', 'add', '--', str(path)], check=True)
-          subprocess.run(['git', '-c', 'user.name=github-actions[bot]',
-                          '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-                          'commit', '-m', 'docs(g18): mark the inventory constant as code'], check=True)
-          subprocess.run(['git', 'push', 'origin', f'HEAD:refs/heads/{branch}'], check=True)
-          sha = run('git', 'rev-parse', 'HEAD')
-          print('PREPARED_HEAD=' + sha, flush=True)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'sha={sha}\n')
-          PY
-
   validate:
-    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.prepare.outputs.sha }}
+          ref: c982caa4cc527bae11706afa960bab11d26dd586
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -95,19 +40,19 @@ jobs:
           cargo fmt --all -- --check
           git diff --exit-code
           python3 - <<'PY'
+          from pathlib import Path
           import subprocess
-          base = '6838258a3dbca18e78e1995cd5c274d52460167b'
-          changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
-          assert set(changed) == {
-              'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs',
-              'docs/contracts/hot-path-attribution.md',
-          }, changed
+          base = '51ed6b123bda3b775aabc008ad581c338b96da79'
           gate = 'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs'
-          previous = subprocess.check_output(['git', 'show', f'{base}:{gate}'], text=True)
-          current = subprocess.check_output(['git', 'show', f'HEAD:{gate}'], text=True)
-          marker = '#[test]\nfn unmeasured_cells_cannot_claim_a_noise_floor()'
-          assert previous.split(marker, 1)[1].strip() == current.split(marker, 1)[1].strip()
-          print('Only path checks, fixtures, and the owning contract changed; existing later gates and ledger data are unchanged')
+          changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
+          assert changed == [gate], changed
+          previous = subprocess.check_output(['git', 'show', f'{base}:{gate}'])
+          current = Path(gate).read_bytes()
+          old = b'/// HPA-05: the declared inventory may extend REQUIRED_PATHS.'
+          new = b'/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.'
+          assert previous.count(old) == 1
+          assert previous.replace(old, new, 1) == current
+          print('Exact one-line Rustdoc correction; all executable code and ledger data match merged main')
           PY
       - name: Prove the old gate accepts and the new gate rejects an undeclared sample
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
