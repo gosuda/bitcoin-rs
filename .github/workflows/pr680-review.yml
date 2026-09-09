@@ -23,24 +23,23 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: d146e0f21b1ebbd761658f56017256f5520b29cd
+          ref: 25a46253e6fe5859bb0e3a9fdacde5587914e96c
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 46021c6dc808f634c8bd8da73156721c71f3791d
+          ref: 25b82cf92415a820d2e23c6659a5c028c89470c2
           path: .review-tools
           persist-credentials: false
-          sparse-checkout: .github/pr680-review-fixes.py
+          sparse-checkout: .github/pr680-confirmation-fix.py
           sparse-checkout-cone-mode: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
           components: rustfmt
-      - name: Apply reviewed edits with exact source-blob guards
-        run: python3 .review-tools/.github/pr680-review-fixes.py
-      - name: Format and refresh the fuzz workspace lockfile without building
+      - name: Apply the confirmation fix to pinned source
+        run: python3 .review-tools/.github/pr680-confirmation-fix.py
+      - name: Check formatting and the fuzz lockfile
         run: |
           cargo fmt --all
-          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /tmp/fuzz-metadata.json
           cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked --no-deps > /dev/null
           git diff HEAD --check
           git diff HEAD --stat
@@ -53,13 +52,13 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess, urllib.request
           from pathlib import Path
-          parent = 'd146e0f21b1ebbd761658f56017256f5520b29cd'
+          parent = '25a46253e6fe5859bb0e3a9fdacde5587914e96c'
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           assert git('rev-parse', 'HEAD') == parent
-          allowed = set('crates/consensus/src/verify_tx.rs crates/mempool/src/accounting.rs crates/node/README.md crates/node/src/run.rs crates/node/src/tx_ingress.rs crates/node/tests/tx_ingress_e2e.rs crates/p2p/README.md crates/script/src/sigops.rs docs/contracts/mempool-mutations.md docs/policies/mempool-policy.md fuzz/Cargo.lock'.split())
+          allowed = set('crates/rpc/src/context.rs crates/node/src/tx_ingress.rs docs/contracts/mempool-mutations.md'.split())
           paths = git('diff', 'HEAD', '--name-only').splitlines()
-          assert paths and set(paths) <= allowed, paths
+          assert paths and set(paths) == allowed, paths
           def post(endpoint, payload):
               request = urllib.request.Request('https://api.github.com/repos/gosuda/bitcoin-rs/git/' + endpoint, data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}, method='POST')
               with urllib.request.urlopen(request) as response:
@@ -69,7 +68,7 @@ jobs:
               assert not Path(path).is_symlink()
               entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': Path(path).read_text()})
           tree = post('trees', {'base_tree': git('rev-parse', 'HEAD^{tree}'), 'tree': entries})
-          commit = post('commits', {'message': 'fix: unify transaction accounting and committed mining effects', 'tree': tree['sha'], 'parents': [parent]})
+          commit = post('commits', {'message': 'fix(rpc): derive peer confirmation hints from applied coins', 'tree': tree['sha'], 'parents': [parent]})
           print('candidate_commit=' + commit['sha'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('commit=' + commit['sha'] + '\n')
@@ -85,7 +84,7 @@ jobs:
             /tmp/pr680-candidate.json
             /tmp/pr680-candidate.tar
           retention-days: 1
-  validate:
+  focused:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -99,9 +98,29 @@ jobs:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - run: cargo fmt --all -- --check
-      - run: cargo test -p bitcoin-rs-script -p bitcoin-rs-mempool --no-default-features --lib
-      - run: cargo test -p bitcoin-rs-consensus --no-default-features --lib
+      - run: cargo test -p bitcoin-rs-rpc --no-default-features --lib admission_chain_
       - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib tx_ingress::tests
       - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e
-      - run: cargo test -p bitcoin-rs-p2p --lib inv::tests
-      - run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - run: |
+          cargo clippy --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
+          cargo clippy -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+          cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+  complete-tests:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Run every pure-Rust gate even when an earlier suite fails
+        run: |
+          failed=0
+          cargo test --workspace --no-fail-fast --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node || failed=1
+          cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast || failed=1
+          cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast || failed=1
+          cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast || failed=1
+          exit "$failed"
