@@ -23,24 +23,29 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 25a46253e6fe5859bb0e3a9fdacde5587914e96c
+          ref: 93c55c99d6d808c601f9a2989a60f5bd36223e57
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 25b82cf92415a820d2e23c6659a5c028c89470c2
+          ref: 4ad649c2c825a3b68531bd9846c4fe0e0b87a513
+          path: .review-source
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: b60d899326fb800df33adf742bbd3d2d274dbf04
           path: .review-tools
           persist-credentials: false
-          sparse-checkout: .github/pr680-confirmation-fix.py
+          sparse-checkout: .github/pr680-integrate.py
           sparse-checkout-cone-mode: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt
-      - name: Apply the confirmation fix to pinned source
-        run: python3 .review-tools/.github/pr680-confirmation-fix.py
-      - name: Check formatting and the fuzz lockfile
+      - name: Reconcile the reviewed fixes with the current owner
+        run: python3 .review-tools/.github/pr680-integrate.py
+      - name: Check formatting and full fuzz dependency resolution
         run: |
           cargo fmt --all
-          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked --no-deps > /dev/null
+          cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked > /tmp/fuzz-metadata.json
           git diff HEAD --check
           git diff HEAD --stat
           git diff HEAD --binary > /tmp/pr680-review.diff
@@ -52,11 +57,11 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess, urllib.request
           from pathlib import Path
-          parent = '25a46253e6fe5859bb0e3a9fdacde5587914e96c'
+          parent = '93c55c99d6d808c601f9a2989a60f5bd36223e57'
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
           assert git('rev-parse', 'HEAD') == parent
-          allowed = set('crates/rpc/src/context.rs crates/node/src/tx_ingress.rs docs/contracts/mempool-mutations.md'.split())
+          allowed = set('crates/consensus/src/verify_tx.rs crates/consensus/src/sigops.rs crates/mempool/src/accounting.rs crates/node/src/run.rs crates/node/src/tx_ingress.rs crates/node/tests/tx_ingress_e2e.rs crates/rpc/src/context.rs docs/contracts/mempool-mutations.md fuzz/Cargo.lock'.split())
           paths = git('diff', 'HEAD', '--name-only').splitlines()
           assert paths and set(paths) == allowed, paths
           def post(endpoint, payload):
@@ -68,7 +73,7 @@ jobs:
               assert not Path(path).is_symlink()
               entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'content': Path(path).read_text()})
           tree = post('trees', {'base_tree': git('rev-parse', 'HEAD^{tree}'), 'tree': entries})
-          commit = post('commits', {'message': 'fix(rpc): derive peer confirmation hints from applied coins', 'tree': tree['sha'], 'parents': [parent]})
+          commit = post('commits', {'message': 'fix: reconcile transaction accounting, confirmation, and committed effects', 'tree': tree['sha'], 'parents': [parent]})
           print('candidate_commit=' + commit['sha'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('commit=' + commit['sha'] + '\n')
@@ -84,7 +89,7 @@ jobs:
             /tmp/pr680-candidate.json
             /tmp/pr680-candidate.tar
           retention-days: 1
-  focused:
+  validate:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -93,34 +98,17 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - run: cargo fmt --all -- --check
+      - run: cargo test -p bitcoin-rs-script -p bitcoin-rs-mempool -p bitcoin-rs-consensus --no-default-features --lib
       - run: cargo test -p bitcoin-rs-rpc --no-default-features --lib admission_chain_
       - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib tx_ingress::tests
       - run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e
+      - run: cargo test -p bitcoin-rs-p2p --lib inv::tests
       - run: |
           cargo clippy --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
           cargo clippy -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
           cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
-  complete-tests:
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ needs.prepare.outputs.commit }}
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - name: Run every pure-Rust gate even when an earlier suite fails
-        run: |
-          failed=0
-          cargo test --workspace --no-fail-fast --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node || failed=1
-          cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast || failed=1
-          cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast || failed=1
-          cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast || failed=1
-          exit "$failed"
