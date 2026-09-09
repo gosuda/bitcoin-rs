@@ -8,163 +8,26 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: continuation-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
 
 jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      common: ${{ steps.candidates.outputs.common }}
-      reference: ${{ steps.candidates.outputs.reference }}
-      verifier: ${{ steps.candidates.outputs.verifier }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: f211c2f99174cdc41ffac0a6cc5d15013a1eb961
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          components: rustfmt
-      - name: Prepare source-only candidates without updating PR branches
-        id: candidates
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          import subprocess
-          import tomllib
-
-          def run(*args):
-              result = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-              if result.returncode:
-                  print(result.stdout, flush=True)
-                  raise RuntimeError(f'{args[0:3]} exited {result.returncode}')
-              return result.stdout
-
-          def edit(path, old, new):
-              p = Path(path)
-              text = p.read_text()
-              assert text.count(old) == 1, (path, old, text.count(old))
-              p.write_text(text.replace(old, new, 1))
-
-          def publish(name):
-              assert not run('git', 'status', '--porcelain').strip(), 'candidate is dirty'
-              sha = run('git', 'rev-parse', 'HEAD').strip()
-              ref = f'automation/review-{name}-{os.environ["GITHUB_RUN_ID"]}'
-              run('git', 'push', 'origin', f'HEAD:refs/heads/{ref}')
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-                  output.write(f'{name}={sha}\n')
-              print(f'CANDIDATE {name} {sha} {ref}', flush=True)
-              print(run('git', 'diff', '--stat', main, 'HEAD'), flush=True)
-              return sha
-
-          main = 'f211c2f99174cdc41ffac0a6cc5d15013a1eb961'
-          minimum = {
-              'refactor/reference-set-test-support': 'ae73aa98805f825d878c1c7dc48bc6b5d2e6b349',
-              'test/script-verifier-boundaries': '28d35cc620d5ba829918c81f603e8c7c552bd7f0',
-          }
-          heads = {}
-          for branch, expected in minimum.items():
-              actual = run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}').split()[0]
-              run('git', 'fetch', 'origin', actual)
-              run('git', 'merge-base', '--is-ancestor', expected, actual)
-              heads[branch] = actual
-              print(f'INPUT {branch} {actual}', flush=True)
-          run('git', 'config', 'user.name', 'github-actions[bot]')
-          run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-
-          reference_test = 'bin/bitcoin-rs/tests/overhaul_reference_set.rs'
-          parity = 'crates/consensus/tests/overhaul_parse_parity.rs'
-          metrics = 'crates/node/src/metrics.rs'
-          edit(reference_test, 'bytes.chunks_exact(2).enumerate()',
-               'bytes.as_chunks::<2>().0.iter().enumerate()')
-          edit(parity, 'assert!(parsed.facts().transaction_spans().len() == parsed.transaction_count());',
-               'assert_eq!(parsed.facts().transaction_spans().len(), parsed.transaction_count());')
-          edit(metrics, '    use super::*;\n',
-               '    use super::*;\n\n    // MetricsServer::bind installs a process-global recorder. Serialize only\n    // these server tests so another test cannot change the recorder between\n    // the occupied-bind precondition and its assertion. Production is unchanged.\n    static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());\n')
-          tests = [
-              'occupied_address_bind_errors_and_in_process_retry_succeeds',
-              'scrape_returns_prometheus_text_with_recorded_metrics',
-              'two_sequential_servers_in_one_process_both_serve',
-              'shutdown_exits_the_listener_thread',
-              'run_retries_metrics_bind_after_occupied_address',
-          ]
-          for name in tests:
-              edit(metrics, f'    fn {name}() {{\n',
-                   f'    fn {name}() {{\n        let _guard = SERVER_TEST_LOCK.lock();\n')
-          paths = [reference_test, parity, metrics]
-          run('rustfmt', '--edition', '2024', *paths)
-          assert set(run('git', 'diff', '--name-only').splitlines()) == set(paths)
-          run('git', 'diff', '--check')
-          print(run('git', 'diff'), flush=True)
-          run('git', 'add', '--', *paths)
-          run('git', 'commit', '-m', 'fix(ci): clear test lints and serialize global metrics fixtures')
-          common = publish('common')
-
-          for name, branch in [('reference', 'refactor/reference-set-test-support'),
-                               ('verifier', 'test/script-verifier-boundaries')]:
-              expected = heads[branch]
-              run('git', 'checkout', '--detach', expected)
-              result = subprocess.run(['git', 'merge', '--no-edit', common], text=True,
-                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-              if result.returncode:
-                  print(result.stdout, flush=True)
-                  conflicts = run('git', 'diff', '--name-only', '--diff-filter=U').splitlines()
-                  assert name == 'reference' and conflicts == ['Cargo.lock'], conflicts
-                  # Preserve the reference test dependency when both branches
-                  # independently repaired the same internal RPC lockfile edge.
-                  original = run('git', 'show', f'{expected}:Cargo.lock')
-                  ref_lock = tomllib.loads(original)
-                  common_lock = tomllib.loads(run('git', 'show', f'{common}:Cargo.lock'))
-                  ref_packages = {p['name']: p for p in ref_lock['package'] if 'source' not in p}
-                  common_packages = {p['name']: p for p in common_lock['package'] if 'source' not in p}
-                  assert set(ref_packages) == set(common_packages)
-                  for package, data in common_packages.items():
-                      other = ref_packages[package]
-                      if package == 'bitcoin-rs':
-                          assert set(other['dependencies']) == set(data['dependencies']) | {'thiserror'}
-                          assert {k: v for k, v in data.items() if k != 'dependencies'} == {k: v for k, v in other.items() if k != 'dependencies'}
-                      else:
-                          assert other == data, package
-                  assert [p for p in ref_lock['package'] if 'source' in p] == [p for p in common_lock['package'] if 'source' in p]
-                  Path('Cargo.lock').write_text(original)
-                  run('git', 'add', 'Cargo.lock')
-                  run('git', 'commit', '--no-edit')
-              if name == 'reference':
-                  path = 'docs/api/core-compat.toml'
-                  before = tomllib.loads(Path(path).read_text())
-                  edit(path,
-                       '# A reference carrying only a version label or a digest that does not match is\n# rejected by `bin/bitcoin-rs/tests/support/reference_set.rs`. `docs/contracts/reference-set.md` is a\n# readable projection; on conflict, this file and that parser govern.',
-                       '# Reference identity fields and digest syntax are validated by\n# `bin/bitcoin-rs/tests/support/reference_set.rs`.\n# `docs/contracts/reference-set.md` is a readable projection; on conflict,\n# this file and that parser govern.')
-                  assert tomllib.loads(Path(path).read_text()) == before, 'manifest data changed'
-                  run('git', 'diff', '--check')
-                  print(run('git', 'diff'), flush=True)
-                  run('git', 'add', path)
-                  run('git', 'commit', '-m', 'docs: distinguish reference parsing from binary authentication')
-              run('git', 'merge-base', '--is-ancestor', expected, 'HEAD')
-              run('git', 'merge-base', '--is-ancestor', main, 'HEAD')
-              publish(name)
-          PY
-
   validate:
-    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: common
-            sha: ${{ needs.prepare.outputs.common }}
-          - name: reference
-            sha: ${{ needs.prepare.outputs.reference }}
-          - name: verifier
-            sha: ${{ needs.prepare.outputs.verifier }}
+          - name: pr-705
+            sha: 8e42fc8fd15dfbad7af8c607c5a97bb5d217ef61
+          - name: pr-696
+            sha: e8dc3ae452625616b8544bb4985e88667fb48d5c
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -175,11 +38,12 @@ jobs:
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - name: Record exact candidate and check formatting
+      - name: Record exact head and check formatting
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: |
           git rev-parse HEAD
-          rustc --version
+          git rev-parse HEAD^{tree}
+          rustc --version --verbose
           cargo fmt --all -- --check
           git diff --exit-code
       - name: Workspace strict Clippy
@@ -192,25 +56,25 @@ jobs:
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: Repeated parallel metrics tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'common' }}
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
         run: |
           for attempt in $(seq 1 10); do
-            cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=8
+            cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=8 || exit 1
           done
       - name: Native parsing regressions
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'common' }}
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
         run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity
-      - name: Reference identity regressions
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'reference' }}
+      - name: Migrated reference identity regressions
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
         run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_reference_set
-      - name: Compile migrated consumers with warnings denied
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'reference' }}
+      - name: Compile migrated process and formal consumers with warnings denied
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
         env:
           RUSTFLAGS: -D warnings
         run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_process_harness --test g20_formal_models --no-run
-      - name: Script unit tests, boundary regressions and Core vectors
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'verifier' }}
+      - name: Script unit tests, verifier boundaries and Core vectors
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-696' }}
         run: cargo test --locked -p bitcoin-rs-script --lib --test verifier_boundaries --test core_vectors
-      - name: Assert candidate was not modified by checks
+      - name: Assert checks did not change the tested tree
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: git diff --exit-code
