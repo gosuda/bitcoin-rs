@@ -62,8 +62,8 @@ cargo test -p bitcoin-rs --no-fail-fast \
   --no-default-features --features "rocksdb,fjall,redb,mdbx"
 
 # Audit the full dependency graph, including the optional kernel
-cargo deny --workspace --no-default-features \
-  --features "rocksdb,fjall,redb,mdbx,kernel" check
+cargo deny check --workspace --no-default-features \
+  --features "rocksdb,fjall,redb,mdbx,kernel"
 ```
 
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
@@ -88,7 +88,8 @@ hooks also enable kernel and require its build dependencies.
 
 Extended verification runs on pushes to `main` and manual dispatch, as defined
 in [`.github/workflows/main.yml`](.github/workflows/main.yml). These lanes add
-kernel-enabled tests, fuzzing, and dependency/feature matrices to the PR checks.
+kernel-enabled tests, fuzzing, and dependency/feature matrices beyond the PR
+checks defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ### Full-node feature set
 
