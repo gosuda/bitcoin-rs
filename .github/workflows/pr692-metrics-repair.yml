@@ -20,6 +20,7 @@ jobs:
         run: |
           cp .github/scripts/pr692_metrics_repair.py "$RUNNER_TEMP/pr692_metrics_repair.py"
           cp .github/scripts/pr692_metrics_repair_v2.py "$RUNNER_TEMP/pr692_metrics_repair_v2.py"
+          cp .github/scripts/pr692_metrics_repair_v3.py "$RUNNER_TEMP/pr692_metrics_repair_v3.py"
           git fetch origin main fix/pr692-startup-metrics-20260910
           git checkout -B fix/pr692-startup-metrics-20260910 f846c7fbeed40e70431cf83ab4f2cb656bf9ea0b
           test "$(git rev-parse HEAD)" = "f846c7fbeed40e70431cf83ab4f2cb656bf9ea0b"
@@ -27,6 +28,7 @@ jobs:
         run: |
           python3 "$RUNNER_TEMP/pr692_metrics_repair.py"
           python3 "$RUNNER_TEMP/pr692_metrics_repair_v2.py"
+          python3 "$RUNNER_TEMP/pr692_metrics_repair_v3.py"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt,clippy
