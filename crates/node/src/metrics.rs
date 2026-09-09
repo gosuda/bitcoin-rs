@@ -820,19 +820,50 @@ mod tests {
 
     #[test]
     fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
+        const CHILD: &str = "BITCOIN_RS_METRICS_BIND_CHILD";
+        const FINISHED: &str = "fresh-recorder-bind-probe-finished";
+        // Recorder installation is process-global and cannot be reset.
+        // A fresh process makes this probe independent of test order and
+        // keeps the empty-slot assertion meaningful, not merely race-free.
+        if std::env::var_os(CHILD).is_none() {
+            let executable = std::env::current_exe()
+                .unwrap_or_else(|error| panic!("locate metrics test executable: {error}"));
+            let output = std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "metrics::tests::occupied_address_bind_errors_and_in_process_retry_succeeds",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap_or_else(|error| panic!("run isolated metrics probe: {error}"));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "isolated metrics probe failed: {stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains(FINISHED),
+                "isolated probe did not execute: {stdout}"
+            );
+            return;
+        }
         let shutdown = Arc::new(AtomicBool::new(false));
         let occupied = TcpListener::bind(unused_ephemeral())
             .unwrap_or_else(|error| panic!("occupy port: {error}"));
         let addr = occupied
             .local_addr()
             .unwrap_or_else(|error| panic!("occupied local addr: {error}"));
-        let installed_before = PROMETHEUS_HANDLE.lock().is_some();
+        assert!(
+            PROMETHEUS_HANDLE.lock().is_none(),
+            "probe requires a fresh recorder slot"
+        );
 
         let first = start_metrics(Some(addr), Arc::clone(&shutdown), &identity());
         assert!(first.is_err(), "occupied bind must fail");
-        assert_eq!(
-            PROMETHEUS_HANDLE.lock().is_some(),
-            installed_before,
+        assert!(
+            PROMETHEUS_HANDLE.lock().is_none(),
             "failed bind must not install the process recorder"
         );
 
@@ -848,6 +879,7 @@ mod tests {
             "retry scrape missing recorded metric: {body}"
         );
         server.join();
+        println!("{FINISHED}");
     }
 
     #[test]
