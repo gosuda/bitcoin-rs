@@ -5,7 +5,7 @@ on:
     branches: [validation/tx-followups-20260910]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: tx-followup-validation
@@ -23,51 +23,22 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ef7d394d51ef1f6f8612ea9e7f2cbf9032ce41d9
-          fetch-depth: 0
+          ref: 8fc8120193dba00d422dc2be74b1c6d48d335f2e
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           cache-on-failure: true
-      - name: Integrate current main without dropping intervening changes
-        id: candidate
-        shell: bash
+      - name: Record the exact integrated source
         run: |
-          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/tx-evidence"
           rustc --version | tee "$RUNNER_TEMP/tx-evidence/toolchain.txt"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git merge --no-edit f211c2f99174cdc41ffac0a6cc5d15013a1eb961
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('docs/contracts/mempool-mutations.md')
-          text = p.read_text()
-          old = '- For standard transactions, the gateway checks input structure before\n  missing-input policy can retain a peer body. The consensus-owned `verify_transaction_input_outpoints` check. Duplicate inputs\n'
-          new = '- For standard transactions, the gateway runs the consensus-owned\n  `verify_transaction_input_outpoints` check before missing-input policy can\n  retain a peer body. Duplicate inputs\n'
-          if text.count(old) != 1:
-              raise SystemExit('contract edit preimage changed')
-          p.write_text(text.replace(old,new,1))
-          PY
-          git diff --check
-          git add docs/contracts/mempool-mutations.md
-          git commit -m 'docs(mempool): clarify bounded structural-rejection contract'
-          python3 - <<'PY'
-          import subprocess
-          base='f211c2f99174cdc41ffac0a6cc5d15013a1eb961'
-          expected={'crates/consensus/src/verify_tx.rs','crates/mempool/src/gateway.rs','crates/mempool/src/admission.rs','docs/contracts/mempool-mutations.md'}
-          actual=set(subprocess.check_output(['git','diff','--name-only',base,'HEAD'],text=True).splitlines())
-          if actual != expected:
-              raise SystemExit(f'unexpected integrated scope: {actual ^ expected}')
-          PY
-          git diff f211c2f99174cdc41ffac0a6cc5d15013a1eb961 HEAD > "$RUNNER_TEMP/tx-evidence/candidate.patch"
           git rev-parse HEAD | tee "$RUNNER_TEMP/tx-evidence/candidate-sha.txt"
-          git push origin HEAD:refs/heads/followup/structural-rejection-scope
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/tx-evidence/source.tar.gz"
+          git ls-tree -r HEAD -- crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/tx-evidence/blobs.txt"
       - name: Native mempool and consensus suites
-        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -uo pipefail
@@ -77,8 +48,19 @@ jobs:
           cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib > "$RUNNER_TEMP/tx-evidence/consensus-native.log" 2>&1 || status=1
           tail -n 25 "$RUNNER_TEMP/tx-evidence/consensus-native.log"
           exit "$status"
+      - name: RPC transaction and real-socket ingress regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-rpc --lib handlers::tx:: > "$RUNNER_TEMP/tx-evidence/rpc-tx.log" 2>&1 || status=1
+          tail -n 40 "$RUNNER_TEMP/tx-evidence/rpc-tx.log"
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e > "$RUNNER_TEMP/tx-evidence/ingress.log" 2>&1 || status=1
+          tail -n 40 "$RUNNER_TEMP/tx-evidence/ingress.log"
+          exit "$status"
       - name: Strict affected-crate Clippy and formatting
-        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -uo pipefail
@@ -91,7 +73,7 @@ jobs:
           tail -n 50 "$RUNNER_TEMP/tx-evidence/fmt.log"
           exit "$status"
       - name: Kernel-enabled mempool and consensus suites
-        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -103,7 +85,7 @@ jobs:
           set -e
           tail -n 60 "$RUNNER_TEMP/tx-evidence/kernel.log"
           exit "$status"
-      - name: Preserve exact candidate and validation evidence
+      - name: Preserve exact-head validation evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
