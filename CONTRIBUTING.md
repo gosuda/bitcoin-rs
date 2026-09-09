@@ -111,6 +111,17 @@ The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
 Each lane also runs G20 against the mutated lockfile. Optional native
 storage backends are owned by the named feature matrix, not this script.
 
+### Bitcoin Core differential
+
+Live observable-behavior check against a pinned Core 31.1 `bitcoind`
+(`docs/contracts/core-differential.md`):
+
+```sh
+scripts/run-p2p-core-interop.sh \
+  --bitcoind-command "$(scripts/install-bitcoind.sh)" \
+  --bitcoin-rs-command target/quickstart/bitcoin-rs
+```
+
 ### Feature combinations
 
 The supported combinations are the rows in
@@ -119,6 +130,17 @@ The supported combinations are the rows in
 ```sh
 scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for kernel)
 scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
+```
+
+### Bitcoin Core differential
+
+Live observable-behavior check against a pinned Core 31.1 `bitcoind`
+(`docs/contracts/core-differential.md`):
+
+```sh
+scripts/run-p2p-core-interop.sh \
+  --bitcoind-command "$(scripts/install-bitcoind.sh)" \
+  --bitcoin-rs-command target/quickstart/bitcoin-rs
 ```
 
 ## Architecture and crate hierarchy
