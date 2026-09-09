@@ -86,9 +86,10 @@ hooks also enable kernel and require its build dependencies.
 
 ## Deep CI lanes (main workflow)
 
-Extended verification runs on pushes to `main` and manual dispatch, as defined
-in [`.github/workflows/main.yml`](.github/workflows/main.yml). These lanes add
-kernel-enabled tests, fuzzing, and dependency/feature matrices to the PR checks.
+[`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
+tests, fuzzing, and dependency/feature matrices on pushes to `main` and manual
+dispatch. Pull-request-triggered checks are defined in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ### Full-node feature set
 
