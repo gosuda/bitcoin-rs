@@ -1,0 +1,160 @@
+name: PR665 final review
+on:
+  push:
+    branches: [review/pr-665-verification-20260909]
+    paths: [.github/workflows/pr665-final.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.commit.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct exact reviewed file contents
+        run: |
+          set -euo pipefail
+          cp .review/reconcile*.json .review/final-extra.json "$RUNNER_TEMP/"
+          git checkout --detach d10455da83725690429d85cd8c184c99a18580e7
+          git restore --source=036c76bd034cdcedbfe1fbc404585cc04d82ea87 -- \
+            bin/bitcoin-rs/tests/overhaul_evidence.rs bin/bitcoin-rs/tests/overhaul_reference_set.rs \
+            crates/consensus/src/block_view.rs crates/consensus/tests/overhaul_parse_parity.rs \
+            crates/mempool/src/gateway.rs crates/node/src/metrics.rs crates/rpc/src/compat_manifest.rs \
+            crates/storage/src/fjall_impl.rs crates/storage/src/redb_impl.rs crates/storage/src/rocksdb_impl.rs \
+            crates/storage/src/trait_.rs crates/storage/tests/backend_metrics.rs crates/storage/tests/storage_footprint.rs \
+            crates/utxo/src/set.rs crates/utxo/src/shard.rs crates/utxo/tests/overhaul_persistent_coins.rs \
+            docs/benchmarks/muhash-rpc.md docs/benchmarks/native-validation-default.md docs/benchmarks/p2p-loopback.md \
+            docs/contracts/mempool-mutations.md docs/contracts/mempool-policy.md docs/contracts/recovery.md docs/contracts/reference-set.md
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          sources = sorted(root.glob('reconcile*.json')) + [root / 'final-extra.json']
+          seen = set()
+          for source in sources:
+              for name, edits in json.loads(source.read_text()).items():
+                  if name == 'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs':
+                      continue
+                  path = Path(name)
+                  if path.is_absolute() or '..' in path.parts or name in seen:
+                      raise SystemExit(f'invalid edit: {name}')
+                  seen.add(name)
+                  lines = path.read_text().splitlines(keepends=True)
+                  for start, count, replacement in reversed(edits):
+                      lines[start:start + count] = replacement.splitlines(keepends=True)
+                  path.write_text(''.join(lines))
+          names = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          digest = hashlib.sha256()
+          for name in names:
+              digest.update(name.encode() + b'\0' + Path(name).read_bytes() + b'\0')
+          print(f'Reviewed paths: {len(names)}; content fingerprint: {digest.hexdigest()}')
+          if len(names) != 40 or digest.hexdigest() != 'b77f65e24558fb6eb5d3280f3ace2de81668af23f143b82b25d9dc8d0bfd2d5f':
+              raise SystemExit('reviewed content fingerprint mismatch')
+          PY
+          git diff --check
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: rustfmt
+      - name: Format reviewed Rust files
+        run: |
+          git diff --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
+          git diff --check
+          git add -u
+      - name: Commit source-only candidate
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Simplify persistent coin ownership and fix admission, durability and query contracts' -m 'Preserve intervening PR changes through d10455da. Replace independent persistent-cache locks with exclusive mutable ownership and typed fail-closed recovery. Reject false durable receipts, verify identities and whole-batch recovery, recheck stale admission rejections, and share weight arithmetic. Reuse the chain-transition guard for coherent coin statistics. Correct HTTP response and CORS contracts, validate evidence identities, and remove misleading implementation claims. KeepKernel and formal/product proof boundaries remain unchanged.'
+          candidate=$(git rev-parse HEAD)
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin "HEAD:refs/heads/review/pr-665-candidate-${GITHUB_RUN_ID}"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "Candidate: $candidate" >> "$GITHUB_STEP_SUMMARY"
+          git diff --binary HEAD^ HEAD > "$RUNNER_TEMP/final.patch"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/final-source.tar.gz" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr665-final-source
+          path: |
+            ${{ runner.temp }}/final.patch
+            ${{ runner.temp }}/final-source.tar.gz
+          retention-days: 3
+  checks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [core, evidence, node, fjall, redb, mdbx, rocksdb]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: pr665-review-${{ matrix.lane }}
+          cache-on-failure: true
+      - name: Tests and strict lints
+        env:
+          LANE: ${{ matrix.lane }}
+          CARGO_INCREMENTAL: 0
+          CARGO_TERM_COLOR: never
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/checks.log") 2>&1
+          echo "Candidate $(git rev-parse HEAD); lane $LANE"
+          rustc --version
+          case "$LANE" in
+            core)
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features --test overhaul_persistent_coins
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features --doc
+              cargo test --locked -p bitcoin-rs-mempool
+              cargo test --locked -p bitcoin-rs-primitives --test overhaul_layout
+              cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs
+              cargo clippy --locked -p bitcoin-rs-utxo -p bitcoin-rs-mempool --no-default-features --all-targets -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs -- -D warnings
+              cargo test --locked -p bitcoin-rs-p2p --test core_compat --test wire_codec --test handshake_roundtrip
+              ;;
+            evidence)
+              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set --test g18_hot_path_ledger --test g19_validation_default
+              cargo test --locked -p bitcoin-rs-rpc --lib coin_queries_wait_for_one_consistent_utxo_and_tip_transition
+              cargo test --locked -p bitcoin-rs-rpc --lib gettxoutsetinfo
+              cargo test --locked -p bitcoin-rs-rpc --lib fee_estimate_conversion_preserves_the_exact_relay_floor
+              cargo test --locked -p bitcoin-rs-rpc --test auth --test handler_smoke --test manifest_coverage
+              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set --test g18_hot_path_ledger -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-rpc --lib --test auth -- -D warnings
+              python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
+              ;;
+            node)
+              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test overhaul_config_status
+              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib run::tests
+              cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --lib -- -D warnings
+              ;;
+            *)
+              cargo test --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --test overhaul_atomic_durability --test backend_metrics --test storage_footprint -- --nocapture
+              cargo clippy --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --all-targets -- -D warnings
+              ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr665-checks-${{ matrix.lane }}
+          path: ${{ runner.temp }}/checks.log
+          retention-days: 3
+          if-no-files-found: warn
