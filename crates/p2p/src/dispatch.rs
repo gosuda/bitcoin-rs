@@ -964,7 +964,7 @@ mod tests {
         }
     }
 
-    /// P2P-01 / BIP144: NODE_WITNESS controls getdata serialization, not hashes.
+    /// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not hashes.
     /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
     #[test]
     fn announced_transactions_request_witness_without_changing_hashes() {
