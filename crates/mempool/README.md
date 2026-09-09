@@ -13,12 +13,9 @@ violations as `PolicyError` or `MempoolError`; `enforce_size_limit` delegates to
 `prioritise` adjusts an entry's effective fee, and `evict_below_fee_rate` /
 `remove_for_block` handle removal. `MempoolStats` supplies the aggregate counters
 behind `getmempoolinfo` and Esplora fee estimates. The `rbf` module plans
-replacements as a `ReplacementCandidate` and `ReplacementPlan`, `standardness` holds
-the relay policy, and the shared `MempoolGateway` owns admission preparation,
-retries, and orphan/recent-reject state. Orphan bodies, transaction indexes,
-parent indexes, and ready work remain with that owner. P2P consumes its query
-and admission results to request parents and relay committed transactions;
-mempool does not own peer connections or transport queues.
+replacements as a `ReplacementCandidate` and `ReplacementPlan`, and `standardness`
+holds the relay policy. For the transaction lifecycle ownership boundary, see
+[ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
 `FeeEstimator` is fed by `tx_entered`, `tx_left`, and `block_connected`, and its
 `estimate` answers a confirmation-target query with a `FeeRate` in sat/kvB, refusing
 rather than fabricating when history is thin.
