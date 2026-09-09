@@ -1,34 +1,117 @@
-name: Review 665 source snapshot
+name: Review 665 validation
 on:
   push:
     branches: [review/pr-665-snapshot-1594cd40]
 permissions:
   contents: read
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: 1
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          path: review
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
           ref: 1594cd40da24de051ed579493c66db55759e8201
-          path: pr
+          path: work
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Reconstruct and verify reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir review-evidence
+          git -C work config user.name 'metaphorics'
+          git -C work config user.email '152830360+metaphorics@users.noreply.github.com'
+          git -C work merge --no-commit --no-ff -Xours 052937df6b7615f107529dddc665119bac190010
+          test "$(git -C work write-tree)" = d1d964d98191754dc03f6dec21b35712408ff27f
+          python3 - <<'PY'
+          import base64, hashlib, lzma
+          from pathlib import Path
+          payload = ''.join(p.read_text() for p in sorted(Path('review/review665-payload').glob('*.b64')))
+          patch = lzma.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'f2fcbf336937bb4ab0b4975eab448313b8a928e88e43f040c1e66426cc005ef7'
+          Path('review-evidence/input.patch').write_bytes(patch)
+          PY
+          git -C work apply --index ../review-evidence/input.patch
+          test "$(git -C work write-tree)" = 34e1c509163c32dcce3d71714d4f9bee8570199b
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
-          ref: 6e1830e51e3ecc5ebed097f68a89de40e22f3955
-          path: base
-          persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
-          ref: 052937df6b7615f107529dddc665119bac190010
-          path: main
-          persist-credentials: false
-      - name: Archive source trees only
-        run: tar --exclude=.git --exclude=target -czf review-665-sources.tar.gz pr base main
+          workspaces: work -> target
+          shared-key: review665-debug0
+          cache-on-failure: true
+      - name: Format candidate and record actual merge parents
+        working-directory: work
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git diff 34e1c509163c32dcce3d71714d4f9bee8570199b --binary > ../review-evidence/format.patch
+          git add -A
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'fix: address PR 665 correctness review and merge main' | git commit-tree "$tree" -p 1594cd40da24de051ed579493c66db55759e8201 -p 052937df6b7615f107529dddc665119bac190010)
+          printf '%s\n' "$commit" > ../review-evidence/candidate-commit.txt
+          printf '%s\n' "$tree" > ../review-evidence/candidate-tree.txt
+          git show --no-patch --pretty=raw "$commit" > ../review-evidence/candidate.txt
+          rustc -Vv > ../review-evidence/rustc.txt
+      - name: Publish isolated candidate only
+        working-directory: work
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          commit=$(cat ../review-evidence/candidate-commit.txt)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "$commit:refs/heads/review/pr-665-candidate-1594cd40-1"
+      - name: Compile, lint, and execute focused regressions
+        working-directory: work
+        shell: bash
+        run: |
+          set -uo pipefail
+          failures=0
+          run_check() {
+            name=$1; shift
+            printf '\n=== %s ===\n' "$name"
+            if "$@" > "../review-evidence/$name.log" 2>&1; then
+              printf '%s PASS\n' "$name" | tee -a ../review-evidence/results.txt
+              tail -n 12 "../review-evidence/$name.log"
+            else
+              printf '%s FAIL\n' "$name" | tee -a ../review-evidence/results.txt
+              tail -n 100 "../review-evidence/$name.log"
+              failures=$((failures + 1))
+            fi
+          }
+          run_check clippy-workspace cargo clippy --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
+          run_check clippy-consensus cargo clippy -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+          run_check clippy-node cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+          run_check persistent-coins cargo test -p bitcoin-rs-utxo --test overhaul_persistent_coins
+          run_check atomic-durability cargo test -p bitcoin-rs-storage --features fjall,redb --test overhaul_atomic_durability
+          run_check consensus cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+          run_check mempool cargo test -p bitcoin-rs-mempool --no-fail-fast
+          run_check rpc cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+          run_check reference-evidence cargo test -p bitcoin-rs --test overhaul_reference_set --test overhaul_evidence
+          run_check node cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast
+          test "$failures" -eq 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: review-665-sources
-          path: review-665-sources.tar.gz
+          name: review-665-validation
+          path: review-evidence
           retention-days: 1
           if-no-files-found: error
