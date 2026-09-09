@@ -17,62 +17,13 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  format:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      sha: ${{ steps.format.outputs.sha }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: 0daa3fd0a832a6c8b232b5fd41e798265787f696
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          components: rustfmt
-      - name: Format only the changed gate without replacing concurrent work
-        id: format
-        run: |
-          python3 - <<'PY'
-          import os
-          import subprocess
-
-          def run(*args):
-              return subprocess.check_output(args, text=True).strip()
-
-          expected = '0daa3fd0a832a6c8b232b5fd41e798265787f696'
-          branch = 'fix/g18-declared-sample-paths'
-          gate = 'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs'
-          assert run('git', 'rev-parse', 'HEAD') == expected
-          remote = run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}').split()[0]
-          assert remote == expected, 'PR branch moved; refusing stale format edit'
-          subprocess.run(['rustfmt', '--edition', '2024', gate], check=True)
-          changed = run('git', 'diff', '--name-only').splitlines()
-          assert changed in ([], [gate]), changed
-          subprocess.run(['git', 'diff', '--check'], check=True)
-          if changed:
-              subprocess.run(['git', 'diff', '--', gate], check=True)
-              subprocess.run(['git', 'add', '--', gate], check=True)
-              subprocess.run(['git', '-c', 'user.name=github-actions[bot]',
-                              '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
-                              'commit', '-m', 'style(g18): format path-membership regressions'], check=True)
-              subprocess.run(['git', 'push', 'origin', f'HEAD:refs/heads/{branch}'], check=True)
-          sha = run('git', 'rev-parse', 'HEAD')
-          print('FORMATTED_HEAD=' + sha)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              output.write(f'sha={sha}\n')
-          PY
-
   validate:
-    needs: format
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.format.outputs.sha }}
+          ref: e0bf5c61a941e0ae37ac9e2a06cfaab4be95cd71
           fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -96,7 +47,13 @@ jobs:
               'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs',
               'docs/contracts/hot-path-attribution.md',
           }, changed
-          print('Only the gate and its owning contract changed; production code and ledger data are unchanged')
+          gate = 'bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs'
+          previous = subprocess.check_output(['git', 'show', f'{base}:{gate}'], text=True)
+          current = subprocess.check_output(['git', 'show', f'HEAD:{gate}'], text=True)
+          # The change must not edit any existing gate after the history test.
+          marker = '#[test]\nfn unmeasured_cells_cannot_claim_a_noise_floor()'
+          assert previous.split(marker, 1)[1].strip() == current.split(marker, 1)[1].strip()
+          print('Only path checks, fixtures, and the owning contract changed; existing later gates and ledger data are unchanged')
           PY
       - name: Prove the old gate accepts and the new gate rejects an undeclared sample
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
