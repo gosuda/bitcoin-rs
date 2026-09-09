@@ -1,3 +1,4 @@
+use bitcoin_rs_consensus::WITNESS_COMMITMENT_PREFIX;
 use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
@@ -5,8 +6,6 @@ use thiserror::Error;
 const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
 const MIN_COINBASE_SCRIPT_SIG_LEN: usize = 2;
 const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
-/// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
-const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Consensus witness reserved value used when constructing a BIP141 commitment.
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
@@ -111,10 +110,7 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     script
 }
 
-/// Core `UpdateUncommittedBlockStructures`: if the block already carries a
-/// BIP141 commitment but the coinbase has no witness, insert the reserved nonce.
-///
-/// `submitblock` calls this before admission. Proposal mode does not.
+/// API-13: update an uncommitted coinbase witness before submitblock admission.
 pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {
     if !segwit_active {
         return;
@@ -162,6 +158,7 @@ fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
 }
 
 #[cfg(test)]
+// CONTRACT: API-13
 mod uncommitted_witness_tests {
     use super::{
         WITNESS_RESERVED_VALUE, update_uncommitted_block_structures, witness_commitment_script,

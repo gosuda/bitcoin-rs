@@ -395,19 +395,6 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         return Err(RpcError::InvalidType("template request must be an object"));
     }
 
-    let capabilities = parse_string_list(request.get("capabilities"), "capabilities")?;
-    let rules = parse_string_list(request.get("rules"), "rules")?;
-    let long_poll_id = match request.get("longpollid") {
-        None => None,
-        Some(value) if value.is_null() => None,
-        Some(value) => {
-            let Some(text) = value.as_str() else {
-                return Err(RpcError::InvalidType("longpollid must be a string"));
-            };
-            Some(CompactString::from(text))
-        }
-    };
-
     let mode_text = match request.get("mode") {
         None => "template",
         Some(value) if value.is_null() => "template",
@@ -419,7 +406,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
     let mode = match mode_text {
         "template" => BlockTemplateMode::Template,
         "proposal" => {
-            // Core does not require the client to list the proposal capability.
+            // API-12: proposal request parsing.
             let data = request.get("data").and_then(JsonValueTrait::as_str).ok_or(
                 RpcError::InvalidType("Missing data String key for proposal"),
             )?;
@@ -428,6 +415,19 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         }
         _ => {
             return Err(RpcError::InvalidParameter("Invalid mode".to_owned()));
+        }
+    };
+
+    let capabilities = parse_string_list(request.get("capabilities"), "capabilities")?;
+    let rules = parse_string_list(request.get("rules"), "rules")?;
+    let long_poll_id = match request.get("longpollid") {
+        None => None,
+        Some(value) if value.is_null() => None,
+        Some(value) => {
+            let Some(text) = value.as_str() else {
+                return Err(RpcError::InvalidType("longpollid must be a string"));
+            };
+            Some(CompactString::from(text))
         }
     };
 

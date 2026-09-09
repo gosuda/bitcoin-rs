@@ -4,7 +4,7 @@ use crate::ConsensusError;
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 
 /// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36` `commitment_header`.
-const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+pub const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Eight AVX2 lanes hash eight parent pairs, so a tree needs 16 leaves before
 /// the batch kernel can issue work. Smaller trees stay on the spine.
