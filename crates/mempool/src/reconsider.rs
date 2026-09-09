@@ -180,7 +180,7 @@ mod tests {
         assert!(batch.into_entries().is_empty());
     }
 
-    /// BIP141 Sigops: legacy/P2SH cost four units; witness-v0 costs one.
+    /// MPL-04 / BIP141: reorg entries retain weighted, prevout-aware sigop costs.
     /// These accounting vectors do not claim to perform reorg script validation.
     /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
     #[test]
@@ -191,7 +191,13 @@ mod tests {
         let multisig = vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG];
         let cases = [
             (vec![0x51], Vec::new(), Vec::new(), vec![0xac], 4),
-            (p2sh.clone(), push_data(&multisig), Vec::new(), Vec::new(), 8),
+            (
+                p2sh.clone(),
+                push_data(&multisig),
+                Vec::new(),
+                Vec::new(),
+                8,
+            ),
             (p2wpkh, Vec::new(), Vec::new(), Vec::new(), 1),
             (
                 p2wsh.clone(),
