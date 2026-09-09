@@ -117,8 +117,7 @@ Explicit deltas from Core 31.1, each intentional and known:
   `submission_carries_prepared_fee_size_and_weighted_sigops_into_entry`
   verifies that both RPC- and peer-originated submissions carry those
   accounting facts into committed entries.
-  `reconsideration_counts_weighted_p2sh_and_witness_prevouts` and
-  `offered_parent_scripts_are_retained_for_child_accounting` in
+  `bip141_sigops_are_preserved_from_restored_coins_and_offered_outputs` in
   `crates/mempool/src/reconsider.rs` cover restored and earlier-offered
   previous outputs. The mining integration test
   `reconsidered_prevout_cost_reaches_the_mining_sigop_budget`

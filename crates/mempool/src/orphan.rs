@@ -296,4 +296,31 @@ mod tests {
         assert!(state.rejects.is_empty());
         assert!(state.reject_order.is_empty());
     }
+    #[test]
+    fn rejecting_another_witness_preserves_the_resident_body_and_ready_work() {
+        let parent = tx(9, Txid::default()).txid();
+        let resident = tx(1, parent);
+        let mut rejected = (*resident).clone();
+        rejected.inputs[0].witness = vec![vec![1]];
+        assert_eq!(resident.txid(), rejected.txid());
+        assert_ne!(resident.wtxid(), rejected.wtxid());
+
+        let mut state = AdmissionLifecycle::default();
+        state.orphans.insert(Arc::clone(&resident), source(1));
+        state.orphans.parent_ready(parent);
+        state.reject(&rejected, RejectScope::Witness);
+        assert!(state.is_rejected(Hash256::from(rejected.wtxid())));
+        assert!(!state.is_rejected(Hash256::from(resident.wtxid())));
+        let ready = state.orphans.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert!(Arc::ptr_eq(&ready[0].tx, &resident));
+        assert_eq!(ready[0].source, source(1));
+
+        state.reject(&resident, RejectScope::Witness);
+        assert_eq!(state.orphans.len(), 0);
+        assert!(state.orphans.by_wtxid.is_empty());
+        assert!(state.orphans.by_parent.is_empty());
+        assert!(state.orphans.order.is_empty());
+        assert_eq!(state.rejects_len(), 2);
+    }
 }

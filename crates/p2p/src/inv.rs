@@ -189,4 +189,17 @@ mod tests {
         assert!(!request_missing_parents(&table, source, &[parent(1)]));
         assert!(lease.is_cancelled());
     }
+
+    #[test]
+    fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
+        let table = PeerTable::new();
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let lease = PeerLease::new(sender);
+        let source = source(&lease);
+        table.register(source.addr, lease.clone());
+        lease.cancel();
+
+        assert!(!request_missing_parents(&table, source, &[parent(1)]));
+        assert!(receiver.try_recv().is_err());
+    }
 }

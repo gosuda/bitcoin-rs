@@ -214,8 +214,7 @@ state (`crates/mempool/src/orphan.rs`).
   `unavailable_parent_never_offers_outputs_to_a_child`,
   `restored_coin_takes_precedence_over_an_offered_output`,
   `coinbase_does_not_become_a_reconsideration_candidate`,
-  `reconsideration_counts_weighted_p2sh_and_witness_prevouts`,
-  `offered_parent_scripts_are_retained_for_child_accounting`.
+  `bip141_sigops_are_preserved_from_restored_coins_and_offered_outputs`.
 - `crates/node/src/chain_effects.rs` (inline tests):
   `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
   `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`.

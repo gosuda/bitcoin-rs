@@ -117,27 +117,47 @@ pub(crate) fn has_invalid_mempool_outpoint(pool: &crate::Mempool, tx: &Tx) -> bo
     })
 }
 
-fn resolve_mempool_inputs(
-    pool: &crate::Mempool,
-    tx: &Tx,
-) -> (HashMap<OutPoint, TxOut>, HashSet<Txid>) {
+// An absent parent can arrive later; a resident parent's nonexistent output
+// cannot. Keep that distinction in the resolved outpoints rather than a second
+// parent-membership index.
+fn resolve_mempool_inputs(pool: &crate::Mempool, tx: &Tx) -> Option<HashMap<OutPoint, TxOut>> {
     let mut prevouts = HashMap::new();
-    let mut parents = HashSet::new();
     for input in &tx.inputs {
         let outpoint = input.previous_output;
         if outpoint.is_null() || outpoint == OutPoint::default() {
             continue;
         }
         if let Some(parent) = pool.transaction_by_txid(&outpoint.txid) {
-            parents.insert(outpoint.txid);
-            if let Ok(index) = usize::try_from(outpoint.vout)
-                && let Some(output) = parent.outputs.get(index)
-            {
-                prevouts.insert(outpoint, output.clone());
-            }
+            let output = parent.outputs.get(usize::try_from(outpoint.vout).ok()?)?;
+            prevouts.insert(outpoint, output.clone());
         }
     }
-    (prevouts, parents)
+    Some(prevouts)
+}
+
+fn combine_input_facts(
+    tx: &Tx,
+    mempool_prevouts: &HashMap<OutPoint, TxOut>,
+    confirmed: &HashMap<OutPoint, TxOut>,
+) -> (Vec<(OutPoint, TxOut)>, Vec<Txid>) {
+    let mut prevouts = Vec::with_capacity(tx.inputs.len());
+    let mut missing_parents = Vec::new();
+    let mut seen_missing = HashSet::new();
+    for input in &tx.inputs {
+        let outpoint = input.previous_output;
+        if outpoint.is_null() || outpoint == OutPoint::default() {
+            continue;
+        }
+        if let Some(output) = mempool_prevouts
+            .get(&outpoint)
+            .or_else(|| confirmed.get(&outpoint))
+        {
+            prevouts.push((outpoint, output.clone()));
+        } else if seen_missing.insert(outpoint.txid) {
+            missing_parents.push(outpoint.txid);
+        }
+    }
+    (prevouts, missing_parents)
 }
 
 impl MempoolGateway {
@@ -169,7 +189,7 @@ impl MempoolGateway {
             let Some(generation) = self.stable_generation() else {
                 continue;
             };
-            let (sequence, mempool_prevouts, known_parents, holdable) = {
+            let (sequence, mempool_prevouts, holdable) = {
                 let pool = self.pool.read();
                 if self.stable_generation() != Some(generation) {
                     continue;
@@ -177,24 +197,28 @@ impl MempoolGateway {
                 if pool.contains_txid(&txid) {
                     return Ok(SubmitOutcome::AlreadyKnown);
                 }
-                if peer {
-                    let lifecycle = self.lifecycle.lock();
-                    if lifecycle.rejects_transaction(txid, tx.wtxid()) {
-                        return Ok(SubmitOutcome::AlreadyKnown);
-                    }
+                if peer && self.lifecycle.lock().rejects_transaction(txid, tx.wtxid()) {
+                    return Ok(SubmitOutcome::AlreadyKnown);
                 }
-                let (prevouts, parents) = resolve_mempool_inputs(&pool, &tx);
+                let prevouts = resolve_mempool_inputs(&pool, &tx);
                 (
                     pool.sequence_number(),
                     prevouts,
-                    parents,
                     peer && can_hold_orphan(&pool, &tx, &pool.policy_snapshot().standardness),
                 )
             };
-            let Some(snapshot) = chain.snapshot(&tx) else {
-                continue;
+            // A nonexistent output of a known parent needs no chain data. It
+            // still goes through the one atomic gate, including private-claim
+            // validation; no separate lifecycle writer is introduced here.
+            let snapshot = if mempool_prevouts.is_some() {
+                let Some(snapshot) = chain.snapshot(&tx) else {
+                    continue;
+                };
+                Some(snapshot)
+            } else {
+                None
             };
-            if peer && snapshot.confirmed {
+            if peer && snapshot.as_ref().is_some_and(|snapshot| snapshot.confirmed) {
                 let pool = self.pool.read();
                 if self.stable_generation() != Some(generation)
                     || pool.sequence_number() != sequence
@@ -208,37 +232,34 @@ impl MempoolGateway {
                 lifecycle.orphans.remove(txid);
                 return Ok(SubmitOutcome::AlreadyConfirmed);
             }
-            let confirmed = snapshot.prevouts.into_iter().collect::<HashMap<_, _>>();
-            let mut prevouts = Vec::with_capacity(tx.inputs.len());
-            let mut missing_inputs = false;
-            let mut missing_parents = Vec::new();
-            let mut seen_missing = HashSet::new();
-            for input in &tx.inputs {
-                let outpoint = input.previous_output;
-                if outpoint.is_null() || outpoint == OutPoint::default() {
-                    missing_inputs = true;
-                } else if let Some(output) = mempool_prevouts
-                    .get(&outpoint)
-                    .or_else(|| confirmed.get(&outpoint))
-                {
-                    prevouts.push((outpoint, output.clone()));
-                } else {
-                    missing_inputs = true;
-                    if !known_parents.contains(&outpoint.txid) && seen_missing.insert(outpoint.txid)
-                    {
-                        missing_parents.push(outpoint.txid);
-                    }
-                }
-            }
+            // Without chain facts, the empty/missing context and zero tip
+            // fields cannot authorize a commit: the gate checks the same
+            // generation/sequence first, then rejects the still-known invalid
+            // outpoint before policy or finality. Changed tokens rebuild a
+            // normal attempt, including chain lookup if the parent disappeared.
+            let (confirmed, height, locktime_cutoff) = snapshot.map_or_else(
+                || (HashMap::new(), 0, 0),
+                |snapshot| {
+                    (
+                        snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
+                        snapshot.height,
+                        snapshot.locktime_cutoff,
+                    )
+                },
+            );
+            let mempool_prevouts = mempool_prevouts.unwrap_or_default();
+            let (prevouts, missing_parents) =
+                combine_input_facts(&tx, &mempool_prevouts, &confirmed);
+            let missing_inputs = prevouts.len() != tx.inputs.len();
             let context = crate::accounting::prepared_context(&tx, &prevouts, missing_inputs);
             let request = AdmissionRequest {
                 tx,
                 context,
                 prevouts,
-                locktime_cutoff: snapshot.locktime_cutoff,
+                locktime_cutoff,
                 max_feerate_sat_per_kvb,
                 time,
-                height: snapshot.height,
+                height,
                 origin,
                 expected_generation: generation,
                 expected_sequence: sequence,
@@ -370,7 +391,7 @@ impl MempoolGateway {
         self.lifecycle.lock().orphans.len()
     }
 
-    /// Number of retained rejection hashes (txid and wtxid forms).
+    /// Number of retained rejection hashes with transaction or witness scope.
     #[must_use]
     pub fn recent_rejects_count(&self) -> usize {
         self.lifecycle.lock().rejects_len()
@@ -523,6 +544,234 @@ mod tests {
         );
         assert_eq!(gateway.orphan_count(), 0);
         assert_eq!(gateway.recent_rejects_count(), 0);
+    }
+
+    #[test]
+    fn nonexistent_mempool_output_is_rejected_without_holding_or_mutating() {
+        for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Peer(source())] {
+            for vout in [1, u32::MAX] {
+                let gateway = gateway();
+                let (parent, child) = parent_and_child();
+                let mut invalid = (*child).clone();
+                invalid.inputs[0].previous_output.vout = vout;
+                let invalid = Arc::new(invalid);
+                insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+                let sequence = gateway.read().sequence_number();
+                assert_eq!(
+                    gateway.submit_transaction(Arc::clone(&invalid), origin, None, 1, &Unavailable),
+                    Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+                );
+                assert_eq!(gateway.orphan_count(), 0);
+                assert_eq!(gateway.read().sequence_number(), sequence);
+                assert_eq!(
+                    gateway.is_rejected(Hash256::from(invalid.wtxid())),
+                    matches!(origin, AdmissionOrigin::Peer(_))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool() {
+        struct ResetPark;
+        impl Drop for ResetPark {
+            fn drop(&mut self) {
+                crate::reset_admission_park();
+            }
+        }
+        let _reset = ResetPark;
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        let mut invalid = (*child).clone();
+        invalid.inputs[0].previous_output.vout = 1;
+        let invalid = Arc::new(invalid);
+        let txid = invalid.txid();
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::arm_admission_park(
+            std::ptr::from_ref(gateway.as_ref()).expose_provenance(),
+            parked_tx,
+            release_rx,
+        );
+        let worker_gateway = Arc::clone(&gateway);
+        let worker = std::thread::spawn(move || {
+            worker_gateway.submit_transaction(
+                invalid,
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Unavailable,
+            )
+        });
+        assert!(
+            parked_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok()
+        );
+        gateway.clear(AdmissionOrigin::Rpc);
+        let sequence = gateway.read().sequence_number();
+        assert!(release_tx.send(()).is_ok());
+        let Ok(result) = worker.join() else {
+            panic!("admission worker panicked")
+        };
+        // The previous no-chain attempt has stale pool facts. After rebuilding,
+        // this absent parent requires real chain lookup, which is unavailable.
+        assert_eq!(result, Err(SubmitError::RetryExhausted));
+        assert_eq!(gateway.read().sequence_number(), sequence);
+        assert!(!gateway.read().contains_txid(&txid));
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.recent_rejects_count(), 0);
+    }
+
+    #[test]
+    fn absent_parent_is_held_but_its_nonexistent_output_is_rejected_on_retry() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        let mut invalid = (*child).clone();
+        invalid.inputs[0].previous_output.vout = 1;
+        let invalid = Arc::new(invalid);
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&invalid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held {
+                missing_parents: vec![parent.txid()]
+            })
+        );
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let retries = gateway.retry_orphans(&Coins(vec![]), 2);
+        assert_eq!(retries.len(), 1);
+        assert_eq!(
+            retries[0].result,
+            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+        );
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(gateway.is_rejected(Hash256::from(invalid.wtxid())));
+        assert!(gateway.retry_orphans(&Coins(vec![]), 3).is_empty());
+    }
+
+    #[test]
+    fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        let mut invalid = (*child).clone();
+        invalid.inputs[0].previous_output.vout = 1;
+        let invalid = Arc::new(invalid);
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&invalid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        let claim = gateway
+            .lifecycle
+            .lock()
+            .orphans
+            .get(&invalid.txid())
+            .cloned();
+        let Some(claim) = claim else {
+            panic!("the missing transaction must be resident")
+        };
+        let mut refreshed = (*invalid).clone();
+        refreshed.inputs[0].witness = vec![vec![1]];
+        let refreshed = Arc::new(refreshed);
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&refreshed),
+                AdmissionOrigin::Peer(source()),
+                None,
+                2,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        assert_eq!(
+            gateway.submit_transaction_claimed(
+                Arc::clone(&invalid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                3,
+                &Unavailable,
+                Some(&claim)
+            ),
+            Ok(SubmitOutcome::AlreadyKnown)
+        );
+        assert_eq!(gateway.get_tx(invalid.txid()), Some((*refreshed).clone()));
+        assert_eq!(gateway.recent_rejects_count(), 0);
+    }
+
+    #[test]
+    fn rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid() {
+        let gateway = gateway();
+        let (parent, valid) = parent_and_child();
+        let chain = Coins(vec![(
+            valid.inputs[0].previous_output,
+            parent.outputs[0].clone(),
+        )]);
+        let mut invalid = (*valid).clone();
+        invalid.inputs[0].witness = vec![vec![1]];
+        let invalid = Arc::new(invalid);
+        assert_eq!(invalid.txid(), valid.txid());
+        assert_ne!(invalid.wtxid(), valid.wtxid());
+        assert_eq!(
+            gateway.submit_transaction(
+                Arc::clone(&invalid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &chain
+            ),
+            Err(SubmitError::Consensus)
+        );
+        assert!(gateway.have_tx(Hash256::from(invalid.wtxid()), true));
+        assert!(!gateway.have_tx(Hash256::from(valid.wtxid()), true));
+        assert!(matches!(
+            gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
+            Ok(SubmitOutcome::Committed(_))
+        ));
+    }
+
+    #[test]
+    fn rejected_stripped_body_does_not_suppress_its_valid_witness_variant() {
+        use bitcoin::hashes::{Hash as _, sha256};
+
+        let gateway = gateway();
+        let (_, child) = parent_and_child();
+        let witness_script = vec![0x51];
+        let mut script_pubkey = vec![0x00, 0x20];
+        script_pubkey.extend_from_slice(&sha256::Hash::hash(&witness_script).to_byte_array());
+        let chain = Coins(vec![(
+            child.inputs[0].previous_output,
+            TxOut {
+                value: 10_000,
+                script_pubkey,
+            },
+        )]);
+        let mut valid = (*child).clone();
+        valid.inputs[0].witness = vec![witness_script];
+        let valid = Arc::new(valid);
+        assert_eq!(child.txid(), valid.txid());
+        assert_ne!(child.wtxid(), valid.wtxid());
+        assert_eq!(
+            gateway.submit_transaction(child, AdmissionOrigin::Peer(source()), None, 1, &chain),
+            Err(SubmitError::Consensus)
+        );
+        assert!(gateway.is_rejected(Hash256::from(valid.txid())));
+        assert!(!gateway.is_rejected(Hash256::from(valid.wtxid())));
+        assert!(matches!(
+            gateway.submit_transaction(valid, AdmissionOrigin::Peer(source()), None, 2, &chain),
+            Ok(SubmitOutcome::Committed(_))
+        ));
     }
 
     #[test]

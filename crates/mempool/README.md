@@ -13,9 +13,8 @@ violations as `PolicyError` or `MempoolError`; `enforce_size_limit` delegates to
 `prioritise` adjusts an entry's effective fee, and `evict_below_fee_rate` /
 `remove_for_block` handle removal. `MempoolStats` supplies the aggregate counters
 behind `getmempoolinfo` and Esplora fee estimates. The `rbf` module plans
-replacements as a `ReplacementCandidate` and `ReplacementPlan`, `standardness` holds
-admission policy, and `MempoolGateway` is the transaction admission entry point.
-The cross-crate ownership boundary is defined by
+replacements as a `ReplacementCandidate` and `ReplacementPlan`, and `standardness`
+holds the relay policy. For the transaction lifecycle ownership boundary, see
 [ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
 `FeeEstimator` is fed by `tx_entered`, `tx_left`, and `block_connected`, and its
 `estimate` answers a confirmation-target query with a `FeeRate` in sat/kvB, refusing
