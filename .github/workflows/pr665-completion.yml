@@ -15,10 +15,10 @@ jobs:
           ref: 7c3558e0d9c1f4afd90696e08d602d0a367e8467
           fetch-depth: 0
           persist-credentials: false
-      - name: Export three exact trees with minimal synthetic ancestry
+      - name: Export exact live-branch trees with minimal synthetic ancestry
         env:
           PR_HEAD: 7c3558e0d9c1f4afd90696e08d602d0a367e8467
-          MAIN_HEAD: b5c321331cedd2491f0f52dff135943280a5af5e
+          MAIN_HEAD: 5936baddf37442521c142ae2f3be17af4df75f6c
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -34,12 +34,11 @@ jobs:
           {
             printf 'base=%s\nhead=%s\nmain=%s\n' "$base" "$PR_HEAD" "$MAIN_HEAD"
             printf 'base_tree=%s\nhead_tree=%s\nmain_tree=%s\n' "$(git rev-parse "$base^{tree}")" "$(git rev-parse "$PR_HEAD^{tree}")" "$(git rev-parse "$MAIN_HEAD^{tree}")"
-            git diff --stat "$base" "$PR_HEAD"
+            git diff --stat "$base" "$MAIN_HEAD"
           } | tee "$RUNNER_TEMP/pr692-inputs.txt"
-          sha256sum "$RUNNER_TEMP/pr692-snapshots.bundle"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr692-merge-inputs
+          name: pr692-live-merge-inputs
           path: |
             ${{ runner.temp }}/pr692-snapshots.bundle
             ${{ runner.temp }}/pr692-inputs.txt
