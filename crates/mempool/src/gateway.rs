@@ -764,17 +764,26 @@ impl MempoolGateway {
         if let Some(reason) = fact.reject_reason {
             return Err(AdmitError::Policy(reason));
         }
-        // Owner-computed sigop cost from resolved prevouts: a caller-supplied
-        // figure never reaches the stored entry.
-        let sigop_cost = total_sigop_cost(&request.tx, &request.prevouts);
+        // Owner-computed sigop cost over the same layered view verification
+        // uses: a caller-supplied figure never reaches the stored entry, and
+        // an input the pool resolves for verification counts its sigops even
+        // when the request omits that prevout. Inputs missing everywhere
+        // contribute nothing here; verification still rejects them.
+        let chain_view = PrevoutMap(&request.prevouts);
+        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
+        let mut resolved = Vec::with_capacity(request.tx.inputs.len());
+        for input in &request.tx.inputs {
+            if let Some(txout) = view.lookup(&input.previous_output) {
+                resolved.push((input.previous_output, txout));
+            }
+        }
+        let sigop_cost = total_sigop_cost(&request.tx, &resolved);
         if sigop_cost > crate::accept::MAX_STANDARD_TX_SIGOPS_COST {
             return Err(AdmitError::Policy(
                 crate::standardness::AcceptanceRejectReason::TooManySigops,
             ));
         }
         fact.sigop_cost = sigop_cost;
-        let chain_view = PrevoutMap(&request.prevouts);
-        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
         if let Err(_err) = verify_transaction(
             &request.tx,
             &view,

@@ -263,6 +263,56 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
     assert_eq!(gateway.read().len(), 0, "rejected tx must not enter the pool");
 }
 
+/// A child spending an in-pool P2SH parent counts the parent's sigops even
+/// when the request omits that prevout: verification resolves the input
+/// through the mempool overlay, so the sigop gate must resolve through the
+/// same view instead of counting the omission as zero.
+#[test]
+fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn Error>> {
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits::default())));
+    let gateway = Arc::new(MempoolGateway::new(pool, None));
+
+    let parent = tx_one_input(
+        outpoint(5, 0),
+        Vec::new(),
+        Vec::new(),
+        100_000,
+        p2sh_script_pubkey(&[0x42; 20]),
+    );
+    let parent_txid = parent.txid();
+    gateway.insert_entry(
+        AdmissionOrigin::Rpc,
+        MempoolEntry::new(Arc::new(parent), 100, 100_000_000, 1, 1),
+    )?;
+
+    let redeem = vec![opcode::OP_CHECKMULTISIG; 200];
+    let child = tx_one_input(
+        OutPoint::new(parent_txid, 0),
+        bitcoin_rs_script::push_data(&redeem),
+        Vec::new(),
+        99_000,
+        P2PKH_SCRIPT.to_vec(),
+    );
+    let context = PackageTxContext {
+        fee: 1_000,
+        vsize: u32::try_from(child.vsize()).unwrap_or(u32::MAX),
+        sigop_cost: 0,
+        missing_inputs: false,
+    };
+    // The request omits the prevout the pool can resolve.
+    let request = admission_request(&gateway, &child, context, Vec::new());
+
+    let result = gateway.admit_transaction(request);
+
+    assert_eq!(
+        result,
+        Err(AdmitError::Policy(AcceptanceRejectReason::TooManySigops)),
+        "overlay-resolved P2SH sigops must trigger the standard limit despite the omission"
+    );
+    assert_eq!(gateway.read().len(), 1, "only the parent must remain in the pool");
+    Ok(())
+}
+
 /// A caller-supplied `sigop_cost` must be ignored: the stored entry carries the
 /// value computed from the resolved prevouts.
 #[test]
