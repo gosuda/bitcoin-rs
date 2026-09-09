@@ -2,7 +2,7 @@ name: PR665 completion verification
 on:
   push:
     branches: [review/pr665-completion-ci-20260910]
-    paths: [.review/ready]
+    paths: [.github/workflows/pr665-completion.yml, .review/ready]
 permissions:
   contents: read
 jobs:
@@ -16,27 +16,32 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: e222fc1fccd2792bf26fdf4e4f9ffb42879093a5
           fetch-depth: 0
           persist-credentials: false
-      - name: Reconstruct the exact reviewed tree
-        run: |
-          set -euo pipefail
-          cp .review/complete.py "$RUNNER_TEMP/complete.py"
-          git worktree add --detach "$RUNNER_TEMP/candidate" db1504be00f994a7d3d214a8ecb3c0ea6e25181a
-          git checkout --detach 970387318c0e14f93491d0a535b8ec2e0a127825
-          CANDIDATE_SOURCE="$RUNNER_TEMP/candidate" python3 "$RUNNER_TEMP/complete.py"
-          git diff --check
-          git add -u
-          test "$(git write-tree)" = 78e31ae429fb9ac97922dbd053d811b54eb974f3
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
+          toolchain: stable
           components: rustfmt
-      - name: Format reviewed Rust files
+      - name: Reconcile workspace lockfile without upgrading registry packages
         run: |
-          git diff --cached --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
+          set -euo pipefail
+          cp Cargo.lock "$RUNNER_TEMP/old.lock"
+          cargo metadata --format-version 1 > /dev/null
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          old = tomllib.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'old.lock').read_text())
+          new = tomllib.loads(pathlib.Path('Cargo.lock').read_text())
+          def external(doc):
+              return {(p['name'], p['version'], p['source']) for p in doc['package'] if 'source' in p}
+          added = external(new) - external(old)
+          if added:
+              raise SystemExit(f'Unexpected dependency additions/upgrades require review: {sorted(added)}')
+          PY
+          git diff -- Cargo.lock | tee "$RUNNER_TEMP/lockfile.patch"
+          cargo metadata --locked --format-version 1 > /dev/null
           git diff --check
-          git add -u
-      - name: Publish source-only candidate, not changes to main
+      - name: Commit lockfile repair on the source-only follow-up branch
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,24 +49,25 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Fix remaining PR665 persistence and evidence defects; simplify cache ownership' -m 'Preserve current main admission, consensus and API refactors. Replace scattered persisted-cache locks with exclusive mutable ownership, typed read failures, full record identity checks, recovery fencing and bounded refills. Preserve original deferred before-images. Collapse lost-persistence fault branches and require honest durable receipts across all tested backends. Reject blank evidence identities and noncanonical corpus pins. Separate planned durable-root recovery from implemented checkpoint startup.'
+          git add Cargo.lock
+          git commit -m 'Synchronize workspace lockfile without upgrading external dependencies'
           candidate=$(git rev-parse HEAD)
-          branch="review/pr665-followup-${GITHUB_RUN_ID}"
           basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin "HEAD:refs/heads/$branch"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin HEAD:refs/heads/review/pr665-followup-34373279168
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "$candidate $branch" | tee "$RUNNER_TEMP/candidate.txt" >> "$GITHUB_STEP_SUMMARY"
-          git diff --binary HEAD^ HEAD > "$RUNNER_TEMP/reviewed.patch"
+          echo "$candidate review/pr665-followup-34373279168" > "$RUNNER_TEMP/candidate.txt"
+          git diff --binary 970387318c0e14f93491d0a535b8ec2e0a127825 HEAD > "$RUNNER_TEMP/reviewed.patch"
           git archive --format=tar.gz -o "$RUNNER_TEMP/reviewed-source.tar.gz" HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
           name: pr665-followup-source
           path: |
             ${{ runner.temp }}/candidate.txt
             ${{ runner.temp }}/reviewed.patch
             ${{ runner.temp }}/reviewed-source.tar.gz
+            ${{ runner.temp }}/lockfile.patch
           retention-days: 7
-          if-no-files-found: error
   verify:
     needs: prepare
     runs-on: ubuntu-latest
@@ -77,10 +83,12 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
         with:
+          toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           key: pr665-review-${{ matrix.lane }}
+          cache-on-failure: true
       - name: Contract regressions and warnings-as-errors lint
         env:
           LANE: ${{ matrix.lane }}
