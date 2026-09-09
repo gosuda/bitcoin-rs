@@ -1,0 +1,45 @@
+name: PR692 completion verification
+on:
+  push:
+    branches: [review/pr665-completion-ci-20260910]
+    paths: [.github/workflows/pr665-completion.yml]
+permissions:
+  contents: read
+jobs:
+  snapshots:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 7c3558e0d9c1f4afd90696e08d602d0a367e8467
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export exact live-branch trees with minimal synthetic ancestry
+        env:
+          PR_HEAD: 7c3558e0d9c1f4afd90696e08d602d0a367e8467
+          MAIN_HEAD: 5936baddf37442521c142ae2f3be17af4df75f6c
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          base=$(git merge-base "$PR_HEAD" "$MAIN_HEAD")
+          b=$(printf 'Synthetic merge base for local analysis only\n' | git commit-tree "$base^{tree}")
+          h=$(printf 'Synthetic PR tree for local analysis only\n' | git commit-tree "$PR_HEAD^{tree}" -p "$b")
+          m=$(printf 'Synthetic main tree for local analysis only\n' | git commit-tree "$MAIN_HEAD^{tree}" -p "$b")
+          git update-ref refs/snapshots/base "$b"
+          git update-ref refs/snapshots/head "$h"
+          git update-ref refs/snapshots/main "$m"
+          git bundle create "$RUNNER_TEMP/pr692-snapshots.bundle" refs/snapshots/base refs/snapshots/head refs/snapshots/main
+          {
+            printf 'base=%s\nhead=%s\nmain=%s\n' "$base" "$PR_HEAD" "$MAIN_HEAD"
+            printf 'base_tree=%s\nhead_tree=%s\nmain_tree=%s\n' "$(git rev-parse "$base^{tree}")" "$(git rev-parse "$PR_HEAD^{tree}")" "$(git rev-parse "$MAIN_HEAD^{tree}")"
+            git diff --stat "$base" "$MAIN_HEAD"
+          } | tee "$RUNNER_TEMP/pr692-inputs.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr692-live-merge-inputs
+          path: |
+            ${{ runner.temp }}/pr692-snapshots.bundle
+            ${{ runner.temp }}/pr692-inputs.txt
+          retention-days: 7

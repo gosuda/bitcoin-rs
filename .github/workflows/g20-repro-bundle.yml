@@ -1,0 +1,43 @@
+name: g20-repro-bundle
+
+on:
+  push:
+    branches: [ci/g20-repro-bundle-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g20-repro-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Provision and verify the exact pinned checker
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      - name: Record reproduction identity
+        run: |
+          mkdir -p target/g20-repro
+          printf 'commit=%s\nrun_id=%s\nattempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > target/g20-repro/context.txt
+          sha256sum docs/models/*.tla docs/models/*.cfg \
+            target/tools/apalache-0.62.2/lib/apalache.jar \
+            > target/g20-repro/SHA256SUMS
+          # Only tracked public source and the verified public checker are
+          # bundled. No credentials, live state, or Git metadata is included.
+          git archive --format=tar HEAD > target/g20-repro/source.tar
+      - name: Upload isolated reproduction bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g20-repro-${{ github.sha }}
+          path: |
+            target/g20-repro/
+            target/tools/apalache-0.62.2/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1

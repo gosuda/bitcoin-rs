@@ -1,0 +1,100 @@
+name: g20-diagnostics
+
+on:
+  push:
+    branches: [ci/g20-diagnostics-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g20-diagnostics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chain-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - strategy: history-after
+            invariant_mode: after
+          - strategy: action-before
+            invariant_mode: before
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Provision the exact pinned checker and reference fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      - name: Prepare a diagnostic-only invariant representation
+        env:
+          STRATEGY: ${{ matrix.strategy }}
+        run: |
+          mkdir -p target/g20-diagnostics
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+
+          path = Path('docs/models/ChainAdmission.tla')
+          original = path.read_bytes()
+          expected = 'e82138365787f075f1ebe232e4c609cec47b515d29cd11d29fe7d35c6f522d83'
+          assert hashlib.sha256(original).hexdigest() == expected, 'model changed; review the experiment'
+          Path('target/g20-diagnostics/ChainAdmission.original.tla').write_bytes(original)
+          if os.environ['STRATEGY'] == 'action-before':
+              text = original.decode('utf-8')
+              changes = {
+                  "Next == NextCore /\\ stepOK' = StepSafe":
+                      'Next == NextCore /\\ UNCHANGED stepOK',
+                  'TransitionSafety == stepOK': 'TransitionSafety == StepSafe',
+              }
+              for old, new in changes.items():
+                  assert text.count(old) == 1, f'expected one definition: {old}'
+                  text = text.replace(old, new)
+              # StepSafe remains a CHECKED action invariant. Never conjoin
+              # StepSafe as a Next guard, which would prune failing edges.
+              # The auxiliary history bit stays true and is no longer
+              # recomputed inside each transition. No production file is
+              # committed or proof verdict promoted by this experiment.
+              path.write_text(text, encoding='utf-8')
+          Path('target/g20-diagnostics/ChainAdmission.checked.tla').write_bytes(path.read_bytes())
+          Path('target/g20-diagnostics/ChainAdmission.cfg').write_bytes(
+              Path('docs/models/ChainAdmission.cfg').read_bytes())
+          PY
+          sha256sum docs/models/ChainAdmission.{tla,cfg} \
+            target/tools/apalache-0.62.2/lib/apalache.jar \
+            > target/g20-diagnostics/SHA256SUMS
+      - name: Check all safety properties at the unchanged bound
+        env:
+          INVARIANT_MODE: ${{ matrix.invariant_mode }}
+          JVM_ARGS: -Xmx4096m
+          SMT_SOLVER: z3
+        run: |
+          args=(check --config=docs/models/ChainAdmission.cfg
+            --inv=TypeOK,Safety,TransitionSafety --length=128
+            --smt-encoding=funArrays --discard-disabled=true
+            --tuning-options="search.invariant.mode=$INVARIANT_MODE"
+            --profiling=true --smtprof
+            --out-dir=target/g20-diagnostics/ChainAdmission)
+          printf 'argv:'
+          printf ' %q' target/tools/apalache-0.62.2/bin/apalache-mc "${args[@]}" docs/models/ChainAdmission.tla
+          printf '\n'
+          set +e
+          timeout --signal=TERM --kill-after=10s 300s \
+            target/tools/apalache-0.62.2/bin/apalache-mc \
+            "${args[@]}" docs/models/ChainAdmission.tla 2>&1 \
+            | tee target/g20-diagnostics/checker.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "$rc" > target/g20-diagnostics/native-exit-code.txt
+          echo "checker exit code: $rc (124 is a diagnostic timeout, never a proof pass)"
+          exit "$rc"
+      - name: Preserve diagnostics even on timeout
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g20-${{ matrix.strategy }}-${{ github.run_id }}
+          path: target/g20-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7

@@ -66,8 +66,8 @@ The decoder types exactly the commands in `crates/p2p/src/compat.rs::COMMANDS` (
 | `sendheaders` | negotiated | BIP130. Sent in handshake; inbound tracked. |
 | `ping` | Answered with `pong` echoing the nonce, ready peers only; pongs feed peer RTT stats. |
 | `pong` | ignored | Completes outstanding ping RTT accounting. |
-| `inv` | Answered with `getdata` for announced vectors the node does not already hold. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, orphans, recent rejects); a wtxid-relay peer announcing `MSG_WTX` is asked for `MSG_WTX`. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
-| `getdata` | Blocks stream from the active chain; transaction inventory is served from the mempool / orphan map. Misses resolve to one trailing `notfound`. Bound: 50 000 vectors. |
+| `inv` | Answered with `getdata` for announced vectors the node does not already hold. P2P's `TxInventory` implementation queries the shared mempool gateway (accepted transactions, orphans, recent rejects); `MSG_TX` announcements are requested as `MSG_WITNESS_TX` from `NODE_WITNESS` peers and as `MSG_TX` otherwise; `MSG_WTX` requests retain their wtxid and type. Bound: 50 000 vectors (`MAX_INV_PER_MSG`, Core `MAX_INV_SZ`). |
+| `getdata` | Blocks stream from the active chain; transaction inventory is served from the mempool / orphan map. `MSG_TX` receives stripped serialization; `MSG_WITNESS_TX` and `MSG_WTX` receive witness serialization (BIP144/BIP339), without changing the retained body. Misses resolve to one trailing `notfound`. Bound: 50 000 vectors. |
 | `notfound` | ignored | Decoded with the same inventory bound. |
 | `getheaders` | Answered with `headers` from the active chain: first locator hash on the active chain anchors the walk, total miss anchors after genesis, stop hash truncates inclusively, ≤ 2 000 headers per message (Core's per-message maximum). Locator bound: 101 hashes (Core `MAX_LOCATOR_SZ`). Empty locator + zero stop answers nothing (Core clients always send a locator; unreachable in practice). |
 | `getblocks` | ignored | Legacy locator request; Core answers with an `inv`, we stay silent. Documented deviation. Locator bound identical. |
@@ -91,12 +91,8 @@ Transaction announcements target only connections with published handshake
 metadata. A peer that negotiated `wtxidrelay` receives `MSG_WTX` with the
 accepted transaction's actual wtxid; other ready peers receive `MSG_TX` with
 its txid, following [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
-RPC/reorg mutation observers resolve the retained entry's wtxid only when
-its acceptance sequence matches the committed event. Removal and re-admission
-invalidate older callbacks, including reinsertion of an identical body;
-unrelated mutations and fee prioritisation do not. Identity and body are read
-under one pool guard, released before relay enqueue. A later removal can still
-overtake an already queued best-effort announcement. Missing-parent requests use txids,
+RPC/reorg mutation observers resolve the retained entry's wtxid and skip
+entries removed before observer delivery. Missing-parent requests use txids,
 which BIP339 permits for unannounced parents. Sources advertising `NODE_WITNESS`
 receive `MSG_WITNESS_TX` requests so the returned parent includes its witness;
 other sources receive `MSG_TX`, following
@@ -150,8 +146,12 @@ Known deltas from Core 31.1:
 
 - **Deterministic fixtures**: `crates/p2p/tests/core_compat.rs` pins the command inventory against this table and against rust-bitcoin's v1 envelope (`RawNetworkMessage`), the handshake fields and service bits, per-network magic/ports and framing, getheaders/headers semantics and bounds, inv/getdata relay round-trips with `notfound`, the reject-or-ignore matrix of §6, and the peer-visible behavior across a chain switch (reorg) and a restart at the `ChainQuery` seam: a rebuilt query serves byte-identical answers, a switched active branch serves the new branch from the fork point and `notfound`s stale bodies. Run with `cargo test -p bitcoin-rs-p2p --test core_compat`.
 - **Transaction consumers**: `crates/p2p/src/dispatch.rs` test
-  `gateway_inventory_filters_and_serves_txid_and_wtxid` exercises the
-  `TxInventory` implementation over the shared gateway. `src/inv.rs` tests
+  `gateway_inventory_filters_and_serves_txid_and_wtxid` exercises lookup,
+  requested serialization, and retained-body immutability over the gateway.
+  `announced_transactions_request_witness_without_changing_hashes` covers
+  ordinary inventory requests with and without the inventory filter.
+  Node's `tx_ingress_e2e` suite requires witness requests from its
+  `NODE_WITNESS` dialers before delivering transactions. `src/inv.rs` tests
   `missing_parents_use_txids_and_deduplicate_repeated_inputs`,
   `missing_parents_request_witness_by_service_not_announcement_preference`,
   `stale_missing_parent_source_cannot_send_to_or_cancel_replacement`,
@@ -164,10 +164,6 @@ Known deltas from Core 31.1:
   `relay_waits_for_handshake_and_selects_the_peers_inventory_type` and
   `local_tx_relay_uses_committed_wtxid_and_ignores_peer_and_removed_entries`
   cover negotiated announcements and actual retained witness identity.
-  `delayed_local_relay_does_not_adopt_a_reinserted_body`,
-  `delayed_local_relay_survives_unrelated_mutations`, and
-  `local_replacement_relay_uses_the_accepted_change_sequence` cover delayed
-  callback identity and per-change sequence selection.
   Run with `cargo test -p bitcoin-rs-p2p --lib`.
 - **Fuzz**: `fuzz/fuzz_targets/p2p_message.rs` drives every payload decoder named by `COMMANDS` (a missing inventory row is a decoder no fuzz input can reach).
 - **Live lane (cut, env-gated)**: `scripts/run-p2p-core-interop.sh --bitcoind-command <cmd>` drives a real Bitcoin Core 31.x (regtest) plus a bitcoin-rs node through the initial sync, mines extra blocks after the handshake to prove the node follows Core's announcements while connected (bitcoin-rs itself sends no proactive block announcements; see the deviation ledger), records Core's own `getpeerinfo` view of us (services bits, subver) into an evidence JSON, and runs the `#[ignore]`d verifier `crates/p2p/tests/core_interop_live.rs`. The lane is never run in CI (no bitcoind on CI hosts); its evidence belongs under `docs/benchmarks/` when a Core bump is pinned.
