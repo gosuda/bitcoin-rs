@@ -2318,7 +2318,7 @@ fn prove_window<'a>(
         }
         if handles.verify_kernel {
             for (unit, unit_flags) in units.iter().zip(&flags) {
-                if unit.compare_kernel_scripts(*unit_flags, true).is_err() {
+                if unit.compare_kernel_scripts(*unit_flags, false).is_err() {
                     return Vec::new();
                 }
             }
@@ -3614,11 +3614,16 @@ fn verify_block_transactions(
         .record(script_timings.prepare_seconds);
     metrics::histogram!("node.apply_block.script_parallel_seconds")
         .record(script_timings.parallel_seconds);
-    if let Some(spent) = oracle_spent {
+    // Only a native script error is a script rejection; preserve other errors.
+      let native_script_accepted = !matches!(
+          script_input_result.as_ref(),
+          Err(bitcoin_rs_consensus::ConsensusError::Script { .. })
+      );
+      if let Some(spent) = oracle_spent {
         bitcoin_rs_consensus::kernel::compare_script_verdicts(
             &spent,
             context.flags,
-            script_input_result.is_ok(),
+            native_script_accepted,
         )?;
     }
     script_input_result?;
