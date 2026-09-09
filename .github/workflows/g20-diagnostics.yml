@@ -21,10 +21,10 @@ jobs:
         include:
           - strategy: baseline
             encoding: oopsla19
-            discard: false
-          - strategy: discard-disabled
-            encoding: oopsla19
             discard: true
+          - strategy: no-precheck
+            encoding: oopsla19
+            discard: false
           - strategy: function-arrays
             encoding: funArrays
             discard: true
@@ -42,13 +42,12 @@ jobs:
           mkdir -p target/g20-diagnostics
           args=(check --config=docs/models/ChainAdmission.cfg
             --inv=TypeOK,Safety,TransitionSafety --length=128
-            --smt-encoding="$ENCODING" --smtprof
+            --smt-encoding="$ENCODING" --discard-disabled="$DISCARD"
+            --profiling=true --smtprof
             --out-dir=target/g20-diagnostics/ChainAdmission)
-          if [[ "$DISCARD" == true ]]; then
-            args+=(--discard-disabled)
-          fi
           sha256sum docs/models/ChainAdmission.{tla,cfg}
-          printf 'argv: %q ' target/tools/apalache-0.62.2/bin/apalache-mc "${args[@]}" docs/models/ChainAdmission.tla
+          printf 'argv:'
+          printf ' %q' target/tools/apalache-0.62.2/bin/apalache-mc "${args[@]}" docs/models/ChainAdmission.tla
           printf '\n'
           set +e
           timeout --signal=TERM --kill-after=10s 300s \
