@@ -6,7 +6,7 @@ permissions:
   contents: write
 concurrency:
   group: pr680-publication-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   candidate:
     runs-on: ubuntu-latest
@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
@@ -37,6 +37,17 @@ jobs:
           git worktree add --detach "$work" "$BASE"
           python3 .github/scripts/pr680_publish.py "$LANE" "$work"
           cd "$work"
+          if [[ "$LANE" == rpc ]]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/rpc/src/handlers/tx.rs')
+          text = path.read_text()
+          old = 'assert_eq!(oracle.total_sigop_cost(|_| Some(oracle_output.clone())), expected);'
+          new = 'assert_eq!(u64::try_from(oracle.total_sigop_cost(|_| Some(oracle_output.clone()))), Ok(expected));'
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new))
+          PY
+          fi
           mapfile -t files < <(git diff --name-only -- '*.rs')
           rustup run stable rustfmt --edition 2024 "${files[@]}"
           git diff --check
