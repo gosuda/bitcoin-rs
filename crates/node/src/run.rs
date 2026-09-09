@@ -905,7 +905,7 @@ pub(crate) fn start_node(
         handles: state.apply_handles(),
         followers: state.chain_followers(),
     }));
-    rpc_context = rpc_context.with_zmq_notifications(state.active_zmq_notifications());
+    rpc_context = rpc_context.with_zmq_publisher(state.zmq_publisher());
     rpc_context = rpc_context.with_debug_log_path(state.data_dir().join("debug.log"));
     rpc_context = rpc_context.with_rollback_warnings(state.warning_store());
     let context = Arc::new(rpc_context);

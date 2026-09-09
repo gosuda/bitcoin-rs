@@ -34,10 +34,6 @@
         "application/json"
       ],
       [
-        "Content-Length",
-        "0"
-      ],
-      [
         "Connection",
         "keep-alive"
       ]
@@ -65,7 +61,6 @@
     }
   },
   "gap_paths": [
-    "headers.content-length",
     "headers.content-type"
   ]
 }

@@ -158,7 +158,7 @@ impl Default for Auth {
 #[serde(default, deny_unknown_fields)]
 pub struct NotificationConfig {
     /// ZMQ PUB sockets, each owning its endpoint, topics, and optional HWM override.
-    pub zmq: Vec<crate::zmq_publisher::ZmqEndpointConfig>,
+    pub zmq: Vec<bitcoin_rs_rpc::zmq::ZmqEndpointConfig>,
 }
 
 /// How much of the derived `ScriptIndex` a node maintains.
@@ -684,7 +684,7 @@ impl NodeConfig {
 
     /// Returns configured ZMQ endpoint groups.
     #[must_use]
-    pub fn zmq_endpoints(&self) -> &[crate::zmq_publisher::ZmqEndpointConfig] {
+    pub fn zmq_endpoints(&self) -> &[bitcoin_rs_rpc::zmq::ZmqEndpointConfig] {
         &self.notifications.zmq
     }
 
@@ -709,7 +709,7 @@ impl NodeConfig {
                 "P2P magic overrides require --dns-seeds-enabled=false"
             );
         }
-        crate::zmq_publisher::validate_endpoint_configs(&self.notifications.zmq)?;
+        bitcoin_rs_rpc::zmq::validate_endpoint_configs(&self.notifications.zmq)?;
         let journal = &self.chainstate_journal;
         anyhow::ensure!(
             journal.blocks > 0,

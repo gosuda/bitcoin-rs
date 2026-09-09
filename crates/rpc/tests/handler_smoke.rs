@@ -570,6 +570,7 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
         services: 0,
         user_agent: "/bitcoin-rs:0.1.0/".to_string(),
         start_height: 0,
+        best_known_height: 0,
         conn_time: 0,
         inbound: true,
         addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),

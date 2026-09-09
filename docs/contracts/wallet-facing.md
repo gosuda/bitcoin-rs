@@ -37,6 +37,11 @@ electrs/mempool.space base URL. Relative routes below are appended to it.
   index covers the applied tip.
 - Broadcast: `POST /tx` (hex body), which dispatches `sendrawtransaction`
   through the same admission owner as JSON-RPC.
+- Public `/api` responses, including errors, allow cross-origin reads with
+  `Access-Control-Allow-Origin: *` and expose `X-Total-Results`. `OPTIONS`
+  requests under `/api` return a 204 preflight response permitting `GET`,
+  `POST`, and the `Content-Type` request header. The mempool backend
+  `/esplora` namespace, JSON-RPC, and Core REST do not inherit this policy.
 - `/api` is a closed electrs namespace: a request in it never falls
   through to JSON-RPC. Unprefixed electrs paths on this listener 404 so
   JSON-RPC keeps `/`. `/api/v1` is Mempool's API on the explorer port,

@@ -667,7 +667,16 @@ fn begin_chain_transition<'a>(
 /// accept `&ChainChangeProof`, not independent `&TransitionLock` and
 /// `&ChainChangeGuard` arguments, so a call without an active odd generation
 /// fails to compile. Build one proof per single operation, whole window, or
-/// whole reorg. Finish only at the outer success boundary.
+/// whole reorg. Finish it once the operation reaches a consistent chainstate:
+/// a successful return, or a clean refusal whose failing block was refused
+/// before the UTXO commit-of-record (`utxo.commit_borrowed_block`). Every
+/// failure before that point touches only idempotent derived state (undo,
+/// block body, header tree) that a retry overwrites; a `UtxoCommit` refusal
+/// may tear the UTXO set, so the transition must be dropped and left odd
+/// until recovery establishes a consistent chainstate. Callers that own the
+/// retry loop (e.g. [`BlockSync`]) may finish on a clean refusal; convenience
+/// entry points finish on success and drop on refusal so the gateway stays
+/// fail-closed.
 pub(crate) struct ChainChangeProof<'a> {
     #[expect(
         dead_code,
@@ -995,9 +1004,16 @@ pub struct Chainstate {
 /// operational failures leave that block retryable.
 ///
 /// [`Self::finish`] stores the reserved even mempool generation. It does not
-/// persist chainstate. Call it only after a successful mutation. A crash or
-/// drop after a successful connect but before finish leaves generation odd
-/// until an external recovery path resets it.
+/// persist chainstate. Call it once the window attempt concludes on a
+/// consistent chainstate: a successful return, or a failure whose committed
+/// prefix is already in place and whose failing block was refused before the
+/// UTXO commit-of-record (`utxo.commit_borrowed_block`). Every failure before
+/// that point touches only idempotent derived state (undo, block body, header
+/// tree) that a retry overwrites. A `UtxoCommit` refusal is different: the
+/// per-shard commit is not all-or-nothing across runs, so the UTXO set may be
+/// torn; drop the transition and leave generation odd until recovery
+/// establishes a consistent chainstate. A drop on crash, panic, or any torn
+/// state does the same.
 pub struct ChainTransition<'a> {
     chainstate: &'a Chainstate,
     proof: ChainChangeProof<'a>,
@@ -1085,8 +1101,12 @@ impl<'a> ChainTransition<'a> {
     /// Finishes the chain change, storing the reserved even generation.
     ///
     /// Consumes the capability so it cannot be used after finish. Does not
-    /// persist chainstate. Call only on the success path; drop on error so
-    /// generation stays odd.
+    /// persist chainstate. Call it once the attempt has reached a consistent
+    /// chainstate — a successful return, or a clean refusal whose committed
+    /// prefix is already in place and whose failing block was refused before
+    /// the UTXO commit-of-record (`utxo.commit_borrowed_block`). Drop on a
+    /// `UtxoCommit` refusal, panic, or torn state leaves generation odd until
+    /// recovery establishes a consistent chainstate.
     pub fn finish(self) -> core::result::Result<(), ApplyError> {
         self.proof.finish()
     }
@@ -1140,11 +1160,17 @@ impl Chainstate {
         })
     }
 
-    /// Begins an admitted chain mutation: admission, transition lock, and
-    /// mempool generation.
+    /// Begins an admitted chain mutation: admission, the transition lock, and
+    /// the mempool generation reservation.
     ///
-    /// The returned capability is the only way to connect or disconnect.
-    /// Finish it on success; drop it on failure so generation stays odd.
+    /// The returned capability is the only way to connect or disconnect. Finish
+    /// it once the attempt reaches a consistent chainstate: a successful
+    /// return, or a clean refusal whose committed prefix is already in place
+    /// and whose failing block was refused before the UTXO commit-of-record
+    /// (`utxo.commit_borrowed_block`). Drop on a `UtxoCommit` refusal, panic,
+    /// or torn state leaves generation odd until recovery establishes a
+    /// consistent chainstate. Failure before this method returns a capability
+    /// acquires no transition and therefore makes no generation postcondition.
     pub fn begin_transition(&self) -> core::result::Result<ChainTransition<'_>, ApplyError> {
         let lock = self.lock_transition()?;
         self.begin_transition_locked(lock)
@@ -1194,7 +1220,11 @@ impl Chainstate {
         }
     }
 
-    /// Admits a transition, connects `block`, and finishes on success.
+    /// Admits a transition, connects `block`, and finishes on success. Failure
+    /// before admission acquires no transition and does not change generation.
+    /// A refusal after admission drops the transition and leaves generation
+    /// odd; callers that need to retry a clean refusal should use
+    /// [`ChainTransition`] directly and finish it explicitly.
     ///
     /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
     /// not invoked. Production paths with followers must dispatch while the
@@ -1230,6 +1260,10 @@ impl Chainstate {
     }
 
     /// Admits a transition, disconnects `block`, and finishes on success.
+    /// Failure before admission acquires no transition and does not change
+    /// generation. A refusal after admission drops the transition and leaves
+    /// generation odd; callers that need to retry should use [`ChainTransition`]
+    /// directly.
     ///
     /// Persistence matches [`ChainTransition::disconnect`]. An admission
     /// failure is `DisconnectError::Refused`. Derived consumers are not
@@ -1249,6 +1283,10 @@ impl Chainstate {
     }
 
     /// Admits a transition, applies consecutive blocks, and finishes on success.
+    /// Failure before admission acquires no transition and does not change
+    /// generation. A refusal after admission drops the transition and leaves
+    /// generation odd; callers that need to retry a clean refusal should use
+    /// [`ChainTransition::connect_window`] directly and finish explicitly.
     ///
     /// Persistence matches [`ChainTransition::connect_window`].
     #[allow(clippy::result_large_err)]
@@ -2045,7 +2083,9 @@ pub struct WindowApplyError {
     pub source: ApplyError,
     /// How the caller must treat this failure: `Permanent` failures poisoned
     /// the failed block's header subtree while the chain transition was still
-    /// held; `Operational` failures poisoned nothing.
+    /// held; `Operational` failures poisoned nothing; `Fatal` means the
+    /// transition itself could not be settled (the reserved even generation
+    /// could not be published), so admission stays closed until recovery.
     pub disposition: WindowApplyDisposition,
     /// Hashes marked invalid under the held transition when `disposition` is
     /// [`WindowApplyDisposition::Permanent`]: the failed block and every
@@ -2097,6 +2137,13 @@ pub enum WindowApplyDisposition {
     /// Transient failure (storage, UTXO commit, shutdown). Nothing was
     /// invalidated; the failed block and its tail stay retryable.
     Operational,
+    /// The transition could not be concluded: the reserved even generation
+    /// could not be published (`ChainChangeGuard::finish` failed /
+    /// `GenerationMoved`). Mempool admission stays closed; a retry cannot
+    /// begin until recovery or restart re-establishes a consistent gateway.
+    /// Nothing about the blocks is invalid — committed blocks stay applied
+    /// and nothing is purged.
+    Fatal,
 }
 
 /// Prepares consecutive blocks against one overlay and verifies all their input
@@ -9159,7 +9206,7 @@ mod consensus_rule_tests {
                 crate::SequenceEvent::Connected(hash) => (hash, b'C'),
                 crate::SequenceEvent::Disconnected(hash) => (hash, b'D'),
                 // Test-fake arms for the mempool `A`/`R` events; the
-                // production payload mapping lives in `zmq_publisher`.
+                // production payload mapping lives in `bitcoin_rs_rpc::zmq`.
                 crate::SequenceEvent::Added(txid, _) => (Hash256::from(txid), b'A'),
                 crate::SequenceEvent::Removed(txid, _) => (Hash256::from(txid), b'R'),
             };
@@ -10630,13 +10677,10 @@ mod consensus_rule_tests {
     /// invalidating its header subtree would freeze the node at the tip.
     #[test]
     fn kernel_script_verification_failure_is_operational() {
-        let error = ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Script {
-                input_index: 0,
-                reason: "kernel script verification failed: Script verification failed"
-                    .to_owned(),
-            },
-        );
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "kernel script verification failed: Script verification failed".to_owned(),
+        });
         assert!(
             !is_permanent_apply_error(&error),
             "kernel script verification failures must be Operational (retryable) per #618"
@@ -10647,12 +10691,10 @@ mod consensus_rule_tests {
     /// the native interpreter is deterministic and not process-state-dependent.
     #[test]
     fn native_script_verification_failure_is_permanent() {
-        let error = ApplyError::Consensus(
-            bitcoin_rs_consensus::ConsensusError::Script {
-                input_index: 0,
-                reason: "Script verification failed".to_owned(),
-            },
-        );
+        let error = ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Script {
+            input_index: 0,
+            reason: "Script verification failed".to_owned(),
+        });
         assert!(
             is_permanent_apply_error(&error),
             "native script verification failures must remain Permanent"

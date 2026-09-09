@@ -461,33 +461,6 @@ pub struct PruneResult {
     pub bytes_freed: u64,
 }
 
-/// One active ZMQ notification reported by `getzmqnotifications`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ZmqNotification {
-    /// Core notifier type (`pubhashblock`, `pubhashtx`, `pubrawblock`, `pubrawtx`).
-    pub notification_type: CompactString,
-    /// Bound ZMQ endpoint address.
-    pub address: String,
-    /// PUB socket high-water mark.
-    pub hwm: u32,
-}
-
-impl ZmqNotification {
-    /// Builds immutable RPC metadata for an active ZMQ publisher.
-    #[must_use]
-    pub fn new(
-        notification_type: impl Into<CompactString>,
-        address: impl Into<String>,
-        hwm: u32,
-    ) -> Self {
-        Self {
-            notification_type: notification_type.into(),
-            address: address.into(),
-            hwm,
-        }
-    }
-}
-
 /// Error returned by the node-owned pruning implementation.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PruneServiceError {
@@ -823,8 +796,8 @@ pub struct Context {
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
     pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
-    /// Active ZMQ PUB notifications.
-    pub zmq_notifications: Arc<[ZmqNotification]>,
+    /// Live ZMQ publisher, also the source of active notifier metadata.
+    pub zmq_publisher: Arc<dyn crate::zmq::ZmqPublisher>,
     /// Configured node debug-log path for `getrpcinfo`.
     pub debug_log_path: Option<PathBuf>,
     /// Limits concurrent full-block REST response materializations.
@@ -899,7 +872,7 @@ impl Context {
             p2p_outbound_sender: None,
             banned: Arc::new(RwLock::new(Vec::new())),
             added_nodes: Arc::new(RwLock::new(Vec::new())),
-            zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
+            zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
@@ -951,7 +924,7 @@ impl Context {
             p2p_outbound_sender: None,
             banned: Arc::new(RwLock::new(Vec::new())),
             added_nodes: Arc::new(RwLock::new(Vec::new())),
-            zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
+            zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
@@ -1017,7 +990,7 @@ impl Context {
             prune_service: None,
             chain_control: None,
             mining_control,
-            zmq_notifications: Arc::from(Vec::<ZmqNotification>::new()),
+            zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
@@ -1082,10 +1055,10 @@ impl Context {
         read()
     }
 
-    /// Attaches active ZMQ notification metadata reported by `getzmqnotifications`.
+    /// Attaches the live ZMQ publisher used by `getzmqnotifications`.
     #[must_use]
-    pub fn with_zmq_notifications(mut self, notifications: Vec<ZmqNotification>) -> Self {
-        self.zmq_notifications = Arc::from(notifications);
+    pub fn with_zmq_publisher(mut self, publisher: Arc<dyn crate::zmq::ZmqPublisher>) -> Self {
+        self.zmq_publisher = publisher;
         self
     }
 
@@ -1101,10 +1074,10 @@ impl Context {
         self.rest_render_budget.try_acquire()
     }
 
-    /// Returns active ZMQ notification metadata.
+    /// Returns active ZMQ notification metadata from the live publisher.
     #[must_use]
-    pub fn zmq_notifications(&self) -> &[ZmqNotification] {
-        self.zmq_notifications.as_ref()
+    pub fn zmq_notifications(&self) -> Vec<crate::zmq::ZmqNotifier> {
+        self.zmq_publisher.active_notifiers()
     }
 
     /// Returns the pruning state reported by `getblockchaininfo`.
