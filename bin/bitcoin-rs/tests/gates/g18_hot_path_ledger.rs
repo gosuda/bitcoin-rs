@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";
+const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v1";
 const CONTRACT: &str = "docs/contracts/hot-path-attribution.md";
 const LEDGER: &str = "docs/benchmarks/hot-path-ledger.toml";
 const CELL_COUNT: usize = 36;

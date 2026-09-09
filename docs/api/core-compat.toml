@@ -41,67 +41,6 @@ kernel_sys_crate_version = "0.3.0"
 # No entry may claim `supported` while this is false, and the suite enforces it.
 differential_harness = false
 
-
-# ---------------------------------------------------------------------------
-# Reference identities
-#
-# Two distinct identities live under this table, and they must never be
-# confused:
-#
-#   * `[reference.release]` below is the RELEASED Bitcoin Core product,
-#     installed from a checksum-pinned tarball. It is the product behavior
-#     reference every compatibility claim in this file is ultimately made
-#     against -- the same pinned reference the status vocabulary talks about.
-#   * the scalar keys above (`core_version = "31.99.0"`, the kernel crates)
-#     are the Core development tree this node links for the oracle lane.
-#     Oracle evidence only: not a release, and never a policy pin.
-#
-# A reference carrying only a version label or a digest that does not match is
-# rejected by `crates/rpc/src/compat_manifest.rs`. `docs/contracts/reference-set.md` is a
-# readable projection; on conflict, this file and that parser govern.
-# ---------------------------------------------------------------------------
-
-[reference.release]
-# The released product identity. `version_output` is what the pinned
-# `bitcoind -version` prints, checked verbatim.
-core_version = "31.1"
-git_tag = "v31.1"
-source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
-archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"
-archive_sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
-bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08"
-version_output = "Bitcoin Core daemon version v31.1.0"
-
-# Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
-# the corpus archive is exported and is deliberately ABSENT until then: a
-# placeholder digest here would be an invented one, so the loader reports the
-# corpus as custody-blocked instead.
-
-[[reference.corpora]]
-id = "C150"
-stop_height = 150000
-stop_hash = "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b"
-# Exported 2026-09-07 by the pinned bitcoind (digest 986e63b3) into a fresh
-# datadir; see the campaign-corpora contract and products.json for canonical
-# corpus measurements and terminal-state evidence.
-# Canonical manifest identity per CORP-02: the `manifest_sha256` field the
-# exporter embeds inside the manifest, NOT the SHA-256 of the manifest file.
-manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d"
-
-[[reference.corpora]]
-id = "Cmodern"
-stop_height = 709635
-stop_hash = "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f"
-
-# The formal model checker, pinned by archive and jar digest. Evidence tool
-# only; no checker run is claimed anywhere in this file.
-
-[reference.formal_tool]
-name = "apalache-mc"
-version = "0.62.2"
-archive_sha256 = "7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2"
-jar_sha256 = "079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8"
-
 # Status vocabulary, in the order of decreasing confidence:
 #
 #   supported              implemented AND differentially verified against the

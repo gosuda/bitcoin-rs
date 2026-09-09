@@ -69,149 +69,8 @@ impl WriteCondition<'_> {
         }
     }
 }
-/// Persistence boundary that a [`PersistFault`] is armed against.
-///
-/// Test-only fault-injection control for the atomic-durability proof suite;
-/// not part of the storage contract. `Apply` is the engine boundary that
-/// atomically commits a batch, `Sync` is the durability step that makes an
-/// applied batch crash-safe, and `Flush` is the [`KvStore::flush`] completion
-/// of deferred writes.
-#[doc(hidden)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum PersistBoundary {
-    /// The engine boundary that applies a batch atomically.
-    Apply,
-    /// The durability boundary that persists an applied batch.
-    Sync,
-    /// The `flush` boundary that completes deferred durability.
-    Flush,
-}
-
-/// One injected persistence fault for the atomic-durability proofs.
-///
-/// Test-only seam, hidden from the documented API: when armed on a backend,
-/// the next write path that reaches the fault's boundary fires the fault once
-/// and consumes it. Unarmed stores never consult the seam, and a fault armed
-/// at a boundary a path does not cross stays armed for a later path. The
-/// observable contract under every fault is fixed by [`KvStore`]: a
-/// multi-family batch recovers as the complete old or the complete new state
-/// across every column family, and a durability completion never precedes the
-/// persisted writes it vouches for.
-#[doc(hidden)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum PersistFault {
-    /// Persistence faults before any batch byte is applied: the call returns
-    /// `Err` and no operation lands in any family.
-    FailApply,
-    /// Lost write at the apply boundary: the engine write is silently
-    /// dropped. Paths that promise no durability may report `Ok`; paths that
-    /// must complete durability return `Err`, because completion never
-    /// precedes the persisted write.
-    LostApply,
-    /// Partial write at the apply boundary: a strict prefix of the batch
-    /// reaches the engine and the boundary then faults. The engine discards
-    /// or aborts the prefix atomically: the call returns `Err` and no family
-    /// observes a partial batch.
-    PartialApply,
-    /// Durability completion faults after the batch applied: the batch is
-    /// visible but not confirmed durable, and the call returns `Err` rather
-    /// than reporting completion.
-    FailSync,
-    /// Lost durability completion: the sync step is silently dropped after
-    /// the batch applied. The call may report success; a reopen observes the
-    /// whole batch or none of it, never a cross-family mix.
-    LostSync,
-    /// `flush` faults without completing deferred durability: the call
-    /// returns `Err`.
-    FailFlush,
-    /// Lost flush: `flush` returns `Ok` without performing the sync; a reopen
-    /// observes each earlier batch whole or not at all.
-    LostFlush,
-}
-
-impl PersistFault {
-    /// The persistence boundary this fault fires at.
-    pub const fn boundary(self) -> PersistBoundary {
-        match self {
-            Self::FailApply | Self::LostApply | Self::PartialApply => PersistBoundary::Apply,
-            Self::FailSync | Self::LostSync => PersistBoundary::Sync,
-            Self::FailFlush | Self::LostFlush => PersistBoundary::Flush,
-        }
-    }
-
-    /// The storage error an injected fault surfaces as.
-    pub fn injected_error(self) -> StorageError {
-        StorageError::Io(std::io::Error::other(format!(
-            "injected persistence fault {:?} at the {:?} boundary",
-            self,
-            self.boundary()
-        )))
-    }
-}
-
-/// Armed persistence-fault slot backing the backend seam.
-///
-/// Test-only; hidden from the documented API. Backends hold one slot and
-/// consult it when a write path reaches a persistence boundary.
-#[doc(hidden)]
-#[derive(Default)]
-pub struct PersistFaultSlot(parking_lot::Mutex<Option<PersistFault>>);
-
-impl PersistFaultSlot {
-    /// Arms `fault`; a later path crossing its boundary fires it once.
-    pub fn arm(&self, fault: PersistFault) {
-        *self.0.lock() = Some(fault);
-    }
-
-    /// Consumes the armed fault when it fires at `boundary`.
-    ///
-    /// A fault armed at a boundary this path does not cross stays armed.
-    #[cfg_attr(
-        not(any(
-            feature = "fjall",
-            feature = "redb",
-            feature = "rocksdb",
-            feature = "mdbx"
-        )),
-        allow(dead_code)
-    )]
-    pub(crate) fn take_at(&self, boundary: PersistBoundary) -> Option<PersistFault> {
-        let mut guard = self.0.lock();
-        match *guard {
-            Some(fault) if fault.boundary() == boundary => {
-                *guard = None;
-                Some(fault)
-            }
-            _ => None,
-        }
-    }
-}
 
 /// Backend-neutral key-value store over named column families.
-///
-/// # Atomicity and durability contract
-///
-/// Every mutation route applies a *named-family atomic batch*: the batch's
-/// operations across every [`ColumnFamily`] it touches land as one unit.
-/// After any fault at a persistence boundary — a lost write, a partial
-/// write, or a faulted or lost durability completion — and a reopen, each
-/// column family reflects either the complete pre-batch state or the
-/// complete post-batch state. A batch is never half-landed: a reopened
-/// store never mixes the new head with old coins, or any other cross-family
-/// combination of old and new rows from one batch.
-///
-/// Atomic visibility is not crash durability. [`Self::write`] and
-/// [`Self::write_deferred`] make a batch visible without promising it
-/// survived a crash; only [`Self::write_durable`], [`Self::write_durable_if`],
-/// and a successful [`Self::flush`] complete durability. A durability
-/// completion never precedes the persisted writes it vouches for: when the
-/// persistence step is lost or faults, the call surfaces `Err` instead of
-/// reporting completion.
-///
-/// [`Self::snapshot`] captures one point-in-time view across families and
-/// never mixes pre-batch and post-batch state. [`Self::snapshot`] plus
-/// [`Self::write_durable_if`] form the receipt contract for compare-and-swap
-/// durability; there is no separate snapshot or receipt trait.
 pub trait KvStore: Send + Sync + 'static {
     /// Backend-specific atomic write-batch type.
     type WriteBatch: WriteBatch;
@@ -257,19 +116,13 @@ pub trait KvStore: Send + Sync + 'static {
         self.write(batch)
     }
 
-    /// Atomically applies `batch` across every column family it touches.
-    ///
-    /// The batch lands as one unit: readers observe either none or all of
-    /// its operations. A persistence-boundary fault surfaces as `Err`; the
-    /// store then holds the batch atomically or not at all across families,
-    /// never a mix. This route alone gives no crash-durability promise.
+    /// Atomically applies `batch`.
     fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError>;
 
     /// Atomically applies `batch`, but may defer crash durability until [`Self::flush`].
     ///
     /// Completed writes must be visible to later reads in the current process. Backends that do
-    /// not support deferred durability may use the regular [`Self::write`] path. A crash before
-    /// [`Self::flush`] may lose the whole batch, never a cross-family part of it.
+    /// not support deferred durability may use the regular [`Self::write`] path.
     fn write_deferred(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         self.write(batch)
     }
@@ -278,9 +131,7 @@ pub trait KvStore: Send + Sync + 'static {
     ///
     /// The default implementation applies the batch via [`Self::write_deferred`] and then
     /// calls [`Self::flush`]. Backends may override this with a single synchronous atomic
-    /// commit that is both applied and durable before returning. `Ok(())` vouches that the
-    /// required bytes are persisted: a lost or faulted persistence step surfaces as `Err`,
-    /// so completion never precedes the persisted write.
+    /// commit that is both applied and durable before returning.
     fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         self.write_deferred(batch)?;
         self.flush()
@@ -294,14 +145,11 @@ pub trait KvStore: Send + Sync + 'static {
     /// earlier conditions on the same key. The empty slice is an all-true conjunction:
     /// the batch commits unconditionally. `Ok(true)` means the whole batch committed
     /// atomically and is durable before return. `Ok(false)` means at least one condition
-    /// did not match and no batch operation was applied — no family, not even one no
-    /// condition names, observes any batch effect, and the durable pre-batch state
-    /// survives reopen unchanged. An unknown family, failed lookup, or backend error
-    /// while evaluating any condition propagates as `Err` and is never reported as a
-    /// mismatch; a fault at the persistence boundary likewise surfaces as `Err`, never
-    /// as `Ok(true)`. Evaluation and commit are atomic with respect to every writer the
-    /// backend permits to coexist on the same database: the backend holds one write
-    /// boundary across all condition reads and the commit.
+    /// did not match and no batch operation was applied. An unknown family, failed
+    /// lookup, or backend error while evaluating any condition propagates as `Err` and
+    /// is never reported as a mismatch. Evaluation and commit are atomic with respect
+    /// to every writer the backend permits to coexist on the same database: the backend
+    /// holds one write boundary across all condition reads and the commit.
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
@@ -309,26 +157,10 @@ pub trait KvStore: Send + Sync + 'static {
     ) -> Result<bool, StorageError>;
 
     /// Makes every earlier completed write durable before returning.
-    ///
-    /// `Err` means durability completion was not established: the affected
-    /// writes stay visible in-process and each recovers whole or not at all
-    /// across families after a reopen, never as a cross-family mix.
     fn flush(&self) -> Result<(), StorageError>;
 
     /// Captures a point-in-time read snapshot.
-    ///
-    /// The view is coherent across column families: it never mixes rows from
-    /// before and after any single batch, including for batches that commit
-    /// while the snapshot is held.
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError>;
-
-    /// Arms `fault` to fire once at its persistence boundary.
-    ///
-    /// Test seam for the atomic-durability proofs: not part of the storage
-    /// contract, hidden from the documented API. Unarmed stores never
-    /// consult the slot.
-    #[doc(hidden)]
-    fn arm_persist_fault(&self, fault: PersistFault);
 }
 
 /// Backend-neutral atomic write batch.

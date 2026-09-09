@@ -65,8 +65,8 @@ pub use verify_block::{
     verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
-    ScriptStageTimings, is_final_tx, total_sigop_cost, verify_block_input_scripts,
-    verify_coinbase_script_sig_size, verify_transaction, verify_transaction_non_script,
+    ScriptStageTimings, is_final_tx, verify_block_input_scripts, verify_coinbase_script_sig_size,
+    verify_transaction, verify_transaction_non_script,
 };
 
 use thiserror::Error;

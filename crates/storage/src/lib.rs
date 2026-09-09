@@ -103,8 +103,7 @@ pub use footprint::{
     logical_store_owners, measure_physical_tree, opened_fd_path,
 };
 pub use trait_::{
-    KvIter, KvPair, KvSnapshot, KvStore, PersistBoundary, PersistFault, PersistFaultSlot,
-    PrefixScan, PrefixScanLimit, WriteBatch, WriteCondition,
+    KvIter, KvPair, KvSnapshot, KvStore, PrefixScan, PrefixScanLimit, WriteBatch, WriteCondition,
 };
 pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
 

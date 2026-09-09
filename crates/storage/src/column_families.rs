@@ -27,12 +27,6 @@ pub enum ColumnFamily {
     /// the addition is additive -- renumbering these is a breaking change
     /// (`docs/policies/db-migration.md` 3.1).
     ScriptLive = 10,
-    /// Grouped transaction-level live coin records (T10): one row per
-    /// transaction with live outputs, keyed by the full 256-bit txid and
-    /// valued by the lossless canonical v5 record payload. Appended after
-    /// every existing discriminant so the addition is additive -- renumbering
-    /// these is a breaking change (`docs/policies/db-migration.md` 3.1).
-    CoinRecords = 11,
 }
 
 impl ColumnFamily {
@@ -49,8 +43,8 @@ impl ColumnFamily {
         Self::BlockBodies,
         Self::UndoData,
         Self::ScriptLive,
-        Self::CoinRecords,
     ];
+
     /// Stable backend column-family/table name.
     pub const fn name(self) -> &'static str {
         match self {
@@ -65,7 +59,6 @@ impl ColumnFamily {
             Self::BlockBodies => "block_bodies",
             Self::UndoData => "undo_data",
             Self::ScriptLive => "script_live",
-            Self::CoinRecords => "coin_records",
         }
     }
 
@@ -88,7 +81,6 @@ impl ColumnFamily {
             8 => Some(Self::BlockBodies),
             9 => Some(Self::UndoData),
             10 => Some(Self::ScriptLive),
-            11 => Some(Self::CoinRecords),
             _ => None,
         }
     }
@@ -107,7 +99,6 @@ impl ColumnFamily {
             Self::BlockBodies => 8,
             Self::UndoData => 9,
             Self::ScriptLive => 10,
-            Self::CoinRecords => 11,
         }
     }
 }

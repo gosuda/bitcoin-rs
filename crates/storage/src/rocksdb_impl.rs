@@ -19,7 +19,6 @@ pub struct RocksDbStore {
     db: rust_rocksdb::DB,
     // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
     write_lock: parking_lot::Mutex<()>,
-    faults: crate::PersistFaultSlot,
 }
 
 impl RocksDbStore {
@@ -71,7 +70,6 @@ impl RocksDbStore {
         Ok(Self {
             db,
             write_lock: parking_lot::Mutex::new(()),
-            faults: crate::PersistFaultSlot::default(),
         })
     }
 
@@ -114,44 +112,16 @@ impl RocksDbStore {
         sync: bool,
     ) -> Result<(), StorageError> {
         count_write(durability, batch.encoded_bytes);
-        // Same seam discipline as the primary backends: apply faults precede
-        // the engine write, sync faults drop the durable write options.
-        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
-            return match fault {
-                crate::PersistFault::FailApply | crate::PersistFault::LostApply => {
-                    Err(fault.injected_error())
-                }
-                crate::PersistFault::PartialApply => Err(fault.injected_error()),
-                _ => unreachable!("take_at only releases Apply-boundary faults"),
-            };
-        }
-        let sync_fault = if sync {
-            self.faults.take_at(crate::PersistBoundary::Sync)
-        } else {
-            None
-        };
-        let effective_sync = sync_fault.is_none() && sync;
         let rocks_batch = self.rocks_batch(batch)?;
-        let outcome = if effective_sync {
+        if sync {
             let mut write_options = WriteOptions::default();
             write_options.set_sync(true);
-            self.db
+            return self
+                .db
                 .write_opt(&rocks_batch, &write_options)
-                .map_err(StorageError::backend)
-        } else {
-            self.db.write(&rocks_batch).map_err(StorageError::backend)
-        };
-        outcome?;
-        if let Some(fault) = sync_fault {
-            return match fault {
-                // Completion never precedes the persisted write.
-                crate::PersistFault::FailSync => Err(fault.injected_error()),
-                // A lost completion cannot acknowledge durability.
-                crate::PersistFault::LostSync => Err(fault.injected_error()),
-                _ => unreachable!("take_at only releases Sync-boundary faults"),
-            };
+                .map_err(StorageError::backend);
         }
-        Ok(())
+        self.db.write(&rocks_batch).map_err(StorageError::backend)
     }
 }
 
@@ -236,13 +206,6 @@ impl KvStore for RocksDbStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "rocksdb").increment(1);
-        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
-            return match fault {
-                crate::PersistFault::FailFlush => Err(fault.injected_error()),
-                crate::PersistFault::LostFlush => Ok(()),
-                _ => unreachable!("take_at only releases Flush-boundary faults"),
-            };
-        }
         self.db.flush_wal(true).map_err(StorageError::backend)
     }
 
@@ -251,10 +214,6 @@ impl KvStore for RocksDbStore {
             db: self,
             snapshot: self.db.snapshot(),
         }))
-    }
-
-    fn arm_persist_fault(&self, fault: crate::PersistFault) {
-        self.faults.arm(fault);
     }
 }
 

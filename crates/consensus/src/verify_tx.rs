@@ -200,15 +200,8 @@ fn verify_transaction_with_locktime_cutoff(
                 .iter()
                 .map(|(_, prevout)| prevout.clone())
                 .collect();
-            let mut shared_cache: Option<bitcoin_rs_primitives::SighashCache<'_>> = None;
             for input_index in 0..tx.inputs.len() {
-                verify_input_script_portable(
-                    input_index,
-                    &spent_outputs,
-                    tx,
-                    flags,
-                    &mut shared_cache,
-                )?;
+                verify_input_script_portable(input_index, &spent_outputs, tx, flags)?;
             }
         }
     }
@@ -312,17 +305,16 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
 /// consensus spend class (legacy, P2SH, `SegWit` v0, Taproot key-path and
 /// script-path).
 #[cfg(not(feature = "kernel"))]
-fn verify_input_script_portable<'t>(
+fn verify_input_script_portable(
     input_index: usize,
-    spent_outputs: &'t [TxOut],
-    tx: &'t Tx,
+    spent_outputs: &[TxOut],
+    tx: &Tx,
     flags: VerifyFlags,
-    shared_cache: &mut Option<bitcoin_rs_primitives::SighashCache<'t>>,
 ) -> Result<(), ConsensusError> {
     let input = &tx.inputs[input_index];
     let prevout = &spent_outputs[input_index];
     Interpreter
-        .execute_with_shared_cache(
+        .execute_with_prevouts(
             &prevout.script_pubkey,
             &input.script_sig,
             &input.witness,
@@ -330,7 +322,6 @@ fn verify_input_script_portable<'t>(
             spent_outputs,
             tx,
             input_index,
-            shared_cache,
         )
         .map_err(|error| ConsensusError::Script {
             input_index,
@@ -761,14 +752,7 @@ fn check_input(
     }
     #[cfg(not(feature = "kernel"))]
     {
-        let mut shared_cache = None;
-        verify_input_script_portable(
-            check.input_index,
-            &prep.spent_outputs,
-            prep.tx,
-            flags,
-            &mut shared_cache,
-        )
+        verify_input_script_portable(check.input_index, &prep.spent_outputs, prep.tx, flags)
     }
 }
 
@@ -813,14 +797,7 @@ fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
     })
 }
 
-/// Total sigop cost from resolved prevouts: legacy `x4`, P2SH redeem-script
-/// accurate sigops `x4`, and witness-program segwit sigops.
-///
-/// The mempool admission owner calls this; no caller-side duplicate exists.
-/// `prevouts` need not be input-ordered: lookups walk with a cursor that
-/// resets when the request order does not match, so arbitrary resolved
-/// slices stay correct.
-pub fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
+fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     let mut cursor = 0_usize;
     for input in &tx.inputs {

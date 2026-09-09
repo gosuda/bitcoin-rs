@@ -1,4 +1,3 @@
-use crate::block_view::BlockFacts;
 use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, Wtxid, encode::double_sha256};
 
 use crate::ConsensusError;
@@ -33,37 +32,39 @@ impl BlockRuleContext {
 
 /// Verifies non-contextual block rules that do not require a UTXO set.
 pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
-    let mut facts = BlockFacts::from_txids(&block.txs, block.txs.iter().map(Tx::txid).collect());
-    // Non-contextual mode enforces active-softfork checks, so a
-    // witness-carrying block needs its witness IDs for the commitment rule.
-    if facts.has_witness() {
-        facts.or_insert_wtxids_from(&block.txs);
-    }
-    verify_block_rules_precomputed(block, BlockRuleContext::non_contextual(), &facts)
+    let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+    let has_witness = block_has_witness(block);
+    let wtxids: Vec<Wtxid> = block.txs.iter().map(Tx::wtxid).collect();
+    verify_block_rules_precomputed(
+        block,
+        BlockRuleContext::non_contextual(),
+        &txids,
+        &wtxids,
+        has_witness,
+    )
 }
 
-/// Verifies block rules for callers that already hold the one-pass derived
-/// facts, such as the node hot path.
+/// Verifies block rules for callers that already hold the transaction IDs,
+/// witness transaction IDs, and witness presence, such as the node hot path.
 ///
-/// `facts` carries the identities, witness IDs, witness presence, weight, and
-/// the Merkle root with its mutation flag derived once from a single parse
-/// (see [`BlockFacts`]); this entry runs the rule sequence without re-walking
-/// or re-serializing the block. The Merkle root verdict keeps its precedence
-/// over the mutation verdict, exactly as [`verify_merkle_root_with_txids`]
-/// orders them.
+/// `wtxids` must hold one witness ID per transaction in block order; callers
+/// that computed them once for the witness-commitment check pass the cached
+/// slice, so no stage re-serializes and re-hashes the block.
 ///
-/// Performs no allocation or hashing: every input is consumed as derived.
+/// Performs no allocation or hashing beyond the existing rule implementation.
 pub fn verify_block_rules_precomputed(
     block: &Block,
     context: BlockRuleContext,
-    facts: &BlockFacts,
+    txids: &[Txid],
+    wtxids: &[Wtxid],
+    has_witness: bool,
 ) -> Result<(), ConsensusError> {
-    debug_assert_eq!(facts.has_witness(), block_has_witness(block));
+    debug_assert_eq!(has_witness, block_has_witness(block));
     let txdata = &block.txs;
     if txdata.is_empty() {
         return Err(ConsensusError::EmptyBlock);
     }
-    if facts.tx_count() != txdata.len() {
+    if txids.len() != txdata.len() {
         return Err(ConsensusError::MerkleRoot);
     }
     if !is_coinbase(&txdata[0]) {
@@ -74,46 +75,18 @@ pub fn verify_block_rules_precomputed(
             return Err(ConsensusError::ExtraCoinbase { tx_index });
         }
     }
-    // Root and mutation flag were derived once over these same txids by the
-    // caller's single pass. The empty tree keeps its `MerkleRoot` verdict and
-    // the root mismatch stays ahead of the mutation verdict.
-    match facts.merkle_root() {
-        None => return Err(ConsensusError::MerkleRoot),
-        Some(root) => {
-            if block.header.merkle_root != root.into() {
-                return Err(ConsensusError::MerkleRoot);
-            }
-        }
-    }
-    if facts.merkle_mutated() {
-        return Err(ConsensusError::MerkleMutation);
-    }
-    if facts.has_witness() {
-        // Core's `CheckWitnessMalleation`: witness data is only ever
-        // legitimate in a block whose coinbase commits to it under an active
-        // segwit deployment. With the deployment inactive there is no
-        // commitment to check, so any witness data is `unexpected-witness`
-        // malleation and the block is invalid regardless of what the
-        // commitment output contains.
-        if !context.segwit_active {
-            return Err(ConsensusError::Bip {
-                bip: "BIP141",
-                reason: "unexpected witness data without active segwit deployment".to_owned(),
-            });
-        }
-        let wtxids = facts.wtxids().unwrap_or(&[]);
+    verify_merkle_root_with_txids(block, txids)?;
+    if context.segwit_active && has_witness {
         debug_assert_eq!(
             wtxids.len(),
             txdata.len(),
-            "witness-carrying blocks need one derived wtxid per transaction"
+            "witness-carrying blocks need one cached wtxid per transaction"
         );
         if !block_witness_commitment_matches(block, wtxids) {
             return Err(ConsensusError::WitnessCommitment);
         }
     }
-    // Facts are supplied independently of the block; derive the consensus
-    // weight from this exact block rather than trusting a mismatched slice.
-    let weight = BlockFacts::block_weight(&block.txs);
+    let weight = block.weight();
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
             weight,
@@ -200,7 +173,7 @@ fn hash_merkle_bytes(left: &[u8; 32], right: &[u8; 32]) -> Hash256 {
 /// level-synchronous 8-way reducer. Comparing two equal *real* adjacent nodes
 /// at any level flags the tree as mutated; the odd leftover paired with its
 /// duplicate-last copy never does.
-pub(crate) fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
+fn merkle_root_and_mutation_borrowed(txids: &[Txid]) -> Option<(Txid, bool)> {
     if txids.len() >= AVX2_MERKLE_MIN_LEAVES && detect_avx2().is_some() {
         let mut hashes = txids.to_vec();
         return merkle_root_and_mutation(&mut hashes);
@@ -440,16 +413,18 @@ fn next_merkle_level_scalar(level: &mut Vec<Txid>) {
 
 #[cfg(test)]
 mod tests {
+    use bitcoin_rs_primitives::{
+        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid,
+    };
+
     use super::{
-        BlockRuleContext, WITNESS_COMMITMENT_PREFIX, block_merkle_root_matches_txids, is_coinbase,
-        merkle_root_and_mutation, merkle_root_and_mutation_borrowed,
-        merkle_root_and_mutation_scalar, merkle_root_bytes, merkle_root_spine, sha256d,
-        verify_block_rules, verify_block_rules_precomputed, verify_merkle_root_with_txids,
+        BlockRuleContext, WITNESS_COMMITMENT_PREFIX, block_has_witness,
+        block_merkle_root_matches_txids, is_coinbase, merkle_root_and_mutation,
+        merkle_root_and_mutation_borrowed, merkle_root_and_mutation_scalar, merkle_root_bytes,
+        merkle_root_spine, sha256d, verify_block_rules, verify_block_rules_precomputed,
+        verify_merkle_root_with_txids,
     };
     use crate::ConsensusError;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid,
-    };
 
     #[test]
     fn valid_single_coinbase_block_passes() {
@@ -506,26 +481,8 @@ mod tests {
     }
 
     #[test]
-    fn contextual_rules_reject_witness_data_before_segwit_activation() {
+    fn contextual_rules_skip_bip141_commitment_before_segwit_activation() {
         let block = block_with_transactions(vec![coinbase_tx(), witness_spend_tx()]);
-
-        assert_eq!(
-            check_block_rules(
-                &block,
-                BlockRuleContext {
-                    segwit_active: false,
-                },
-            ),
-            Err(ConsensusError::Bip {
-                bip: "BIP141",
-                reason: "unexpected witness data without active segwit deployment".to_owned(),
-            })
-        );
-    }
-
-    #[test]
-    fn contextual_rules_accept_witness_free_block_before_segwit_activation() {
-        let block = block_with_transactions(vec![coinbase_tx(), spend_tx(3)]);
 
         assert_eq!(
             check_block_rules(
@@ -1124,14 +1081,10 @@ mod tests {
     }
 
     fn check_block_rules(block: &Block, context: BlockRuleContext) -> Result<(), ConsensusError> {
-        let mut facts = crate::block_view::BlockFacts::from_txids(
-            &block.txs,
-            block.txs.iter().map(Tx::txid).collect(),
-        );
-        if facts.has_witness() {
-            facts.or_insert_wtxids_from(&block.txs);
-        }
-        verify_block_rules_precomputed(block, context, &facts)
+        let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+        let wtxids: Vec<Wtxid> = block.txs.iter().map(Tx::wtxid).collect();
+        let has_witness = block_has_witness(block);
+        verify_block_rules_precomputed(block, context, &txids, &wtxids, has_witness)
     }
 
     fn compute_merkle_root_from_txs(txs: &[Tx]) -> Option<Hash256> {

@@ -786,12 +786,8 @@ pub(crate) fn start_node(
 
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
 
-    let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-    let metrics = crate::metrics::start_metrics(
-        state.config().observability.metrics_bind,
-        state.shutdown(),
-        &identity,
-    )?;
+    let metrics =
+        crate::metrics::start_metrics(state.config().observability.metrics_bind, state.shutdown())?;
     guard.services.metrics = metrics;
 
     let shutdown = state.shutdown();

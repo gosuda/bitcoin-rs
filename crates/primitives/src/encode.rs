@@ -148,6 +148,10 @@ pub(crate) fn take<'a>(reader: &mut &'a [u8], needed: usize) -> Result<&'a [u8],
     Ok(head)
 }
 
+pub(crate) fn read_u8(reader: &mut &[u8]) -> Result<u8, DecodeError> {
+    Ok(take(reader, 1)?[0])
+}
+
 pub(crate) fn read_array<const N: usize>(reader: &mut &[u8]) -> Result<[u8; N], DecodeError> {
     let mut out = [0_u8; N];
     out.copy_from_slice(take(reader, N)?);
@@ -249,6 +253,25 @@ impl ConsensusDecode for TxOut {
     }
 }
 
+impl ConsensusEncode for TxIn {
+    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
+        self.previous_output.consensus_encode(writer)?;
+        write_script(writer, &self.script_sig)?;
+        writer.write_all(&self.sequence.to_le_bytes())
+    }
+}
+
+impl ConsensusDecode for TxIn {
+    fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
+        Ok(Self {
+            previous_output: OutPoint::consensus_decode(reader)?,
+            script_sig: read_script(reader)?,
+            sequence: read_u32_le(reader)?,
+            witness: Vec::new(),
+        })
+    }
+}
+
 /// Serializes a transaction; `with_witness` controls the BIP144 marker/flag and witness
 /// sections (emitted only when some input carries witness data).
 pub(crate) fn encode_tx(tx: &Tx, writer: &mut impl Write, with_witness: bool) -> io::Result<()> {
@@ -277,23 +300,58 @@ pub(crate) fn encode_tx(tx: &Tx, writer: &mut impl Write, with_witness: bool) ->
     writer.write_all(&tx.lock_time.to_le_bytes())
 }
 
-impl ConsensusEncode for TxIn {
-    fn consensus_encode(&self, writer: &mut impl Write) -> io::Result<()> {
-        self.previous_output.consensus_encode(writer)?;
-        write_script(writer, &self.script_sig)?;
-        writer.write_all(&self.sequence.to_le_bytes())
+/// Decodes a transaction, accepting the BIP144 marker/flag/witness layout.
+pub(crate) fn decode_tx(reader: &mut &[u8]) -> Result<Tx, DecodeError> {
+    let version = read_i32_le(reader)?;
+    let mut input_count = read_compact(reader)?;
+    let mut segwit = false;
+    if input_count == 0 {
+        // BIP144: a zero input count is the segwit marker; the flag byte must be 0x01.
+        let flag = read_u8(reader)?;
+        if flag != 0x01 {
+            return Err(DecodeError::InvalidSegwitFlag { got: flag });
+        }
+        segwit = true;
+        input_count = read_compact(reader)?;
     }
-}
 
-impl ConsensusDecode for TxIn {
-    fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
-        Ok(Self {
-            previous_output: OutPoint::consensus_decode(reader)?,
-            script_sig: read_script(reader)?,
-            sequence: read_u32_le(reader)?,
-            witness: Vec::new(),
-        })
+    let mut inputs = Vec::new();
+    for _ in 0..input_count {
+        inputs.push(TxIn::consensus_decode(reader)?);
     }
+    let mut outputs = Vec::new();
+    let output_count = read_compact(reader)?;
+    for _ in 0..output_count {
+        outputs.push(TxOut::consensus_decode(reader)?);
+    }
+    if segwit {
+        for input in &mut inputs {
+            let item_count = read_compact(reader)?;
+            let mut witness = Vec::new();
+            for _ in 0..item_count {
+                let len = read_compact(reader)?;
+                let needed = usize::try_from(len).unwrap_or(usize::MAX);
+                witness.push(take(reader, needed)?.to_vec());
+            }
+            input.witness = witness;
+        }
+        // BIP144: the marker/flag exists only to carry witness data. Core rejects the
+        // all-empty form ("Superfluous witness record") and rust-bitcoin rejects the
+        // non-empty-input form ("witness flag set but no witnesses present"); we reject
+        // every such encoding here, before the lock time, matching the check position
+        // of both oracles, so every accepted encoding re-encodes byte-identically.
+        if !inputs.iter().any(|input| !input.witness.is_empty()) {
+            return Err(DecodeError::SuperfluousWitness);
+        }
+    }
+    let lock_time = read_u32_le(reader)?;
+
+    Ok(Tx {
+        version,
+        inputs,
+        outputs,
+        lock_time,
+    })
 }
 
 impl ConsensusEncode for Tx {
@@ -303,10 +361,8 @@ impl ConsensusEncode for Tx {
 }
 
 impl ConsensusDecode for Tx {
-    /// Decodes through the checked borrowed layout ([`crate::layout`]), the
-    /// sole owner of transaction wire parsing.
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
-        Ok(crate::layout::ParsedTransaction::parse(reader)?.materialize())
+        decode_tx(reader)
     }
 }
 
@@ -322,10 +378,14 @@ impl ConsensusEncode for Block {
 }
 
 impl ConsensusDecode for Block {
-    /// Decodes through the checked borrowed layout ([`crate::layout`]), the
-    /// sole owner of block wire parsing.
     fn consensus_decode(reader: &mut &[u8]) -> Result<Self, DecodeError> {
-        Ok(crate::layout::ParsedBlock::parse(reader)?.materialize())
+        let header = <Header as ConsensusDecode>::consensus_decode(reader)?;
+        let tx_count = read_compact(reader)?;
+        let mut txs = Vec::new();
+        for _ in 0..tx_count {
+            txs.push(<Tx as ConsensusDecode>::consensus_decode(reader)?);
+        }
+        Ok(Self { header, txs })
     }
 }
 

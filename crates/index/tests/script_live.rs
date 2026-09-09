@@ -139,10 +139,6 @@ impl KvStore for MemoryStore {
             cfs: self.cfs.read().clone(),
         }))
     }
-
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
     fn scan_prefix_bounded(
         &self,
         cf: ColumnFamily,

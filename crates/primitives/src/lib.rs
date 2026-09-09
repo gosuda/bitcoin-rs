@@ -13,8 +13,6 @@ pub mod hash;
 pub mod header;
 /// Transaction, witness-transaction, and block identifier newtypes.
 pub mod ids;
-/// Checked borrowed wire layout for blocks and transactions.
-pub mod layout;
 /// Bitcoin network constants.
 pub mod network;
 /// Fixed-layout transaction outpoint.

@@ -4,18 +4,14 @@
 //! the last *clean shutdown* left behind — which may be far behind the crash
 //! point. This worker publishes a checkpoint when the applied tip has advanced
 //! [`CHECKPOINT_INTERVAL_BLOCKS`] blocks or [`CHECKPOINT_INTERVAL_SECS`]
-//! seconds since the last publication, whichever fires first. Between
-//! publications it performs idle journal maintenance: flushing chainstate
-//! journal records whose wall-clock boundary has passed and reporting
-//! retention pressure.
+//! seconds since the last publication, whichever fires first.
 //!
 //! ## Cadence
 //!
-//! The worker polls every [`POLL_INTERVAL`]. [`CHECKPOINT_INTERVAL_BLOCKS`] =
-//! 10 000. At 30–75 blocks/s during IBD this fires every ~2–5 min.
-//! [`CHECKPOINT_INTERVAL_SECS`] = 1800 (30 min) is the fallback for a
-//! slow-syncing node that has not reached the block count but still wants
-//! progress anchored.
+//! [`CHECKPOINT_INTERVAL_BLOCKS`] = 10 000. At 30–75 blocks/s during IBD this
+//! fires every ~2–5 min. [`CHECKPOINT_INTERVAL_SECS`] = 1800 (30 min) is the
+//! fallback for a slow-syncing node that has not reached the block count but
+//! still wants progress anchored.
 //!
 //! ## Recovery story
 //!
@@ -80,8 +76,7 @@ pub(crate) const CHECKPOINT_INTERVAL_BLOCKS: u32 = 10_000;
 pub(crate) const CHECKPOINT_INTERVAL_SECS: u64 = 1800;
 
 /// Poll interval for the worker loop. Short enough to publish soon after a
-/// trigger fires and to flush soon after a journal boundary passes; long
-/// enough to avoid busy-waiting.
+/// trigger fires; long enough to avoid busy-waiting.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// All the shared handles needed to publish a checkpoint from a background
@@ -276,13 +271,12 @@ impl CheckpointPublisher {
 
 /// Spawns the periodic checkpoint worker thread.
 ///
-/// The worker polls every [`POLL_INTERVAL`], flushes due journal records, and
-/// publishes a checkpoint when the tip has advanced `interval_blocks` since
-/// the last publication or `interval_secs` has elapsed since the last
-/// publication, whichever fires first, or when the journal reports retention
-/// pressure. A `DisconnectInFlight` refusal or an in-flight publication error
-/// is logged and retried on the next tick. The worker exits when `shutdown`
-/// is set.
+/// The worker polls the applied tip every [`POLL_INTERVAL`] and publishes a
+/// checkpoint when the tip has advanced `interval_blocks` since the last
+/// publication or `interval_secs` has elapsed since the last publication,
+/// whichever fires first. A `DisconnectInFlight` refusal or an in-flight
+/// publication error is logged and retried on the next tick. The worker exits
+/// when `shutdown` is set.
 pub(crate) fn spawn_periodic_checkpoint_worker(
     publisher: CheckpointPublisher,
     shutdown: Arc<AtomicBool>,
@@ -298,7 +292,6 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                 .as_ref()
                 .map_or(0, |tip| tip.height);
             let mut last_published_at = Instant::now();
-            let mut prev_pressure = false;
 
             while !shutdown.load(Ordering::Relaxed) {
                 if wait_for_shutdown(&shutdown, POLL_INTERVAL) {
@@ -306,21 +299,11 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
                 }
 
                 let retention_pressure = publisher.maintain_journal();
-                let pressure_transition = retention_pressure && !prev_pressure;
-
                 let current_tip = publisher.applied_tip.load();
                 let Some(tip) = current_tip.as_ref() else {
                     // No applied tip yet; nothing to checkpoint.
                     continue;
                 };
-
-                prev_pressure = retention_pressure;
-
-                if pressure_transition {
-                    tracing::info!(
-                        "journal retention pressure: triggering checkpoint publication to drain",
-                    );
-                }
 
                 let blocks_advanced = tip.height.saturating_sub(last_published_height);
                 let elapsed = last_published_at.elapsed();
