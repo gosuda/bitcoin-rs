@@ -302,6 +302,7 @@ class CorpusWriter:
         self._archive_sha = hashlib.sha256()
         self._entries_sha = hashlib.sha256()
         self._tail_pending = False
+        self._write_failed = False
 
     def _tail_cleared(self) -> bool:
         """Observe caller-owned truncation: sizes must equal the committed prefix."""
@@ -312,6 +313,8 @@ class CorpusWriter:
         return archive_end == self._offset and entries_end == self._entries_pos
 
     def append(self, payload: bytes, *, expected_hash: str | None = None) -> FrameMeta:
+        if self._write_failed:
+            raise ContractError("a previous append failed mid-frame: resume a new writer over the committed prefix")
         if self._tail_pending:
             if not self._tail_cleared():
                 raise ContractError("unverified tail present: truncate owned files to the recorded prefix first")
@@ -335,17 +338,26 @@ class CorpusWriter:
                 raise ContractError(f"{self._chosen.corpus_id} stop hash does not match the frozen tip")
         meta = FrameMeta(offset=self._offset, payload_length=len(payload))
         header = self._freeze.network_magic + struct.pack("<I", len(payload))
-        _write_all(self._archive, header)
-        _write_all(self._archive, payload)
-        self._archive_sha.update(header)
-        self._archive_sha.update(payload)
-        line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
-        _write_all(self._entries, line)
-        self._entries_sha.update(line)
+        # A failed frame poisons this writer: the rolling digests already
+        # absorbed uncommitted bytes and cannot rewind, so only a resumed
+        # writer (which rebuilds both digests from disk) may continue.
+        self._tail_pending = True
+        try:
+            _write_all(self._archive, header)
+            _write_all(self._archive, payload)
+            self._archive_sha.update(header)
+            self._archive_sha.update(payload)
+            line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
+            _write_all(self._entries, line)
+            self._entries_sha.update(line)
+        except (OSError, ValueError):
+            self._write_failed = True
+            raise
         self._count += 1
         self._offset += HEADER_LEN + len(payload)
         self._entries_pos += len(line)
         self._last_hash = block_hash
+        self._tail_pending = False
         return meta
 
     def prefix_facts(self) -> PrefixFacts:
@@ -948,6 +960,8 @@ def _run_writer(
     manifest_path: Path,
     items: Iterable[tuple[str | None, bytes]],
 ) -> None:
+    if archive_path.resolve() == manifest_path.resolve():
+        raise ContractError("archive and manifest paths must differ")
     _refuse_existing(archive_path)
     _refuse_existing(manifest_path)
     archive_path.parent.mkdir(parents=True, exist_ok=True)

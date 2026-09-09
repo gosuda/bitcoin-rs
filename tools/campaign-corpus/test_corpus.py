@@ -880,6 +880,43 @@ class PartialWrite(unittest.TestCase):
                 backing_archive.close()
                 backing_entries.close()
 
+    def test_failed_append_poisons_same_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            freeze = _fixture_freeze(root)
+            archive_path = root / "failed.archive"
+            entries_path = root / "failed.entries"
+            backing_archive = archive_path.open("w+b")
+            backing_entries = entries_path.open("w+b")
+            archive = _FlakyWrites(backing_archive)
+            entries = _FlakyWrites(backing_entries)
+            try:
+                writer = corpus.CorpusWriter(freeze, FIX_CORPUS, archive, entries)
+                writer.append(_GENESIS, expected_hash=GENESIS_HASH)
+                facts = writer.prefix_facts()
+                archive.poisoned = True
+                with self.assertRaises(OSError):
+                    writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
+                # The digests absorbed uncommitted bytes, so the writer stays
+                # poisoned: truncation cannot make it safe to reuse.
+                archive.truncate(facts.archive_bytes)
+                entries.truncate(facts.entries_bytes)
+                with self.assertRaises(ContractError):
+                    writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
+                self.assertEqual(writer.prefix_facts(), facts)
+            finally:
+                backing_archive.close()
+                backing_entries.close()
+
+    def test_run_writer_rejects_identical_destinations(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            freeze = _fixture_freeze(root)
+            same = root / "same.bin"
+            with self.assertRaises(ContractError):
+                corpus._run_writer(freeze, FIX_CORPUS, same, same, [(None, _GENESIS)])
+            self.assertFalse(same.exists())
+
 
 # ---------------------------------------------------------------------------
 # Verifier schema: exact fields, types, duplicates, digests, linkage.
