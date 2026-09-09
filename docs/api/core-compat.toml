@@ -80,6 +80,14 @@ version_output = "Bitcoin Core daemon version v31.1.0"
 id = "C150"
 stop_height = 150000
 stop_hash = "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b"
+# Exported 2026-09-07 by the pinned bitcoind (digest 986e63b3) into a fresh
+# datadir. The archive holds 150001 contiguous entries, height 0 through
+# 150000, and its last entry hash equals `stop_hash` above. The muhash
+# receipt taken at exactly height 150000 carries the same hash as its
+# `bestblock`, with 1127181 unspent outputs.
+# Canonical manifest identity per CORP-02: the `manifest_sha256` field the
+# exporter embeds inside the manifest, NOT the SHA-256 of the manifest file.
+manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d"
 
 [[reference.corpora]]
 id = "Cmodern"
