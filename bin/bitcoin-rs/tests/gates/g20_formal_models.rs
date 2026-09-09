@@ -35,7 +35,7 @@ const TEMPORAL: &str = "--temporal=ConditionalProgress";
 const LENGTH: &str = "--length=128";
 const CONSTRAINTS: &str = "CONSTRAINTS.md";
 const JAR: &str = "lib/apalache.jar";
-const JVM_ARGS_DEFAULT: &str = "4096m";
+const JVM_ARGS_DEFAULT: &str = "-Xmx4096m";
 const SMT_SOLVER_DEFAULT: &str = "z3";
 const TIMEOUT_SECS: u64 = 3600;
 const OUTCOME_NO_ERROR: &str = "The outcome is: NoError";
