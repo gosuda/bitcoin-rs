@@ -140,6 +140,12 @@ Explicit deltas from Core 31.1, each intentional and known:
   `reconsidered_prevout_cost_reaches_the_mining_sigop_budget`
   (`crates/mining/tests/coinbase_template.rs`) checks the stored reorg cost
   against template selection's sigop budget.
+- **Package-parent accounting**: `package_prevouts_preserve_sigops_without_mutating_the_pool`
+  in `crates/rpc/src/handlers/tx.rs` checks nonzero output selection for
+  P2SH and native/nested witness programs against BIP141 and rust-bitcoin.
+  One-past-end and maximum output indices stay missing, with no contextual
+  sigops, invented fee, or pool mutation. These are accounting checks, not
+  package script-verification claims.
 - A policy change that alters any §3 row must update its fixture in the same commit; a fixture that no longer compiles against the doc is the defect (anti-shim rule).
 
 See also [docs/contracts/mempool-policy.md](../contracts/mempool-policy.md) for the contracts index and precedence rule.
