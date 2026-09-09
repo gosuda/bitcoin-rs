@@ -1,37 +1,114 @@
-name: PR665 completion source
+name: PR665 completion verification
 on:
   push:
     branches: [review/pr665-completion-ci-20260910]
+    paths: [.review/ready]
 permissions:
   contents: read
 jobs:
-  source:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.commit.outputs.candidate }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Export pinned main, candidate, and three-way integration result
+      - name: Reconstruct the exact reviewed tree
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/export"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/export/main.tar.gz" 970387318c0e14f93491d0a535b8ec2e0a127825
-          git archive --format=tar.gz -o "$RUNNER_TEMP/export/candidate.tar.gz" db1504be00f994a7d3d214a8ecb3c0ea6e25181a
-          git diff --binary f8bb0f8d0f49ade933eb558d6722041d37a9c02c db1504be00f994a7d3d214a8ecb3c0ea6e25181a > "$RUNNER_TEMP/export/reviewed.patch"
-          git diff --stat f8bb0f8d0f49ade933eb558d6722041d37a9c02c 970387318c0e14f93491d0a535b8ec2e0a127825 > "$RUNNER_TEMP/export/main-changes.txt"
+          cp .review/complete.py "$RUNNER_TEMP/complete.py"
+          git worktree add --detach "$RUNNER_TEMP/candidate" db1504be00f994a7d3d214a8ecb3c0ea6e25181a
           git checkout --detach 970387318c0e14f93491d0a535b8ec2e0a127825
-          git apply --3way "$RUNNER_TEMP/export/reviewed.patch" > "$RUNNER_TEMP/export/integration.txt" 2>&1 || true
-          git status --short >> "$RUNNER_TEMP/export/integration.txt"
-          git diff --cached --binary > "$RUNNER_TEMP/export/integrated.patch"
-          if ! git ls-files -u | grep -q .; then
-            git write-tree > "$RUNNER_TEMP/export/integrated-tree.txt"
-            git archive --format=tar.gz -o "$RUNNER_TEMP/export/integrated.tar.gz" "$(git write-tree)"
-          fi
+          CANDIDATE_SOURCE="$RUNNER_TEMP/candidate" python3 "$RUNNER_TEMP/complete.py"
+          git diff --check
+          git add -u
+          test "$(git write-tree)" = 78e31ae429fb9ac97922dbd053d811b54eb974f3
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: rustfmt
+      - name: Format reviewed Rust files
+        run: |
+          git diff --cached --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
+          git diff --check
+          git add -u
+      - name: Publish source-only candidate, not changes to main
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Fix remaining PR665 persistence and evidence defects; simplify cache ownership' -m 'Preserve current main admission, consensus and API refactors. Replace scattered persisted-cache locks with exclusive mutable ownership, typed read failures, full record identity checks, recovery fencing and bounded refills. Preserve original deferred before-images. Collapse lost-persistence fault branches and require honest durable receipts across all tested backends. Reject blank evidence identities and noncanonical corpus pins. Separate planned durable-root recovery from implemented checkpoint startup.'
+          candidate=$(git rev-parse HEAD)
+          branch="review/pr665-followup-${GITHUB_RUN_ID}"
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin "HEAD:refs/heads/$branch"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "$candidate $branch" | tee "$RUNNER_TEMP/candidate.txt" >> "$GITHUB_STEP_SUMMARY"
+          git diff --binary HEAD^ HEAD > "$RUNNER_TEMP/reviewed.patch"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/reviewed-source.tar.gz" HEAD
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pr665-completion-source
-          path: ${{ runner.temp }}/export/*
-          retention-days: 1
+          name: pr665-followup-source
+          path: |
+            ${{ runner.temp }}/candidate.txt
+            ${{ runner.temp }}/reviewed.patch
+            ${{ runner.temp }}/reviewed-source.tar.gz
+          retention-days: 7
           if-no-files-found: error
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [coins, evidence, fjall, redb, mdbx, rocksdb]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: pr665-review-${{ matrix.lane }}
+      - name: Contract regressions and warnings-as-errors lint
+        env:
+          LANE: ${{ matrix.lane }}
+          CARGO_INCREMENTAL: 0
+          CARGO_TERM_COLOR: never
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/verification.log") 2>&1
+          case "$LANE" in
+            coins)
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features
+              cargo clippy --locked -p bitcoin-rs-utxo --no-default-features --all-targets -- -D warnings
+              python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
+              ;;
+            evidence)
+              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set
+              cargo test --locked -p bitcoin-rs-rpc --test core_compat --test handler_smoke
+              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set -- -D warnings
+              ;;
+            *)
+              cargo test --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --test overhaul_atomic_durability -- --nocapture
+              cargo clippy --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --all-targets -- -D warnings
+              ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr665-verify-${{ matrix.lane }}
+          path: ${{ runner.temp }}/verification.log
+          retention-days: 7
