@@ -1,0 +1,144 @@
+name: publish-locked-ci-policy
+
+on:
+  push:
+    branches: [automation/locked-ci-publish-20260910]
+    paths: [.github/workflows/publish-locked-ci-policy.yml]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e423b1a9983c86839826a4211b852d382773acd1
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - name: Add locked Cargo gates and restore the TLS policy owner
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          def run(*args):
+              return subprocess.check_output(args, text=True).strip()
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              actual = text.count(old)
+              assert actual == count, (path, old, actual, count)
+              p.write_text(text.replace(old, new, count))
+
+          base = 'e423b1a9983c86839826a4211b852d382773acd1'
+          branch = 'fix/locked-ci-and-tls-policy'
+          assert run('git', 'rev-parse', 'HEAD') == base
+          assert not run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}'), 'Refusing to overwrite an existing branch'
+          subprocess.run(['git', 'switch', '-c', branch], check=True)
+
+          ci = '.github/workflows/ci.yml'
+          replacements = [
+              ('cargo clippy --workspace --all-targets', 'cargo clippy --locked --workspace --all-targets'),
+              ('cargo clippy -p bitcoin-rs-consensus', 'cargo clippy --locked -p bitcoin-rs-consensus'),
+              ('cargo clippy -p bitcoin-rs-node', 'cargo clippy --locked -p bitcoin-rs-node'),
+              ('cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast', 'cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast'),
+              ('cargo test -p bitcoin-rs-node \\\n', 'cargo test --locked -p bitcoin-rs-node \\\n'),
+              ('cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast', 'cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast'),
+              ('cargo test --workspace --no-fail-fast \\\n', 'cargo test --locked --workspace --no-fail-fast \\\n'),
+              ('cargo test -p bitcoin-rs --no-fail-fast \\\n', 'cargo test --locked -p bitcoin-rs --no-fail-fast \\\n'),
+              ('cargo bench -p bitcoin-rs --no-run \\\n', 'cargo bench --locked -p bitcoin-rs --no-run \\\n'),
+              ('cargo bench -p bitcoin-rs-utxo --no-run', 'cargo bench --locked -p bitcoin-rs-utxo --no-run'),
+              ('cargo bench -p bitcoin-rs-node --no-run \\\n', 'cargo bench --locked -p bitcoin-rs-node --no-run \\\n'),
+          ]
+          for old, new in replacements:
+              replace(ci, old, new)
+
+          main = '.github/workflows/main.yml'
+          replacements = [
+              ('run: cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored', 'run: cargo test --locked -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored'),
+              ('cargo clippy -p bitcoin-rs --all-targets \\\n', 'cargo clippy --locked -p bitcoin-rs --all-targets \\\n'),
+              ('run: cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings', 'run: cargo clippy --locked -p bitcoin-rs-node --all-targets -- -D warnings'),
+              ('run: cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings', 'run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets -- -D warnings'),
+              ('cargo test -p bitcoin-rs --no-fail-fast \\\n', 'cargo test --locked -p bitcoin-rs --no-fail-fast \\\n'),
+              ('cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle', 'cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle'),
+              ('cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit', 'cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit'),
+              ('cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline', 'cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline'),
+              ('cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal', 'cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal'),
+              ('cargo +nightly check --workspace --all-targets', 'cargo +nightly check --locked --workspace --all-targets'),
+              ('cargo hack check --each-feature --no-dev-deps', 'cargo hack check --locked --each-feature --no-dev-deps'),
+              ('run: cargo test -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture', 'run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture'),
+          ]
+          for old, new in replacements:
+              replace(main, old, new)
+
+          policy = Path('docs/policies/source-compatibility.md')
+          text = policy.read_text()
+          anchor = '''### 3.2 Major Version Bumps
+- Upgrading a workspace dependency to a new major version requires:
+  1. Audit of upstream security, performance, and API changes.
+  2. Compilation and verification across all four storage backend features (`fjall`, `rocksdb`, `mdbx`, `redb`).
+  3. Verification against the `kernel` consensus feature path.
+'''
+          addition = anchor + '''
+### 3.3 Lockfile and CI Reproducibility
+- `Cargo.lock` is committed and is part of the build identity. Normal CI lint, test, benchmark, and feature checks use `--locked`; a stale lockfile fails the job instead of being rewritten only inside the runner checkout.
+- Dependency-update changes may intentionally edit `Cargo.lock`, but validation after that edit still uses `--locked`.
+- The `minimal-versions` lane in `.github/workflows/main.yml` is the one intentional mutation lane: `cargo +nightly update -Zdirect-minimal-versions` rewrites the lockfile in its disposable checkout. Its subsequent compile uses `--locked` against that rewritten result.
+- Cargo subcommand wrappers with their own resolution behavior (`cargo fuzz`) are audited separately rather than treated as ordinary root-workspace Cargo invocations.
+
+### 3.4 TLS Provider and Transport Rules
+- If a TLS transport is added, use Rustls with default features disabled and a reviewed non-C crypto provider. Do not rely on adapter defaults to select the provider.
+- `deny.toml` enforces the dependency boundary. Keep the native-TLS/OpenSSL/platform-TLS families and disallowed Rustls provider/adaptor families complete so a transitive feature cannot reintroduce AWS-LC, ring, OpenSSL, or platform TLS.
+- Review both dependency features and transport configuration when changing a TLS path. A dependency ban alone does not establish correct certificate, protocol, timeout, or endpoint behavior.
+'''
+          assert text.count(anchor) == 1
+          policy.write_text(text.replace(anchor, addition, 1))
+
+          # Guard the intended exception and reject unpinned ordinary Cargo commands.
+          for path in [Path(ci), Path(main)]:
+              for number, line in enumerate(path.read_text().splitlines(), 1):
+                  stripped = line.strip()
+                  if not stripped.startswith('cargo '):
+                      continue
+                  if 'cargo fmt ' in stripped or 'cargo +nightly update -Zdirect-minimal-versions' in stripped:
+                      continue
+                  if 'cargo +nightly fuzz ' in stripped:
+                      continue
+                  assert '--locked' in stripped, f'{path}:{number}: ordinary Cargo command lacks --locked: {stripped}'
+
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          print(subprocess.check_output(['git', 'diff', '--stat'], text=True), flush=True)
+          print(subprocess.check_output(['git', 'diff'], text=True), flush=True)
+          subprocess.run(['git', 'add', '--', ci, main, str(policy)], check=True)
+          subprocess.run(['git', '-c', 'user.name=github-actions[bot]',
+                          '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com',
+                          'commit', '-m', 'ci: enforce the committed lockfile in normal Cargo gates'], check=True)
+          subprocess.run(['git', 'push', 'origin', f'HEAD:refs/heads/{branch}'], check=True)
+          print('PUBLISHED_SHA=' + run('git', 'rev-parse', 'HEAD'), flush=True)
+          PY
+      - name: Validate workflow YAML and policy anchors
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          for path in ['.github/workflows/ci.yml', '.github/workflows/main.yml']:
+              text = Path(path).read_text()
+              assert '\t' not in text
+              assert text.count('name:') >= 1
+          policy = Path('docs/policies/source-compatibility.md').read_text()
+          assert '### 3.3 Lockfile and CI Reproducibility' in policy
+          assert '### 3.4 TLS Provider and Transport Rules' in policy
+          agents = Path('AGENTS.md').read_text()
+          assert 'source-compatibility.md` §3.4 owns TLS provider and transport policy' in agents
+          print('workflow text and policy ownership anchors present')
+          PY
