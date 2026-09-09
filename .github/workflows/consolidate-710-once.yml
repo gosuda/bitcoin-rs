@@ -1,0 +1,128 @@
+name: Consolidate PR710 on current main
+on:
+  push:
+    branches: [exec/consolidate-710-e423b1a]
+permissions:
+  contents: write
+  pull-requests: read
+concurrency:
+  group: consolidate-pr710-source-only
+  cancel-in-progress: false
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+      OLD: f1d64d79ac27a0ab8b7a55be85aa2a7e5d4cd5ef
+      BRANCH: fix/pr680-package-prevout-accounting-20260910
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - name: Consolidate and publish only existing regression and policy changes
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main "$BRANCH"
+          test "$(git rev-parse "origin/$BRANCH")" = "$OLD"
+          export BASE=$(git rev-parse origin/main)
+          work="$RUNNER_TEMP/pr710-consolidated"
+          git worktree add --detach "$work" "$BASE"
+          export WORK="$work"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          text = Path('.github/scripts/pr710_consolidate.py').read_text()
+          old = 'main = "5936baddf37442521c142ae2f3be17af4df75f6c"'
+          assert text.count(old) == 1
+          text = text.replace(old, 'main = "' + os.environ['BASE'] + '"')
+          destination = Path(os.environ['RUNNER_TEMP']) / 'pr710-consolidate.py'
+          destination.write_text(text)
+          PY
+          python3 "$RUNNER_TEMP/pr710-consolidate.py" "$work"
+          cd "$work"
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/rpc/src/handlers/tx.rs')
+          text = path.read_text()
+          old = '''            let txs = [parent, child];
+                      let contexts = super::package_contexts(&ctx, &pool, &txs);'''
+          new = old.replace('let txs =', 'let mut txs =')
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = '''                let mut missing = txs[1].clone();
+                          missing.inputs[0].previous_output.vout = vout;
+                          let contexts =
+                              super::package_contexts(&ctx, &pool, &[txs[0].clone(), missing]);'''
+          new = '''                txs[1].inputs[0].previous_output.vout = vout;
+                          let contexts = super::package_contexts(&ctx, &pool, &txs);'''
+          assert text.count(old) == 1
+          path.write_text(text.replace(old, new))
+          PY
+          rustup run stable rustfmt --edition 2024 crates/rpc/src/handlers/tx.rs
+          git diff --check
+          python3 - <<'PY'
+          import json, os, subprocess, urllib.request
+          from pathlib import Path
+          path = 'crates/rpc/src/handlers/tx.rs'
+          before = subprocess.check_output(['git', 'show', os.environ['BASE'] + ':' + path], text=True)
+          after = Path(path).read_text()
+          assert before.split('#[cfg(test)]', 1)[0] == after.split('#[cfg(test)]', 1)[0]
+          assert after.count('fn package_prevouts_preserve_sigops_without_mutating_the_pool(') == 1
+          assert 'package_prevouts_preserve_contextual_sigops_without_mutating_the_pool' not in after
+          paths = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert paths == {path, 'docs/policies/mempool-policy.md'}, paths
+          request = urllib.request.Request(
+              'https://api.github.com/repos/gosuda/bitcoin-rs/pulls/710',
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              pr = json.load(response)
+          assert pr['state'] == 'open' and not pr['merged']
+          assert pr['head']['sha'] == os.environ['OLD']
+          assert pr['head']['ref'] == os.environ['BRANCH']
+          PY
+          git diff
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/rpc/src/handlers/tx.rs docs/policies/mempool-policy.md
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'test(rpc): consolidate package accounting coverage on current main' | git commit-tree "$tree" -p "$OLD" -p "$BASE")
+          git merge-base --is-ancestor "$OLD" "$commit"
+          git merge-base --is-ancestor "$BASE" "$commit"
+          test -z "$(git diff --name-only "$BASE" "$commit" -- .github Cargo.lock Cargo.toml)"
+          git push --force-with-lease="refs/heads/$BRANCH:$OLD" origin "$commit:refs/heads/$BRANCH"
+          git reset --hard "$commit"
+          test -z "$(git status --porcelain)"
+          echo "sha=$commit" >> "$GITHUB_OUTPUT"
+          printf 'Source commit: `%s`\n\nMain baseline: `%s`\n\nProduction code unchanged; one existing regression strengthened.\n' "$commit" "$BASE" >> "$GITHUB_STEP_SUMMARY"
+          rustc +stable --version
+          cargo +stable --version
+      - name: RPC transaction unit regressions
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}/pr710-consolidated
+        run: cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --lib handlers::tx::tests
+      - name: RPC transaction and policy contracts
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}/pr710-consolidated
+        run: cargo +stable test --locked -p bitcoin-rs-rpc --no-default-features --test transaction_methods --test policy_contract --no-fail-fast
+      - name: Strict RPC Clippy
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}/pr710-consolidated
+        run: cargo +stable clippy --locked -p bitcoin-rs-rpc --no-default-features --all-targets -- -D warnings
+      - name: Formatting and clean source
+        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
+        working-directory: ${{ runner.temp }}/pr710-consolidated
+        run: |
+          cargo +stable fmt --all -- --check
+          git diff --check
+          test -z "$(git status --porcelain)"
