@@ -1,0 +1,106 @@
+name: tx-followup-validation
+
+on:
+  push:
+    branches: [validation/tx-followups-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tx-followup-validation
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  structural-rejection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 456ca80cb7d816c04a3fee51c1c30a51433d7f76
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          cache-on-failure: true
+      - name: Record the exact integrated source
+        run: |
+          mkdir -p "$RUNNER_TEMP/tx-evidence"
+          rustc --version | tee "$RUNNER_TEMP/tx-evidence/toolchain.txt"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/tx-evidence/candidate-sha.txt"
+          git ls-tree -r HEAD -- crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/tx-evidence/blobs.txt"
+      - name: Native mempool and consensus suites
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-mempool --lib > "$RUNNER_TEMP/tx-evidence/mempool.log" 2>&1 || status=1
+          tail -n 25 "$RUNNER_TEMP/tx-evidence/mempool.log"
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib > "$RUNNER_TEMP/tx-evidence/consensus-native.log" 2>&1 || status=1
+          tail -n 25 "$RUNNER_TEMP/tx-evidence/consensus-native.log"
+          exit "$status"
+      - name: RPC transaction and real-socket ingress regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-rpc --lib handlers::tx:: > "$RUNNER_TEMP/tx-evidence/rpc-tx.log" 2>&1 || status=1
+          tail -n 40 "$RUNNER_TEMP/tx-evidence/rpc-tx.log"
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e > "$RUNNER_TEMP/tx-evidence/ingress.log" 2>&1 || status=1
+          tail -n 40 "$RUNNER_TEMP/tx-evidence/ingress.log"
+          exit "$status"
+      - name: Workspace Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee "$RUNNER_TEMP/tx-evidence/clippy-workspace.log"
+      - name: Native consensus Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/tx-evidence/clippy-consensus.log"
+      - name: Native node Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/tx-evidence/clippy-node.log"
+      - name: Workspace formatting
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all -- --check 2>&1 | tee "$RUNNER_TEMP/tx-evidence/fmt.log"
+      - name: Kernel-enabled mempool and consensus suites
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libboost-dev cmake
+          set +e
+          cargo test --locked -p bitcoin-rs-mempool -p bitcoin-rs-consensus --lib > "$RUNNER_TEMP/tx-evidence/kernel.log" 2>&1
+          status=$?
+          set -e
+          tail -n 60 "$RUNNER_TEMP/tx-evidence/kernel.log"
+          exit "$status"
+      - name: Preserve exact-head validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tx-structural-rejection-evidence
+          path: ${{ runner.temp }}/tx-evidence
+          retention-days: 3
+          if-no-files-found: error

@@ -122,7 +122,7 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
             .is_err()
     );
 
-    let mut altered_tx = tx.clone();
+    let mut altered_tx = tx;
     altered_tx.outputs[0].value -= 1;
     assert!(verify(&altered_tx, &prevouts, 0).is_err());
 }
@@ -135,7 +135,7 @@ fn supplied_witness_is_verified_without_mutating_the_transaction() {
     let (tx, prevouts) = signed_spend();
     assert_eq!(verify(&tx, &prevouts, 0), Ok(true));
     let witness = tx.inputs[0].witness.clone();
-    let mut corrupted_tx = tx.clone();
+    let mut corrupted_tx = tx;
     corrupted_tx.inputs[0].witness[0][0] ^= 1;
     assert!(verify(&corrupted_tx, &prevouts, 0).is_err());
     let unchanged_tx = corrupted_tx.clone();

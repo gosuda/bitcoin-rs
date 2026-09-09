@@ -1,0 +1,80 @@
+name: finalize-publication
+
+on:
+  push:
+    branches: [automation/reference-extraction-20260910]
+    paths: [.github/workflows/finalize-publication.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: continuation-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: pr-705
+            sha: 8e42fc8fd15dfbad7af8c607c5a97bb5d217ef61
+          - name: pr-696
+            sha: e8dc3ae452625616b8544bb4985e88667fb48d5c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        id: toolchain
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Record exact head and check formatting
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: |
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
+          rustc --version --verbose
+          cargo fmt --all -- --check
+          git diff --exit-code
+      - name: Workspace strict Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
+      - name: Native consensus strict Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+      - name: Native node strict Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: Repeated parallel metrics tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
+        run: |
+          for attempt in $(seq 1 10); do
+            cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib metrics:: -- --test-threads=8 || exit 1
+          done
+      - name: Native parsing regressions
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
+        run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity
+      - name: Migrated reference identity regressions
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_reference_set
+      - name: Compile migrated process and formal consumers with warnings denied
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-705' }}
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_process_harness --test g20_formal_models --no-run
+      - name: Script unit tests, verifier boundaries and Core vectors
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && matrix.name == 'pr-696' }}
+        run: cargo test --locked -p bitcoin-rs-script --lib --test verifier_boundaries --test core_vectors
+      - name: Assert checks did not change the tested tree
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: git diff --exit-code
