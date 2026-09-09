@@ -1068,7 +1068,8 @@ mod tests {
     /// POL-01 / BIP141: package prevouts retain the scripts used by accounting.
     /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
     #[test]
-    fn package_prevouts_preserve_sigops_without_mutating_the_pool() {
+    fn package_prevouts_preserve_sigops_without_mutating_the_pool()
+    -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Context::new();
         let pool = ctx.mempool.read();
         let sequence = pool.sequence_number();
@@ -1119,8 +1120,25 @@ mod tests {
             };
             // Preparation only: no script execution or successful package
             // acceptance is claimed. The parent's chain input is absent.
+            let oracle: bitcoin::Transaction =
+                bitcoin::consensus::deserialize(&consensus_bytes(&child))?;
+            let expected_outpoint = oracle.input[0].previous_output;
+            let oracle_output = bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(parent.outputs[1].value),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                    parent.outputs[1].script_pubkey.clone(),
+                ),
+            };
+            assert_eq!(
+                u32::try_from(oracle.total_sigop_cost(|outpoint| {
+                    (*outpoint == expected_outpoint).then(|| oracle_output.clone())
+                }))?,
+                4 + input_cost,
+                "independent rust-bitcoin oracle",
+            );
             let vsize = child.vsize();
-            let contexts = super::package_contexts(&ctx, &pool, &[parent, child]);
+            let txs = [parent, child];
+            let contexts = super::package_contexts(&ctx, &pool, &txs);
             assert_eq!(contexts.len(), 2);
             assert!(contexts[0].missing_inputs);
             assert!(!contexts[1].missing_inputs);
@@ -1128,9 +1146,18 @@ mod tests {
             assert_eq!(u64::from(contexts[1].vsize), vsize);
             // BIP141: the legacy output CHECKSIG adds four to the input cost.
             assert_eq!(contexts[1].sigop_cost, 4 + input_cost);
+            for vout in [2, u32::MAX] {
+                let mut missing = txs[1].clone();
+                missing.inputs[0].previous_output.vout = vout;
+                let contexts = super::package_contexts(&ctx, &pool, &[txs[0].clone(), missing]);
+                assert!(contexts[1].missing_inputs);
+                assert_eq!(contexts[1].fee, 0);
+                assert_eq!(contexts[1].sigop_cost, 4);
+            }
             assert_eq!(pool.sequence_number(), sequence);
             assert!(pool.is_empty());
         }
+        Ok(())
     }
 
     #[test]
