@@ -1,0 +1,130 @@
+name: tx-followup-validation
+
+on:
+  push:
+    branches: [validation/tx-followups-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tx-followup-validation
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  structural-rejection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runner
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: de81e329c783247e1e57bf0402fdf5adf294001e
+          path: candidate
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: candidate -> target
+      - name: Require failing regression assertions on the original implementation
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tx-evidence"
+          rustc --version | tee "$RUNNER_TEMP/tx-evidence/toolchain.txt"
+          python3 ../runner/.github/review/structural_rejection.py tests
+          set +e
+          cargo test --locked -p bitcoin-rs-mempool --lib input_structure_ -- --nocapture > "$RUNNER_TEMP/tx-evidence/red.log" 2>&1
+          status=$?
+          set -e
+          tail -n 130 "$RUNNER_TEMP/tx-evidence/red.log"
+          if [ "$status" -eq 0 ]; then
+            echo 'Regression tests unexpectedly passed before the fix.' >&2
+            exit 1
+          fi
+          grep -q 'test result: FAILED' "$RUNNER_TEMP/tx-evidence/red.log"
+          echo 'Confirmed red regression assertions, not a compilation failure.'
+      - name: Prepare the focused candidate branch without runner files
+        id: candidate
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ../runner/.github/review/structural_rejection.py fix
+          rustfmt --edition 2024 crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'crates/consensus/src/verify_tx.rs', 'crates/mempool/src/gateway.rs', 'crates/mempool/src/admission.rs', 'docs/contracts/mempool-mutations.md'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f'unexpected candidate scope: {actual ^ expected}')
+          PY
+          git diff --stat
+          git diff > "$RUNNER_TEMP/tx-evidence/candidate.patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md
+          git commit -m 'fix(mempool): reject malformed input outpoints before orphan retention'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/tx-evidence/candidate-sha.txt"
+          git ls-tree -r HEAD -- crates/consensus/src/verify_tx.rs crates/mempool/src/gateway.rs crates/mempool/src/admission.rs docs/contracts/mempool-mutations.md | tee "$RUNNER_TEMP/tx-evidence/blobs.txt"
+          git push origin HEAD:refs/heads/followup/structural-rejection-scope
+      - name: Native mempool and consensus regression suites
+        if: always() && steps.candidate.outcome == 'success'
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-mempool --lib > "$RUNNER_TEMP/tx-evidence/mempool.log" 2>&1 || status=1
+          tail -n 30 "$RUNNER_TEMP/tx-evidence/mempool.log"
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --lib > "$RUNNER_TEMP/tx-evidence/consensus-native.log" 2>&1 || status=1
+          tail -n 30 "$RUNNER_TEMP/tx-evidence/consensus-native.log"
+          exit "$status"
+      - name: Strict affected-crate Clippy and formatting
+        if: always() && steps.candidate.outcome == 'success'
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo clippy --locked -p bitcoin-rs-mempool --all-targets -- -D warnings > "$RUNNER_TEMP/tx-evidence/clippy-mempool.log" 2>&1 || status=1
+          tail -n 70 "$RUNNER_TEMP/tx-evidence/clippy-mempool.log"
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings > "$RUNNER_TEMP/tx-evidence/clippy-consensus.log" 2>&1 || status=1
+          tail -n 70 "$RUNNER_TEMP/tx-evidence/clippy-consensus.log"
+          cargo fmt --all -- --check > "$RUNNER_TEMP/tx-evidence/fmt.log" 2>&1 || status=1
+          tail -n 70 "$RUNNER_TEMP/tx-evidence/fmt.log"
+          exit "$status"
+      - name: Kernel-enabled mempool and consensus regression suites
+        if: always() && steps.candidate.outcome == 'success'
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libboost-dev cmake
+          set +e
+          cargo test --locked -p bitcoin-rs-mempool -p bitcoin-rs-consensus --lib > "$RUNNER_TEMP/tx-evidence/kernel.log" 2>&1
+          status=$?
+          set -e
+          tail -n 100 "$RUNNER_TEMP/tx-evidence/kernel.log"
+          exit "$status"
+      - name: Preserve exact candidate and validation evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tx-structural-rejection-evidence
+          path: ${{ runner.temp }}/tx-evidence
+          retention-days: 3
+          if-no-files-found: error
