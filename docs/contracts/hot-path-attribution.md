@@ -76,6 +76,10 @@ The 2.0x speed gate and the 36-cell denominator live in issues #33 and
 - `docs/benchmarks/hot-path-ledger.toml` is the only inventory of
   measured product hot paths, cost classes, known levers, and forbidden
   probes.
+- Every recorded `Sample.path` must exactly match a declared `paths.id`.
+  G18 rejects empty or undeclared paths in every cell history. The
+  declared inventory may extend the gate's required minimum; validating
+  membership never deduplicates samples or removes empty cells.
 - A row records applicability, custody, wall contribution,
   disable/neutralize delta, overlap, affected cells, and disposition.
 - Shared versus backend-, corpus-, domain-, or architecture-specific
@@ -180,7 +184,10 @@ posture.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs`
-  (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`)
+  (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`), including
+  `declared_sample_paths_preserve_repetitions_and_empty_cells`,
+  `additional_declared_sample_paths_are_allowed`, and
+  `undeclared_sample_paths_are_rejected_in_later_histories` for HPA-05.
 - `bin/bitcoin-rs/tests/overhaul_evidence.rs` (planned): rejects evidence
   missing binary, corpus, configuration, or durability identity; rejects
   summing nested or concurrent intervals; retains repeated samples and

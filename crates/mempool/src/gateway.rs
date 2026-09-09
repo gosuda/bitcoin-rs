@@ -648,6 +648,23 @@ impl MempoolGateway {
             self.lifecycle.lock().orphans.remove(txid);
             return Ok(AdmitOutcome::AlreadyKnown);
         }
+        // These failures cannot be repaired by another witness or parent arrival.
+        // Standardness bounds the scan before it allocates an input set.
+        // Keep the consensus-owned check ahead of missing-input policy,
+        // but after every generation, sequence, and resident-claim guard.
+        let policy = pool.policy_snapshot();
+        if crate::standardness::is_standard_tx(&request.tx, &policy.standardness).is_ok()
+            && bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
+                .is_err()
+        {
+            self.record_peer_failure(
+                &pool,
+                request,
+                AdmitError::Consensus,
+                RejectScope::Transaction,
+            );
+            return Err(AdmitError::Consensus);
+        }
         // Missing outputs of a resident parent are base-invalid, not orphans.
         // This classification follows all state/claim checks and finalizes the
         // same lifecycle as every other atomic failure, including retry removal.
@@ -666,7 +683,6 @@ impl MempoolGateway {
         //    checks standardness, missing inputs, coinbase, min-relay,
         //    max-fee, and replacement — but NOT package limits (those are
         //    enforced by `replace_transaction` below).
-        let policy = pool.policy_snapshot();
         let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
             &pool,
             policy.incremental_relay_fee_sat_per_kvb,
@@ -2974,5 +2990,60 @@ mod tests {
             "duplicate inputs must fail consensus verification: {result:?}"
         );
         assert!(gateway.read().is_empty());
+    }
+
+    #[test]
+    fn input_structure_checks_follow_generation_and_sequence_guards() {
+        let gateway = gateway_with(None);
+        let mut candidate = standard_tx(93);
+        candidate.inputs.push(candidate.inputs[0].clone());
+        candidate.inputs[0].witness = vec![vec![1]];
+        let origin = AdmissionOrigin::Peer(crate::PeerToken {
+            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            connection_id: 7,
+        });
+        let request = admit_request(&gateway, &candidate, origin);
+        gateway.chain_generation.store(2, Ordering::Release);
+        assert_eq!(
+            gateway.admit_transaction(request),
+            Err(AdmitError::GenerationChanged)
+        );
+        assert_eq!(gateway.recent_rejects_count(), 0);
+
+        let request = admit_request(&gateway, &candidate, origin);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&tx(94)))
+            .expect("fixture insert");
+        assert_eq!(
+            gateway.admit_transaction(request),
+            Err(AdmitError::MempoolChanged)
+        );
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.read().sequence_number(), 1);
+    }
+
+    #[test]
+    fn input_structure_nonstandard_transactions_keep_policy_precedence() {
+        use crate::standardness::{AcceptanceRejectReason, StandardnessError};
+        for (version, witness_len, reason) in [
+            (0, 1, StandardnessError::Version),
+            (2, 400_001, StandardnessError::Weight),
+        ] {
+            let gateway = gateway_with(None);
+            let mut candidate = standard_tx(95);
+            candidate.version = version;
+            candidate.inputs.push(candidate.inputs[0].clone());
+            candidate.inputs[0].witness = vec![vec![0; witness_len]];
+            let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+            assert_eq!(
+                gateway.admit_transaction(request),
+                Err(AdmitError::Policy(AcceptanceRejectReason::NonStandard(
+                    reason
+                )))
+            );
+            assert!(gateway.read().is_empty());
+            assert_eq!(gateway.read().sequence_number(), 0);
+        }
     }
 }
