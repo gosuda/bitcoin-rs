@@ -1654,7 +1654,10 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
             }
         }
         match mode {
-            CoinDurability::Durable => self.store.write_durable(batch)?,
+            CoinDurability::Durable => {
+                self.store.write_durable(batch)?;
+                self.retained_before_images.clear();
+            }
             CoinDurability::CasGuarded => {
                 let conditions: Vec<_> = before
                     .iter()
@@ -1673,6 +1676,7 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
                 if !self.store.write_durable_if(&conditions, batch)? {
                     return Err(PersistentUtxoError::ConditionMismatch);
                 }
+                self.retained_before_images.clear();
             }
             CoinDurability::Deferred => {
                 self.store.write_deferred(batch)?;
