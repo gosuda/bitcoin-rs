@@ -1,6 +1,7 @@
 //! Gateway-owned resident peer transactions awaiting another admission attempt.
-//! Readiness indexes the same bounded store. The live contract is count-bounded
-//! FIFO retention without expiry; witness refresh preserves FIFO position.
+//! Readiness indexes the same bounded store. The live contract is FIFO retention
+//! bounded by both transaction count and aggregate transaction weight; witness
+//! refresh preserves FIFO position.
 
 use crate::mutation::PeerToken;
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
@@ -8,6 +9,13 @@ use bitcoin_rs_primitives::{Hash256, Tx, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 const DEFAULT_ORPHAN_QUOTA: usize = 100;
+/// Aggregate BIP141 weight budget for resident orphan bodies.
+///
+/// This preserves the pre-ownership-move hard memory bound while keeping the
+/// new single lifecycle store. Count and weight are independent caps: neither
+/// a few large standard transactions nor many small ones can grow retention
+/// without bound.
+const DEFAULT_MAX_ORPHAN_WEIGHT: u64 = 10_000_000;
 const DEFAULT_REJECT_CAP: usize = 100_000;
 
 #[derive(Clone, Debug)]
@@ -25,10 +33,16 @@ pub(crate) struct OrphanPool {
     ready: VecDeque<Txid>,
     ready_ids: HashSet<Txid>,
     quota: usize,
+    total_weight: u64,
+    max_weight: u64,
 }
 
 impl OrphanPool {
     pub(crate) fn new(quota: usize) -> Self {
+        Self::with_limits(quota, DEFAULT_MAX_ORPHAN_WEIGHT)
+    }
+
+    fn with_limits(quota: usize, max_weight: u64) -> Self {
         Self {
             entries: HashMap::new(),
             by_wtxid: HashMap::new(),
@@ -37,29 +51,39 @@ impl OrphanPool {
             ready: VecDeque::new(),
             ready_ids: HashSet::new(),
             quota,
+            total_weight: 0,
+            max_weight,
         }
     }
+
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
+
     pub(crate) fn contains(&self, txid: &Txid) -> bool {
         self.entries.contains_key(txid)
     }
+
     pub(crate) fn get(&self, txid: &Txid) -> Option<&HeldOrphan> {
         self.entries.get(txid)
     }
+
     pub(crate) fn is_current(&self, claim: &HeldOrphan) -> bool {
         self.entries.get(&claim.tx.txid()).is_some_and(|current| {
             current.source == claim.source && Arc::ptr_eq(&current.tx, &claim.tx)
         })
     }
+
     pub(crate) fn get_by_wtxid(&self, wtxid: &Wtxid) -> Option<&HeldOrphan> {
         self.by_wtxid.get(wtxid).and_then(|id| self.entries.get(id))
     }
+
     pub(crate) fn insert(&mut self, tx: Arc<Tx>, source: PeerToken) {
         let txid = tx.txid();
         let wtxid = tx.wtxid();
+        let weight = tx.weight();
         if let Some(old) = self.entries.remove(&txid) {
+            self.total_weight = self.total_weight.saturating_sub(old.tx.weight());
             self.by_wtxid.remove(&old.tx.wtxid());
             self.unindex_parents(txid, &old.tx);
         } else {
@@ -73,22 +97,26 @@ impl OrphanPool {
             }
         }
         self.by_wtxid.insert(wtxid, txid);
+        self.total_weight = self.total_weight.saturating_add(weight);
         self.entries.insert(txid, HeldOrphan { tx, source });
-        while self.entries.len() > self.quota {
+        while self.entries.len() > self.quota || self.total_weight > self.max_weight {
             let Some(oldest) = self.order.front().copied() else {
                 break;
             };
             self.remove(oldest);
         }
     }
+
     pub(crate) fn remove(&mut self, txid: Txid) -> Option<HeldOrphan> {
         let entry = self.entries.remove(&txid)?;
+        self.total_weight = self.total_weight.saturating_sub(entry.tx.weight());
         self.by_wtxid.remove(&entry.tx.wtxid());
         self.order.retain(|id| *id != txid);
         self.unindex_parents(txid, &entry.tx);
         self.clear_ready(txid);
         Some(entry)
     }
+
     fn unindex_parents(&mut self, txid: Txid, tx: &Tx) {
         for input in &tx.inputs {
             let parent = input.previous_output.txid;
@@ -100,22 +128,26 @@ impl OrphanPool {
             }
         }
     }
+
     fn clear_ready(&mut self, txid: Txid) {
         if self.ready_ids.remove(&txid) {
             self.ready.retain(|id| *id != txid);
         }
     }
+
     pub(crate) fn mark_ready(&mut self, txid: Txid) {
         if self.entries.contains_key(&txid) && self.ready_ids.insert(txid) {
             self.ready.push_back(txid);
         }
     }
+
     pub(crate) fn parent_ready(&mut self, parent: Txid) {
         let children = self.by_parent.get(&parent).cloned().unwrap_or_default();
         for child in children {
             self.mark_ready(child);
         }
     }
+
     /// Claim one bounded snapshot. Bodies remain resident across transient failures.
     pub(crate) fn take_ready(&mut self) -> Vec<HeldOrphan> {
         self.ready_ids.clear();
@@ -123,6 +155,11 @@ impl OrphanPool {
             .drain(..)
             .filter_map(|id| self.entries.get(&id).cloned())
             .collect()
+    }
+
+    #[cfg(test)]
+    fn total_weight(&self) -> u64 {
+        self.total_weight
     }
 }
 
@@ -212,6 +249,7 @@ mod tests {
         let tx = tx(1, Txid::default());
         pool.insert(Arc::clone(&tx), source(1));
         assert_eq!(pool.len(), 0);
+        assert_eq!(pool.total_weight(), 0);
         assert!(pool.by_wtxid.is_empty());
         assert!(pool.by_parent.is_empty());
         assert!(pool.order.is_empty());
@@ -256,6 +294,24 @@ mod tests {
         assert!(pool.ready.is_empty());
     }
     #[test]
+    fn aggregate_weight_evicts_fifo_even_when_count_quota_has_room() {
+        let parent = tx(9, Txid::default()).txid();
+        let first = tx(1, parent);
+        let second = tx(2, parent);
+        let one_weight = first.weight();
+        let mut pool = OrphanPool::with_limits(10, one_weight.saturating_add(1));
+
+        pool.insert(Arc::clone(&first), source(1));
+        assert_eq!(pool.total_weight(), one_weight);
+        pool.insert(Arc::clone(&second), source(2));
+
+        assert_eq!(pool.len(), 1);
+        assert!(!pool.contains(&first.txid()));
+        assert!(pool.contains(&second.txid()));
+        assert_eq!(pool.total_weight(), second.weight());
+        assert!(pool.total_weight() <= one_weight.saturating_add(1));
+    }
+    #[test]
     fn rejects_are_bounded_and_chain_reset_clears_both_indexes() {
         let mut state = AdmissionLifecycle {
             reject_cap: 2,
@@ -271,6 +327,8 @@ mod tests {
         assert!(state.rejects.is_empty());
         assert!(state.reject_order.is_empty());
     }
+    /// MPL-04 exact-body residency: rejecting a different witness body with
+    /// the same txid must preserve the resident claim and its ready marker.
     #[test]
     fn rejecting_another_witness_preserves_the_resident_body_and_ready_work() {
         let parent = tx(9, Txid::default()).txid();
@@ -293,6 +351,7 @@ mod tests {
 
         state.reject(&resident);
         assert_eq!(state.orphans.len(), 0);
+        assert_eq!(state.orphans.total_weight(), 0);
         assert!(state.orphans.by_wtxid.is_empty());
         assert!(state.orphans.by_parent.is_empty());
         assert!(state.orphans.order.is_empty());
