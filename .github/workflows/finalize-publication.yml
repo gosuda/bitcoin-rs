@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: fd0d37ae7b2dc0b80b741f3d481c2e8caa88be2c
+          ref: f211c2f99174cdc41ffac0a6cc5d15013a1eb961
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -63,20 +63,20 @@ jobs:
               print(run('git', 'diff', '--stat', main, 'HEAD'), flush=True)
               return sha
 
-          main = '8e1bc07a9648293768ca1109118ba89e87f7b6de'
-          heads = {
-              'followup/stable-clippy-cleanup': 'fd0d37ae7b2dc0b80b741f3d481c2e8caa88be2c',
-              'refactor/reference-set-test-support': '39454345335b70b6a96e79062fa1bd9eedeca4f9',
+          main = 'f211c2f99174cdc41ffac0a6cc5d15013a1eb961'
+          minimum = {
+              'refactor/reference-set-test-support': 'ae73aa98805f825d878c1c7dc48bc6b5d2e6b349',
               'test/script-verifier-boundaries': '28d35cc620d5ba829918c81f603e8c7c552bd7f0',
           }
-          for branch, expected in heads.items():
+          heads = {}
+          for branch, expected in minimum.items():
               actual = run('git', 'ls-remote', '--heads', 'origin', f'refs/heads/{branch}').split()[0]
-              assert actual == expected, f'{branch} moved; refusing stale preparation'
-              run('git', 'fetch', 'origin', expected)
+              run('git', 'fetch', 'origin', actual)
+              run('git', 'merge-base', '--is-ancestor', expected, actual)
+              heads[branch] = actual
+              print(f'INPUT {branch} {actual}', flush=True)
           run('git', 'config', 'user.name', 'github-actions[bot]')
           run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-          run('git', 'fetch', 'origin', main)
-          run('git', 'merge', '--no-edit', main)
 
           reference_test = 'bin/bitcoin-rs/tests/overhaul_reference_set.rs'
           parity = 'crates/consensus/tests/overhaul_parse_parity.rs'
@@ -110,15 +110,14 @@ jobs:
                                ('verifier', 'test/script-verifier-boundaries')]:
               expected = heads[branch]
               run('git', 'checkout', '--detach', expected)
-              run('git', 'merge', '--no-edit', main)
               result = subprocess.run(['git', 'merge', '--no-edit', common], text=True,
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
               if result.returncode:
                   print(result.stdout, flush=True)
                   conflicts = run('git', 'diff', '--name-only', '--diff-filter=U').splitlines()
                   assert name == 'reference' and conflicts == ['Cargo.lock'], conflicts
-                  # Both branches added the same internal RPC edge. The reference
-                  # branch additionally needs thiserror for its migrated test code.
+                  # Preserve the reference test dependency when both branches
+                  # independently repaired the same internal RPC lockfile edge.
                   original = run('git', 'show', f'{expected}:Cargo.lock')
                   ref_lock = tomllib.loads(original)
                   common_lock = tomllib.loads(run('git', 'show', f'{common}:Cargo.lock'))
@@ -140,13 +139,13 @@ jobs:
                   path = 'docs/api/core-compat.toml'
                   before = tomllib.loads(Path(path).read_text())
                   edit(path,
-                       '# A reference carrying only a version label or a digest that does not match is\n# rejected by `crates/rpc/src/compat_manifest.rs`. `docs/contracts/reference-set.md` is a\n# readable projection; on conflict, this file and that parser govern.',
+                       '# A reference carrying only a version label or a digest that does not match is\n# rejected by `bin/bitcoin-rs/tests/support/reference_set.rs`. `docs/contracts/reference-set.md` is a\n# readable projection; on conflict, this file and that parser govern.',
                        '# Reference identity fields and digest syntax are validated by\n# `bin/bitcoin-rs/tests/support/reference_set.rs`.\n# `docs/contracts/reference-set.md` is a readable projection; on conflict,\n# this file and that parser govern.')
                   assert tomllib.loads(Path(path).read_text()) == before, 'manifest data changed'
                   run('git', 'diff', '--check')
                   print(run('git', 'diff'), flush=True)
                   run('git', 'add', path)
-                  run('git', 'commit', '-m', 'docs: name the migrated reference validator in its manifest')
+                  run('git', 'commit', '-m', 'docs: distinguish reference parsing from binary authentication')
               run('git', 'merge-base', '--is-ancestor', expected, 'HEAD')
               run('git', 'merge-base', '--is-ancestor', main, 'HEAD')
               publish(name)
