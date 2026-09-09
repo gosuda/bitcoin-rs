@@ -496,8 +496,8 @@ mod tests {
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
 
-    use crate::zmq_publisher::MempoolSequenceObserver;
-    use crate::zmq_publisher::{SequenceEvent, ZmqPublisher};
+    use bitcoin_rs_rpc::zmq::MempoolSequenceObserver;
+    use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
     /// Captures every `sequence`-topic event the gateway's observer emits.
     #[derive(Default)]
@@ -589,7 +589,7 @@ mod tests {
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         let dir = tempfile::tempdir().expect("tempdir");
         let publisher = Arc::new(RecordingSequencePublisher::default());
-        let recording: Arc<dyn crate::zmq_publisher::ZmqPublisher> = publisher.clone();
+        let recording: Arc<dyn bitcoin_rs_rpc::zmq::ZmqPublisher> = publisher.clone();
         let observer: Arc<dyn MempoolObserver> = Arc::new(MempoolSequenceObserver::new(recording));
         let config = embedded_config(&dir.path().join("node"));
 

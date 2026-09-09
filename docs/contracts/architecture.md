@@ -79,7 +79,7 @@ Owners:
   - Layer 0 (Core): `bitcoin-rs-primitives`, `bitcoin-rs-script`, `bitcoin-rs-consensus`.
   - Layer 1 (Storage): `bitcoin-rs-storage`.
   - Layer 2 (Services): `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`, `bitcoin-rs-mining`.
-  - Layer 3 (Surface): `bitcoin-rs-rpc`.
+  - Layer 3 (Surface): `bitcoin-rs-rpc`, including the Bitcoin Core-compatible ZMQ protocol and transport.
   - Layer 4 (Compose): `bitcoin-rs-node`, `bitcoin-rs`.
 - `chainstate` sits in Layer 2 because it depends on `chain`, `utxo`, `consensus`, and `storage`.
 - `chain` and `utxo` remain in Layer 2 because they depend on `storage` for block index records, undo storage, and UTXO snapshots.
@@ -116,6 +116,13 @@ Owners:
   - template assembly and the BIP22/BIP23 JSON contract live in `mining`;
   - index schemas and backfill live in `index`.
 - `bitcoin-rs-node` owns runtime startup and shutdown sequencing, configuration resolution and validation, `UserConfig` to `NodeConfig` overlay, and process-level cache budgeting.
+- `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
+  transport, mempool sequence projection, and live notifier enumeration.
+  `bitcoin-rs-node` constructs and wires the publisher and continues to own when
+  committed chain effects are emitted. The same live publisher is the source for
+  `getzmqnotifications`; node does not keep a parallel notifier metadata model.
+  The `g17_dependency_direction` gate pins the external `zmq` dependency to the
+  surface crate and permits node only to forward `bitcoin-rs-rpc/zmq`.
 - Applied-tip mutation is owned by the `chainstate` owner, not by a public field bag of subsystem handles.
 - The composition root (`NodeState`, `BlockSync`, reorg logic, mining) dispatches `ChainFollowers` while the `ChainTransition` is still held, then calls `finish` to release the chain transition reservation. Convenience methods that finish before returning (`apply_block`, `disconnect_block`) do not dispatch followers. RPC, `BlockLog`, hash/zmq, `TxIndex` wake, sequence `C`/`D`, mining generation, and admission run from that dispatch. Mempool eviction stays inside `apply`.
 

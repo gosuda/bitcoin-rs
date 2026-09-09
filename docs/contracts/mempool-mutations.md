@@ -7,6 +7,7 @@ built on them. Owners: `MempoolGateway` in `crates/mempool/src/gateway.rs`;
 in `crates/mempool/src/orphan.rs`; the fee estimator in
 `crates/mempool/src/fee_estimator.rs`. Mempool owns orphan mechanics.
 The node owns peer-event routing only.
+The ZMQ sequence observer lives in `crates/rpc/src/zmq.rs`.
 
 ## Clauses
 
@@ -90,6 +91,14 @@ The node owns peer-event routing only.
 
 ## Proven by
 
+
+- `crates/rpc/src/zmq.rs`:
+  `admission_publishes_one_a_frame_with_core_payload_bytes`,
+  `policy_eviction_publishes_r_frames_in_commit_order`,
+  `block_inclusion_suppresses_r_frames`,
+  `policy_eviction_publishes_r_frames_with_contiguous_sequences`,
+  `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`,
+  `sequence_event_payload_uses_core_hash_orientation_and_label`.
 - `crates/node/tests/overhaul_mempool_lifecycle.rs` (planned): mined
   parent keeps its valid child; mined conflict removes descendants;
   reconsider refuses nonfinal candidates and withholds children;

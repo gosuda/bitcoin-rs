@@ -62,7 +62,7 @@ mdbx = [
     "bitcoin-rs-storage/mdbx",
 ]
 kernel = ["bitcoin-rs-consensus/kernel"]
-zmq = ["dep:zmq", "bitcoin-rs-rpc/zmq"]
+zmq = ["bitcoin-rs-rpc/zmq"]
 prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
@@ -100,7 +100,6 @@ quanta.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
-zmq = { workspace = true, optional = true }
 sha2.workspace = true
 cap-std.workspace = true
 cap-fs-ext.workspace = true
