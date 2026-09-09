@@ -849,7 +849,7 @@ fn concurrent_partial_spends_preserve_siblings_and_store_cache_agreement() {
 fn real_durable_write_releases_earlier_deferred_pins() {
     for mode in [CoinDurability::Durable, CoinDurability::CasGuarded] {
         let store = MemoryStore::default();
-        let set = PersistentUtxoSet::new(UtxoSet::new(), store);
+        let set = PersistentUtxoSet::new(UtxoSet::new(), store.clone());
         let a = txid(26);
         let b = txid(27);
 
@@ -877,6 +877,25 @@ fn real_durable_write_releases_earlier_deferred_pins() {
                 .retained_before_image_bytes,
             0,
             "a real durable write must complete every earlier deferred write"
+        );
+        assert!(
+            coin_row(&store, a).is_none(),
+            "the earlier deferred deletion must remain in the backing store"
+        );
+        let reopened = PersistentUtxoSet::new(UtxoSet::new(), store);
+        assert!(
+            reopened
+                .get(&outpoint(a, 0))
+                .expect("reopen earlier deferred row")
+                .is_none(),
+            "fresh cache must observe the earlier deferred deletion"
+        );
+        assert!(
+            reopened
+                .get(&outpoint(b, 0))
+                .expect("reopen receipt row")
+                .is_some(),
+            "fresh cache must observe the durable receipt row"
         );
     }
 }
