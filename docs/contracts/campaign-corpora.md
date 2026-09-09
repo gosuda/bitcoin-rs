@@ -106,14 +106,14 @@ that height. No Cmodern cell may close on a guessed or recalled UTXO total.
 
 ### `CORP-06`: End-state evidence roles
 
-- G0 pins: the corpus identities, stop hashes, manifest digest binding, and
-  chain-state oracle values are reference-set truth. They are recorded in
-  [`reference-set.md`](reference-set.md).
+- G0 pins: this contract and `tools/campaign-corpus/products.json` own the
+  corpus identities, stop hashes, manifest digest binding, and chain-state
+  oracle values.
 - G5 replay arms: every product cell uses a C150 or Cmodern replay as one arm
   of the promotion gate. The full native validation path must match the
   certified `muhash` and the invalid corpus must be counted and classified.
 - A corpus with a mismatched stop hash, an unsynchronized `coinstatsindex`, or
-  a guessed `muhash` is rejected as reference-set failure.
+  a guessed `muhash` is rejected as a corpus-custody failure.
 
 ## Proven by
 
@@ -121,8 +121,6 @@ that height. No Cmodern cell may close on a guessed or recalled UTXO total.
   (`python3 tools/campaign-corpus/test_corpus.py`) pins both identities, the
   eleven specials, C150 census zeros, Cmodern all-positive specials, Core
   framing, manifest digest binding, and `assume_valid_height = 0`.
-- `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned): G0 pin; rejects
-  a corpus with a mismatched stop hash or missing chain-state oracle.
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 replay
   arm; covers every active and inactive consensus boundary with invalid
   corpora counted and classified.
