@@ -687,6 +687,7 @@ mod tests {
         Ok(())
     }
 
+    /// VAL-01: transaction IDs are hashed from the preserved wire serialization.
     #[test]
     fn wire_txid_matches_reencoded_txid_for_legacy_and_segwit() -> Result<()> {
         use crate::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
