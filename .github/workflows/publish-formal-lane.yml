@@ -1,0 +1,44 @@
+name: publish-formal-lane
+
+on:
+  push:
+    branches: [automation/formal-lane-publish-20260910]
+    paths:
+      - .github/workflows/publish-formal-lane.yml
+      - .github/scripts/publish-formal-lane.py
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f846c7fbeed40e70431cf83ab4f2cb656bf9ea0b
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Apply and publish formal-lane separation
+        shell: bash
+        run: |
+          git fetch origin refs/heads/automation/formal-lane-publish-20260910:refs/remotes/origin/automation/formal-lane-publish-20260910
+          python3 <(git show origin/automation/formal-lane-publish-20260910:.github/scripts/publish-formal-lane.py)
+      - name: G20 default tests do not execute the ignored proof run
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test g20_formal_models -- --list
+      - name: Compile the explicit ignored G20 execution target
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test g20_formal_models all_model_specs_check_with_apalache --no-run
+      - name: Strict workspace Clippy
+        run: cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
+      - name: Formatting and clean tree
+        run: |
+          cargo fmt --all -- --check
+          git diff --exit-code
