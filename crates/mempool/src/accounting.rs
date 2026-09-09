@@ -5,11 +5,7 @@
 //! incomplete prevouts and must retain its explicit missing-input fact.
 
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
-use bitcoin_rs_script::script::{
-    Instruction, instructions, is_p2sh, is_push_only, is_witness_program,
-};
-use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
-use hashbrown::HashMap;
+use bitcoin_rs_script::sigops::count_tx_sigop_cost;
 
 use crate::standardness::PackageTxContext;
 
@@ -35,60 +31,9 @@ pub fn prepared_context(
     PackageTxContext {
         fee: input_value.saturating_sub(output_value),
         vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
-        sigop_cost: sigop_cost(tx, prevouts),
+        sigop_cost: count_tx_sigop_cost(tx, prevouts),
         missing_inputs,
     }
-}
-
-/// Returns BIP141 sigop cost against the resolved input scripts.
-///
-/// Legacy and P2SH sigops cost four units; native and P2SH-nested witness-v0
-/// sigops cost one unit. Taproot has a separate per-input budget. See BIP141
-/// `Sigops` and Bitcoin Core v31.1 `GetTransactionSigOpCost` /
-/// `CountWitnessSigOps`. Missing prevouts contribute no contextual cost.
-#[must_use]
-pub fn sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
-    let by_outpoint: HashMap<_, _> = prevouts
-        .iter()
-        .map(|(outpoint, output)| (*outpoint, output))
-        .collect();
-    let mut cost = count_tx_legacy(tx).saturating_mul(4);
-    for input in &tx.inputs {
-        let Some(prevout) = by_outpoint.get(&input.previous_output) else {
-            continue;
-        };
-        // A redeem script has meaning only behind a P2SH prevout, and Core
-        // counts it only if scriptSig is push-only. Arbitrary scriptSig data
-        // must not activate nested witness accounting on another script type.
-        let redeem = if is_p2sh(&prevout.script_pubkey) && is_push_only(&input.script_sig) {
-            last_push(&input.script_sig)
-        } else {
-            None
-        };
-        if let Some(script) = redeem {
-            cost = cost.saturating_add(count_accurate(script).saturating_mul(4));
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(count_segwit(program, &input.witness));
-        }
-    }
-    cost
-}
-
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
 }
 
 #[cfg(test)]
@@ -156,7 +101,7 @@ mod tests {
             Ok(expected),
             "independent rust-bitcoin oracle"
         );
-        assert_eq!(sigop_cost(tx, &prevouts), expected);
+        assert_eq!(count_tx_sigop_cost(tx, &prevouts), expected);
         let context = prepared_context(tx, &prevouts, false);
         assert_eq!(context.fee, 1_000);
         assert_eq!(u32::try_from(oracle.vsize()), Ok(context.vsize));
@@ -225,7 +170,7 @@ mod tests {
         // enforce that precondition, so Core supplies this malformed-input
         // expectation rather than the library oracle used for valid shapes.
         // https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp#L170-L189
-        assert_eq!(sigop_cost(&tx, &prevouts), 0);
+        assert_eq!(count_tx_sigop_cost(&tx, &prevouts), 0);
     }
 
     #[test]

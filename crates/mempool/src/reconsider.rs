@@ -18,7 +18,9 @@ use crate::MempoolEntry;
 /// accepted candidates. The gateway remains responsible for rejecting
 /// descendants of candidates that fail or are immediately evicted.
 pub struct DisconnectedCandidates {
-    offered: HashMap<Txid, Vec<u64>>,
+    // Index the retained transaction bodies rather than copying their outputs.
+    // Children need full scripts as well as values for BIP141 accounting.
+    offered: HashMap<Txid, usize>,
     entries: Vec<MempoolEntry>,
     time: u64,
     height: u32,
@@ -47,34 +49,36 @@ impl DisconnectedCandidates {
         if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
             return false;
         }
-        let mut input_total = 0_u64;
+        let mut prevouts = Vec::with_capacity(tx.inputs.len());
         for input in &tx.inputs {
             let outpoint = input.previous_output;
-            let value = if let Some(output) = lookup(&outpoint) {
-                output.value
+            let output = if let Some(output) = lookup(&outpoint) {
+                output
             } else {
-                let Some(value) = self.offered.get(&outpoint.txid).and_then(|values| {
+                let Some(output) = self.offered.get(&outpoint.txid).and_then(|index| {
+                    let outputs = &self.entries[*index].tx.outputs;
                     usize::try_from(outpoint.vout)
                         .ok()
-                        .and_then(|vout| values.get(vout))
+                        .and_then(|vout| outputs.get(vout))
                 }) else {
                     return false;
                 };
-                *value
+                output.clone()
             };
-            input_total = input_total.saturating_add(value);
+            prevouts.push((outpoint, output));
         }
-        let output_values: Vec<u64> = tx.outputs.iter().map(|output| output.value).collect();
-        let output_total = output_values
-            .iter()
-            .fold(0_u64, |total, value| total.saturating_add(*value));
-        let fee = input_total.saturating_sub(output_total);
-        let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-        // Preserve the existing reconsideration metadata contract. Full
-        // prevout-aware verification belongs to the separate reorg work; this
-        // move must not silently replace it with ordinary admission.
-        let entry = MempoolEntry::new(Arc::new(tx.clone()), vsize, fee, self.time, self.height);
-        self.offered.insert(entry.txid, output_values);
+        let accounting = crate::accounting::prepared_context(tx, &prevouts, false);
+        // Preserve the reserved reorg commit and its existing validation scope,
+        // but carry the same resolved-input accounting as ordinary admission.
+        let entry = MempoolEntry::new(
+            Arc::new(tx.clone()),
+            accounting.vsize,
+            accounting.fee,
+            self.time,
+            self.height,
+        )
+        .with_sigop_cost(accounting.sigop_cost);
+        self.offered.insert(entry.txid, self.entries.len());
         self.entries.push(entry);
         true
     }
@@ -169,5 +173,44 @@ mod tests {
         let mut batch = DisconnectedCandidates::new(0, 0);
         assert!(!batch.offer(&coinbase, |_| panic!("coinbase must not read coins")));
         assert!(batch.into_entries().is_empty());
+    }
+    #[test]
+    fn reconsideration_counts_weighted_p2sh_and_witness_prevouts() {
+        // BIP141: a two-key P2SH multisig costs 8; the same P2WSH script costs 2.
+        let redeem = vec![0x52, 0xae];
+        let mut p2sh_tx = spend(funded(), 9_000);
+        p2sh_tx.inputs[0].script_sig = bitcoin_rs_script::push_data(&redeem);
+        let mut p2sh_batch = DisconnectedCandidates::new(0, 0);
+        assert!(p2sh_batch.offer(&p2sh_tx, |_| Some(TxOut {
+            value: 10_000,
+            script_pubkey: [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat(),
+        })));
+        assert_eq!(p2sh_batch.into_entries()[0].sigop_cost, 8);
+
+        let mut witness_tx = spend(funded(), 9_000);
+        witness_tx.inputs[0].witness = vec![redeem];
+        let mut witness_batch = DisconnectedCandidates::new(0, 0);
+        assert!(witness_batch.offer(&witness_tx, |_| Some(TxOut {
+            value: 10_000,
+            script_pubkey: [vec![0x00, 0x20], vec![2; 32]].concat(),
+        })));
+        assert_eq!(witness_batch.into_entries()[0].sigop_cost, 2);
+    }
+
+    #[test]
+    fn offered_parent_scripts_are_retained_for_child_accounting() {
+        let mut parent = spend(funded(), 9_000);
+        parent.outputs[0].script_pubkey = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        let mut child = spend(OutPoint::new(parent.txid(), 0), 8_000);
+        child.inputs[0].script_sig = bitcoin_rs_script::push_data(&[0x52, 0xae]);
+        let mut batch = DisconnectedCandidates::new(0, 0);
+        assert!(batch.offer(&parent, |_| Some(TxOut {
+            value: 10_000,
+            script_pubkey: vec![0x51]
+        })));
+        assert!(batch.offer(&child, |_| None));
+        let entries = batch.into_entries();
+        assert_eq!(entries[1].fee, 1_000);
+        assert_eq!(entries[1].sigop_cost, 8);
     }
 }
