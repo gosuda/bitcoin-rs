@@ -1,0 +1,30 @@
+name: PR665 reconciliation export
+on:
+  push:
+    branches: [review/pr-665-verification-20260909]
+    paths: [.github/workflows/pr665-reconcile-export.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export tracked sources and review history
+        run: |
+          git archive --format=tar.gz -o current-source.tar.gz e7d4b77ea82e5f0c3541edc770a1bad5a60c6288
+          git archive --format=tar.gz -o common-source.tar.gz d10455da83725690429d85cd8c184c99a18580e7
+          git log --oneline d10455da83725690429d85cd8c184c99a18580e7..e7d4b77ea82e5f0c3541edc770a1bad5a60c6288 > recent-commits.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr665-reconciliation-source
+          path: |
+            current-source.tar.gz
+            common-source.tar.gz
+            recent-commits.txt
+          retention-days: 3
+          if-no-files-found: error
