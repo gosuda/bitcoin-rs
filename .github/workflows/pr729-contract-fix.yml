@@ -1,0 +1,85 @@
+name: pr729-contract-fix
+
+on:
+  push:
+    branches: [validation/pr729-contract-20260910]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  contract-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 6ee5f19f8f293cc96c809ebb62ee4f1c16fbae8a
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt
+      - name: Add the current relay contract and tie every regression to it
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_head=$(git ls-remote origin refs/heads/followup/local-relay-admission-identity | cut -f1)
+          test "$remote_head" = 6ee5f19f8f293cc96c809ebb62ee4f1c16fbae8a
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if text.count(old) != 1:
+                  raise SystemExit(f'unexpected preimage count for {path}: {text.count(old)}')
+              p.write_text(text.replace(old, new, 1))
+
+          relay = 'crates/p2p/src/tx_relay.rs'
+          replace_once(
+              relay,
+              '    #[test]\n    fn delayed_local_relay_survives_unrelated_mutations() {',
+              '    // MPL-01: unrelated commits do not retire a resident local admission.\n'
+              '    #[test]\n    fn delayed_local_relay_survives_unrelated_mutations() {',
+          )
+          replace_once(
+              relay,
+              '    #[test]\n    fn local_replacement_relay_uses_the_accepted_change_sequence() {',
+              '    // MPL-01: relay keys the Accepted change, not the batch base or removal.\n'
+              '    #[test]\n    fn local_replacement_relay_uses_the_accepted_change_sequence() {',
+          )
+
+          contract = 'docs/contracts/mempool-mutations.md'
+          marker = '  mining observer at gateway construction and the ZMQ sequence observer as\n  an extra named leg on the gateway\'s `CompositeObserver`.\n'
+          addition = marker + (
+              '- Local RPC/reorg transaction relay is qualified by the exact accepted\n'
+              '  mempool admission, using that change\'s assigned mempool sequence. A\n'
+              '  delayed callback may relay only while the same admission remains\n'
+              '  resident. Removal and re-admission retire the older callback even when\n'
+              '  the txid, wtxid, or transaction allocation is identical. Unrelated\n'
+              '  mempool mutations and fee prioritisation do not retire the admission.\n'
+              '  The observer resolves admission identity and wtxid under one pool read\n'
+              '  guard, releases it before relay enqueue, and remains a best-effort\n'
+              '  mirror: a removal may still overtake an announcement already queued.\n'
+          )
+          replace_once(contract, marker, addition)
+          proof_marker = '## Proven by\n\n'
+          proof = proof_marker + (
+              '- `crates/p2p/src/tx_relay.rs` (inline tests):\n'
+              '  `delayed_local_relay_does_not_adopt_a_reinserted_body`,\n'
+              '  `delayed_local_relay_survives_unrelated_mutations`,\n'
+              '  `local_replacement_relay_uses_the_accepted_change_sequence`.\n'
+          )
+          replace_once(contract, proof_marker, proof)
+          PY
+          rustfmt --edition 2024 crates/p2p/src/tx_relay.rs
+          git diff --check
+          test "$(git diff --name-only | sort)" = $'crates/p2p/src/tx_relay.rs\ndocs/contracts/mempool-mutations.md'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/p2p/src/tx_relay.rs docs/contracts/mempool-mutations.md
+          git commit -m 'docs(p2p): bind local relay regressions to MPL-01'
+          git push origin HEAD:refs/heads/followup/local-relay-admission-identity
