@@ -1,0 +1,34 @@
+name: Review 665 source snapshot
+on:
+  push:
+    branches: [review/pr-665-snapshot-1594cd40]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 1594cd40da24de051ed579493c66db55759e8201
+          path: pr
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 6e1830e51e3ecc5ebed097f68a89de40e22f3955
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 052937df6b7615f107529dddc665119bac190010
+          path: main
+          persist-credentials: false
+      - name: Archive source trees only
+        run: tar --exclude=.git --exclude=target -czf review-665-sources.tar.gz pr base main
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: review-665-sources
+          path: review-665-sources.tar.gz
+          retention-days: 1
+          if-no-files-found: error
