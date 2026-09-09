@@ -1,0 +1,132 @@
+name: PR665 delivery verification
+on:
+  push:
+    branches: [review/pr-665-verification-20260909]
+    paths: [.github/workflows/pr665-delivery-check.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      candidate: ${{ steps.commit.outputs.candidate }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct exact reviewed files on latest pinned PR
+        run: |
+          set -euo pipefail
+          cp .review/publish665.py "$RUNNER_TEMP/publish665.py"
+          git checkout --detach df8717e86a25de3d94e51d93cb2787d9021cb2fa
+          python3 "$RUNNER_TEMP/publish665.py"
+          git add -u
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - name: Format reviewed Rust files
+        run: |
+          git diff --cached --name-only -z -- '*.rs' | xargs -0 -r rustfmt --edition 2024 --config skip_children=true
+          git diff --check
+          git add -u
+      - name: Publish source-only candidate
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Fix PR 665 persistence and read fences; simplify ownership and evidence' -m 'Preserve current PR cleanup through df8717e. Private exclusive coin-cache ownership replaces split synchronization and fences failed mutations and flushes. Reject false persistence receipts across all backends and assert whole-batch recovery. Recheck stale policy, script and height verdicts before admission. Reuse the existing chain transition guard for coherent coin-statistics queries. Tighten evidence identities and corpus pins, fix feature-specific builds, and distinguish implemented contracts from planned architecture. No validation promotion or power-loss/product proof is claimed.'
+          candidate=$(git rev-parse HEAD)
+          basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $basic" push origin "HEAD:refs/heads/review/pr665-delivery-${GITHUB_RUN_ID}"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "Candidate: $candidate" >> "$GITHUB_STEP_SUMMARY"
+          git diff --binary HEAD^ HEAD > "$RUNNER_TEMP/pr665-delivery.patch"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/pr665-delivery-source.tar.gz" HEAD
+          git show --stat --oneline HEAD > "$RUNNER_TEMP/pr665-delivery-stat.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr665-delivery-source
+          path: |
+            ${{ runner.temp }}/pr665-delivery.patch
+            ${{ runner.temp }}/pr665-delivery-source.tar.gz
+            ${{ runner.temp }}/pr665-delivery-stat.txt
+          retention-days: 3
+          if-no-files-found: error
+  rust:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [core, evidence, node, fjall, redb, mdbx, rocksdb]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          toolchain: 1.98.0
+          components: clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: pr665-review-${{ matrix.lane }}
+          cache-on-failure: true
+      - name: Run contracts and strict lints
+        env:
+          LANE: ${{ matrix.lane }}
+          CARGO_INCREMENTAL: 0
+          CARGO_TERM_COLOR: never
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec > >(tee "$RUNNER_TEMP/checks.log") 2>&1
+          echo "Candidate: $(git rev-parse HEAD); lane: $LANE"
+          rustc --version
+          case "$LANE" in
+            core)
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features --test overhaul_persistent_coins
+              cargo test --locked -p bitcoin-rs-utxo --no-default-features --doc
+              cargo test --locked -p bitcoin-rs-mempool
+              cargo test --locked -p bitcoin-rs-script --no-default-features --lib taproot
+              cargo test --locked -p bitcoin-rs-primitives --test overhaul_layout
+              cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs
+              cargo clippy --locked -p bitcoin-rs-utxo -p bitcoin-rs-mempool --no-default-features --all-targets -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity --test overhaul_prepared_inputs -- -D warnings
+              cargo test --locked -p bitcoin-rs-p2p --test core_compat --test wire_codec --test handshake_roundtrip
+              ;;
+            evidence)
+              cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set --test g18_hot_path_ledger --test g19_validation_default
+              cargo test --locked -p bitcoin-rs-rpc --lib coin_queries_wait_for_one_consistent_utxo_and_tip_transition
+              cargo test --locked -p bitcoin-rs-rpc --lib gettxoutsetinfo
+              cargo test --locked -p bitcoin-rs-rpc --test handler_smoke --test manifest_coverage --test auth
+              cargo clippy --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence --test overhaul_reference_set --test g18_hot_path_ledger -- -D warnings
+              cargo clippy --locked -p bitcoin-rs-rpc --lib -- -D warnings
+              python3 -m unittest discover -s tools/campaign-corpus -p 'test_*.py'
+              ;;
+            node)
+              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test overhaul_config_status
+              cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib run::tests
+              cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --lib -- -D warnings
+              ;;
+            *)
+              cargo test --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --test overhaul_atomic_durability --test backend_metrics --test storage_footprint -- --nocapture
+              cargo clippy --locked -p bitcoin-rs-storage --no-default-features --features "$LANE" --all-targets -- -D warnings
+              ;;
+          esac
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: pr665-delivery-checks-${{ matrix.lane }}
+          path: ${{ runner.temp }}/checks.log
+          retention-days: 3
+          if-no-files-found: warn
