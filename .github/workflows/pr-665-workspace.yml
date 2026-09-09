@@ -1,0 +1,41 @@
+name: PR 665 review workspace
+
+on:
+  push:
+    branches: [review/pr-665-workspace]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f8bb0f8d0f49ade933eb558d6722041d37a9c02c
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b
+        with:
+          components: rustfmt,clippy
+      - name: Prepare pinned offline workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pr-665-workspace"
+          git archive --format=tar HEAD | zstd -T0 -o "$RUNNER_TEMP/pr-665-workspace/source.tar.zst"
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
+          toolchain="$(rustc --print sysroot)"
+          tar -C "$toolchain" -I 'zstd -T0' -cf "$RUNNER_TEMP/pr-665-workspace/toolchain.tar.zst" bin lib libexec
+          tar -C "$HOME/.cargo" -I 'zstd -T0' -cf "$RUNNER_TEMP/pr-665-workspace/registry.tar.zst" registry
+          printf '%s\n' f8bb0f8d0f49ade933eb558d6722041d37a9c02c > "$RUNNER_TEMP/pr-665-workspace/SOURCE_COMMIT"
+          cd "$RUNNER_TEMP/pr-665-workspace"
+          sha256sum *.tar.zst > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr-665-offline-workspace
+          path: ${{ runner.temp }}/pr-665-workspace/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
