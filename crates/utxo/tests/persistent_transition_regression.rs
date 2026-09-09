@@ -21,6 +21,8 @@ use bitcoin_rs_utxo::set::{
     UtxoChangeEvents, UtxoChangeListener, UtxoInserted, UtxoRemoved, UtxoSet,
 };
 
+const DEADLOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn txid(index: u32) -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[..4].copy_from_slice(&index.to_le_bytes());
@@ -156,7 +158,7 @@ impl ReentrantListener {
             set.connect_block(
                 &BlockChanges::default(),
                 &hash,
-                CoinDurability::Durable
+                CoinDurability::Durable,
             ),
             Err(PersistentUtxoError::ReentrantOperation)
         ) && matches!(
@@ -200,7 +202,7 @@ fn blocked_flush_does_not_block_resident_reads() {
         });
 
         // RCV-04A: this is a deadlock detector, not a latency requirement.
-        let read_while_blocked = rx.recv_timeout(Duration::from_secs(5));
+        let read_while_blocked = rx.recv_timeout(DEADLOCK_TIMEOUT);
         gate.release.wait();
         let output = read_while_blocked
             .expect("resident read waited for backing-store flush")
@@ -226,10 +228,20 @@ fn listener_reentry_is_rejected_instead_of_deadlocking() {
     let set = Arc::new(PersistentUtxoSet::new(raw, TestStore::default()));
     assert!(target.set(Arc::downgrade(&set)).is_ok());
 
-    let a = txid(2);
-    let error = set
-        .connect_block(&funding(a), &a, CoinDurability::Durable)
-        .expect_err("test store rejects outer persistence after the callback");
+    let worker_set = Arc::clone(&set);
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let a = txid(2);
+        tx.send(worker_set.connect_block(&funding(a), &a, CoinDurability::Durable))
+            .expect("send outer mutation result");
+    });
+
+    // RCV-04A: the timeout converts a regression back to self-deadlock into a test failure.
+    let result = rx
+        .recv_timeout(DEADLOCK_TIMEOUT)
+        .expect("listener reentry deadlocked the outer mutation");
+    handle.join().expect("outer mutation thread");
+    let error = result.expect_err("test store rejects outer persistence after the callback");
     assert!(matches!(
         error,
         PersistentUtxoError::Storage(StorageError::InvalidOperation(_))
