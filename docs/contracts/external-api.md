@@ -38,12 +38,15 @@ recorded Core reference used by the RPC fixture replay gate.
 
 ### `API-04`: Read consistency and query budgeting
 
-- Multi-record queries across chainstate use optimistic tip fencing or
-  active-tip verification against `BlockTree`. If a reorg occurs during
-  assembly, queries return `503 Service Unavailable` rather than inconsistent
-  data.
-- Statistical and script index queries are bounded by `QueryBudget` to prevent
-  memory exhaustion.
+Read consistency and resource limits are owned per query, not guaranteed by
+transport or response shape. `gettxoutsetinfo` and `scantxoutset` hold the existing
+chain-transition guard across UTXO and applied-tip reads (MRPC-04); long scans
+can therefore delay chain mutation. Some indexed paths use active-tip checks
+and `QueryBudget`, but this does not establish a shared chain/index/mempool
+snapshot for every handler. In particular, Esplora `script_activity` still
+combines index activity and mempool reads separately. A common read stamp and
+bounded, cancellable scans remain targets. Do not promise that every race
+returns HTTP 503 or that every statistical query has a budget.
 
 ### `API-05`: Solo-mining generate path
 
@@ -114,7 +117,7 @@ owned by [wallet-facing.md](wallet-facing.md).
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
-- **Typed embedding surface**: Direct in-process application API as an alternative to localhost JSON-RPC daemon boundary is tracked under #145 (open).
+- **Embedding**: The existing in-process `Node` API is documented in [embedding.md](embedding.md); it is not an unimplemented transport alternative.
 
 ## Proven by
 

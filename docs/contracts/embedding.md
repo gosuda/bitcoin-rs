@@ -9,9 +9,9 @@ the first embedder — there is one lifecycle implementation, not two.
 - **EMB-01 — One lifecycle.** `run()` and `Node::start` both boot through
   `crates/node/src/run.rs::start_node` and both stop through
   `NodeServices::teardown`: request (shutdown flag + event-loop wake) →
-  event loop join → rpc join → p2p joins → metrics stop → outbound join →
-  bounded subsystem drain → clean checkpoint (deferred result) → bounded
-  bootstrap join → signal-handler close and join → checkpoint result.
+  core-service joins → bounded subsystem drain → bootstrap/checkpoint-worker
+  joins → signal-handler close and join → eligible clean checkpoint.
+  Bootstrap joins are not abandoned at the subsystem drain deadline.
   Owner: `crates/node/src/run.rs`; consumed by `crates/node/src/embed.rs`.
   `TeardownMode` names the only difference between reaches:
   `StartupAbort` (a bootstrap step failed, or the graph was dropped
@@ -37,9 +37,11 @@ the first embedder — there is one lifecycle implementation, not two.
 - **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
   `Context::admit_transaction` (`crates/rpc/src/context.rs`) — the identical
   typed admission `sendrawtransaction` runs (`crates/rpc/src/handlers/tx.rs`):
-  the full policy stack is evaluated under the node's one
-  `MempoolGateway` write-lock interval and the authorized mutation
-  commits inside it, so no concurrent admission can pass stale policy.
+  script verification runs outside the pool writer. Every provisional verdict
+  is rechecked against chain generation and mempool sequence under the writer;
+  a stale request returns a retryable error before its verdict is used.
+  Accepted mutations commit under that writer. This fence is not evidence of
+  full Core policy parity; see [mempool-policy.md](mempool-policy.md).
   Block-connect eviction commits through the same gateway's
   `remove_for_block` (Core's `removeForBlock` mirror), reorg
   re-admission through `reconsider_disconnected`, and
@@ -52,8 +54,9 @@ the first embedder — there is one lifecycle implementation, not two.
   index: a disabled index is `NodeError::Unavailable`, a proven-absent
   transaction is `NodeError::NotFound`. Owner: `crates/node/src/embed.rs`.
 - **EMB-07 — Shutdown consumes.** `Node::shutdown(self)` runs the ordered
-  sequence exactly once and publishes the clean checkpoint; a node
-  started on the same data dir afterwards resumes from that checkpoint.
+  sequence exactly once. It publishes a clean checkpoint only when all prior
+  cleanup succeeded and an applied tip exists; startup can restore that
+  checkpoint. The consuming call reports shutdown/checkpoint errors.
   Dropping a node without `shutdown` runs the same teardown in
   `StartupAbort` mode — services joined, storage released, no checkpoint.
 - **EMB-08 — Mutations wake the template coordinator.** The node-owned
@@ -72,8 +75,9 @@ listener spawn) rolls the whole graph back through the same ordered
 teardown in `StartupAbort` mode before the error is returned: no worker
 outlives a failed startup, no joinable handle is dropped, sockets and
 storage locks are released, and no checkpoint is published for the
-abandoned run. Bootstrap workers poll the shared shutdown flag through
-bounded waits, so every join completes.
+abandoned run. Workers observe the shared shutdown flag, but synchronous joins
+can block the calling executor thread; this is not a bounded-latency shutdown
+or a guarantee about arbitrary blocking worker operations.
 
 ## Readiness
 
