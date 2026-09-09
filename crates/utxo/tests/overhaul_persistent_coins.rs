@@ -815,3 +815,43 @@ fn repeated_deferred_spends_keep_the_original_before_image() {
         0
     );
 }
+
+/// FP-05 / CL-14: any successful synchronous durability boundary completes the
+/// deferred window, releases its pins, and allows the resident budget to evict.
+#[test]
+fn synchronous_durability_releases_deferred_pins() {
+    for (index, mode) in [
+        (29, CoinDurability::Durable),
+        (30, CoinDurability::CasGuarded),
+    ] {
+        let a = txid(index);
+        let mut coins = PersistentUtxoSet::new(MemoryStore::default());
+        coins
+            .connect_block(
+                &block(two_output_add(a, &[0x51], &[0x52]), vec![]),
+                &a,
+                CoinDurability::Durable,
+            )
+            .expect("seed");
+        coins
+            .connect_block(
+                &block(vec![], vec![outpoint(a, 0)]),
+                &a,
+                CoinDurability::Deferred,
+            )
+            .expect("deferred spend");
+        coins.set_resident_budget(1);
+        let pinned = coins.ledger().expect("pinned ledger");
+        assert!(pinned.retained_before_image_bytes > 0);
+        assert_eq!(pinned.resident.records, 1, "deferred row stays pinned");
+
+        coins
+            .connect_block(&block(vec![], vec![]), &a, mode)
+            .expect("synchronous durability boundary");
+        let ledger = coins.ledger().expect("released ledger");
+        assert_eq!(ledger.retained_before_image_bytes, 0);
+        assert_eq!(ledger.resident.accounted_bytes(), 0);
+        assert_eq!(ledger.stored_rows, 1);
+        assert!(coins.get(&outpoint(a, 1)).expect("reload").is_some());
+    }
+}
