@@ -5,7 +5,7 @@ and the ZMQ `sequence` mapping built on them. Owners: `MempoolGateway` in
 `crates/mempool/src/gateway.rs`; `MutationResult`/`MutationOutcome`/
 `RemovalReason`/`MutationEnvelope`/`AdmissionOrigin` in
 `crates/mempool/src/mutation.rs`; the ZMQ sequence observer
-in `crates/node/src/zmq_publisher.rs`.
+in `crates/rpc/src/zmq.rs`.
 
 ## Clauses
 
@@ -125,7 +125,7 @@ in `crates/node/src/zmq_publisher.rs`.
   `stable_generation_is_even_after_disconnect`.
 - `crates/rpc/src/handlers/tx.rs` (inline tests):
   admission retry rebuilds context after a transient rejection.
-- `crates/node/src/zmq_publisher.rs`:
+- `crates/rpc/src/zmq.rs`:
   `admission_publishes_one_a_frame_with_core_payload_bytes`,
   `policy_eviction_publishes_r_frames_in_commit_order`,
   `block_inclusion_suppresses_r_frames`,
