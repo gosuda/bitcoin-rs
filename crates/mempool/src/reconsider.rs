@@ -1,7 +1,7 @@
 //! Preparation of ordered transactions displaced by a chain change.
 //!
 //! The chain owner supplies candidates in dependency order and controls the
-//! transition reservation. This builder owns both candidate pricing and the
+//! transition reservation. This builder owns both candidate accounting and the
 //! earlier offered outputs needed by descendants, without doing block I/O or
 //! replacing the gateway's reconsideration commit path.
 
@@ -12,13 +12,13 @@ use hashbrown::HashMap;
 
 use crate::MempoolEntry;
 
-/// Candidate entries and the outputs already offered in the same batch.
+/// Candidate entries and the transactions already offered in the same batch.
 ///
 /// The output overlay includes offered candidates, not just subsequently
 /// accepted candidates. The gateway remains responsible for rejecting
 /// descendants of candidates that fail or are immediately evicted.
 pub struct DisconnectedCandidates {
-    offered: HashMap<Txid, Vec<u64>>,
+    offered: HashMap<Txid, Arc<Tx>>,
     entries: Vec<MempoolEntry>,
     time: u64,
     height: u32,
@@ -47,34 +47,35 @@ impl DisconnectedCandidates {
         if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
             return false;
         }
-        let mut input_total = 0_u64;
+        let mut prevouts = Vec::with_capacity(tx.inputs.len());
         for input in &tx.inputs {
             let outpoint = input.previous_output;
-            let value = if let Some(output) = lookup(&outpoint) {
-                output.value
-            } else {
-                let Some(value) = self.offered.get(&outpoint.txid).and_then(|values| {
-                    usize::try_from(outpoint.vout)
-                        .ok()
-                        .and_then(|vout| values.get(vout))
-                }) else {
-                    return false;
-                };
-                *value
+            let Some(output) = lookup(&outpoint).or_else(|| {
+                let parent = self.offered.get(&outpoint.txid)?;
+                parent
+                    .outputs
+                    .get(usize::try_from(outpoint.vout).ok()?)
+                    .cloned()
+            }) else {
+                return false;
             };
-            input_total = input_total.saturating_add(value);
+            prevouts.push((outpoint, output));
         }
-        let output_values: Vec<u64> = tx.outputs.iter().map(|output| output.value).collect();
-        let output_total = output_values
-            .iter()
-            .fold(0_u64, |total, value| total.saturating_add(*value));
-        let fee = input_total.saturating_sub(output_total);
-        let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-        // Preserve the existing reconsideration metadata contract. Full
-        // prevout-aware verification belongs to the separate reorg work; this
-        // move must not silently replace it with ordinary admission.
-        let entry = MempoolEntry::new(Arc::new(tx.clone()), vsize, fee, self.time, self.height);
-        self.offered.insert(entry.txid, output_values);
+        // Reuse admission accounting, not its validation/commit path. In
+        // particular, mining must retain BIP141 costs for P2SH and witness
+        // inputs after a reorg just as it does after ordinary admission.
+        let context = crate::accounting::prepared_context(tx, &prevouts, false);
+        let entry = MempoolEntry::new(
+            Arc::new(tx.clone()),
+            context.vsize,
+            context.fee,
+            self.time,
+            self.height,
+        )
+        .with_sigop_cost(context.sigop_cost);
+        // Share the candidate body rather than maintaining a value-only copy
+        // of its outputs that loses the scripts needed by descendants.
+        self.offered.insert(entry.txid, Arc::clone(&entry.tx));
         self.entries.push(entry);
         true
     }
@@ -90,6 +91,7 @@ impl DisconnectedCandidates {
 mod tests {
     use super::*;
     use bitcoin_rs_primitives::{Hash256, TxIn};
+    use bitcoin_rs_script::script::{opcode, push_data};
 
     fn spend(previous_output: OutPoint, value: u64) -> Tx {
         Tx {
@@ -112,6 +114,7 @@ mod tests {
         OutPoint::new(Txid::from(Hash256::from_le_bytes(&[1; 32])), 0)
     }
 
+    /// MPL-04: restored coins and dependency-ordered candidates price one batch.
     #[test]
     fn restored_coins_and_ordered_candidates_price_the_batch() {
         let parent = spend(funded(), 9_000);
@@ -137,6 +140,7 @@ mod tests {
         }
     }
 
+    /// MPL-04: unavailable candidates cannot supply descendant outputs.
     #[test]
     fn unavailable_parent_never_offers_outputs_to_a_child() {
         let parent = spend(funded(), 9_000);
@@ -147,9 +151,11 @@ mod tests {
         assert!(batch.into_entries().is_empty());
     }
 
+    /// MPL-04: authoritative restored coins take precedence over the overlay.
     #[test]
     fn restored_coin_takes_precedence_over_an_offered_output() {
-        let parent = spend(funded(), 9_000);
+        let mut parent = spend(funded(), 9_000);
+        parent.outputs[0].script_pubkey = [vec![0x00, 0x14], vec![2; 20]].concat();
         let child = spend(OutPoint::new(parent.txid(), 0), 8_000);
         let mut batch = DisconnectedCandidates::new(0, 0);
         assert!(batch.offer(&parent, |_| Some(TxOut {
@@ -160,14 +166,65 @@ mod tests {
             value: 8_500,
             script_pubkey: Vec::new()
         })));
-        assert_eq!(batch.into_entries()[1].fee, 500);
+        let entries = batch.into_entries();
+        assert_eq!(entries[1].fee, 500);
+        assert_eq!(entries[1].sigop_cost, 0);
     }
 
+    /// MPL-04: coinbase transactions are never reconsideration candidates.
     #[test]
     fn coinbase_does_not_become_a_reconsideration_candidate() {
         let coinbase = spend(OutPoint::new(Txid::default(), u32::MAX), 50_000);
         let mut batch = DisconnectedCandidates::new(0, 0);
         assert!(!batch.offer(&coinbase, |_| panic!("coinbase must not read coins")));
         assert!(batch.into_entries().is_empty());
+    }
+
+    /// BIP141 Sigops: legacy/P2SH cost four units; witness-v0 costs one.
+    /// These accounting vectors do not claim to perform reorg script validation.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
+    #[test]
+    fn bip141_sigops_are_preserved_from_restored_coins_and_offered_outputs() {
+        let p2sh = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
+        let p2wsh = [vec![0x00, 0x20], vec![2; 32]].concat();
+        let multisig = vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG];
+        let cases = [
+            (vec![0x51], Vec::new(), Vec::new(), vec![0xac], 4),
+            (p2sh.clone(), push_data(&multisig), Vec::new(), Vec::new(), 8),
+            (p2wpkh, Vec::new(), Vec::new(), Vec::new(), 1),
+            (
+                p2wsh.clone(),
+                Vec::new(),
+                vec![multisig.clone()],
+                Vec::new(),
+                2,
+            ),
+            (p2sh, push_data(&p2wsh), vec![multisig], Vec::new(), 2),
+        ];
+        for (prevout_script, script_sig, witness, output_script, expected) in cases {
+            let mut parent = spend(funded(), 9_000);
+            parent.outputs[0].script_pubkey = prevout_script;
+            let mut child = spend(OutPoint::new(parent.txid(), 0), 8_000);
+            child.inputs[0].script_sig = script_sig;
+            child.inputs[0].witness = witness;
+            child.outputs[0].script_pubkey = output_script;
+
+            let mut restored = DisconnectedCandidates::new(42, 100);
+            assert!(restored.offer(&child, |_| Some(parent.outputs[0].clone())));
+            let entry = &restored.into_entries()[0];
+            assert_eq!(entry.sigop_cost, expected, "restored prevout");
+            assert_eq!(entry.fee, 1_000);
+
+            let mut offered = DisconnectedCandidates::new(42, 100);
+            assert!(offered.offer(&parent, |_| Some(TxOut {
+                value: 10_000,
+                script_pubkey: vec![0x51],
+            })));
+            assert!(offered.offer(&child, |_| None));
+            let entry = &offered.into_entries()[1];
+            assert_eq!(entry.sigop_cost, expected, "offered prevout");
+            assert_eq!(entry.fee, 1_000);
+        }
     }
 }
