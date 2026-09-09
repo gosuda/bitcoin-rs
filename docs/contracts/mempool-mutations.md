@@ -142,6 +142,13 @@ state (`crates/mempool/src/orphan.rs`).
   Rust's `OutPoint::default()` is `(zero txid, index 0)`, which is non-null.
   Such unresolved inputs follow ordinary missing-parent requests and parent
   indexing instead of being silently omitted from retry tracking.
+- Before missing-input policy can retain a peer body, the gateway runs the
+  consensus-owned `verify_transaction_input_outpoints` check. Duplicate inputs
+  and null outpoints in non-coinbase transactions reject as `Consensus` and
+  use transaction-scoped caching even when witness data is present or coins
+  are missing. Parent arrival or a different witness cannot repair these
+  failures. State and resident-claim guards still precede classification;
+  RPC failures do not populate peer caches. Coinbase policy remains separate.
 - Recent rejects use one bounded FIFO with an identity scope for each hash.
   Witness-scoped refusals suppress only the checked wtxid; transaction-scoped
   refusals additionally suppress the txid. Legacy inventory does not consult
@@ -182,6 +189,7 @@ state (`crates/mempool/src/orphan.rs`).
 ## Proven by
 
 - `crates/mempool/src/gateway.rs` (inline tests):
+  `input_structure_checks_follow_generation_and_sequence_guards`,
   `accepted_and_block_inclusion_events_arrive_in_commit_order`,
   `remove_for_block_publishes_removals_with_origins`,
   `remove_for_block_leaves_unmined_child_and_publishes_only_the_parent`,
@@ -199,6 +207,9 @@ state (`crates/mempool/src/orphan.rs`).
 - `crates/rpc/src/handlers/tx.rs` (inline tests):
   admission retry rebuilds context after a transient rejection.
 - `crates/mempool/src/admission.rs` (inline tests):
+  `input_structure_duplicate_rejection_is_shared_across_witnesses`,
+  `input_structure_null_rejection_is_shared_across_witnesses`,
+  `input_structure_rpc_rejection_does_not_populate_peer_caches`,
   `parent_commit_without_observers_retries_orphan_with_original_source`,
   `chain_change_with_no_pool_mutation_clears_rejects_and_preserves_odd_ready_work`,
   `exhausted_ready_retry_stays_bounded_and_is_retried_on_later_poll`,
