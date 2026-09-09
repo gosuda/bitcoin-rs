@@ -2,7 +2,8 @@
 
 `API-01`–`API-04` place owners under the
 [contracts precedence rule](README.md). `API-05` is the solo-mining generate
-path. `API-06` is `getnetworkhashps` snapshot consistency.
+path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
+recorded Core reference used by the RPC fixture replay gate.
 
 ## Clauses
 
@@ -89,6 +90,23 @@ The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
 
+### `API-07`: RPC fixture reference provenance
+
+- **Owner**: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns
+  `PINNED_CORE_VERSION`, `PINNED_CORE_SHA256`, and their validation. Every
+  fixture records the version and exact binary digest used for its capture;
+  missing, empty, or mismatched values fail loading before replay starts.
+- These pins describe the released Core node used for the recorded RPC
+  responses. They are separate from the `bitcoinkernel` oracle and from the
+  broader API family declared by `MANIFEST` (`API-01`). Changing either of
+  those references cannot relabel existing captures.
+- `core_parity` replays recorded responses against bitcoin-rs. It does not
+  execute or hash a local `bitcoind`, and the fixture metadata does not attest
+  a source commit or build configuration. Verifying process binaries and
+  recording those missing identities remain work under #625 and #626.
+- A reference refresh must update the capture provenance and affected
+  fixtures together, with evidence from the selected Core build.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -96,6 +114,12 @@ owned by [wallet-facing.md](wallet-facing.md).
 
 ## Proven by
 
+- `API-07`: `crates/rpc/tests/core_parity.rs` test
+  `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:
+  - `copied_fixture_preserves_core_reference`
+  - `corpus_rejects_missing_core_reference_fields`
+  - `corpus_rejects_stale_or_empty_core_version`
+  - `corpus_rejects_mismatched_or_empty_core_digest`
 - `crates/rpc/tests/manifest_coverage.rs`:
   - `rpc_rows_and_the_live_registry_agree_both_ways`
   - `rest_rows_and_router_registrations_agree_both_ways`
