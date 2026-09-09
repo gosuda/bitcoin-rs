@@ -1502,6 +1502,15 @@ impl<S: bitcoin_rs_storage::KvStore> PersistentUtxoSet<S> {
     /// Connects one block: reload evicted affected records, in-memory
     /// commit, then changed-records-only persistence under the chosen
     /// durability mode.
+    ///
+    /// The in-memory commit is irrevocable: once it succeeds, a later
+    /// persistence failure leaves memory ahead of the store. Durability
+    /// arrives only at persistence — callers on `Deferred` must call
+    /// `flush` before treating the connect as durable. A `Storage` error
+    /// is a fault boundary (T12): the caller must not retry the connect
+    /// against the moved in-memory state. A `ConditionMismatch` means a
+    /// guarded write lost its store race; the row on disk is authoritative
+    /// and recovery re-establishes it from the store (T12).
     pub fn connect_block(
         &self,
         changes: &BlockChanges,
