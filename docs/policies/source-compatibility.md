@@ -44,6 +44,17 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
   2. Compilation and verification across all four storage backend features (`fjall`, `rocksdb`, `mdbx`, `redb`).
   3. Verification against the `kernel` consensus feature path.
 
+### 3.3 Lockfile and CI Reproducibility
+- `Cargo.lock` is committed and is part of the build identity. Normal CI lint, test, benchmark, and feature checks use `--locked`; a stale lockfile fails the job instead of being rewritten only inside the runner checkout.
+- Dependency-update changes may intentionally edit `Cargo.lock`, but validation after that edit still uses `--locked`.
+- The `minimal-versions` lane in `.github/workflows/main.yml` is the one intentional mutation lane: `cargo +nightly update -Zdirect-minimal-versions` rewrites the lockfile in its disposable checkout. Its subsequent compile uses `--locked` against that rewritten result.
+- Cargo subcommand wrappers with their own resolution behavior (`cargo fuzz`) are audited separately rather than treated as ordinary root-workspace Cargo invocations.
+
+### 3.4 TLS Provider and Transport Rules
+- If a TLS transport is added, use Rustls with default features disabled and a reviewed non-C crypto provider. Do not rely on adapter defaults to select the provider.
+- `deny.toml` enforces the dependency boundary. Keep the native-TLS/OpenSSL/platform-TLS families and disallowed Rustls provider/adaptor families complete so a transitive feature cannot reintroduce AWS-LC, ring, OpenSSL, or platform TLS.
+- Review both dependency features and transport configuration when changing a TLS path. A dependency ban alone does not establish correct certificate, protocol, timeout, or endpoint behavior.
+
 ## 4. Workspace Versioning and Semver Commitment
 
 All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.5.0`).
