@@ -102,24 +102,18 @@ impl MdbxStore {
         // Apply boundary: every mdbx write path commits synchronously, so a
         // lost apply may never report success.
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
-            return match fault {
-                crate::PersistFault::FailApply | crate::PersistFault::LostApply => {
-                    Err(fault.injected_error())
+            if fault == crate::PersistFault::PartialApply {
+                // A strict prefix is staged into a transaction that is
+                // dropped uncommitted: no family observes a partial batch.
+                let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
+                let mut partial = MdbxWriteBatch::default();
+                if let Some(first) = batch.ops.into_iter().next() {
+                    partial.ops.push(first);
                 }
-                crate::PersistFault::PartialApply => {
-                    // A strict prefix is staged into a transaction that is
-                    // dropped uncommitted: no family observes a partial batch.
-                    let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
-                    let mut partial = MdbxWriteBatch::default();
-                    if let Some(first) = batch.ops.into_iter().next() {
-                        partial.ops.push(first);
-                    }
-                    apply_mdbx_ops(self, &txn, partial)?;
-                    drop(txn);
-                    Err(fault.injected_error())
-                }
-                _ => unreachable!("take_at only releases Apply-boundary faults"),
-            };
+                apply_mdbx_ops(self, &txn, partial)?;
+                drop(txn);
+            }
+            return Err(fault.injected_error());
         }
         let sync_fault = self.faults.take_at(crate::PersistBoundary::Sync);
         let txn = self.env.begin_rw_sync().map_err(StorageError::backend)?;
@@ -127,11 +121,7 @@ impl MdbxStore {
         txn.commit().map_err(StorageError::backend)?;
         // Sync boundary: the batch is committed; completion faults or is lost.
         if let Some(fault) = sync_fault {
-            return match fault {
-                crate::PersistFault::FailSync => Err(fault.injected_error()),
-                crate::PersistFault::LostSync => Err(fault.injected_error()),
-                _ => unreachable!("take_at only releases Sync-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         Ok(())
     }
@@ -207,34 +197,24 @@ impl KvStore for MdbxStore {
         // Seam: the apply and sync boundaries of this commit. Condition
         // evaluation precedes both, so a mismatch never consumes a fault.
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
-            return match fault {
-                crate::PersistFault::FailApply | crate::PersistFault::LostApply => {
-                    Err(fault.injected_error())
+            if fault == crate::PersistFault::PartialApply {
+                // A strict prefix is staged into the transaction that is
+                // dropped uncommitted: no family observes a partial batch.
+                let mut partial = MdbxWriteBatch::default();
+                if let Some(first) = batch.ops.into_iter().next() {
+                    partial.ops.push(first);
                 }
-                crate::PersistFault::PartialApply => {
-                    // A strict prefix is staged into the transaction that is
-                    // dropped uncommitted: no family observes a partial batch.
-                    let mut partial = MdbxWriteBatch::default();
-                    if let Some(first) = batch.ops.into_iter().next() {
-                        partial.ops.push(first);
-                    }
-                    apply_mdbx_ops(self, &txn, partial)?;
-                    drop(txn);
-                    Err(fault.injected_error())
-                }
-                _ => unreachable!("take_at only releases Apply-boundary faults"),
-            };
+                apply_mdbx_ops(self, &txn, partial)?;
+                drop(txn);
+            }
+            return Err(fault.injected_error());
         }
         let sync_fault = self.faults.take_at(crate::PersistBoundary::Sync);
         apply_mdbx_ops(self, &txn, batch)?;
         txn.commit().map_err(StorageError::backend)?;
         count_write("durable", encoded_bytes);
         if let Some(fault) = sync_fault {
-            return match fault {
-                crate::PersistFault::FailSync => Err(fault.injected_error()),
-                crate::PersistFault::LostSync => Ok(true),
-                _ => unreachable!("take_at only releases Sync-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         Ok(true)
     }
@@ -242,11 +222,7 @@ impl KvStore for MdbxStore {
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "mdbx").increment(1);
         if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
-            return match fault {
-                crate::PersistFault::FailFlush => Err(fault.injected_error()),
-                crate::PersistFault::LostFlush => Ok(()),
-                _ => unreachable!("take_at only releases Flush-boundary faults"),
-            };
+            return Err(fault.injected_error());
         }
         self.env
             .sync(true)

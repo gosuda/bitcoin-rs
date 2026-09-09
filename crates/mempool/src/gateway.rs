@@ -598,14 +598,6 @@ impl MempoolGateway {
     /// before mutation.
     #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
-        // Test-only causal seam: parks the first admission BEFORE acquiring
-        // the write lock so a cross-crate test can mutate the pool and
-        // generation between the caller's capture and the gateway's
-        // re-check, forcing a deterministic transient error. Disarmed, this
-        // is a no-op. One shot: the park consumes the arm.
-        #[cfg(any(test, feature = "test-seam"))]
-        ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
-
         // Script verification runs OUTSIDE the pool writer (the lock-order
         // rule: never hold the mempool write lock during script
         // verification). The verdict computed here is only evidence; its
@@ -628,10 +620,16 @@ impl MempoolGateway {
         // not a valid chain state, but failing closed here matches the
         // conservative choice: nothing is admitted when the finality
         // question is unanswerable.
-        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
-        let Some((policy, fact)) = self.prepare_and_verify(&request, finality_height)? else {
-            return Ok(AdmitOutcome::AlreadyKnown);
-        };
+        let prepared = request
+            .height
+            .checked_add(1)
+            .ok_or(AdmitError::Consensus)
+            .and_then(|height| self.prepare_and_verify(&request, height));
+
+        // POL-03: the test seam runs after every provisional verdict, with
+        // no domain lock held, so stale rejection races are reproducible.
+        #[cfg(any(test, feature = "test-seam"))]
+        ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
         let mut pool = self.pool.write();
 
@@ -653,6 +651,10 @@ impl MempoolGateway {
         if pool.contains_txid(&txid) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
+
+        let Some((policy, fact)) = prepared? else {
+            return Ok(AdmitOutcome::AlreadyKnown);
+        };
 
         // 6. Mutate under the same write guard via `replace_transaction`,
         //    which handles BIP125 replacement, package limits, and insert.
@@ -967,13 +969,7 @@ impl ChainChangeGuard {
     }
 }
 
-/// Test-only causal gate for the publication ordering proof.
-///
-/// Disarmed, [`park_if_armed`] is a no-op and every mutator passes. Armed,
-/// the next mutator parks inside the exact publish-lock acquisition helper
-/// after sequencing, while it still holds the pool write guard. It signals
-/// the test on `parked` and blocks on `release`. One shot: the park consumes
-/// the arm.
+/// One-shot admission gate after verification and before the writer recheck.
 #[cfg(any(test, feature = "test-seam"))]
 mod ordering_gate {
     use parking_lot::Mutex;
@@ -1015,8 +1011,7 @@ mod ordering_gate {
             return;
         };
         let _ = parked_tx.send(());
-        // The parked mutator holds the pool write guard here; a dead test
-        // thread drops the sender and the park dissolves instead of hanging.
+        // No pool lock is held. Dropping the release sender unblocks the test.
         let _ = release_rx.recv();
     }
 }
@@ -2284,6 +2279,47 @@ mod tests {
             "a script-invalid spend must fail verification: {result:?}"
         );
         assert!(gateway.read().is_empty());
+    }
+
+    /// POL-03: a stale context outranks even a provisional rejection.
+    #[test]
+    fn rejected_verdicts_are_rechecked_after_verification() {
+        for policy_rejection in [false, true] {
+            for change_chain in [false, true] {
+                let gateway = gateway_with(None);
+                let candidate = standard_tx(0x90);
+                let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+                if policy_rejection {
+                    request.context.missing_inputs = true;
+                } else {
+                    request.prevouts[0].1.script_pubkey = vec![0x00];
+                }
+                let (parked_tx, parked_rx) = mpsc::channel();
+                let (release_tx, release_rx) = mpsc::channel();
+                super::arm_admission_park(
+                    Arc::as_ptr(&gateway).expose_provenance(),
+                    parked_tx,
+                    release_rx,
+                );
+                let worker = Arc::clone(&gateway);
+                let thread = std::thread::spawn(move || worker.admit_transaction(request));
+                parked_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("verification finished");
+                let expected = if change_chain {
+                    gateway.chain_generation.fetch_add(2, Ordering::Release);
+                    AdmitError::GenerationChanged
+                } else {
+                    gateway
+                        .insert_entry(AdmissionOrigin::Rpc, entry(&tx(0x91)))
+                        .expect("pool changed");
+                    AdmitError::MempoolChanged
+                };
+                release_tx.send(()).expect("release admission");
+                assert_eq!(thread.join().expect("admission thread"), Err(expected));
+                assert!(!gateway.read().contains_txid(&candidate.txid()));
+            }
+        }
     }
 
     #[test]

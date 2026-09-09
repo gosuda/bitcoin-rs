@@ -211,6 +211,14 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
         // The owned materialization agrees with the derived facts and
         // re-encodes to the exact fixture bytes.
         let materialized: Block = parsed.materialize();
+        assert_eq!(
+            BlockFacts::block_weight(&materialized.txs),
+            oracle.weight().to_wu()
+        );
+        assert_eq!(
+            BlockFacts::from_txids(&materialized.txs, expected_txids.clone()).weight(),
+            oracle.weight().to_wu()
+        );
         for (index, tx) in materialized.txs.iter().enumerate() {
             assert_eq!(
                 &tx.txid(),

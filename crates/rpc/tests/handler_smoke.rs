@@ -928,6 +928,7 @@ fn encode_base64(bytes: &[u8]) -> String {
 }
 
 #[test]
+// CONTRACT: docs/contracts/indexing.md#IDX-02
 fn getcapabilities_reports_revision_and_disabled_txindex_row()
 -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());

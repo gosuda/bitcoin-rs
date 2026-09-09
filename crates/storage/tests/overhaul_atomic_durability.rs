@@ -1,5 +1,6 @@
-//! Atomic-durability proofs for the storage ladder under injected
-//! persistence faults.
+//! RCV-04 fault-injection coverage for the storage ladder.
+//! Contract: `docs/contracts/recovery.md#rcv-04-crash-matrix`.
+//! This exercises backend seams and clean reopen, not simulated power loss.
 //!
 //! Every fault in [`PersistFault`] is armed at each persistence boundary and
 //! fired against a multi-family batch spanning three column families. After
@@ -41,12 +42,11 @@ fn snapshot_all(store: &impl KvStore) -> Vec<FamilyState> {
     FAMILIES
         .iter()
         .map(|cf| {
-            let mut rows = Vec::new();
-            if let Ok(iter) = store.iter_prefix(*cf, b"") {
-                for (key, value) in iter.flatten() {
-                    rows.push((key, value));
-                }
-            }
+            let rows = store
+                .iter_prefix(*cf, b"")
+                .expect("open family iterator")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("read every family row");
             FamilyState { rows }
         })
         .collect()
@@ -76,6 +76,15 @@ impl Route {
             Self::WriteDurable => "write_durable",
             Self::WriteDurableIf => "write_durable_if",
             Self::FlushDeferred => "write_deferred+flush",
+        }
+    }
+
+    fn crosses(&self, boundary: bitcoin_rs_storage::PersistBoundary) -> bool {
+        use bitcoin_rs_storage::PersistBoundary;
+        match boundary {
+            PersistBoundary::Apply => true,
+            PersistBoundary::Sync => matches!(self, Self::WriteDurable | Self::WriteDurableIf),
+            PersistBoundary::Flush => matches!(self, Self::FlushDeferred),
         }
     }
 }
@@ -173,7 +182,7 @@ fn redb_txindex_injected_faults_never_mix_families() {
                             }],
                             batch,
                         )
-                        .map(|_| ()),
+                        .map(|committed| assert!(committed, "seeded condition must match")),
                     Route::FlushDeferred => {
                         store.write_deferred(batch).and_then(|()| store.flush())
                     }
@@ -197,13 +206,14 @@ fn redb_txindex_injected_faults_never_mix_families() {
                 "{label}: families recovered as a mix: meta={meta:?} confirmed={confirmed:?}"
             );
 
-            let completion_fault = match route {
-                Route::WriteDurable | Route::WriteDurableIf => {
-                    matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
-                }
-                Route::FlushDeferred => fault == PersistFault::FailFlush,
-                Route::Write => false,
-            };
+            if outcome.is_ok() {
+                assert!(
+                    both_new,
+                    "{label}: success acknowledged an absent durable batch"
+                );
+            }
+
+            let completion_fault = route.crosses(fault.boundary());
             if completion_fault {
                 assert!(
                     outcome.is_err(),
@@ -268,7 +278,7 @@ where
                     }],
                     batch,
                 )
-                .map(|_| ()),
+                .map(|committed| assert!(committed, "seeded condition must match")),
             Route::FlushDeferred => store.write_deferred(batch).and_then(|()| store.flush()),
         }
     };
@@ -278,35 +288,31 @@ where
         let store = open(path).expect("reopen to inspect");
         snapshot_all(&store)
     };
-    for (index, (before, later)) in old.iter().zip(after.iter()).enumerate() {
-        let is_old = before == later;
-        let mut expected_new = FamilyState {
+    let expected_new: Vec<_> = old
+        .iter()
+        .map(|before| FamilyState {
             rows: before
                 .rows
                 .iter()
                 .map(|(key, _)| (key.clone(), b"new".to_vec()))
                 .collect(),
-        };
-        expected_new.rows.sort();
-        let mut later_sorted = later.clone();
-        later_sorted.rows.sort();
-        let is_new = later_sorted == expected_new;
-        assert!(
-            is_old || is_new,
-            "{label}: family {index} recovered as a mix: {later} (was {before})"
+        })
+        .collect();
+    assert!(
+        after == old || after == expected_new,
+        "{label}: cross-family recovery is neither the whole old nor whole new batch: {after:?}"
+    );
+    if outcome.is_ok() && !matches!(route, Route::Write) {
+        assert_eq!(
+            after, expected_new,
+            "{label}: success acknowledged an absent durable batch"
         );
     }
 
     // Completion honesty: routes that promise durability never report success
     // when the durability step faulted.
     let reported_success = outcome.is_ok();
-    let completion_fault = match route {
-        Route::WriteDurable | Route::WriteDurableIf => {
-            matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
-        }
-        Route::FlushDeferred => fault == PersistFault::FailFlush,
-        Route::Write => false,
-    };
+    let completion_fault = route.crosses(fault.boundary());
     if completion_fault {
         assert!(
             !reported_success,
