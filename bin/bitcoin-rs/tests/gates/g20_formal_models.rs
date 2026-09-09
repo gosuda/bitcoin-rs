@@ -26,7 +26,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin_rs_rpc::compat_manifest::{ReferenceSet, reference_set};
+#[path = "../support/mod.rs"]
+mod support;
+
+use support::reference_set::{ReferenceSet, reference_set};
 
 const EXPECTED_VERSION: &str = "0.62.2";
 const MODELS: [&str; 3] = ["ChainAdmission", "PeerLeases", "ProjectionMining"];
