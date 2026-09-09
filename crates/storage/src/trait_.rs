@@ -81,17 +81,17 @@ pub enum PersistBoundary {
 pub enum PersistFault {
     /// Fail before applying the batch.
     FailApply,
-    /// Drop the apply step and return an error; no visible write was accepted.
+    /// Drop the apply step.
     LostApply,
     /// Attempt a partial apply; the backend must expose no partial batch.
     PartialApply,
     /// Fail after apply while completing durability.
     FailSync,
-    /// Drop durability completion after apply and return an error, not a receipt.
+    /// Drop durability completion after apply.
     LostSync,
     /// Fail while flushing deferred writes.
     FailFlush,
-    /// Drop the flush sync and return an error; durability is not acknowledged.
+    /// Lose flush completion and return an error without confirming durability.
     LostFlush,
 }
 

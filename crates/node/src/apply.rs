@@ -2321,7 +2321,6 @@ fn prove_window<'a>(
         // same reason the script checks are batched across blocks rather than
         // split within one.
         let mut units = Vec::with_capacity(prepared.len());
-        let mut flags: Vec<bitcoin_rs_script::VerifyFlags> = Vec::with_capacity(prepared.len());
         for (index, ((block, unit), context)) in blocks
             .iter()
             .zip(prepared.iter_mut())
@@ -2351,22 +2350,17 @@ fn prove_window<'a>(
                 &mut unit.view,
                 context.height,
                 context.locktime_cutoff,
+                context.flags,
                 &unit.kernel_block,
             ) {
-                Ok(checks) => {
-                    units.push(checks);
-                    // Pushed together with the unit so the two stay aligned:
-                    // collecting flags from every context would misalign them
-                    // against a units list that skipped some.
-                    flags.push(context.flags);
-                }
+                Ok(checks) => units.push(checks),
                 Err(_) => return Vec::new(),
             }
         }
         metrics::histogram!("node.window.checks_seconds")
             .record(checks_started.elapsed().as_secs_f64());
         let verify_started = quanta::Instant::now();
-        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units, &flags);
+        let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
         metrics::histogram!("node.window.verify_seconds")
             .record(verify_started.elapsed().as_secs_f64());
         if verdict.is_err() {
@@ -2782,9 +2776,7 @@ fn apply_block_admitted<'b>(
         bitcoin_rs_consensus::BlockRuleContext {
             segwit_active: softfork_state.segwit_active,
         },
-        view.txids(),
-        view.computed_witness_ids().unwrap_or_default(),
-        view.facts().has_witness(),
+        view.facts(),
     );
     let block_rules_dur = block_rules_started.elapsed();
     metrics::histogram!("node.apply_block.block_rules_seconds")
@@ -3568,6 +3560,7 @@ fn run_non_script_checks_only(
     txids: &[Txid],
     height: u32,
     locktime_cutoff: u32,
+    flags: bitcoin_rs_script::VerifyFlags,
 ) -> core::result::Result<(), ApplyError> {
     if !tx_plan.needs_local_utxo_overlay {
         block.txs.par_iter().try_for_each(|tx| {
@@ -3580,6 +3573,7 @@ fn run_non_script_checks_only(
                 &*resolved,
                 height,
                 locktime_cutoff,
+                flags,
             )
         })?;
         return Ok(());
@@ -3596,6 +3590,7 @@ fn run_non_script_checks_only(
             &view,
             height,
             locktime_cutoff,
+            flags,
         )?;
         view.spend_inputs(tx);
         view.add_outputs(tx_index, *txid, tx.outputs.len())?;
@@ -3636,6 +3631,7 @@ fn verify_block_transactions(
             view.txids(),
             context.height,
             context.locktime_cutoff,
+            context.flags,
         );
     }
     // Full-verify: resolve every transaction's prevouts serially in block order
@@ -7825,11 +7821,13 @@ mod consensus_rule_tests {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
 
-        fn prepare_block(
+        fn prepare_block_with_spent_scripts(
             &self,
+            _capabilities: bitcoin_rs_index::IndexCapabilities,
             _height: u32,
             _hash: [u8; 32],
             _body: &[u8],
+            _spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
         ) -> Result<bitcoin_rs_index::PreparedBlock, bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
@@ -7845,13 +7843,14 @@ mod consensus_rule_tests {
         ) -> Result<(), bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }
-        fn commit_rollback_one_for_with_cursor(
+        fn commit_rollback_one_for_with_cursor_with_spent_scripts(
             &self,
             _fence: bitcoin_rs_index::IndexWriteFence,
             _capabilities: bitcoin_rs_index::IndexCapabilities,
             _prev: Option<bitcoin_rs_index::IndexWatermark>,
             _body: &[u8],
             _cursor: bitcoin_rs_index::ConsumerCursorUpdate<'_>,
+            _spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
         ) -> Result<(), bitcoin_rs_index::IndexError> {
             Err(bitcoin_rs_index::IndexError::UnsupportedRollback)
         }

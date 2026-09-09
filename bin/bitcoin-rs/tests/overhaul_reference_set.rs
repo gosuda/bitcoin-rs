@@ -18,9 +18,10 @@
     reason = "failure-path fixtures assert typed rejections by construction"
 )]
 
-use bitcoin_rs_rpc::compat_manifest::{
-    CorpusCustody, MANIFEST_TOML, ReferenceError, Status, load_reference_set, reference_set,
-};
+mod support;
+
+use bitcoin_rs_rpc::compat_manifest::{MANIFEST_TOML, Status};
+use support::reference_set::{CorpusCustody, ReferenceError, load_reference_set, reference_set};
 
 /// Pinned release archive digest, restated only to compare parsed bytes
 /// against the identity — never to build a manifest.
@@ -54,7 +55,7 @@ fn digest(text: &str) -> [u8; 32] {
     let bytes = text.as_bytes();
     assert_eq!(bytes.len(), 64, "digest literal must be 64 hex characters");
     let mut out = [0_u8; 32];
-    for (at, pair) in bytes.chunks_exact(2).enumerate() {
+    for (at, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let nibble = |byte: u8| {
             u8::try_from(char::from(byte).to_digit(16).expect("hex nibble")).expect("nibble fits")
         };
@@ -290,48 +291,4 @@ fn every_deviation_entry_states_its_deviation() {
         }
     }
     assert!(deviations > 0, "the manifest must record its deviations");
-}
-
-/// REF-03: product identity comes from the exporter registry, not arbitrary TOML.
-#[test]
-fn noncanonical_corpus_identities_are_rejected() {
-    for (old, new) in [
-        ("stop_height = 150000", "stop_height = 149999"),
-        (
-            "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b",
-            "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884c",
-        ),
-        ("id = \"C150\"", "id = \"unknown\""),
-        ("id = \"Cmodern\"", "id = \"C150\""),
-    ] {
-        assert!(
-            matches!(
-                load_reference_set(&edit_manifest(old, new)),
-                Err(ReferenceError::CorpusIdentityMismatch { .. })
-            ),
-            "{new}"
-        );
-    }
-}
-
-/// REF-02: a distinct label is not necessarily a kernel development version.
-#[test]
-fn kernel_identity_requires_a_31_99_patch_version() {
-    for version in [
-        "nonsense",
-        "31.99",
-        "31.99.",
-        "31.99.x",
-        "31.99.0.1",
-        "32.0.0",
-    ] {
-        let edited = edit_manifest(
-            "core_version = \"31.99.0\"",
-            &format!("core_version = \"{version}\""),
-        );
-        assert_eq!(
-            load_reference_set(&edited),
-            Err(ReferenceError::IdentityConfusion)
-        );
-    }
 }

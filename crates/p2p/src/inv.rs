@@ -10,15 +10,11 @@ pub const MAX_INV_PER_MSG: usize = 50_000;
 /// Inventory item advertised by a peer.
 pub type InventoryVector = Inventory;
 
-/// Requests the missing parents identified by admission from their delivering
-/// connection. A stale source never sends to a same-address replacement.
+/// Requests missing parents from the connection that supplied the child.
 ///
-/// Parent inputs identify transactions by txid. Witness-capable sources receive
-/// `MSG_WITNESS_TX` so a `SegWit` parent's witness is not stripped; other sources
-/// receive `MSG_TX`. Both identify the parent by txid, as BIP339 permits for
-/// unannounced parents, independently of the peer's announcement preference.
-/// Repeated parents produce one inventory item. Returns whether a non-empty
-/// request was queued; outbound saturation keeps the lease's disconnect policy.
+/// Inventory identity, witness serialization, deduplication, and saturation
+/// behavior follow `docs/policies/p2p-compatibility.md` §5; this function
+/// adapts admission's parent txids to the authoritative peer-table enqueue.
 pub fn request_missing_parents(
     peers: &crate::PeerTable,
     source: PeerToken,
@@ -40,21 +36,15 @@ pub fn request_missing_parents(
         }
     });
     let mut seen = hashbrown::HashSet::new();
-    let items: Vec<Inventory> = parents
+    let mut items: Vec<Inventory> = parents
         .iter()
         .filter(|txid| seen.insert(**txid))
-        .map(|txid| {
-            let txid = bitcoin::Txid::from_byte_array(*txid.as_bytes());
-            if witness {
-                Inventory::WitnessTransaction(txid)
-            } else {
-                Inventory::Transaction(txid)
-            }
-        })
+        .map(|txid| Inventory::Transaction(bitcoin::Txid::from_byte_array(*txid.as_bytes())))
         .collect();
     if items.is_empty() {
         return false;
     }
+    request_transaction_witness(&mut items, witness);
     // Capability metadata belongs to the same connection as the token. The
     // table rechecks that identity and pins it through the nonblocking enqueue,
     // so a replacement cannot inherit either the request or its service choice.
@@ -64,6 +54,19 @@ pub fn request_missing_parents(
         false
     } else {
         true
+    }
+}
+
+/// Applies BIP144's transaction witness request flag without changing hashes.
+/// Only getdata requests use this flag; announcements retain their own types.
+pub(crate) fn request_transaction_witness(items: &mut [Inventory], witness: bool) {
+    if !witness {
+        return;
+    }
+    for item in items {
+        if let Inventory::Transaction(txid) = item {
+            *item = Inventory::WitnessTransaction(*txid);
+        }
     }
 }
 

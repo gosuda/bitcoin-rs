@@ -65,6 +65,10 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf 'JAVA_HOME=%s\n' "$JAVA_HOME" >> "$GITHUB_ENV"
+  # `funArrays` preserves the TLA+ model while encoding its function-heavy
+  # state with SMT arrays; this branch tests whether that avoids g20's
+  # ChainAdmission temporal translation/solver timeout.
+  printf 'SMT_ENCODING=funArrays\n' >> "$GITHUB_ENV"
 fi
 if [[ -n "${GITHUB_PATH:-}" ]]; then
   printf '%s\n' "$JAVA_HOME/bin" >> "$GITHUB_PATH"

@@ -290,9 +290,6 @@ impl Shard {
     pub(crate) fn remove_resident_record(&self, key: UtxoKey, txid: Hash256) {
         let mut table = self.inner.write();
         remove_record(&mut table, key, txid);
-        if table.table.is_empty() {
-            table.table = HashTable::new();
-        }
     }
 
     /// Snapshot seam for the persistence layer: the record's canonical

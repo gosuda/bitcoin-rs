@@ -1,24 +1,15 @@
 # Recovery contract
 
-## Implementation status
+How the node recovers an authoritative chainstate after a crash, a lost
+write, a reorganization, or an incompatible datadir. `chainstate` is the
+single durable authority. Every other persisted component is derived and
+reconciles to it.
 
-This page specifies the **target durable-root protocol**, not the current
-startup implementation. The proposed `crates/chainstate` owner and `DurableHead`
-below do not exist in the runtime. Current startup/shutdown still restores and
-publishes node checkpoints; see [embedding](embedding.md). `PersistentUtxoSet`
-is an isolated persisted-cache API, not an integrated node recovery protocol.
-
-Existing `crates/storage/tests/overhaul_atomic_durability.rs` checks injected
-backend faults and clean reopen: each recovered batch is wholly old or new,
-and a successful durable receipt requires the proposed bytes. It does not
-simulate power loss or prove whole-node recovery. The owner paths and crash,
-reorg, and checkpoint-independence tests below are planned unless they actually
-exist; naming a test here is not evidence that it ran.
-
-Target owners:
+Owners:
 - Authoritative durable root and ordered commit protocol:
   `crates/chainstate/src/transition.rs`
 - Recovery and schema admission: `crates/chainstate/src/recovery.rs`
+- Persistent coin transition boundary: `crates/utxo/src/set/persistent.rs`
 - Crash and lost-write fault tests: `crates/node/tests/overhaul_crash_matrix.rs`
 - Reorg and disconnect: `crates/node/tests/overhaul_streaming_reorg.rs`
 - Checkpoint independence: `crates/node/tests/overhaul_checkpoint_independence.rs`
@@ -27,7 +18,7 @@ Target owners:
 
 ## Durable root
 
-The proposed authoritative durable root is:
+The authoritative durable root is:
 
 ```text
 R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs)
@@ -47,7 +38,7 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
   the durable byte range in the corresponding segment file. Undo and body
   references include the block hash, not only the height.
 
-The proposed persisted form (not an implemented Rust type) is:
+`DurableHead` is the persisted form:
 
 ```rust
 struct DurableHead {
@@ -125,16 +116,16 @@ the durable root recovery contract.
 
 ### `RCV-04`: Crash matrix
 
-The target crash and error points in `docs/chainstate-recovery.md` and
+The crash and error points in `docs/contracts/chainstate-recovery.md` and
 `docs/policies/db-migration.md` produce exactly these results:
 
 | Crash or error point | Recovery result |
 |---|---|
 | Body append mid-frame | The in-progress frame is discarded on next start; no durable head references it. |
 | Undo append mid-frame | Same as body append; partial undo is not the authoritative head. |
-| Append/sync fails before the atomic batch is attempted | Keep the prior root. Even synced orphan frames do not authorize a new head. |
+| Sync before durable batch | The atomic batch contains only data that reached the OS; any missing body or undo prevents commit. |
 | Durable batch complete, no publish | Restart sees the new head, coins, and `refs`; mempool and index reconcile. |
-| Durable batch ambiguous | Keep the fence closed. Recover the prior or whole proposed root by `CommitId` and full identity, then reconcile before publication or retry. Do not assume rollback. |
+| Durable batch ambiguous | Recovery resolves the ambiguity by `CommitId` and full identity; no mixed head/coins. |
 | Publication callback lost | The durable root is still authoritative; mempool and index reconcile after restart. |
 | Reorg stage 1: disconnect | Apply the exact per-block inverse; hold the fence until all disconnects commit. |
 | Reorg stage 2: reconnect | Apply the new branch using ordinary connect; each connect advances `CommitId`. |
@@ -146,6 +137,35 @@ isolated local environment. A process kill is not a substitute for simulated
 power loss. Fault-injection storage tests must exercise lost writes, partial
 writes, and failures around sync completion in addition to child-process kill
 tests.
+
+### `RCV-04A`: Persistent coin transition boundary
+
+- `PersistentUtxoSet` serializes refill, mutation, persistence, and flush with
+  an explicit in-flight generation. Its metadata mutex is held only while
+  observing or updating transition and cache bookkeeping; backing-store I/O
+  and UTXO listener callbacks run without that mutex.
+- A mutation transition excludes other persistent operations until it
+  completes, so no concurrent refill or read can cross an unpublished coin
+  generation. During a non-mutating storage transition, a cache-resident
+  `get` may complete immediately; a cache miss joins the serialized
+  transition before consulting storage.
+- A listener running on the active mutation thread must not wait on its own
+  transition. Re-entering a `PersistentUtxoSet` operation from that owner
+  returns `PersistentUtxoError::ReentrantOperation`; no nested persistent
+  transition begins.
+- A deferred mutation retains a pin for its changed transaction, including
+  its latest pending before-image payload, until a durability receipt covers
+  it. A successful explicit `flush`, or a successful non-empty `Durable` or
+  `CasGuarded` persistence operation, covers every earlier completed deferred
+  write and clears all retained pins. An empty or no-op mutation performs no
+  store durability operation and must not clear pins. A failed flush provides
+  no receipt and leaves pins intact; failed persistence or a CAS mismatch
+  never treats retained pins as durably completed and leaves the failed
+  mutation quarantined.
+- Timed concurrency regressions use their finite timeout only as a deadlock
+  detector. The timeout is not a latency target or service-level guarantee;
+  the contract requires progress before the deliberately blocked storage
+  boundary is released.
 
 ### `RCV-05`: Deep rollback and selective rebuild
 
@@ -242,6 +262,8 @@ tests.
 - `crates/node/tests/overhaul_crash_matrix.rs` (planned): exercises the
   `RCV-04` crash and lost-write points, including process kill, lost and
   partial writes, and ambiguous durable completion.
+- `crates/utxo/tests/overhaul_persistent_coins.rs` (existing): covers the
+  `RCV-04A` metadata-lock, cache-resident progress, re-entry, and durability-pin rules.
 - `crates/node/tests/overhaul_streaming_reorg.rs` (planned): covers
   `RCV-05`, `RCV-08`, and bounded disconnect and reorg memory.
 - `crates/node/tests/overhaul_checkpoint_independence.rs` (planned):

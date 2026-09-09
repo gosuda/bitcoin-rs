@@ -77,7 +77,7 @@ Important defaults:
 
 Change the default RPC credentials before exposing the port.
 
-`--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest` enables the unauthenticated Core REST routes on the RPC listener.
+`--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest=true` enables the unauthenticated Core REST routes on the RPC listener.
 
 ## Check progress
 
@@ -88,31 +88,13 @@ curl -s --user bitcoin-rs:bitcoin-rs \
   http://127.0.0.1:8332/
 ```
 
-For the tip only:
-
-```sh
-curl -s --user bitcoin-rs:bitcoin-rs \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"1.0","id":"1","method":"getbestblockhash","params":[]}' \
-  http://127.0.0.1:8332/
-```
+For the tip hash only, use `getbestblockhash` with the same empty parameter list.
 
 [rpc-reference.md](rpc-reference.md) is generated from the live RPC manifest and records implemented, deviating, and unimplemented methods. The node has no in-tree wallet or private-key custody; key-free descriptor/PSBT helpers remain available for external signers.
 
 ## Capability state
 
-Index-backed queries expose the owner's capability state rather than treating unavailable data as empty:
-
-- `Disabled`: not configured
-- `Opening`: inspecting durable state
-- `CatchingUp`: backfilling
-- `Ready`: watermark matches the active tip
-- `RollingBack`: reconciling a reorg
-- `Rebuilding`: selective reset/rebuild
-- `Failed`: worker stopped on an error
-- `Shutdown`: node is stopping
-
-See [contracts/indexing.md](contracts/indexing.md) for exact query gating.
+Index-backed queries expose the owner's capability state rather than treating unavailable data as empty. [contracts/indexing.md](contracts/indexing.md) owns the state vocabulary, readiness conditions, and exact query gating.
 
 ## Public consumers
 
@@ -134,7 +116,7 @@ The wallet-facing contract is [contracts/wallet-facing.md](contracts/wallet-faci
 
 ### REST
 
-`--rest` (or `rest=1`) serves Core-compatible REST on the RPC port without authentication. See [rest-interface.md](rest-interface.md).
+`--rest=true` (or `rest=1` in `bitcoin.conf`) serves Core-compatible REST on the RPC port without authentication. The CLI option takes an explicit boolean; bare `--rest` is not the enablement syntax. See [rest-interface.md](rest-interface.md).
 
 ### ZMQ
 

@@ -1,0 +1,145 @@
+name: local-relay-admission-validation
+
+on:
+  push:
+    branches: [validation/local-relay-admission-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: local-relay-admission-validation
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  relay-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: runner
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 6838258a3dbca18e78e1995cd5c274d52460167b
+          path: candidate
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: candidate -> target
+          shared-key: tx-followups
+      - name: Require assertion failure on the original relay implementation
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/relay-evidence"
+          rustc --version | tee "$RUNNER_TEMP/relay-evidence/toolchain.txt"
+          python3 -m py_compile ../runner/.github/review/relay_admission_patch.py
+          python3 ../runner/.github/review/relay_admission_patch.py tests
+          set +e
+          cargo test --locked -p bitcoin-rs-p2p --lib tx_relay::tests::delayed_local_relay_ -- --nocapture > "$RUNNER_TEMP/relay-evidence/red.log" 2>&1
+          status=$?
+          set -e
+          tail -n 120 "$RUNNER_TEMP/relay-evidence/red.log"
+          test "$status" -ne 0
+          grep -q 'test result: FAILED' "$RUNNER_TEMP/relay-evidence/red.log"
+          grep -q 'delayed_local_relay_does_not_adopt_a_reinserted_body' "$RUNNER_TEMP/relay-evidence/red.log"
+      - name: Apply the fix and require the relay regressions to pass
+        id: fixed
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ../runner/.github/review/relay_admission_patch.py fix
+          rustfmt --edition 2024 crates/mempool/src/pool.rs crates/p2p/src/tx_relay.rs
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'crates/mempool/src/pool.rs', 'crates/p2p/src/tx_relay.rs', 'docs/policies/p2p-compatibility.md'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f'unexpected change scope: {actual ^ expected}')
+          PY
+          git diff > "$RUNNER_TEMP/relay-evidence/candidate.patch"
+          cargo test --locked -p bitcoin-rs-p2p --lib tx_relay::tests -- --nocapture > "$RUNNER_TEMP/relay-evidence/relay-green.log" 2>&1
+          tail -n 100 "$RUNNER_TEMP/relay-evidence/relay-green.log"
+      - name: Publish only the source candidate on a new branch
+        id: published
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/mempool/src/pool.rs crates/p2p/src/tx_relay.rs docs/policies/p2p-compatibility.md
+          git commit -m 'fix(p2p): bind delayed local relay to the committed admission'
+          git rev-parse HEAD | tee "$RUNNER_TEMP/relay-evidence/candidate-sha.txt"
+          git ls-tree HEAD crates/mempool/src/pool.rs crates/p2p/src/tx_relay.rs docs/policies/p2p-compatibility.md | tee "$RUNNER_TEMP/relay-evidence/blobs.txt"
+          git archive HEAD | gzip > "$RUNNER_TEMP/relay-evidence/source.tar.gz"
+          git push origin HEAD:refs/heads/followup/local-relay-admission-identity
+      - name: Mempool and P2P library and protocol tests
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-mempool --lib > "$RUNNER_TEMP/relay-evidence/mempool.log" 2>&1 || status=1
+          tail -n 35 "$RUNNER_TEMP/relay-evidence/mempool.log"
+          cargo test --locked -p bitcoin-rs-p2p --lib --test core_compat > "$RUNNER_TEMP/relay-evidence/p2p.log" 2>&1 || status=1
+          tail -n 45 "$RUNNER_TEMP/relay-evidence/p2p.log"
+          exit "$status"
+      - name: Workspace strict Clippy
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee "$RUNNER_TEMP/relay-evidence/clippy-workspace.log"
+      - name: Native consensus strict Clippy
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/relay-evidence/clippy-consensus.log"
+      - name: Native node strict Clippy
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/relay-evidence/clippy-node.log"
+      - name: Real-socket ingress and owner regression gates
+        if: ${{ !cancelled() && steps.fixed.outcome == 'success' }}
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test tx_ingress_e2e > "$RUNNER_TEMP/relay-evidence/ingress.log" 2>&1 || status=1
+          tail -n 45 "$RUNNER_TEMP/relay-evidence/ingress.log"
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership > "$RUNNER_TEMP/relay-evidence/ownership.log" 2>&1 || status=1
+          tail -n 45 "$RUNNER_TEMP/relay-evidence/ownership.log"
+          cargo fmt --all -- --check > "$RUNNER_TEMP/relay-evidence/fmt.log" 2>&1 || status=1
+          tail -n 50 "$RUNNER_TEMP/relay-evidence/fmt.log"
+          git diff --exit-code || status=1
+          exit "$status"
+      - name: Preserve exact source and all execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: local-relay-admission-evidence
+          path: ${{ runner.temp }}/relay-evidence
+          retention-days: 3
+          if-no-files-found: error

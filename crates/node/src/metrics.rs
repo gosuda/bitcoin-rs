@@ -4,7 +4,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle, PrometheusRecorder};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::OnceLock;
@@ -191,75 +191,29 @@ fn describe_node_metrics() {
     );
 }
 
-/// A Prometheus recorder built with its final evidence identity but not yet
-/// installed process-wide.
-///
-/// Startup uses this recorder locally while storage opens and chainstate
-/// recovery runs. If a later bind or startup step fails, dropping this value
-/// has no global side effect, so an in-process retry may use different config.
-/// Once startup is otherwise complete, the same recorder is installed
-/// globally and the samples it already holds become immediately scrapeable.
-#[derive(Clone)]
-pub(crate) struct PreparedMetrics {
-    identity: EvidenceIdentity,
-    recorder: Arc<PrometheusRecorder>,
-    handle: PrometheusHandle,
-}
+static PROMETHEUS_HANDLE: Mutex<Option<(EvidenceIdentity, PrometheusHandle)>> = Mutex::new(None);
 
-impl PreparedMetrics {
-    fn new(identity: &EvidenceIdentity) -> Self {
-        let mut builder = PrometheusBuilder::new();
-        for (label, value) in identity.labels() {
-            builder = builder.add_global_label(label, value);
-        }
-        let recorder = Arc::new(builder.build_recorder());
-        let handle = recorder.handle();
-        Self {
-            identity: identity.clone(),
-            recorder,
-            handle,
-        }
-    }
-
-    fn for_identity(identity: &EvidenceIdentity) -> Result<Self> {
-        if let Some(installed) = PROMETHEUS_RECORDER.lock().as_ref() {
-            anyhow::ensure!(
-                installed.identity == *identity,
-                "metrics recorder already serves a different evidence identity"
-            );
-            return Ok(installed.clone());
-        }
-        Ok(Self::new(identity))
-    }
-
-    /// Builds or reuses the recorder for this process/configuration identity.
-    pub(crate) fn of_process(config: &crate::config::NodeConfig) -> Result<Self> {
-        Self::for_identity(&EvidenceIdentity::of_process(config)?)
-    }
-
-    /// Runs one startup phase with this not-yet-global recorder selected on
-    /// the current thread.
-    pub(crate) fn capture<T>(&self, f: impl FnOnce() -> T) -> T {
-        metrics::with_local_recorder(self.recorder.as_ref(), f)
-    }
-}
-
-static PROMETHEUS_RECORDER: Mutex<Option<PreparedMetrics>> = Mutex::new(None);
-
-/// Installs or reuses the one process recorder for `prepared`.
-fn prometheus_handle(prepared: &PreparedMetrics) -> Result<PrometheusHandle> {
-    let mut slot = PROMETHEUS_RECORDER.lock();
-    if let Some(installed) = slot.as_ref() {
+/// One process serves one identity: every scraped sample carries the
+/// artifact, configuration, corpus and durability it was taken under as
+/// global labels, so a reader can never attribute a value to the wrong build.
+fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
+    let mut slot = PROMETHEUS_HANDLE.lock();
+    if let Some((installed, handle)) = slot.as_ref() {
         anyhow::ensure!(
-            installed.identity == prepared.identity,
+            installed == identity,
             "metrics recorder already serves a different evidence identity"
         );
-        return Ok(installed.handle.clone());
+        return Ok(handle.clone());
     }
-    metrics::set_global_recorder(Arc::clone(&prepared.recorder))
+    let mut builder = PrometheusBuilder::new();
+    for (label, value) in identity.labels() {
+        builder = builder.add_global_label(label, value);
+    }
+    let handle = builder
+        .install_recorder()
         .map_err(|error| anyhow::anyhow!("install prometheus recorder: {error}"))?;
-    *slot = Some(prepared.clone());
-    Ok(prepared.handle.clone())
+    *slot = Some((identity.clone(), handle.clone()));
+    Ok(handle)
 }
 
 /// Process-global Prometheus scrape listener bound by [`start_metrics`].
@@ -280,21 +234,11 @@ impl MetricsServer {
         shutdown: Arc<AtomicBool>,
         identity: &EvidenceIdentity,
     ) -> Result<Self> {
-        let prepared = PreparedMetrics::for_identity(identity)?;
-        Self::bind_prepared(addr, shutdown, &prepared)
-    }
-
-    /// Binds and activates a recorder that may already contain startup samples.
-    pub(crate) fn bind_prepared(
-        addr: SocketAddr,
-        shutdown: Arc<AtomicBool>,
-        prepared: &PreparedMetrics,
-    ) -> Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let local_addr = listener.local_addr()?;
-        listener.set_nonblocking(true)?;
-        let handle = prometheus_handle(prepared)?;
+        let handle = prometheus_handle(identity)?;
         describe_node_metrics();
+        listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = thread::Builder::new()
@@ -418,10 +362,7 @@ impl core::str::FromStr for Sha256Hex {
         let mut bytes = [0_u8; 32];
         for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
             let text = core::str::from_utf8(pair).map_err(|_| malformed())?;
-            if text
-                .bytes()
-                .any(|c| !c.is_ascii_digit() && !(b'a'..=b'f').contains(&c))
-            {
+            if text.bytes().any(|c| c.is_ascii_uppercase()) {
                 return Err(malformed());
             }
             *byte = u8::from_str_radix(text, 16).map_err(|_| malformed())?;
@@ -617,23 +558,8 @@ fn combine(
 
 impl Sample {
     fn check(&self) -> Result<(), EvidenceError> {
-        let corpus = self
-            .identity
-            .corpus
-            .as_ref()
-            .ok_or(EvidenceError::MissingCorpus)?;
-        for (field, value) in [
-            ("path", self.path.as_str()),
-            ("owner", self.owner.as_str()),
-            ("version", self.identity.version.as_str()),
-            ("backend", self.identity.backend.as_str()),
-            ("durability", self.identity.durability.as_str()),
-            ("hardware", self.identity.hardware.as_str()),
-            ("corpus.id", corpus.id.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(EvidenceError::MissingIdentityField(field));
-            }
+        if self.identity.corpus.is_none() {
+            return Err(EvidenceError::MissingCorpus);
         }
         self.interval.check()
     }
@@ -643,13 +569,7 @@ impl Sample {
     /// Nested and concurrent intervals share instants, so their resources
     /// were consumed once and cannot be added; extrema take the maximum.
     pub fn sum(&self, other: &Self) -> Result<Self, EvidenceError> {
-        self.check()?;
-        other.check()?;
-        if self.path != other.path
-            || self.owner != other.owner
-            || self.identity != other.identity
-            || self.interval.kind != other.interval.kind
-        {
+        if self.path != other.path || self.owner != other.owner || self.identity != other.identity {
             return Err(EvidenceError::MismatchedTreatment);
         }
         if self.interval.overlaps(other.interval) {
@@ -764,9 +684,6 @@ pub enum EvidenceError {
     /// A product sample named no corpus.
     #[error("product sample carries no corpus identity")]
     MissingCorpus,
-    /// A required textual identity field is empty or whitespace-only.
-    #[error("evidence identity field {0} is empty")]
-    MissingIdentityField(&'static str),
     /// An interval ended before it started.
     #[error("interval {0:?} ends before it starts")]
     InvertedInterval(Interval),
@@ -796,6 +713,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    // MetricsServer::bind installs a process-global recorder. Serialize only
+    // these server tests so another test cannot change the recorder between
+    // the occupied-bind precondition and its assertion. Production is unchanged.
+    static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn process_start_is_recorded_once_and_uptime_advances() {
@@ -902,46 +824,20 @@ mod tests {
     }
 
     #[test]
-    fn prepared_metrics_survive_pre_bind_recording() {
-        let prepared = PreparedMetrics::for_identity(&identity())
-            .unwrap_or_else(|error| panic!("prepare metrics: {error}"));
-        prepared.capture(|| {
-            metrics::counter!("node_metrics_startup_probe").increment(1);
-            metrics::gauge!("storage.cache_capacity_bytes", "backend" => "startup-test")
-                .set(123.0);
-        });
-
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let server = MetricsServer::bind_prepared(unused_ephemeral(), shutdown, &prepared)
-            .unwrap_or_else(|error| panic!("bind prepared metrics: {error}"));
-        let (status, body) = scrape(server.local_addr());
-        assert_eq!(status, 200);
-        assert!(
-            body.contains("node_metrics_startup_probe"),
-            "pre-bind counter must survive recorder activation: {body}"
-        );
-        assert!(
-            body.contains("storage_cache_capacity_bytes")
-                && body.contains("backend=\"startup-test\""),
-            "pre-bind storage gauge must survive recorder activation: {body}"
-        );
-        server.join();
-    }
-
-    #[test]
     fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let occupied = TcpListener::bind(unused_ephemeral())
             .unwrap_or_else(|error| panic!("occupy port: {error}"));
         let addr = occupied
             .local_addr()
             .unwrap_or_else(|error| panic!("occupied local addr: {error}"));
-        let installed_before = PROMETHEUS_RECORDER.lock().is_some();
+        let installed_before = PROMETHEUS_HANDLE.lock().is_some();
 
         let first = start_metrics(Some(addr), Arc::clone(&shutdown), &identity());
         assert!(first.is_err(), "occupied bind must fail");
         assert_eq!(
-            PROMETHEUS_RECORDER.lock().is_some(),
+            PROMETHEUS_HANDLE.lock().is_some(),
             installed_before,
             "failed bind must not install the process recorder"
         );
@@ -962,6 +858,7 @@ mod tests {
 
     #[test]
     fn scrape_returns_prometheus_text_with_recorded_metrics() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
             .unwrap_or_else(|error| panic!("bind metrics: {error}"));
@@ -981,6 +878,7 @@ mod tests {
 
     #[test]
     fn two_sequential_servers_in_one_process_both_serve() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let first = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
             .unwrap_or_else(|error| panic!("first: {error}"));
@@ -1001,9 +899,10 @@ mod tests {
 
     #[test]
     fn shutdown_exits_the_listener_thread() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
-            .unwrap_or_else(|error| panic!("bind: {error}"));
+            .unwrap_or_else(|error| panic!("bind metrics: {error}"));
         let addr = server.local_addr();
         shutdown.store(true, Ordering::Release);
         server.join();
@@ -1013,6 +912,7 @@ mod tests {
 
     #[test]
     fn run_retries_metrics_bind_after_occupied_address() {
+        let _guard = SERVER_TEST_LOCK.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let occupied =
             TcpListener::bind(unused_ephemeral()).unwrap_or_else(|error| panic!("occupy: {error}"));

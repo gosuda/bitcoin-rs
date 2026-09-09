@@ -26,7 +26,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin_rs_rpc::compat_manifest::{ReferenceSet, reference_set};
+#[path = "../support/mod.rs"]
+mod support;
+
+use support::reference_set::{ReferenceSet, reference_set};
 
 const EXPECTED_VERSION: &str = "0.62.2";
 const MODELS: [&str; 3] = ["ChainAdmission", "PeerLeases", "ProjectionMining"];
@@ -37,6 +40,7 @@ const CONSTRAINTS: &str = "CONSTRAINTS.md";
 const JAR: &str = "lib/apalache.jar";
 const JVM_ARGS_DEFAULT: &str = "-Xmx4096m";
 const SMT_SOLVER_DEFAULT: &str = "z3";
+const SMT_ENCODING_DEFAULT: &str = "funArrays";
 const TIMEOUT_SECS: u64 = 3600;
 const OUTPUT_TAIL_BYTES: usize = 1024 * 1024;
 const OUTCOME_NO_ERROR: &str = "The outcome is: NoError";
@@ -453,6 +457,23 @@ fn execute_and_capture(
     (native_rc, stdout, stderr)
 }
 
+fn configured_smt_encoding(root: &Path) -> String {
+    let constraints =
+        fs::read_to_string(root.join(CONSTRAINTS)).expect("read canonical formal-tool configuration");
+    let prefix = "| SMT encoding | `";
+    let suffix = "` (";
+    constraints
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(prefix)?
+                .split_once(suffix)
+                .map(|(value, _)| value)
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or(SMT_ENCODING_DEFAULT)
+        .to_string()
+}
+
 fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
     let mut args = vec![
         "check".to_string(),
@@ -463,6 +484,8 @@ fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
         CheckKind::Temporal => args.push(TEMPORAL.to_string()),
     }
     args.push(LENGTH.to_string());
+    let smt_encoding = configured_smt_encoding(root);
+    args.push(format!("--smt-encoding={smt_encoding}"));
     args.push(format!("--out-dir=target/apalache/{model}"));
     args.push(format!("docs/models/{model}.tla"));
 
@@ -498,7 +521,7 @@ fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
     let mut run_text = String::new();
     run_text.push_str(&format!("# argv: {} {}\n", exe.display(), args.join(" ")));
     run_text.push_str(&format!(
-        "# env: JVM_ARGS={jvm_args} SMT_SOLVER={smt_solver}\n"
+        "# env: JVM_ARGS={jvm_args} SMT_SOLVER={smt_solver} SMT_ENCODING={smt_encoding}\n"
     ));
     run_text.push_str(&format!("# native rc: {native_rc:?}, skill rc: {skill}\n"));
     run_text.push_str(&format!(
