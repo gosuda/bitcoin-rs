@@ -737,8 +737,8 @@ impl MiningCoordinator {
         Some(BlockValidationResult::DuplicateInconclusive)
     }
 
-    /// In-process apply leaves `chain_tx_count`; checkpoint restore writes it
-    /// only on the applied tip, so applied-chain membership covers ancestors.
+    /// A non-zero count is the durable scripts-valid marker. Checkpoint
+    /// restore also restores a marker on each applied ancestor.
     fn scripts_valid(
         &self,
         tree: &BlockTree,
@@ -791,9 +791,8 @@ impl MiningCoordinator {
 
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
-        // CONTRACT: docs/contracts/external-api.md#API-21
-        // Header-only tree entries are DuplicateInconclusive and still receive
-        // the body so `submitheader` then `submitblock` works.
+        // See API-21 for duplicate and inconclusive-result semantics.
+        // Header-only entries still receive the body.
         if matches!(
             self.known_block_result(block_hash),
             Some(BlockValidationResult::Duplicate)
