@@ -275,6 +275,7 @@ pub fn write_message<W: Write + ?Sized>(
     magic: Magic,
     message: &Message,
 ) -> Result<usize, PeerError> {
+    // refused_by: statement_fold · collision: `// segment splits and per-part syscall overhead on TcpStream).`
     match message {
         Message::BlockPayload(payload) => write_framed(writer, magic, &message.command(), payload),
         other => {

@@ -27,6 +27,7 @@ use bitcoin_rs_storage::{
 
 /// Reserved capability-reset marker slot mirrored from the index crate.
 const RESET_KEY: &[u8] = &[0x00, b'R'];
+
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 
 /// Interrupted 9-byte claim from an earlier binary: mask plus process epoch,
@@ -75,6 +76,7 @@ fn stored_idle_version<S: KvStore>(store: &Arc<S>) -> Result<u64, Box<dyn std::e
         other => Err(std::io::Error::other(format!("reset state is not idle: {other:?}")).into()),
     }
 }
+
 #[derive(Default)]
 struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
@@ -385,6 +387,7 @@ impl KvSnapshot for CallTrackingSnapshot<'_> {
 struct MemoryBatch {
     ops: Vec<MemoryOp>,
 }
+
 impl MemoryBatch {
     fn put_value(&self, cf: ColumnFamily, key: &[u8]) -> Option<Vec<u8>> {
         self.ops.iter().find_map(|op| match op {
@@ -503,6 +506,7 @@ impl KvSnapshot for MemorySnapshot {
     }
 }
 
+/// CONTRACT: IDX-09 — canonical electrs row cardinality after an atomic commit.
 /// CONTRACT: IDX-06 — electrs-shaped occupancy after one atomic forward commit.
 #[test]
 fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std::error::Error>> {
@@ -1509,12 +1513,19 @@ fn interrupted_reset_resumes_after_delete_before_clear() -> Result<(), Box<dyn s
 
 /// Capability-mask bits, mirroring `IndexCapabilities::to_mask`.
 const TX_LOOKUP_MASK: u8 = 0b01;
+
 const SCRIPT_HISTORY_MASK: u8 = 0b10;
+
 const TX_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
+
 const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
+
 const LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
+
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
+
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
+
 const FORMAT_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
@@ -1660,6 +1671,7 @@ impl KvStore for ForeignFenceStore {
         // In-memory double: no persistence boundary exists to fault.
     }
 }
+
 #[test]
 fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(ForeignFenceStore {

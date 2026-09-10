@@ -75,6 +75,13 @@ ownership and cites proof under the
     matrix, and peer-visible reorg/restart behavior.
 - `crates/p2p/tests/core_interop_live.rs`: live interop lane running via
   `scripts/run-p2p-core-interop.sh` when an external `bitcoind` is provided.
+- `crates/p2p/src/counters.rs` tests
+  `a_vectored_write_counts_every_slice_the_socket_took`,
+  `a_short_vectored_write_counts_what_the_socket_took`, and
+  `write_message_through_counting_stream_stays_vectored`: a v1 frame's header
+  and payload leave as one `write_vectored`, and the wrapper counts every byte
+  the socket took (`P2P-01`). Elapsed time is
+  `crates/p2p/benches/write_message.rs`.
 - `crates/p2p/src/peer_table.rs` tests
   `note_announced_height_credits_only_the_delivering_connection` and
   `note_announced_height_raises_monotonically_and_reports_actual_updates`
