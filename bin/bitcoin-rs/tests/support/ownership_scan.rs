@@ -2,11 +2,10 @@
 //! boundaries that `cargo metadata` cannot see.
 //!
 //! The scan walks the workspace Rust sources (excluding `tests/`, `benches/`,
-//! and in-file `#[cfg(test)] mod` test modules) and fails if any production
-//! code outside `crates/mempool/src/` directly calls a mutating `Mempool`
-//! method, or acquires the pool write lock through a bypass pattern
-//! (`mempool().write(` on a raw `Arc<RwLock<Mempool>>` or `.pool().write(` on
-//! a `MempoolGateway`).
+//! and in-file test items) and fails if any production code outside
+//! `crates/mempool/src/` directly calls a mutating `Mempool` method, or acquires
+//! the pool write lock through a bypass pattern (`mempool().write(` on a raw
+//! `Arc<RwLock<Mempool>>` or `.pool().write(` on a `MempoolGateway`).
 
 use std::path::Path;
 
@@ -16,12 +15,8 @@ use std::path::Path;
 /// `gateway` or `mempool` cannot prove ownership. Every exception is therefore
 /// tied to one source file and one complete receiver expression. Adding a new
 /// production gateway mutation requires an explicit review of this list.
-const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
-    (
-        "crates/rpc/src/handlers/mining.rs",
-        "ctx.mempool",
-    ),
-];
+const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] =
+    &[("crates/rpc/src/handlers/mining.rs", "ctx.mempool")];
 
 /// Mutating methods on `Mempool` that only the mempool owner may call from
 /// production code. `MempoolGateway` deliberately reuses some of these names,
@@ -69,15 +64,19 @@ pub(crate) struct WriterScanResult {
     pub mutating_calls_found: usize,
 }
 
-/// Walks the workspace and returns any mempool-writer violations.
-pub(crate) fn scan_mempool_writer_violations() -> WriterScanResult {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut result = WriterScanResult {
+fn empty_result() -> WriterScanResult {
+    WriterScanResult {
         violations: Vec::new(),
         files_scanned: 0,
         pool_writes_found: 0,
         mutating_calls_found: 0,
-    };
+    }
+}
+
+/// Walks the workspace and returns any mempool-writer violations.
+pub(crate) fn scan_mempool_writer_violations() -> WriterScanResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut result = empty_result();
     scan_dir(&root, &mut result);
     result
 }
@@ -101,10 +100,15 @@ fn scan_dir(dir: &Path, result: &mut WriterScanResult) {
 
 fn scan_file(path: &Path, result: &mut WriterScanResult) {
     let path_str = path.to_string_lossy();
-    let is_mempool_owner = path_str.contains("/crates/mempool/src/");
     let content = std::fs::read_to_string(path).unwrap_or_default();
+    scan_source(&path_str, &content, result);
+    result.files_scanned += 1;
+}
+
+fn scan_source(path_str: &str, content: &str, result: &mut WriterScanResult) {
+    let is_mempool_owner = path_str.replace('\\', "/").contains("/crates/mempool/src/");
     let lines: Vec<&str> = content.lines().collect();
-    let mut skip_test_module = false;
+    let mut skip_test_item = false;
 
     for (index, raw_line) in lines.iter().enumerate() {
         // Strip `//`, `///`, and `//!` line comments before any other inspection.
@@ -115,13 +119,18 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
         };
         let trimmed = line.trim();
 
-        if skip_test_module {
+        if skip_test_item {
+            // Rustfmt places the closing brace of a top-level module/function
+            // at column zero. Resume scanning after it so later production
+            // items cannot hide behind an earlier test item.
+            if line == "}" {
+                skip_test_item = false;
+            }
             continue;
         }
 
-        // `#[cfg(test)]` stops scanning only when it introduces a test *module*.
-        // `#[test]` introduces a unit-test function and stops scanning from that
-        // point onward. Intervening attributes like `#[allow(...)]` are skipped.
+        // Skip a top-level inline `#[cfg(test)] mod ... { ... }`, but not a
+        // semicolon module declaration; the next production item is scanned.
         if trimmed == "#[cfg(test)]" || trimmed.starts_with("#[cfg(test)] ") {
             for next in lines.iter().skip(index + 1) {
                 let next_trimmed = next.trim();
@@ -132,15 +141,17 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
                 {
                     continue;
                 }
-                if next_trimmed.starts_with("mod ") {
-                    skip_test_module = true;
+                if next_trimmed.starts_with("mod ") && !next_trimmed.ends_with(';') {
+                    skip_test_item = true;
                 }
                 break;
             }
-            if skip_test_module {
+            if skip_test_item {
                 continue;
             }
         } else if trimmed.starts_with("#[test]") {
+            // A top-level test function is also skipped only through its own
+            // rustfmt-aligned closing brace, never to end-of-file.
             for next in lines.iter().skip(index + 1) {
                 let next_trimmed = next.trim();
                 if next_trimmed.is_empty()
@@ -151,11 +162,11 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
                     continue;
                 }
                 if next_trimmed.starts_with("fn ") {
-                    skip_test_module = true;
+                    skip_test_item = true;
                 }
                 break;
             }
-            if skip_test_module {
+            if skip_test_item {
                 continue;
             }
         }
@@ -181,7 +192,7 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
             if let Some(pos) = line.find(method) {
                 result.mutating_calls_found += 1;
                 if !is_mempool_owner
-                    && !is_authorized_gateway_call(&path_str, line, pos, &lines, index)
+                    && !is_authorized_gateway_call(path_str, line, pos, &lines, index)
                 {
                     result.violations.push(format!(
                         "raw mempool mutation `{method}` at {}:{}: {}",
@@ -193,8 +204,6 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
             }
         }
     }
-
-    result.files_scanned += 1;
 }
 
 /// Returns true only when the call is on a receiver expression explicitly
@@ -239,9 +248,10 @@ fn is_authorized_gateway_call(
 
 #[cfg(test)]
 mod tests {
-    use super::is_authorized_gateway_call;
+    use super::{empty_result, is_authorized_gateway_call, scan_source};
 
     const MINING_HANDLER: &str = "/workspace/crates/rpc/src/handlers/mining.rs";
+    const NON_OWNER: &str = "/workspace/crates/node/src/fake.rs";
 
     fn authorized(path: &str, source: &str) -> bool {
         let lines: Vec<&str> = source.lines().collect();
@@ -252,6 +262,12 @@ mod tests {
             .expect("fixture contains prioritise call");
         let method_pos = line.find("prioritise(").expect("method position");
         is_authorized_gateway_call(path, line, method_pos, &lines, line_index)
+    }
+
+    fn violations(source: &str) -> Vec<String> {
+        let mut result = empty_result();
+        scan_source(NON_OWNER, source, &mut result);
+        result.violations
     }
 
     #[test]
@@ -285,5 +301,57 @@ mod tests {
             MINING_HANDLER,
             "ctx.mempool.write().prioritise(txid, fee_delta)"
         ));
+    }
+
+    #[test]
+    fn production_after_an_inline_test_module_is_still_scanned() {
+        let source = r#"
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fixture() {
+        gateway.prioritise(txid, 1);
+    }
+}
+
+pub fn production() {
+    gateway.prioritise(txid, 2);
+}
+"#;
+        let found = violations(source);
+        assert_eq!(found.len(), 1, "test mutation is skipped, production is not");
+        assert!(found[0].contains("gateway.prioritise(txid, 2)"));
+    }
+
+    #[test]
+    fn production_after_a_top_level_test_function_is_still_scanned() {
+        let source = r#"
+#[test]
+fn fixture() {
+    mempool.prioritise(txid, 1);
+}
+
+pub fn production() {
+    mempool.prioritise(txid, 2);
+}
+"#;
+        let found = violations(source);
+        assert_eq!(found.len(), 1, "test mutation is skipped, production is not");
+        assert!(found[0].contains("mempool.prioritise(txid, 2)"));
+    }
+
+    #[test]
+    fn external_test_module_declaration_does_not_hide_following_production() {
+        let source = r#"
+#[cfg(test)]
+mod tests;
+
+pub fn production() {
+    gateway.prioritise(txid, 3);
+}
+"#;
+        let found = violations(source);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("gateway.prioritise(txid, 3)"));
     }
 }
