@@ -1,0 +1,99 @@
+name: script-parity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: script-parity-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  script-parity:
+    name: script-parity (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [native, kernel]
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+      ENGINE: ${{ matrix.engine }}
+      CARGO_TARGET_DIR: target/script-parity-${{ matrix.engine }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        id: toolchain
+        with:
+          toolchain: '1.95.0'
+          components: clippy
+      - name: Install kernel build prerequisites
+        if: matrix.engine == 'kernel'
+        run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # Separate runners and target directories keep the native candidate and
+      # kernel-enabled oracle artifacts distinct. No shared build cache here.
+      - name: Record source, toolchain, lockfile, and feature graph
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          features=()
+          if [[ "$ENGINE" == kernel ]]; then features=(--features bitcoin-rs-script/kernel); fi
+          {
+            printf 'engine=%s\npr_head=%s\ntarget_dir=%s\n' "$ENGINE" "$PR_HEAD_SHA" "$CARGO_TARGET_DIR"
+            git rev-parse HEAD
+            rustc --version --verbose
+            cargo --version
+            sha256sum Cargo.lock
+          } > evidence/identity.txt
+          cargo tree --locked -p bitcoin-rs-script --no-default-features \
+            "${features[@]}" > evidence/features.txt
+      - name: Lint primitives and script targets
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ "$ENGINE" == kernel ]]; then features=(--features bitcoin-rs-script/kernel); fi
+          cargo clippy --locked -p bitcoin-rs-primitives -p bitcoin-rs-script \
+            --no-default-features "${features[@]}" --all-targets -- -D warnings \
+            2>&1 | tee evidence/clippy.log
+      # This focused acceptance lane is independent of Apalache provisioning
+      # and the full-workspace test job. Lint failure must not hide test output.
+      - name: Run primitives and script suites
+        if: ${{ !cancelled() && steps.identity.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ "$ENGINE" == kernel ]]; then features=(--features bitcoin-rs-script/kernel); fi
+          cargo test --locked -p bitcoin-rs-primitives -p bitcoin-rs-script \
+            --no-default-features "${features[@]}" --no-fail-fast -- --nocapture \
+            2>&1 | tee evidence/tests.log
+      - name: Record built artifact identities
+        if: ${{ always() && steps.identity.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$CARGO_TARGET_DIR/debug/deps" ]]; then
+            find "$CARGO_TARGET_DIR/debug/deps" -maxdepth 1 -type f -executable -print0 \
+              | sort -z | xargs -0 -r sha256sum > evidence/executables.sha256
+          fi
+      - name: Preserve acceptance evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: script-parity-${{ matrix.engine }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 7

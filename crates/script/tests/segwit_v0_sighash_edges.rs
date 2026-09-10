@@ -328,3 +328,147 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
         }
     }
 }
+
+/// Keep an executed separator before an unexecuted separator. BIP143 drops
+/// the former prefix, but must retain the latter opcode in the signed suffix.
+fn separated_witness_script(key: &PublicKey, multisig: bool) -> Vec<u8> {
+    let mut script = vec![0xab, 0x00, 0x63, 0xab, 0x68];
+    if multisig {
+        script.push(0x51); // one signature
+    }
+    script.push(0x21);
+    script.extend_from_slice(&key.serialize());
+    if multisig {
+        // CHECKMULTISIG examines keys from the top of the stack. A valid but
+        // nonmatching last key must not trigger NULLFAIL before the first matches.
+        let other = SecretKey::from_slice(&[1; 32]).expect("public test key");
+        script.push(0x21);
+        script.extend_from_slice(&PublicKey::from_secret_key(SECP256K1, &other).serialize());
+        script.extend_from_slice(&[0x52, 0xae]);
+    } else {
+        script.push(0xac);
+    }
+    script
+}
+
+fn signed_script_witness(
+    digest: [u8; 32],
+    byte: u8,
+    script: &[u8],
+    multisig: bool,
+) -> Vec<Vec<u8>> {
+    let mut signature = SECP256K1
+        .sign_ecdsa(&Message::from_digest(digest), &test_key())
+        .serialize_der()
+        .to_vec();
+    signature.push(byte);
+    let mut witness = Vec::new();
+    if multisig {
+        witness.push(Vec::new()); // BIP147 dummy
+    }
+    witness.push(signature);
+    witness.push(script.to_vec());
+    witness
+}
+
+#[test]
+fn p2wsh_raw_hashtypes_preserve_executed_separator_suffix_and_multisig_matching() {
+    let pubkey = PublicKey::from_secret_key(SECP256K1, &test_key());
+    for multisig in [false, true] {
+        let script = separated_witness_script(&pubkey, multisig);
+        let suffix = &script[1..];
+        let mut removed_unexecuted = suffix.to_vec();
+        assert_eq!(removed_unexecuted.remove(2), 0xab);
+        let mut program = vec![0x00, 0x20];
+        program.extend_from_slice(&Sha256::digest(&script));
+        let prevout = TxOut {
+            value: VALUE,
+            script_pubkey: program,
+        };
+        for output_count in [1, 2] {
+            let (tx, oracle) = fixture(output_count);
+            for byte in 0_u8..=u8::MAX {
+                let raw = u32::from(byte);
+                let digest = reference_bip143(&oracle, INPUT, suffix, VALUE, raw);
+                let witness = signed_script_witness(digest, byte, &script, multisig);
+                assert_eq!(
+                    verify_witness(
+                        &tx,
+                        &prevout,
+                        &witness,
+                        VerifyFlags::MANDATORY.union(VerifyFlags::NULLFAIL),
+                    ),
+                    Ok(true),
+                    "P2WSH: multisig={multisig}, outputs={output_count}, raw={raw:#x}",
+                );
+                let mut wrong_amount = prevout.clone();
+                wrong_amount.value += 1;
+                assert_eq!(
+                    verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::EvalFalse,
+                    }),
+                    "P2WSH must commit to the spent amount",
+                );
+                #[cfg(feature = "kernel")]
+                kernel_witness_parity(&tx, &prevout, &witness);
+                for wrong_code in [script.as_slice(), removed_unexecuted.as_slice()] {
+                    let wrong = reference_bip143(&oracle, INPUT, wrong_code, VALUE, raw);
+                    assert_ne!(digest, wrong, "script-code mutation must change the digest");
+                    let bad = signed_script_witness(wrong, byte, &script, multisig);
+                    assert_eq!(
+                        verify_witness(&tx, &prevout, &bad, VerifyFlags::MANDATORY),
+                        Err(ScriptError::Invalid {
+                            code: ScriptErrCode::EvalFalse,
+                        }),
+                        "wrong script code: multisig={multisig}, raw={raw:#x}",
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cached_raw_sighash_matches_fresh_reference_across_inputs_and_compactsize_edges() {
+    // Populate and bypass the cached aggregates in both directions, including
+    // zero outputs, SINGLE with no matching output, and both CompactSize cutovers.
+    let raw_types = [
+        0x83, 0x82, 0x81, 0, 1, 2, 3, 0x41, 0x42, 0x43, 0x8000_0083, u32::MAX,
+    ];
+    for output_count in [0, 1, 2] {
+        let (tx, oracle) = fixture(output_count);
+        let mut cache = SighashCache::new(&tx);
+        for raw in raw_types {
+            for input in [1, 0, 1] {
+                for length in [0, 1, 252, 253, 254, 65_535, 65_536] {
+                    // This is a digest-engine test, not an executable script:
+                    // arbitrary supplied script-code bytes must be hashed verbatim.
+                    let script = vec![0xab; length];
+                    for value in [0, VALUE + 1] {
+                        let expected = reference_bip143(&oracle, input, &script, value, raw);
+                        let warm = cache
+                            .segwit_v0_signature_hash_raw(input, &script, value, raw)
+                            .expect("reused BIP143 cache");
+                        let fresh = SighashCache::new(&tx)
+                            .segwit_v0_signature_hash_raw(input, &script, value, raw)
+                            .expect("fresh BIP143 cache");
+                        assert_eq!(warm, fresh);
+                        assert_eq!(
+                            warm.as_byte_array(),
+                            &expected,
+                            "outputs={output_count}, input={input}, length={length}, raw={raw:#x}",
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            cache.segwit_v0_signature_hash_raw(usize::MAX, &[], 0, u32::MAX),
+            Err(SighashError::InputOutOfRange {
+                index: usize::MAX,
+                total: tx.inputs.len(),
+            }),
+        );
+    }
+}
