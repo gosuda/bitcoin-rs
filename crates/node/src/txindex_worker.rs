@@ -387,7 +387,7 @@ impl TxIndexWorker {
         body_store: Option<Arc<dyn BlockBodyStore>>,
         batch_limits: PreparedBatchLimits,
         enabled: IndexCapabilities,
-        chain_events: Arc<crate::state::ChainEventPublisher>,
+        chain_events: Arc<crate::state::events::ChainEventPublisher>,
         reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
         rollback_rebuild_cutover: u32,
         wake_rx: Receiver<()>,
@@ -461,7 +461,7 @@ impl TxIndexWorker {
         body_store: Option<Arc<dyn BlockBodyStore>>,
         block_source: IndexBlockSource,
         body_source: Option<Arc<dyn BlockBodySource>>,
-        chain_events: Arc<crate::state::ChainEventPublisher>,
+        chain_events: Arc<crate::state::events::ChainEventPublisher>,
         reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
         shutdown: Arc<AtomicBool>,
         wake_rx: Receiver<()>,
@@ -591,7 +591,7 @@ fn run_worker_with_open(
     body_store: Option<Arc<dyn BlockBodyStore>>,
     block_source: IndexBlockSource,
     body_source: Option<Arc<dyn BlockBodySource>>,
-    chain_events: &Arc<crate::state::ChainEventPublisher>,
+    chain_events: &Arc<crate::state::events::ChainEventPublisher>,
     reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
     shutdown: &Arc<AtomicBool>,
     wake_rx: &Receiver<()>,
@@ -707,7 +707,7 @@ fn open_and_run(
     body_store: &Option<Arc<dyn BlockBodyStore>>,
     block_source: &IndexBlockSource,
     body_source: &Option<Arc<dyn BlockBodySource>>,
-    chain_events: &Arc<crate::state::ChainEventPublisher>,
+    chain_events: &Arc<crate::state::events::ChainEventPublisher>,
     reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
     shutdown: &Arc<AtomicBool>,
     wake_rx: &Receiver<()>,
@@ -946,8 +946,8 @@ impl bitcoin_rs_index::SpentCoinScripts for UndoScripts {
 
 /// Detached publisher for test worker construction; records still sequence.
 #[cfg(test)]
-pub(crate) fn detached_chain_publisher() -> Arc<crate::state::ChainEventPublisher> {
-    Arc::new(crate::state::ChainEventPublisher::detached(0).0)
+pub(crate) fn detached_chain_publisher() -> Arc<crate::state::events::ChainEventPublisher> {
+    Arc::new(crate::state::events::ChainEventPublisher::detached(0).0)
 }
 
 /// Reporter for test worker construction that writes rollback evidence
@@ -979,7 +979,7 @@ struct Worker {
     body_store: Option<Arc<dyn BlockBodyStore>>,
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
-    chain_events: Arc<crate::state::ChainEventPublisher>,
+    chain_events: Arc<crate::state::events::ChainEventPublisher>,
     /// Sink for the index-ahead rollback evidence (`chain-rollback-event`
     /// marker plus `getblockchaininfo` warning).
     reporter: Arc<crate::recovery_evidence::RecoveryReporter>,

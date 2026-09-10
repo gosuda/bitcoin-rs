@@ -37,7 +37,7 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         coin_stats,
         mempool,
         gateway,
-        Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
+        Arc::new(bitcoin_rs_node::state::events::ChainEventPublisher::detached(0).0),
     );
     BlockSync::new(
         handles,

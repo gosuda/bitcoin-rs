@@ -49,7 +49,7 @@ use crate::{
     apply::{ApplyAdmission, UndoStore},
     checkpoint::{self, CheckpointError, CheckpointWrite},
     recovery_evidence,
-    state::ChainEventPublisher,
+    state::events::ChainEventPublisher,
 };
 
 use parking_lot::RwLock;

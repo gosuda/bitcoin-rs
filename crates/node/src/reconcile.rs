@@ -10,7 +10,7 @@
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
 
-use crate::state::ChainSnapshot;
+use crate::state::events::ChainSnapshot;
 
 /// Durable cursor length: epoch (8 LE) + sequence (8 LE) + height (4 LE) + hash.
 pub const CURSOR_BYTE_LEN: usize = 52;

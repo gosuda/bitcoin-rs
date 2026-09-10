@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::lifecycle::services::{DRAIN_DEADLINE, NodeServices, TeardownMode};
 use crate::lifecycle::startup::start_node;
-use crate::state::{ChainSnapshot, NodeState};
+use crate::state::{NodeState, events::ChainSnapshot};
 
 /// Failure at the typed node boundary.
 #[derive(Debug, Error)]

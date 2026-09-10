@@ -5,6 +5,9 @@
 //! wiring (chain / utxo / mempool
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
+/// Applied-chain event publication and durable process epochs.
+pub mod events;
+
 use anyhow::{Context as _, Result, bail};
 
 use arc_swap::ArcSwapOption;
@@ -14,7 +17,7 @@ use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 
 use bitcoin_rs_primitives::{
-    Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,
+    Block, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,
 };
 
 use bitcoin_rs_rpc::context::{
@@ -39,7 +42,6 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 
 use std::{
-    io::{self, Write as _},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -62,248 +64,12 @@ pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
 // in-flight request window (`PENDING_BUDGET` = 256) so honest delivery, which
 // wakes the drain on every block, is never throttled.
 pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
-// Bounds chain-event hints between the block-apply commit path and
-// reconciliation consumers (#77). Hints are wake-ups, never data: a consumer
-// that misses one recovers by reconciling `ChainSnapshot` against its own
-// cursor using the chain itself. The bound is single-sourced from the
-// inbound-block bound so both channels share the same flood posture; a full
-// channel drops the hint and never blocks the commit path.
-pub(crate) const CHAIN_HINT_CHANNEL_LIMIT: usize = INBOUND_BLOCK_CHANNEL_LIMIT;
 // Bounds inbound peer transactions between the per-peer listener threads and
 // the single ingress consumer. A full channel applies TCP backpressure to
 // that peer's read loop; other peers keep their own threads. Sized to absorb
 // a burst of honest `tx` deliveries without stalling header/block traffic on
 // the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
-
-/// A coherent, non-torn view of the applied chain tip.
-///
-/// The only writer replaces the whole cell under one `RwLock`, so a reader
-/// never observes a torn mix of two commit points. This is a live value: it is
-/// never persisted per-event. `epoch` changes only across process restarts,
-/// `sequence` advances once per committed connect/disconnect (`0` means no
-/// committed event yet this run), and the tip fields name the block that
-/// sequence was advanced for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainSnapshot {
-    /// Persisted process epoch, strictly monotonic per data dir.
-    pub epoch: u64,
-    /// Commit counter; starts at `1` on the first `record` of a run.
-    pub sequence: u64,
-    /// Applied tip block hash (genesis hash before the first commit).
-    pub tip_hash: Hash256,
-    /// Applied tip height (`0` at genesis).
-    pub tip_height: u32,
-}
-
-/// Which committed chain event a [`ChainEventHint`] describes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HintKind {
-    /// A block was committed onto the tip.
-    Connected,
-    /// The tip moved back to its parent during a disconnect/reorg.
-    Disconnected,
-}
-
-/// Wake-up for reconciliation consumers: one committed connect or disconnect.
-///
-/// Hints are not a replay log and carry no payload to apply. A dropped hint is
-/// not a bug — it loses only the wake-up, and the consumer recovers by
-/// reconciling a fresh [`ChainSnapshot`] against its own cursor using the
-/// chain itself: ancestry via `BlockTree::active_node_at_height` and
-/// `BlockTree::find_common_ancestor` (crates/chain), bodies via
-/// `BlockBodyStore::load_block_body` (`crate::apply`). The `epoch` field is
-/// what makes a persisted consumer cursor `(epoch, sequence)` stale on
-/// restart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainEventHint {
-    /// Whether the block was added to or removed from the tip.
-    pub kind: HintKind,
-    /// Height of the block the event committed.
-    pub height: u32,
-    /// Hash of the block the event committed.
-    pub hash: Hash256,
-    /// Process epoch the event belongs to.
-    pub epoch: u64,
-    /// Commit-counter value assigned to this event.
-    pub sequence: u64,
-}
-
-/// Single write path for chain events: [`Self::record`] advances the commit
-/// sequence, replaces the snapshot cell, then emits the hint, in that order.
-///
-/// A consumer woken by a hint therefore always reads a snapshot at least as
-/// fresh as the hint. Production wiring goes through `NodeState::open`;
-/// [`Self::detached`] exists for `Chainstate` composition in tests.
-pub struct ChainEventPublisher {
-    epoch: u64,
-    sequence: AtomicU64,
-    snapshot: RwLock<ChainSnapshot>,
-    hints: Sender<ChainEventHint>,
-}
-
-impl ChainEventPublisher {
-    fn new(epoch: u64, initial: ChainSnapshot) -> (Self, Receiver<ChainEventHint>) {
-        let (hints, receiver) = crossbeam_channel::bounded(CHAIN_HINT_CHANNEL_LIMIT);
-        (
-            Self {
-                epoch,
-                sequence: AtomicU64::new(0),
-                snapshot: RwLock::new(initial),
-                hints,
-            },
-            receiver,
-        )
-    }
-
-    /// Publisher detached from any node, for test handle composition only.
-    /// Anchors at an empty tip; records still sequence and publish normally.
-    #[must_use]
-    pub fn detached(epoch: u64) -> (Self, Receiver<ChainEventHint>) {
-        Self::new(
-            epoch,
-            ChainSnapshot {
-                epoch,
-                sequence: 0,
-                tip_hash: Hash256::from_le_bytes(&[0; 32]),
-                tip_height: 0,
-            },
-        )
-    }
-
-    /// Returns the process epoch this publisher stamps events with.
-    #[must_use]
-    pub const fn epoch(&self) -> u64 {
-        self.epoch
-    }
-
-    /// Returns the current snapshot without changing any state.
-    #[must_use]
-    pub fn snapshot(&self) -> ChainSnapshot {
-        *self.snapshot.read()
-    }
-
-    /// Records one committed connect or disconnect.
-    ///
-    /// Publication order is fixed: advance the sequence, replace the snapshot
-    /// cell, then `try_send` the hint. A full hint channel drops the hint and
-    /// never blocks or fails the commit path — consumers reconcile from the
-    /// chain, so only the wake-up is lost. Sequence values start at `1`; a
-    /// snapshot with sequence `0` means no committed event yet.
-    pub fn record(&self, kind: HintKind, height: u32, hash: Hash256) -> ChainEventHint {
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.snapshot.write() = ChainSnapshot {
-            epoch: self.epoch,
-            sequence,
-            tip_hash: hash,
-            tip_height: height,
-        };
-        let hint = ChainEventHint {
-            kind,
-            height,
-            hash,
-            epoch: self.epoch,
-            sequence,
-        };
-        let _ = self.hints.try_send(hint);
-        hint
-    }
-}
-
-const PROCESS_EPOCH_FILE: &str = "process-epoch";
-const PROCESS_EPOCH_LOCK_FILE: &str = ".process-epoch.lock";
-const PROCESS_EPOCH_TEMP: &str = ".process-epoch.tmp";
-// A u64 in decimal is at most 20 digits; the trailing newline makes 21.
-const PROCESS_EPOCH_MAX_BYTES: u64 = 32;
-
-/// Reads the persisted process epoch; `0` when the data dir has none yet.
-///
-/// A corrupt file is an error, not a reset: silently restarting the counter
-/// would let a new run reuse an epoch old consumer cursors live in.
-fn load_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
-    let bytes =
-        match crate::checkpoint_fs::read_file(dir, PROCESS_EPOCH_FILE, PROCESS_EPOCH_MAX_BYTES) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {PROCESS_EPOCH_FILE}"));
-            }
-        };
-    let text = core::str::from_utf8(&bytes)
-        .with_context(|| format!("{PROCESS_EPOCH_FILE} is not valid UTF-8"))?;
-    text.trim().parse::<u64>().with_context(|| {
-        format!("{PROCESS_EPOCH_FILE} is corrupt; refusing to start rather than reuse epochs")
-    })
-}
-
-/// Allocates the next process epoch, durably, before first use.
-///
-/// The persistent lock serializes the complete load → increment → temporary
-/// file sync → rename → data-directory sync transaction across processes.
-/// Keeping its descriptor alive through the final directory sync matters:
-/// opening the data directory does not freeze its namespace or mount topology.
-/// The epoch itself lives outside the re-writable checkpoint tree, so a
-/// checkpoint wipe or resync can never regress it. A crash before the rename
-/// may leave a temporary file; gaps are fine, but reuse is not.
-fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
-    use cap_fs_ext::FollowSymlinks;
-    use cap_fs_ext::OpenOptionsFollowExt as _;
-    use cap_fs_ext::OpenOptionsSyncExt as _;
-
-    let mut lock_options = cap_std::fs::OpenOptions::new();
-    lock_options
-        .read(true)
-        .write(true)
-        .create(true)
-        .follow(FollowSymlinks::No)
-        .nonblock(true);
-    let lock = dir
-        .open_with(PROCESS_EPOCH_LOCK_FILE, &lock_options)
-        .with_context(|| format!("open process epoch lock {PROCESS_EPOCH_LOCK_FILE}"))?;
-    let lock_metadata = lock
-        .metadata()
-        .with_context(|| format!("inspect process epoch lock {PROCESS_EPOCH_LOCK_FILE}"))?;
-    if !lock_metadata.is_file() {
-        bail!("process epoch lock {PROCESS_EPOCH_LOCK_FILE} is not a regular file");
-    }
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
-        .with_context(|| format!("lock process epoch file {PROCESS_EPOCH_LOCK_FILE}"))?;
-
-    let epoch = load_process_epoch(dir)?
-        .checked_add(1)
-        .context("process epoch counter exhausted")?;
-    let bytes = format!("{epoch}\n").into_bytes();
-    match dir.remove_file(PROCESS_EPOCH_TEMP) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("remove stale {PROCESS_EPOCH_TEMP}"));
-        }
-    }
-
-    let allocation = (|| -> Result<()> {
-        let mut file = crate::checkpoint_fs::create_file(dir, PROCESS_EPOCH_TEMP)
-            .with_context(|| format!("create {PROCESS_EPOCH_TEMP}"))?;
-        file.write_all(&bytes)
-            .with_context(|| format!("write {PROCESS_EPOCH_TEMP}"))?;
-        file.sync_all()
-            .with_context(|| format!("sync {PROCESS_EPOCH_TEMP}"))?;
-        drop(file);
-        dir.rename(PROCESS_EPOCH_TEMP, dir, PROCESS_EPOCH_FILE)
-            .with_context(|| format!("publish {PROCESS_EPOCH_FILE}"))?;
-        crate::checkpoint_fs::sync_dir(dir)
-            .context("sync data dir after allocating the process epoch")
-    })();
-    if allocation.is_err() {
-        let _ = dir.remove_file(PROCESS_EPOCH_TEMP);
-    }
-    allocation?;
-
-    // `lock` intentionally remains live until after the directory durability
-    // barrier above. Dropping it here releases the cross-process transaction.
-    drop(lock);
-    Ok(epoch)
-}
 
 struct NodeStorage {
     backend: StorageBackend,
@@ -645,7 +411,6 @@ impl BlockBodySource for StoredBlockBodySource {
             .block_body_metadata(height, hash.0)
             .ok()
             .flatten()
-
     }
 }
 
@@ -1185,8 +950,8 @@ pub struct NodeState {
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
-    chain_events: Arc<ChainEventPublisher>,
-    chain_event_hints_rx: Arc<Mutex<Receiver<ChainEventHint>>>,
+    chain_events: Arc<crate::state::events::ChainEventPublisher>,
+    chain_event_hints_rx: Arc<Mutex<Receiver<crate::state::events::ChainEventHint>>>,
     apply_handles: crate::apply::Chainstate,
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
@@ -1220,7 +985,7 @@ impl NodeState {
         })?;
         // Allocate the process epoch before anything else can consume one:
         // durable, strictly greater than every earlier run of this data dir.
-        let epoch = allocate_process_epoch(&checkpoint_data_dir)?;
+        let epoch = crate::state::events::allocate_process_epoch(&checkpoint_data_dir)?;
         let checkpoint_config = crate::checkpoint::HeaderCheckpointConfig {
             network: config.network,
             genesis: config.network.genesis_block_hash(),
@@ -1388,7 +1153,7 @@ impl NodeState {
         // Anchor the initial snapshot before `restored_applied_tip` is moved
         // into the applied-tip slot: a restored node resumes at its restored
         // tip, a fresh one at genesis, both with an untouched sequence.
-        let initial_snapshot = ChainSnapshot {
+        let initial_snapshot = crate::state::events::ChainSnapshot {
             epoch,
             sequence: 0,
             tip_hash: restored_applied_tip
@@ -1420,7 +1185,7 @@ impl NodeState {
         // Created before the txindex worker spawn: the worker mirrors this
         // publisher's snapshot into its persisted consumer cursor.
         let (chain_events_raw, chain_event_hints_rx_raw) =
-            ChainEventPublisher::new(epoch, initial_snapshot);
+            crate::state::events::ChainEventPublisher::new(epoch, initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
         let chain_transition = Arc::new(parking_lot::Mutex::new(()));
@@ -2065,20 +1830,20 @@ impl NodeState {
     /// Returns the current coherent chain snapshot: the applied tip stamped
     /// with the process epoch and the commit sequence.
     #[must_use]
-    pub fn active_chain_snapshot(&self) -> ChainSnapshot {
+    pub fn active_chain_snapshot(&self) -> crate::state::events::ChainSnapshot {
         self.chain_events.snapshot()
     }
 
     /// Returns the chain-event publisher. The apply path records committed
     /// connects/disconnects through it; consumers read the snapshot from it.
     #[must_use]
-    pub fn chain_event_publisher(&self) -> Arc<ChainEventPublisher> {
+    pub fn chain_event_publisher(&self) -> Arc<crate::state::events::ChainEventPublisher> {
         Arc::clone(&self.chain_events)
     }
 
     /// Returns the shared hint receiver handle for reconciliation consumers.
     #[must_use]
-    pub fn chain_event_hints(&self) -> Arc<Mutex<Receiver<ChainEventHint>>> {
+    pub fn chain_event_hints(&self) -> Arc<Mutex<Receiver<crate::state::events::ChainEventHint>>> {
         Arc::clone(&self.chain_event_hints_rx)
     }
 
@@ -4196,7 +3961,7 @@ mod tests {
         let epoch = state.chain_event_publisher().epoch();
         assert_eq!(
             state.active_chain_snapshot(),
-            ChainSnapshot {
+            crate::state::events::ChainSnapshot {
                 epoch,
                 sequence: 0,
                 tip_hash: config.network.genesis_block_hash(),
@@ -4256,18 +4021,18 @@ mod tests {
         let hash_a = Hash256::from_le_bytes(&[0xAA; 32]);
         let hash_b = Hash256::from_le_bytes(&[0xBB; 32]);
 
-        let first = publisher.record(HintKind::Connected, 1, hash_a);
-        let second = publisher.record(HintKind::Disconnected, 0, hash_b);
+        let first = publisher.record(crate::state::events::HintKind::Connected, 1, hash_a);
+        let second = publisher.record(crate::state::events::HintKind::Disconnected, 0, hash_b);
 
-        let expected_first = ChainEventHint {
-            kind: HintKind::Connected,
+        let expected_first = crate::state::events::ChainEventHint {
+            kind: crate::state::events::HintKind::Connected,
             height: 1,
             hash: hash_a,
             epoch,
             sequence: 1,
         };
-        let expected_second = ChainEventHint {
-            kind: HintKind::Disconnected,
+        let expected_second = crate::state::events::ChainEventHint {
+            kind: crate::state::events::HintKind::Disconnected,
             height: 0,
             hash: hash_b,
             epoch,
@@ -4282,7 +4047,7 @@ mod tests {
         );
         assert_eq!(
             state.active_chain_snapshot(),
-            ChainSnapshot {
+            crate::state::events::ChainSnapshot {
                 epoch,
                 sequence: 2,
                 tip_hash: hash_b,
@@ -4315,12 +4080,12 @@ mod tests {
         let state = NodeState::open(config, None)?;
         let publisher = state.chain_event_publisher();
         let rx = state.chain_event_hints();
-        for sequence in 1..=super::CHAIN_HINT_CHANNEL_LIMIT {
+        for sequence in 1..=crate::state::events::CHAIN_HINT_CHANNEL_LIMIT {
             let sequence = u64::try_from(sequence)?;
             let mut tip = [0_u8; 32];
             tip[..8].copy_from_slice(&sequence.to_le_bytes());
             publisher.record(
-                HintKind::Connected,
+                crate::state::events::HintKind::Connected,
                 u32::try_from(sequence)?,
                 Hash256::from_le_bytes(&tip),
             );
@@ -4330,22 +4095,22 @@ mod tests {
         // design, while the commit itself still lands and the snapshot
         // still advances. Dropping never blocks or fails the commit path.
         let overflow = publisher.record(
-            HintKind::Connected,
-            u32::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)?,
+            crate::state::events::HintKind::Connected,
+            u32::try_from(crate::state::events::CHAIN_HINT_CHANNEL_LIMIT)?,
             Hash256::from_le_bytes(&[0xFF; 32]),
         );
         assert_eq!(
             overflow.sequence,
-            u64::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)? + 1,
+            u64::try_from(crate::state::events::CHAIN_HINT_CHANNEL_LIMIT)? + 1,
             "the record itself is sequenced even when its hint is dropped"
         );
         assert_eq!(
             state.active_chain_snapshot(),
-            ChainSnapshot {
+            crate::state::events::ChainSnapshot {
                 epoch: publisher.epoch(),
                 sequence: overflow.sequence,
                 tip_hash: Hash256::from_le_bytes(&[0xFF; 32]),
-                tip_height: u32::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)?,
+                tip_height: u32::try_from(crate::state::events::CHAIN_HINT_CHANNEL_LIMIT)?,
             },
         );
 
@@ -4356,13 +4121,15 @@ mod tests {
         }
         assert_eq!(
             drained.len(),
-            super::CHAIN_HINT_CHANNEL_LIMIT,
+            crate::state::events::CHAIN_HINT_CHANNEL_LIMIT,
             "exactly the bounded hints are queued"
         );
         assert_eq!(drained[0], 1, "the oldest hint survives at the front");
         assert_eq!(
             drained.last().copied(),
-            Some(u64::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)?),
+            Some(u64::try_from(
+                crate::state::events::CHAIN_HINT_CHANNEL_LIMIT
+            )?),
             "the overflow hint is the one that was dropped"
         );
         Ok(())
@@ -4412,7 +4179,7 @@ mod tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            let epoch = super::allocate_process_epoch(&dir)?;
+            let epoch = crate::state::events::allocate_process_epoch(&dir)?;
             std::fs::write(
                 data_dir.join(format!("epoch-{}", std::process::id())),
                 format!("{epoch}\n"),

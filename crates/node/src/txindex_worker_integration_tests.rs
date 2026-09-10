@@ -46,7 +46,7 @@ struct WorkerInputs {
     shutdown: Arc<AtomicBool>,
     wake_rx: Receiver<()>,
     block_source: IndexBlockSource,
-    chain_events: Arc<crate::state::ChainEventPublisher>,
+    chain_events: Arc<crate::state::events::ChainEventPublisher>,
 }
 
 fn build_worker_inputs(dir: &std::path::Path, epoch: u64) -> WorkerInputs {

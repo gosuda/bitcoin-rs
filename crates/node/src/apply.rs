@@ -452,7 +452,7 @@ pub struct Chainstate {
     /// from the weak registry. The raw `mempool` field stays for read-only
     /// node code that still needs the pool.
     pub(crate) mempool_gateway: Arc<MempoolGateway>,
-    pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
+    pub(crate) chain_events: Arc<crate::state::events::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn BlockBodyStore>>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
     pub(crate) admission: Arc<ApplyAdmission>,
@@ -870,7 +870,7 @@ impl Chainstate {
         coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
         mempool: Arc<RwLock<Mempool>>,
         mempool_gateway: Arc<MempoolGateway>,
-        chain_events: Arc<crate::state::ChainEventPublisher>,
+        chain_events: Arc<crate::state::events::ChainEventPublisher>,
     ) -> Self {
         Self {
             network,
@@ -1117,7 +1117,7 @@ pub(crate) fn disconnect_block_admitted(
             .applied_tip
             .store(Some(Arc::new(parent_tip.clone())));
         handles.chain_events.record(
-            crate::state::HintKind::Disconnected,
+            crate::state::events::HintKind::Disconnected,
             parent_tip.height,
             parent_tip.hash,
         );
@@ -2517,9 +2517,11 @@ fn apply_block_admitted<'b>(
     {
         let _publication = begin_applied_publication(handles);
         handles.applied_tip.store(Some(Arc::new(tip.clone())));
-        handles
-            .chain_events
-            .record(crate::state::HintKind::Connected, tip.height, tip.hash);
+        handles.chain_events.record(
+            crate::state::events::HintKind::Connected,
+            tip.height,
+            tip.hash,
+        );
         advance_chain_tx_count(handles, height, tx_count_delta_for(block));
     }
     let (txids, raw_txs) = scratch.into_payloads();
@@ -7286,7 +7288,7 @@ mod consensus_rule_tests {
             None,
             crate::txindex_worker::DEFAULT_BATCH_LIMITS,
             bitcoin_rs_index::IndexCapabilities::HISTORICAL,
-            Arc::new(crate::state::ChainEventPublisher::detached(0).0),
+            Arc::new(crate::state::events::ChainEventPublisher::detached(0).0),
             crate::txindex_worker::test_recovery_reporter(evidence_dir.path()).0,
             u32::MAX,
             wake_rx,
@@ -9665,7 +9667,7 @@ mod consensus_rule_tests {
             )),
             mempool,
             mempool_gateway,
-            Arc::new(crate::state::ChainEventPublisher::detached(0).0),
+            Arc::new(crate::state::events::ChainEventPublisher::detached(0).0),
         )
     }
 

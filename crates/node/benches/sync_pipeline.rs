@@ -1203,7 +1203,7 @@ fn apply_handles(
         coin_stats,
         mempool,
         mempool_gateway,
-        Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
+        Arc::new(bitcoin_rs_node::state::events::ChainEventPublisher::detached(0).0),
     )
 }
 
