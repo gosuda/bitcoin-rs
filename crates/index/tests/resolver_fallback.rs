@@ -6,7 +6,9 @@ mod common;
 use std::sync::Arc;
 
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
-use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash, ScriptHashRow, ScriptHistoryEntry};
+use bitcoin_rs_index::{
+    BlockSource, IndexWriter, Indexer, ScriptHash, ScriptHashRow, ScriptHistoryEntry,
+};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, varint,
 };
@@ -14,7 +16,7 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore as _, WriteBatch as _};
 
 use common::MemoryStore;
 
-const HEIGHT: u32 = 100;
+const HEIGHT: u32 = 0;
 
 struct FixtureSource {
     block: Block,
@@ -93,8 +95,8 @@ fn eight_byte_prefix_collision_resolves_full_script_identity()
     let target = ScriptHash::from_script_bytes(&target_script);
     let row = ScriptHashRow::row(target, HEIGHT).to_db_row();
     let store = Arc::new(MemoryStore::default());
-    let mut indexer = Indexer::new(Arc::clone(&store));
-    indexer.ingest_block(&bytes, HEIGHT)?;
+    IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes)?;
+    let indexer = Indexer::new(Arc::clone(&store));
 
     // A real eight-byte collision makes the writer merge both valid positions
     // under one row key. Model that persisted result directly; unlike the

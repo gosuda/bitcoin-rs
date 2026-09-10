@@ -111,6 +111,13 @@ impl MiningControl for SmokeMiningControl {
     }
 
     fn publish_generation(&self) {}
+
+    fn generate(
+        &self,
+        _request: bitcoin_rs_mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Unavailable("not wired".into()))
+    }
 }
 
 #[test]
@@ -558,11 +565,13 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
     let peer_table = Arc::new(PeerTable::new());
     let info = PeerInfo {
+        wtxid_relay: false,
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         version: 70016,
         services: 0,
         user_agent: "/bitcoin-rs:0.1.0/".to_string(),
         start_height: 0,
+        best_known_height: 0,
         conn_time: 0,
         inbound: true,
         addr_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),

@@ -172,6 +172,10 @@ pub struct PackageAcceptanceFacts {
     pub results: Vec<TxAcceptanceFact>,
 }
 
+/// Per-transaction relay sigop limit: one fifth of the block limit,
+/// matching Core v31.1's `MAX_STANDARD_TX_SIGOPS_COST`.
+pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
+
 /// Policy rejection reason for dry-run package acceptance.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AcceptanceRejectReason {
@@ -199,6 +203,9 @@ pub enum AcceptanceRejectReason {
     /// Transaction exceeds ancestor or descendant package limits.
     #[error(transparent)]
     PackageLimit(#[from] PolicyError),
+    /// Prevout-aware sigop cost exceeds the per-transaction relay limit.
+    #[error("too-many-sigops")]
+    TooManySigops,
     /// Next-block BIP68 relative sequence locks are unmet.
     #[error("non-BIP68-final")]
     NonBip68Final,
@@ -278,56 +285,11 @@ pub fn evaluate_package_acceptance(
     }
 }
 
-/// Evaluates all transactions in a package without stopping after the first
-/// rejection. Each row gets its own independent verdict.
-///
-/// This is the `testmempoolaccept` form: it reports every row's acceptance
-/// status, including rows after an earlier rejected row.
-#[must_use]
-pub fn evaluate_package_acceptance_all(
-    pool: &Mempool,
-    policy: &StandardnessPolicy,
-    txs: &[Tx],
-    contexts: &[PackageTxContext],
-    max_feerate_sat_per_kvb: Option<u64>,
-    incremental_relay_fee_sat_per_kvb: u64,
-) -> PackageAcceptanceFacts {
-    assert_eq!(
-        txs.len(),
-        contexts.len(),
-        "package txs and contexts must align"
-    );
-
-    if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
-        return PackageAcceptanceFacts {
-            package_error: Some(AcceptanceRejectReason::PackageTooLarge),
-            results: Vec::new(),
-        };
-    }
-
-    let mempool_min_fee =
-        crate::eviction::mempool_min_fee_sat_per_kvb(pool, incremental_relay_fee_sat_per_kvb);
-
-    let results = txs
-        .iter()
-        .zip(contexts.iter())
-        .map(|(tx, context)| {
-            evaluate_one(
-                pool,
-                policy,
-                tx,
-                *context,
-                max_feerate_sat_per_kvb,
-                mempool_min_fee,
-                incremental_relay_fee_sat_per_kvb,
-            )
-        })
-        .collect();
-
-    PackageAcceptanceFacts {
-        package_error: None,
-        results,
-    }
+/// Caller fee guard shared by policy-only evaluation and verified admission.
+/// Callers choose its place in their contract; the rate arithmetic remains
+/// owned by the same helper that computes mempool entry fee rates.
+pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) -> bool {
+    maximum.is_some_and(|max| crate::entry::fee_rate(fee, u64::from(vsize)) > max)
 }
 
 pub(crate) fn evaluate_one(
@@ -343,11 +305,7 @@ pub(crate) fn evaluate_one(
     let wtxid = tx.wtxid();
     let weight = tx.weight();
     let vsize = context.vsize;
-    let fee_rate = if vsize == 0 {
-        0
-    } else {
-        context.fee.saturating_mul(1_000) / u64::from(vsize)
-    };
+    let fee_rate = crate::entry::fee_rate(context.fee, u64::from(vsize));
 
     let reject = if pool.contains_txid(&txid) {
         Some(AcceptanceRejectReason::AlreadyInMempool)
@@ -357,7 +315,7 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::NonStandard(err))
     } else if fee_rate < mempool_min_fee_sat_per_kvb {
         Some(AcceptanceRejectReason::MinRelayFeeNotMet)
-    } else if max_feerate_sat_per_kvb.is_some_and(|max| fee_rate > max) {
+    } else if exceeds_max_feerate(context.fee, vsize, max_feerate_sat_per_kvb) {
         Some(AcceptanceRejectReason::MaxFeeExceeded)
     } else {
         let candidate = ReplacementCandidate::new(
@@ -1071,30 +1029,5 @@ mod tests {
             Some(AcceptanceRejectReason::MissingInputs),
             "coinbase maps to MissingInputs"
         );
-    }
-
-    #[test]
-    fn package_acceptance_all_evaluates_after_rejection() {
-        let pool = crate::Mempool::new(crate::MempoolLimits::default());
-        let first = standard_tx(1);
-        let second = standard_tx(2);
-        let facts = evaluate_package_acceptance_all(
-            &pool,
-            &policy(),
-            &[first, second.clone()],
-            &[ctx(1_000, 100, true), ctx(1_000, 100, false)],
-            None,
-            1_000,
-        );
-        assert_eq!(
-            facts.results[0].reject_reason,
-            Some(AcceptanceRejectReason::MissingInputs)
-        );
-        assert_eq!(
-            facts.results[1].allowed,
-            Some(true),
-            "evaluate-all must still evaluate the second row after the first rejects"
-        );
-        assert_eq!(facts.results[1].txid, second.txid());
     }
 }

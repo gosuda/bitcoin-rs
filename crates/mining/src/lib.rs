@@ -16,10 +16,11 @@ pub use coinbase::{MiningError, WITNESS_RESERVED_VALUE, witness_commitment_scrip
 pub use context::{MiningChainContext, check_candidate_header};
 pub use control::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, LastCandidateInfo, MiningCapability, MiningControl,
-    MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation,
-    difficulty_for_bits,
+    BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
+    GeneratedBlock, LastCandidateInfo, MiningCapability, MiningControl, MiningControlError,
+    MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation, difficulty_for_bits,
 };
 pub use template::{
     Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,
+    assemble_ordered_candidate, solve_block,
 };

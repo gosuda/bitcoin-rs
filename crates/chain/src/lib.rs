@@ -28,7 +28,9 @@ pub use block_body::{BlockBodyMetadata, BlockBodySource};
 pub use deployment::{
     SignallingDeployment, candidate_version, signalling_deployments, softfork_state,
 };
-pub use header_sync::{accept_headers, current_unix_seconds, validate_header_timestamp};
+pub use header_sync::{
+    accept_headers, compact_is_met_by, current_unix_seconds, validate_header_timestamp,
+};
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use reorg::{ReorgPlan, plan_reorg};
 pub use tip::TipSnapshot;

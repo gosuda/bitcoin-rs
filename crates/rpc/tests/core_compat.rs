@@ -345,6 +345,13 @@ impl MiningControl for CompatMiningControl {
 
     fn publish_generation(&self) {}
 
+    fn generate(
+        &self,
+        _request: bitcoin_rs_mining::GenerateRequest,
+    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+        Err(MiningControlError::Unavailable("not wired".into()))
+    }
+
     fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
         Ok(self.mining_info()?.network_hashes_per_second)
     }

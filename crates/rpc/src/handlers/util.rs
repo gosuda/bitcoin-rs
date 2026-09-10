@@ -111,10 +111,10 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
     crate::handlers::ensure_no_params(params)?;
     let notifications = ctx
         .zmq_notifications()
-        .iter()
+        .into_iter()
         .map(|notification| v31::GetZmqNotifications {
-            type_: notification.notification_type.to_string(),
-            address: notification.address.clone(),
+            type_: notification.topic.notifier_type().to_string(),
+            address: notification.endpoint,
             hwm: u64::from(notification.hwm),
         })
         .collect::<Vec<_>>();
@@ -208,10 +208,10 @@ pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     // Optional here, as in Core: `Parse` is called without `require_checksum`,
     // so a bare descriptor is analysed and one carrying a checksum has it
     // checked.
-    let checksum = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
+    let (payload, checksum) = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
 
-    let info = analyse(descriptor, convert::bitcoin_network(ctx.chain_network))
-        .map_err(descriptor_error)?;
+    let info =
+        analyse(payload, convert::bitcoin_network(ctx.chain_network)).map_err(descriptor_error)?;
 
     typed_to_sonic_omitting_nulls(&v31::GetDescriptorInfo {
         // The canonical form comes from the parse, so a descriptor handed to this
@@ -248,19 +248,16 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     // addresses are what someone will send money to; a mistyped descriptor
     // derives perfectly good addresses that nobody holds the keys for, and the
     // checksum is the only thing between a typo and that.
-    let _checksum = checked_checksum(descriptor, ChecksumRequirement::Required)?;
+    let (payload, _checksum) = checked_checksum(descriptor, ChecksumRequirement::Required)?;
     let range = array
         .get(1)
         .filter(|value| !value.is_null())
         .map(parse_derivation_range)
         .transpose()?;
 
-    let expansions = derive_descriptor_addresses(
-        descriptor,
-        convert::bitcoin_network(ctx.chain_network),
-        range,
-    )
-    .map_err(descriptor_error)?;
+    let expansions =
+        derive_descriptor_addresses(payload, convert::bitcoin_network(ctx.chain_network), range)
+            .map_err(descriptor_error)?;
 
     // Core returns a flat array for a single-path descriptor and an array per
     // expansion for a multipath one.
@@ -312,9 +309,13 @@ pub(crate) enum ChecksumRequirement {
     Required,
 }
 
-/// Verifies a descriptor's checksum and returns the computed one.
+/// Verifies a descriptor's checksum and returns the body plus the computed sum.
 ///
 /// Bitcoin Core's `CheckChecksum` in `script/descriptor.cpp`, rule for rule.
+/// Callers parse the returned payload. `combo(` / `addr(` / `raw(` look for a
+/// trailing `)`, so the original `desc#checksum` string is not a descriptor
+/// body.
+///
 /// The previous implementation split the text on its last `#` and threw the
 /// supplied checksum away, which meant a *wrong* checksum was accepted and
 /// silently replaced with the right one in the response. The checksum exists to
@@ -330,41 +331,49 @@ pub(crate) enum ChecksumRequirement {
 fn checked_checksum(
     descriptor: &str,
     requirement: ChecksumRequirement,
-) -> Result<String, RpcError> {
+) -> Result<(&str, String), RpcError> {
+    checksummed_payload(descriptor, requirement).map_err(RpcError::InvalidAddressOrKey)
+}
+
+/// Splits an optional BIP380 checksum and verifies it when present.
+///
+/// Returns the descriptor body and the computed checksum. A supplied checksum
+/// may be omitted when `requirement` is [`ChecksumRequirement::Optional`], but
+/// a present checksum is always checked.
+fn checksummed_payload(
+    descriptor: &str,
+    requirement: ChecksumRequirement,
+) -> Result<(&str, String), String> {
     let mut parts = descriptor.split('#');
     let Some(payload) = parts.next() else {
-        return Err(RpcError::InvalidAddressOrKey(
-            "Invalid characters in payload".to_owned(),
-        ));
+        return Err("Invalid characters in payload".to_owned());
     };
     let supplied = parts.next();
     if parts.next().is_some() {
-        return Err(RpcError::InvalidAddressOrKey(
-            "Multiple '#' symbols".to_owned(),
-        ));
+        return Err("Multiple '#' symbols".to_owned());
     }
     if supplied.is_none() && requirement == ChecksumRequirement::Required {
-        return Err(RpcError::InvalidAddressOrKey("Missing checksum".to_owned()));
+        return Err("Missing checksum".to_owned());
     }
     if let Some(supplied) = supplied
         && supplied.len() != 8
     {
-        return Err(RpcError::InvalidAddressOrKey(format!(
+        return Err(format!(
             "Expected 8 character checksum, not {} characters",
             supplied.len()
-        )));
+        ));
     }
 
-    let computed = descriptor_checksum(payload)
-        .ok_or_else(|| RpcError::InvalidAddressOrKey("Invalid characters in payload".to_owned()))?;
+    let computed =
+        descriptor_checksum(payload).ok_or_else(|| "Invalid characters in payload".to_owned())?;
     if let Some(supplied) = supplied
         && supplied != computed
     {
-        return Err(RpcError::InvalidAddressOrKey(format!(
+        return Err(format!(
             "Provided checksum '{supplied}' does not match computed checksum '{computed}'"
-        )));
+        ));
     }
-    Ok(computed)
+    Ok((payload, computed))
 }
 
 /// Bitcoin Core's `ParseDescriptorRange`: an end, or an inclusive `[begin,end]`.
@@ -488,6 +497,8 @@ impl core::fmt::Display for DescriptorError {
 /// material back separately, and this function keeps only the fact that there
 /// was some. Echoing the caller's text back would return an `xprv` to whoever
 /// asked, which is the one thing this call must not do.
+///
+/// `text` is the descriptor body after checksum verification (no `#checksum`).
 fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, DescriptorError> {
     if let Some(key) = parse_combo(text)? {
         let combo = parse_combo_info(key, network)?;
@@ -533,7 +544,7 @@ fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, Desc
         // and Core reports them as the unsolvable ones they are rather than
         // refusing the question -- but it still checks that what is inside the
         // brackets is an address or a script, and so does this.
-        Err(error) => match parse_unspendable(strip_checksum(text)) {
+        Err(error) => match parse_unspendable(text) {
             Some(unspendable) => {
                 let unspendable = unspendable?;
                 if let Unspendable::Address(address) = &unspendable {
@@ -556,8 +567,7 @@ fn analyse(text: &str, network: bitcoin::Network) -> Result<DescriptorInfo, Desc
 }
 
 fn parse_combo(text: &str) -> Result<Option<&str>, DescriptorError> {
-    let body = strip_checksum(text);
-    if let Some(key) = body
+    if let Some(key) = text
         .strip_prefix("combo(")
         .and_then(|s| s.strip_suffix(')'))
     {
@@ -655,7 +665,7 @@ fn require_range_match(
 ///
 /// The outer vector is one entry per multipath expansion, in specifier order;
 /// a single-path descriptor yields exactly one. `range` is inclusive at both
-/// ends, matching Bitcoin Core.
+/// ends, matching Bitcoin Core. `text` is the checksum-verified descriptor body.
 fn derive_descriptor_addresses(
     text: &str,
     network: bitcoin::Network,
@@ -672,7 +682,7 @@ fn derive_descriptor_addresses(
     }
 
     // An `addr()` or `raw()` descriptor has exactly one output and no range.
-    if let Some(unspendable) = parse_unspendable(strip_checksum(text)) {
+    if let Some(unspendable) = parse_unspendable(text) {
         if range.is_some() {
             return Err(DescriptorError::Range(
                 "Range should not be specified for an un-ranged descriptor",
@@ -905,9 +915,105 @@ fn parse_unspendable(text: &str) -> Option<Result<Unspendable, DescriptorError>>
     )
 }
 
-/// Drops a trailing `#checksum`, which is not part of the descriptor body.
-fn strip_checksum(text: &str) -> &str {
-    text.rsplit_once('#').map_or(text, |(body, _)| body)
+/// Coinbase script for `generateblock`'s `output` argument (`API-05`).
+pub(crate) fn generateblock_payout_script(
+    text: &str,
+    network: bitcoin::Network,
+) -> Result<Vec<u8>, RpcError> {
+    match script_from_descriptor(text, network) {
+        Ok(script) => Ok(script),
+        Err(error @ DescriptorError::Range(_)) => Err(descriptor_error(error)),
+        Err(error) => {
+            match payout_script_from_address(text, network, "Error: Invalid address or script") {
+                Ok(script) => Ok(script),
+                Err(_) => Err(descriptor_error(error)),
+            }
+        }
+    }
+}
+
+/// Network-valid address script, with no descriptor or raw-script fallback.
+pub(crate) fn payout_script_from_address(
+    text: &str,
+    network: bitcoin::Network,
+    invalid_message: &'static str,
+) -> Result<Vec<u8>, RpcError> {
+    let unchecked = bitcoin::Address::from_str(text)
+        .map_err(|_| RpcError::InvalidAddressOrKey(invalid_message.to_owned()))?;
+    let address = unchecked
+        .require_network(network)
+        .map_err(|_| RpcError::InvalidAddressOrKey(invalid_message.to_owned()))?;
+    Ok(address.script_pubkey().as_bytes().to_vec())
+}
+
+fn script_from_descriptor(
+    text: &str,
+    network: bitcoin::Network,
+) -> Result<Vec<u8>, DescriptorError> {
+    let (payload, _) =
+        checksummed_payload(text, ChecksumRequirement::Optional).map_err(DescriptorError::Parse)?;
+    if let Some(key) = parse_combo(payload)? {
+        return combo_payout_script(key, network);
+    }
+
+    if let Some(unspendable) = parse_unspendable(payload) {
+        return match unspendable? {
+            Unspendable::Address(address) => {
+                let address = address
+                    .require_network(network)
+                    .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+                Ok(address.script_pubkey().as_bytes().to_vec())
+            }
+            Unspendable::Raw(script) => Ok(script.as_bytes().to_vec()),
+        };
+    }
+
+    let checksummed = descriptor_text_with_optional_checksum(payload)?;
+    let secp = bitcoin::secp256k1::Secp256k1::signing_only();
+    let (descriptor, keys) =
+        MiniscriptDescriptor::<DescriptorPublicKey>::parse_descriptor(&secp, &checksummed)
+            .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    if descriptor.has_wildcard() || descriptor.is_multipath() {
+        return Err(ranged_descriptor_rejected());
+    }
+    ensure_keys_match_network(&descriptor, network)?;
+    ensure_secret_keys_match_network(keys, network)?;
+    let derived = descriptor
+        .at_derivation_index(0)
+        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    Ok(derived.script_pubkey().as_bytes().to_vec())
+}
+
+fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, DescriptorError> {
+    let combo = parse_combo_info(key, network)?;
+    if combo.is_range || combo.paths.len() != 1 {
+        return Err(ranged_descriptor_rejected());
+    }
+    let path = combo
+        .paths
+        .first()
+        .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
+    let derived = path
+        .at_derivation_index(0)
+        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+    // Core's combo Expand emits P2PK first and generateblock uses scripts[0].
+    let pk = MiniscriptDescriptor::new_pk(combo_key(&derived)?);
+    Ok(pk.script_pubkey().as_bytes().to_vec())
+}
+
+fn ranged_descriptor_rejected() -> DescriptorError {
+    DescriptorError::Range(
+        "Ranged descriptor not accepted. Maybe pass through deriveaddresses first?",
+    )
+}
+
+fn descriptor_text_with_optional_checksum(text: &str) -> Result<String, DescriptorError> {
+    if text.contains('#') {
+        return Ok(text.to_owned());
+    }
+    let checksum = descriptor_checksum(text)
+        .ok_or_else(|| DescriptorError::Parse("Invalid descriptor".into()))?;
+    Ok(format!("{text}#{checksum}"))
 }
 
 const BIP380_INPUT_CHARSET: &str = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ ";
@@ -1101,9 +1207,22 @@ mod tests {
     fn getzmqnotifications_returns_active_metadata() {
         use alloc::sync::Arc;
 
-        let ctx = Arc::new(Context::new().with_zmq_notifications(vec![
-            crate::context::ZmqNotification::new("pubhashblock", "tcp://127.0.0.1:28332", 7),
-        ]));
+        #[derive(Debug)]
+        struct NotifierPublisher;
+        impl crate::zmq::ZmqPublisher for NotifierPublisher {
+            fn active_notifiers(&self) -> Vec<crate::zmq::ZmqNotifier> {
+                vec![crate::zmq::ZmqNotifier {
+                    topic: crate::zmq::ZmqTopic::HashBlock,
+                    endpoint: "tcp://127.0.0.1:28332".to_string(),
+                    hwm: 7,
+                }]
+            }
+            fn publish_hashblock(&self, _hash: bitcoin_rs_primitives::Hash256) {}
+            fn publish_hashtx(&self, _txid: bitcoin_rs_primitives::Txid) {}
+            fn publish_rawblock(&self, _bytes: &[u8]) {}
+            fn publish_rawtx(&self, _bytes: &[u8]) {}
+        }
+        let ctx = Arc::new(Context::new().with_zmq_publisher(Arc::new(NotifierPublisher)));
         let result = getzmqnotifications(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -1483,6 +1602,22 @@ mod descriptor_checksum_tests {
         );
     }
 
+    /// A supplied checksum is verified, then the body is analysed. `combo` is
+    /// not miniscript, so the parser must see `combo(KEY)` and not `combo(KEY)#sum`.
+    #[test]
+    fn checksummed_combo_is_analysed() {
+        let ctx = Arc::new(Context::new());
+        let key = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+        let bare = format!("combo({key})");
+        let checksum =
+            descriptor_checksum(&bare).unwrap_or_else(|| panic!("{bare} must have a checksum"));
+        let without = getdescriptorinfo(&ctx, &json!([bare]))
+            .unwrap_or_else(|err| panic!("bare combo must analyse: {err}"));
+        let with = getdescriptorinfo(&ctx, &json!([format!("{bare}#{checksum}")]))
+            .unwrap_or_else(|err| panic!("checksummed combo must analyse: {err}"));
+        assert_eq!(without, with);
+    }
+
     /// Core's `getdescriptorinfo` expands a multipath descriptor into one
     /// entry per path and returns the first as `descriptor`.
     #[test]
@@ -1567,7 +1702,6 @@ mod descriptor_checksum_tests {
 #[cfg(test)]
 mod deriveaddresses_tests {
     use alloc::sync::Arc;
-    use sonic_rs::JsonContainerTrait as _;
 
     use super::*;
 

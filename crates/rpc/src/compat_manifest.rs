@@ -21,6 +21,9 @@
 //! (e.g. `deriveaddresses` refuses ranged descriptors with a stable
 //! `MethodDisabled` error). No whole method is disabled: methods this node
 //! does not expose are absent from the manifest and answer `-32601`.
+//!
+//! Reference identity parsing and custody validation are owned by
+//! `bin/bitcoin-rs/tests/support/reference_set.rs`.
 
 /// The manifest source, embedded so it cannot drift from the binary.
 pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
@@ -229,7 +232,7 @@ mod tests {
             .map(|entry| field(entry, "method"))
             .collect();
 
-        for method in ["getwalletinfo", "listunspent", "generatetoaddress"] {
+        for method in ["getwalletinfo", "listunspent", "generate"] {
             assert!(
                 !listed.contains(&method.to_owned()),
                 "this test needs a method the manifest does not list; `{method}` is listed"

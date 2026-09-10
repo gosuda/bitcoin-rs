@@ -6,30 +6,41 @@
 //! validation path without persistence; solved-block submission returns only
 //! after validation, persistence, and chain-state application complete.
 
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use core::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use alloc::{collections::VecDeque, sync::Arc};
 
 use arc_swap::ArcSwapOption;
+
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
-use bitcoin_rs_mempool::{Mempool, MempoolObserver, MutationEnvelope};
+
+use bitcoin_rs_mempool::{
+    Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
+};
+
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
-    BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, LastCandidateInfo,
-    MiningCapability, MiningChainContext, MiningControl, MiningControlError, MiningInfo,
-    MiningRule, SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate,
+    BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, GenerateRequest,
+    GenerateSelection, GenerateTx, GeneratedBlock, LastCandidateInfo, MiningCapability,
+    MiningChainContext, MiningControl, MiningControlError, MiningInfo, MiningRule,
+    SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network};
+
+use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
+
 use compact_str::CompactString;
+
+use core::time::Duration;
+
+use crate::{ApplyError, apply::Chainstate, chain_effects::ChainFollowers};
+
 use hashbrown::HashMap;
+
 use parking_lot::{Condvar, Mutex, RwLock};
 
-use crate::ApplyError;
-use crate::apply::{self, Chainstate};
-use crate::chain_effects::ChainFollowers;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -538,6 +549,107 @@ impl MiningCoordinator {
         Ok(Arc::new(candidate))
     }
 
+    fn assemble_fresh(
+        &self,
+        payout: &[u8],
+        selection: &GenerateSelection,
+    ) -> Result<Candidate, MiningControlError> {
+        let tip = self.applied_tip.load_full().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        let snapshot = {
+            let mempool = self.mempool.read();
+            snapshot_for_selection(&mempool, selection)?
+        };
+        let current_time = Self::current_time_secs().max(1);
+        let chain = {
+            let tree = self.block_tree.read();
+            MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time).map_err(
+                |error| MiningControlError::Failed(CompactString::from(error.to_string())),
+            )?
+        };
+        let context = CandidateContext {
+            previous_block_hash: chain.previous_block_hash,
+            height: chain.height,
+            version: chain.version,
+            bits: chain.bits,
+            min_time: chain.min_time,
+            current_time: current_time.max(chain.min_time),
+            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
+            network: self.network,
+            csv_active: chain.csv_active,
+            segwit_active: chain.segwit_active,
+            max_weight: MAX_BLOCK_WEIGHT,
+            max_size: MAX_BLOCK_SIZE,
+            max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
+        };
+        match selection {
+            GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
+            GenerateSelection::Ordered(_) => {
+                assemble_ordered_candidate(&context, &snapshot, payout)
+            }
+        }
+        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+    }
+
+    /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
+    ///
+    /// Each submitted block is applied through `apply::apply_block` before the
+    /// next iteration; that is the commit point (`ARCH-07`). Failure after *N*
+    /// accepted submissions leaves those *N* blocks durable at the applied tip.
+    /// `submit = false` dry-validates through `apply::validate_block` and does
+    /// not persist. The result vector grows one block at a time, so `count` cannot
+    /// force a large allocation up front. Callers own retry after inspecting the
+    /// tip. [`MiningControlError::InvalidRequest`] is not retriable without
+    /// changing the request; `Unavailable` and `Failed` may be retried.
+    fn generate_blocks(
+        &self,
+        request: &GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        if request.count == 0 {
+            return Ok(Vec::new());
+        }
+        if !request.submit && request.count != 1 {
+            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                "submit=false requires nblocks=1",
+            )));
+        }
+        let mut generated = Vec::new();
+        for _ in 0..request.count {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
+            let block = candidate.solve(request.max_tries).map_err(|error| {
+                MiningControlError::Failed(CompactString::from(error.to_string()))
+            })?;
+            if request.submit {
+                match self.submit(&block)? {
+                    BlockValidationResult::Accepted => {}
+                    other => {
+                        return Err(MiningControlError::Failed(CompactString::from(format!(
+                            "generated block was not accepted: {other:?}"
+                        ))));
+                    }
+                }
+            } else {
+                let validation = self.propose(&block);
+                if validation != BlockValidationResult::Accepted {
+                    return Err(MiningControlError::Failed(CompactString::from(format!(
+                        "generated block failed validation: {validation:?}"
+                    ))));
+                }
+            }
+            generated.push(GeneratedBlock {
+                hash: block.block_hash(),
+                hex: hex_encode(&consensus_bytes(&block)),
+            });
+        }
+        Ok(generated)
+    }
+
     fn template_from_candidate(
         network: Network,
         candidate: Arc<Candidate>,
@@ -615,7 +727,7 @@ impl MiningCoordinator {
     }
 
     fn propose(&self, block: &Block) -> BlockValidationResult {
-        match apply::validate_block(&self.apply_handles, block) {
+        match self.apply_handles.validate_block(block) {
             Ok(()) => BlockValidationResult::Accepted,
             Err(error) => map_apply_error(error),
         }
@@ -793,6 +905,13 @@ impl MiningControl for MiningCoordinator {
     fn publish_generation(&self) {
         Self::publish_generation(self);
     }
+
+    fn generate(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        self.generate_blocks(&request)
+    }
 }
 
 impl MempoolSequenceWake for MiningCoordinator {
@@ -839,8 +958,9 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
 
 #[cfg(test)]
 mod apply_error_tests {
-    use super::{BlockValidationResult, map_apply_error};
-    use crate::state::ApplyError;
+    use super::BlockValidationResult;
+    use super::map_apply_error;
+    use crate::apply::error::ApplyError;
 
     #[test]
     fn journal_backpressure_is_operational() {
@@ -875,7 +995,7 @@ fn hashps_missing_height() -> MiningControlError {
 /// This is the sole height-resolution owner for that RPC. `None` is an empty
 /// chain (rate `0.0`). An explicit height that is absent from that snapshot is
 /// Core's invalid-parameter error, not a zero rate.
-// CONTRACT: docs/contracts/external-api.md#API-05
+// CONTRACT: docs/contracts/external-api.md#API-06
 fn resolve_hash_ps_start(
     tree: &BlockTree,
     tip: Option<&TipSnapshot>,
@@ -970,6 +1090,89 @@ fn estimate_network_hashps(
     hashes_per_second(work_bytes, time_delta_secs)
 }
 
+fn snapshot_for_selection(
+    mempool: &Mempool,
+    selection: &GenerateSelection,
+) -> Result<MempoolMiningSnapshot, MiningControlError> {
+    match selection {
+        GenerateSelection::Mempool => Ok(mempool.mining_snapshot()),
+        GenerateSelection::Ordered(items) => {
+            let full = mempool.mining_snapshot();
+            let mut by_txid = HashMap::with_capacity(full.entries.len());
+            for (index, entry) in full.entries.iter().enumerate() {
+                let position = u32::try_from(index).unwrap_or(u32::MAX);
+                by_txid.insert(entry.txid, position);
+            }
+            let mut selected = Vec::with_capacity(items.len());
+            let mut old_to_new = HashMap::with_capacity(items.len());
+            for item in items {
+                match item {
+                    GenerateTx::Mempool(txid) => {
+                        let Some(&old) = by_txid.get(txid) else {
+                            return Err(MiningControlError::InvalidRequest(CompactString::from(
+                                "transaction not in mempool",
+                            )));
+                        };
+                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                        old_to_new.insert(old, new_index);
+                        let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
+                        selected.push(full.entries[old_usize].clone());
+                    }
+                    GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
+                }
+            }
+            for entry in &mut selected {
+                entry.ancestors.retain_mut(|ancestor| {
+                    if let Some(&new_index) = old_to_new.get(ancestor) {
+                        *ancestor = new_index;
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+            Ok(MempoolMiningSnapshot {
+                sequence: full.sequence,
+                entries: selected,
+            })
+        }
+    }
+}
+
+fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
+    let tx = Arc::new(tx.clone());
+    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
+    SnapshotEntry {
+        txid: tx.txid(),
+        wtxid: tx.wtxid(),
+        vsize,
+        bip141_vsize: vsize,
+        size,
+        weight: tx.weight(),
+        sigop_cost: bitcoin_rs_script::count_tx_legacy(&tx),
+        fee: 0,
+        fee_delta: 0,
+        time: 0,
+        height: 0,
+        ancestor_size: u64::from(vsize),
+        ancestor_fee: 0,
+        ancestor_fee_delta: 0,
+        ancestors: Vec::new(),
+        tx,
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
 fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
     if time_delta_secs <= 0 {
         return 0.0;
@@ -1029,7 +1232,8 @@ fn decode_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod generation_key_tests {
-    use super::{GenerationKey, parse_long_poll_id};
+    use super::GenerationKey;
+    use super::parse_long_poll_id;
     use bitcoin_rs_mining::TemplateId;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1078,10 +1282,17 @@ mod generation_key_tests {
 /// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
 #[cfg(test)]
 mod network_hashps_oracle_tests {
-    use super::{estimate_network_hashps, hash_ps_at};
-    use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+    use super::estimate_network_hashps;
+    use super::hash_ps_at;
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::NodeId;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::TipSnapshot;
     use bitcoin_rs_mining::MiningControlError;
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::Network;
 
     const BITS: u32 = 0x207f_ffff;
 
@@ -1236,7 +1447,7 @@ mod network_hashps_oracle_tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/external-api.md#API-05
+    // CONTRACT: docs/contracts/external-api.md#API-06
     fn hash_ps_at_rejects_a_height_the_tip_cannot_resolve() {
         let mut tree = BlockTree::new();
         let genesis = append(&mut tree, BlockHash::default(), 1_000_000);
@@ -1254,8 +1465,12 @@ mod network_hashps_oracle_tests {
 #[cfg(test)]
 mod candidate_template_tests {
     use alloc::sync::Arc;
-    use bitcoin_rs_mining::{Candidate, TemplateId};
-    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
+    use bitcoin_rs_mining::Candidate;
+    use bitcoin_rs_mining::TemplateId;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxOut;
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
@@ -1435,10 +1650,12 @@ mod candidate_template_tests {
 
 #[cfg(test)]
 mod generation_signal_tests {
-    use super::{MempoolSequenceWake, MiningGenerationSignal};
-    use bitcoin_rs_mining::{
-        BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
-    };
+    use super::MempoolSequenceWake;
+    use super::MiningGenerationSignal;
+    use bitcoin_rs_mining::BlockTemplateRequest;
+    use bitcoin_rs_mining::BlockTemplateResult;
+    use bitcoin_rs_mining::MiningControl;
+    use bitcoin_rs_mining::MiningControlError;
     use bitcoin_rs_primitives::Block;
     use compact_str::CompactString;
     use parking_lot::Mutex;
@@ -1481,6 +1698,13 @@ mod generation_signal_tests {
 
         fn publish_generation(&self) {
             *self.published.lock() += 1;
+        }
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+            Err(unavailable())
         }
     }
 

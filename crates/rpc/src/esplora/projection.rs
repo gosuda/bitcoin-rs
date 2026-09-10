@@ -14,13 +14,13 @@ use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxOut, Txid, deserialize,
 };
 
+use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
+use crate::rest::Response;
+
+use super::http::{bad, internal, not_found, query_error, unavailable};
 use super::model::{
     BlockValue, ScriptStats, TransactionInput, TransactionOutput, TransactionStatus,
     TransactionValue, UtxoValue,
-};
-use super::{
-    Context, Response, ScriptHistoryRecord, ScriptIndexRecord, bad, internal, not_found,
-    query_error, unavailable,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -495,7 +495,7 @@ impl<'a> Projection<'a> {
         if unchanged {
             Ok(())
         } else {
-            Err(query_error(super::TxQueryError::Retry))
+            Err(query_error(TxQueryError::Retry))
         }
     }
 

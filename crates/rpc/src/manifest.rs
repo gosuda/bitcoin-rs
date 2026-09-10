@@ -27,8 +27,9 @@
 //! registrations Core's `help` output prints. Hidden test/administration
 //! commands (`echo*`, `setmocktime`, `mockscheduler`, `addconnection`,
 //! `addpeeraddress`, `sendmsgtopeer`, `getrawaddrman`,
-//! `syncwithvalidationinterfacequeue`, the `generate*` family, `getorphantxs`,
-//! `getmempoolfeeratediagram`) are intentionally absent from the table.
+//! `syncwithvalidationinterfacequeue`, `generate` (removed in Core),
+//! `generatetodescriptor`, `getorphantxs`, `getmempoolfeeratediagram`) are
+//! intentionally absent from the table.
 
 use std::format;
 use std::string::String;

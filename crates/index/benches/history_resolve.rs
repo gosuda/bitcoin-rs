@@ -4,7 +4,7 @@
 //! production-shaped flat-file fixture.
 //!
 //! Blocks are served from a **real `FlatFileBlockStore`**, the same path
-//! production takes through `FlatFilePruneBodyStore`: open, `fstat`, seek, read.
+//! production takes through `IndexedBlockBodyStore`: open, `fstat`, seek, read.
 //! An earlier revision served them from an in-memory map, which left the syscall
 //! sequence out entirely and reported ratios roughly an order of magnitude too
 //! large — a whole-body read and a 250-byte range read differ by only about 2x
@@ -18,30 +18,35 @@
 // and confined to fixture setup and the timed calls' error arms.
 #![allow(clippy::expect_used)]
 
-use std::hint::black_box;
-use std::sync::Arc;
+use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
 
-use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     deserialize,
 };
-use bitcoin_rs_storage::RocksDbStore;
-use bitcoin_rs_storage::block_file::{BlockFilePosition, FlatFileBlockStore};
+
+use bitcoin_rs_storage::{
+    RocksDbStore,
+    block_file::{BlockFilePosition, FlatFileBlockStore},
+};
+
 use criterion::{Criterion, criterion_group, criterion_main};
+
 use hashbrown::HashMap;
+
+use std::{hint::black_box, sync::Arc};
 
 /// Filler transactions per block for the ~250 KB shape.
 const TXS_PER_BLOCK_250K: usize = 2_200;
 /// Filler transactions per block for the ~1 MB shape.
 const TXS_PER_BLOCK_1M: usize = 9_000;
-/// First height a fixture block is placed at. Non-zero so height 0 never
-/// doubles as a "missing" sentinel.
-const BASE_HEIGHT: u32 = 100;
+/// First height a fixture block is placed at. Sequential `commit_block`
+/// requires a contiguous watermark from height 0.
+const BASE_HEIGHT: u32 = 0;
 
 /// Block source over a real flat-file store.
 ///
-/// Mirrors `FlatFilePruneBodyStore`: a position lookup, then
+/// Mirrors `IndexedBlockBodyStore`: a position lookup, then
 /// `FlatFileBlockStore::load` for a whole body or `load_range` for a slice. Both
 /// pay the real open/`fstat`/seek/read sequence, so the ratio this harness
 /// reports is one a node can actually see.
@@ -168,17 +173,6 @@ fn target_tx(height: u32, target_script: &[u8]) -> Tx {
     }
 }
 
-fn empty_header() -> Header {
-    Header {
-        version: 1,
-        prev_blockhash: BlockHash::default(),
-        merkle_root: Hash256::default(),
-        time: 0,
-        bits: 0,
-        nonce: 0,
-    }
-}
-
 /// Builds `heights` blocks of `txs_per_block` filler transactions, each with
 /// one target transaction planted at the **midpoint**.
 ///
@@ -190,7 +184,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
     let blocks_dir = tempfile::tempdir().expect("blocks tempdir");
     let store = Arc::new(RocksDbStore::open(dir.path()).expect("open rocksdb"));
     let files = FlatFileBlockStore::open(blocks_dir.path()).expect("open block files");
-    let mut indexer = Indexer::new(store);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1).expect("open IndexWriter");
 
     let target_script = witness_script(0xdead_beef);
     let target = ScriptHash::from_script_bytes(&target_script);
@@ -198,6 +192,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
     let mut positions = HashMap::new();
     let mut last_target = None;
     let midpoint = txs_per_block / 2;
+    let mut prev_blockhash = BlockHash::default();
 
     for index in 0..heights {
         let height = BASE_HEIGHT + index;
@@ -216,13 +211,21 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         }
 
         let block = Block {
-            header: empty_header(),
+            header: Header {
+                version: 1,
+                prev_blockhash,
+                merkle_root: Hash256::default(),
+                time: 0,
+                bits: 0,
+                nonce: 0,
+            },
             txs: txdata,
         };
         let bytes = consensus_bytes(&block);
-        indexer
-            .ingest_block(&bytes, height)
-            .expect("ingest fixture block");
+        writer
+            .commit_block(height, &bytes)
+            .expect("commit fixture block");
+        prev_blockhash = block.block_hash();
         let hash = *block.block_hash().as_bytes();
         let position = files
             .persist(None, height, hash, &bytes)
@@ -230,7 +233,9 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
         positions.insert(height, (position, hash));
         last_target = Some((planted_txid, OutPoint::new(planted_txid, 0)));
     }
+    drop(writer);
 
+    let indexer = Indexer::new(store);
     let (target_txid, target_outpoint) = last_target.expect("at least one fixture height");
 
     let source = FlatFileBlockSource { files, positions };

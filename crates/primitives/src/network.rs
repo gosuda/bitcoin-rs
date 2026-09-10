@@ -545,7 +545,9 @@ fn decode_compiled_hex(hex: &str) -> Vec<u8> {
         "compiled-in hex constant has even length"
     );
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
         .collect()
 }

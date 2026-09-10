@@ -408,6 +408,15 @@ mod tests {
         }
 
         fn publish_generation(&self) {}
+
+        fn generate(
+            &self,
+            _request: bitcoin_rs_mining::GenerateRequest,
+        ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
+            Err(MiningControlError::Unavailable(
+                compact_str::CompactString::from("not wired"),
+            ))
+        }
     }
 
     /// Methods this compares, and the parameters it compares them with.

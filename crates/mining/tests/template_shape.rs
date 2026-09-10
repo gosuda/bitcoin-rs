@@ -8,7 +8,10 @@ use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 // rust-bitcoin differential oracle: witness merkle root.
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
-use bitcoin_rs_mining::{CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate};
+use bitcoin_rs_mining::{
+    CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
+    assemble_ordered_candidate,
+};
 use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
 
 #[test]
@@ -346,5 +349,94 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
         assert_eq!(candidate.csv_active, csv_active);
         assert_eq!(candidate.segwit_active, segwit_active);
     }
+    Ok(())
+}
+
+/// API-05: `Candidate::solve` searches nonces until the compact target is met.
+#[test]
+fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
+    let mempool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    });
+    let snapshot = mempool.mining_snapshot();
+    let context = CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
+        height: 1,
+        version: 1,
+        bits: 0x207f_ffff,
+        min_time: 1,
+        current_time: 2,
+        locktime_cutoff: 1,
+        network: Network::Regtest,
+        csv_active: true,
+        segwit_active: true,
+        max_weight: 4_000_000,
+        max_size: 4_000_000,
+        max_sigops: 80_000,
+    };
+    let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
+    let unsolved = candidate.into_unsolved_block();
+    assert_eq!(unsolved.txs.len(), 1);
+    assert_eq!(unsolved.header.nonce, 0);
+    assert_eq!(unsolved.header.bits, context.bits);
+    let solved = candidate.solve(1_000_000)?;
+    assert_eq!(solved.txs.len(), 1);
+    assert_eq!(solved.header.prev_blockhash.0, context.previous_block_hash);
+    Ok(())
+}
+
+/// API-05: generateblock keeps listed order and does not add those fees to the coinbase.
+#[test]
+fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
+    let mut mempool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    });
+    mempool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(1, 10_000, None)),
+        150,
+        1_000,
+        1,
+        100,
+    ))?;
+    mempool.insert_entry(MempoolEntry::new(
+        Arc::new(tx(2, 10_000, None)),
+        150,
+        1_000,
+        1,
+        100,
+    ))?;
+    let snapshot = mempool.mining_snapshot();
+    let context = CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
+        height: 1,
+        version: 1,
+        bits: 0x207f_ffff,
+        min_time: 1,
+        current_time: 2,
+        locktime_cutoff: 1,
+        network: Network::Regtest,
+        csv_active: true,
+        segwit_active: true,
+        max_weight: 4_000_000,
+        max_size: 4_000_000,
+        max_sigops: 80_000,
+    };
+    let candidate = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
+    assert_eq!(candidate.fees, 0);
+    assert_eq!(candidate.coinbase_value, 5_000_000_000);
+    assert_eq!(
+        candidate
+            .transactions
+            .iter()
+            .map(|tx| tx.txid)
+            .collect::<Vec<_>>(),
+        snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.txid)
+            .collect::<Vec<_>>()
+    );
     Ok(())
 }

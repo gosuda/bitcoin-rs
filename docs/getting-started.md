@@ -1,121 +1,89 @@
 # Getting started
 
-From a clone to a syncing node. Each step explains what you should see so you can
-verify progress before moving on.
+For a bounded first visit, follow the [local regtest evaluation](local-evaluation.md).
+It covers build, public reads, shutdown, and same-directory reopen without
+reusing a production datadir. Its runtime verification status is stated there.
 
 ## Prerequisites
 
-- A Rust toolchain for edition 2024 (MSRV 1.95.0 or newer).
-- The default binary build is pure Rust and requires no C++ compiler or system
-  libraries. It uses the native Rust script interpreter, which verifies
-  legacy, P2SH, SegWit v0, and Taproot key-path and script-path spends.
-  Core's committed script and transaction vectors currently pin zero native
-  mismatches. `libbitcoinkernel` remains the library production default and
-  the Compose image engine until issue #213 promotes native
-  (`docs/contracts/validation-default.md`). For that engine, enable the
-  `kernel` feature.
+The repository development toolchain is `stable`; the workspace MSRV is Rust `1.95.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).
 
-If you plan to compile with the `kernel` feature to run `libbitcoinkernel` as
-an independent verification oracle, install `cmake` and `libboost-dev`:
+The default binary is kernel-free. Building the optional `kernel` lane also needs CMake and Boost on Debian/Ubuntu:
 
 ```sh
-# Required for the kernel verification-oracle feature
 sudo apt-get install -y cmake libboost-dev
 ```
 
-## Step 1: build
+## Build
 
-Build the node with default features:
+Use a lane deliberately:
 
-```sh
-cargo build --release -p bitcoin-rs
-```
+| Lane | Command | Purpose |
+| --- | --- | --- |
+| Default | `cargo build --locked --release -p bitcoin-rs` | Normal binary: `fjall`, `redb`, `zmq`; no kernel |
+| Minimal native | `cargo build --locked --release -p bitcoin-rs --no-default-features --features fjall` | One storage backend, optional extensions off |
+| Kernel | `CARGO_TARGET_DIR=target/oracle cargo build --locked --release -p bitcoin-rs --features kernel` | Optional `bitcoinkernel` validation/oracle lane |
 
-This produces `./target/release/bitcoin-rs`. The default configuration includes
-the `fjall` storage backend, `redb`, and `zmq` sequence publishing. The default
-binary build uses the native Rust script interpreter for every consensus spend
-class. Library crates and the Compose image still default to
-`libbitcoinkernel` (`docs/contracts/validation-default.md`).
+Keep the kernel lane in a separate `CARGO_TARGET_DIR` when proving a kernel-free build. BIP324 is target work only; there is currently no `bip324` Cargo feature.
 
-To compile with `libbitcoinkernel` as an independent verification oracle:
+## Configuration
 
-```sh
-cargo build --release -p bitcoin-rs --features kernel
-```
+Precedence, low to high:
 
-## Step 2: choose a storage backend
+1. defaults
+2. `--config` TOML
+3. `--bitcoin-conf`
+4. `BITCOIN_RS_*` environment variables
+5. CLI flags
 
-`fjall` is the default storage engine. `redb` is also compiled in default builds.
-Pass `--storage-backend` to select a backend:
+A later layer overrides only fields it supplies. Network-dependent validation, including mining payout addresses, runs after merge. Runtime test controls are not public configuration.
+
+Common network names are `mainnet`, `signet`, `testnet4`, and `regtest`; retained aliases are documented by the compatibility contracts.
+
+## Storage
+
+`fjall` is the default backend; `redb` is also compiled into the default binary.
 
 ```sh
 ./target/release/bitcoin-rs --storage-backend redb
 ```
 
-You can also set it via environment variable:
+or:
 
 ```sh
 export BITCOIN_RS_STORAGE_BACKEND=fjall
 ```
 
-Alternative C++ storage backends (`rocksdb`, `mdbx`) are available through
-non-default Cargo features:
+RocksDB is a non-default backend used as a shipped alternative and comparison engine.
 
-```sh
-cargo build --release -p bitcoin-rs --features rocksdb
-```
-
-## Step 3: start the node
-
-Start the node on mainnet:
+## Start the node
 
 ```sh
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs
 ```
 
-Configuration defaults:
+Important defaults:
 
-| Flag | Default |
-|---|---|
-| `--data-dir` | `.bitcoin-rs` |
-| `--network` | `mainnet` (`mainnet`, `testnet3`, `testnet4`, `signet`, `regtest`, `drynet4`) |
-| `--storage-backend` | `fjall` |
-| `--rpc-bind` | `127.0.0.1:8332` on mainnet, network Core port otherwise |
-| `--rest` | off (enables unauthenticated Core-compatible REST routes on the RPC port) |
-| `--rpc-user` / `--rpc-password` | `bitcoin-rs` / `bitcoin-rs` |
-| `--dbcache-mb` | 450 (split 80/20 across chainstate and txindex when enabled, with disabled shares going to chainstate) |
-| `--prune-target-mb` | 0 (no pruning) |
-| `--txindex` | off |
-| `--scriptindex` | off (accepts `full`, `utxo`, or boolean; defaults to `full` when passed without a value) |
-| `--features kernel` (build-time) | off in default binary; enables `libbitcoinkernel` as a verification oracle |
+| Setting | Default |
+| --- | --- |
+| network | `mainnet` |
+| data dir | `.bitcoin-rs` |
+| storage backend | `fjall` |
+| RPC bind | `127.0.0.1:8332` on mainnet |
+| REST | off |
+| RPC basic auth | `bitcoin-rs` / `bitcoin-rs` unless cookie auth is configured |
+| dbcache | 450 MiB |
+| pruning | off |
+| txindex | off |
+| scriptindex | off |
+| metrics listener | off |
+| mining payout | unset |
 
-The node logs its startup banner, effective cache allocation, and the address
-the JSON-RPC listener bound to.
+Change the default RPC credentials before exposing the port.
 
-`--txindex` enables Bitcoin Core-compatible transaction lookup support.
-`--scriptindex` (`full`, or the historical boolean `true`) enables address and
-scripthash UTXO queries plus confirmed funding/spending history via
-Esplora-compatible HTTP endpoints. `--scriptindex=utxo` maintains only the
-compact live-output view: current UTXO routes work once that view is ready,
-while history, statistics, pagination, and confirmed outspend routes return
-HTTP 503 as a disabled capability rather than as a lagging backfill. Address
-and scripthash UTXO routes return HTTP 503 until the live view catches up, or
-when ScriptIndex is disabled. `--rest` enables the unauthenticated Core REST
-gateway (`/rest/tx`, `/rest/block`, `/rest/headers`, etc.) alongside JSON-RPC.
+`--txindex` is the explicit Core-compatible txindex promise. `--scriptindex=utxo` enables the live script view; `--scriptindex=full` also enables confirmed script history. `--rest=true` enables the unauthenticated Core REST routes on the RPC listener.
 
-The datadir schema marker covers the transaction and script indexes as well as
-chainstate. An unmarked or incompatible datadir fails before any derived index
-store opens; the operator must replace or quarantine it and resync. A marked
-current datadir can then build `--scriptindex` and `--txindex` state from the
-active chain.
-
-Change the RPC credentials before exposing the port anywhere. The defaults are
-a development convenience, not a secret. `--rpc-cookie` takes a Core-style
-cookie file instead.
-
-## Step 4: check sync progress
-
-The JSON-RPC surface uses Bitcoin Core method names:
+## Check progress
 
 ```sh
 curl -s --user bitcoin-rs:bitcoin-rs \
@@ -124,32 +92,21 @@ curl -s --user bitcoin-rs:bitcoin-rs \
   http://127.0.0.1:8332/
 ```
 
-The response includes the current validated height, best block hash, and sync
-progress. Call it twice a minute apart to confirm height advances.
+For the tip hash only, use `getbestblockhash` with the same empty parameter list.
 
-To query just the tip hash:
+[rpc-reference.md](rpc-reference.md) is generated from the live RPC manifest and records implemented, deviating, and unimplemented methods. The node has no in-tree wallet or private-key custody; key-free descriptor/PSBT helpers remain available for external signers.
 
-```sh
-curl -s --user bitcoin-rs:bitcoin-rs \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"1.0","id":"1","method":"getbestblockhash","params":[]}' \
-  http://127.0.0.1:8332/
-```
+## Capability state
 
-The dispatch table in `crates/rpc/src/handlers.rs` implements supported Core
-methods. There is no internal wallet: private-key and wallet-construction
-methods are absent, while key-free PSBT utilities (`combinepsbt`, `finalizepsbt`)
-and descriptor helpers remain for external signers.
+Index-backed queries expose the owner's capability state rather than treating unavailable data as empty. [contracts/indexing.md](contracts/indexing.md) owns the state vocabulary, readiness conditions, and exact query gating.
 
-## External wallet
+## Public consumers
 
-Point any Esplora client at `/api` on the JSON-RPC listener.
-`--scriptindex` must be on, or address and scripthash routes return HTTP 503.
+### Esplora
 
-[bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw`) is the
-named external consumer:
+Public Esplora routes live under `/api`. Script/address routes require the applicable script-index capability. `/esplora` is the versioned backend superset; `/api/v1` belongs to the external mempool application, not this node.
 
-Start the node in one terminal:
+Example regtest startup:
 
 ```sh
 ./target/release/bitcoin-rs \
@@ -159,34 +116,46 @@ Start the node in one terminal:
   --rpc-bind 127.0.0.1:18443
 ```
 
-Then, in a second terminal, run the wallet while the node is still running:
+The wallet-facing contract is [contracts/wallet-facing.md](contracts/wallet-facing.md).
+
+### REST
+
+`--rest=true` (or `rest=1` in `bitcoin.conf`) serves Core-compatible REST on the RPC port without authentication. The CLI option takes an explicit boolean; bare `--rest` is not the enablement syntax. See [rest-interface.md](rest-interface.md).
+
+### ZMQ
+
+ZMQ endpoint groups are configured with `[[notifications.zmq]]` (`endpoint`, `topics`, optional `hwm`). `getzmqnotifications` reports the live configuration. `bitcoin_rs_rpc::zmq` owns topic framing and transport compatibility.
+
+## Datadir compatibility
+
+Follow [policies/db-migration.md](policies/db-migration.md) for authoritative and owner-local format changes. Never treat a schema mismatch as permission to rewrite or delete an operator datadir implicitly.
+
+The target durable-root recovery model and its current evidence status are summarized in [chainstate-recovery.md](chainstate-recovery.md) and owned normatively by [contracts/recovery.md](contracts/recovery.md).
+
+## Measure storage
+
+`--measure-storage` records logical and physical datadir accounting and exits:
 
 ```sh
-btcw balance -n regtest -u http://127.0.0.1:18443/api
+./target/release/bitcoin-rs --data-dir .bitcoin-rs --measure-storage \
+  --measure-storage-output footprint.json \
+  --measure-storage-stop-height <height> \
+  --measure-storage-stop-hash <hash> \
+  --storage-high-water-bytes <bytes>
 ```
 
-`/api` is the Esplora surface (the mempool.space electrs prefix). JSON-RPC
-keeps the listener root. `/api/v1` is Mempool's API on the explorer port,
-not an Esplora alias on this node.
+Only a measured physical high-water can prove the storage budget; a point-in-time filesystem snapshot is a lower bound. See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 
-The wallet stays in that repository. This node only serves the public
-surface documented in [contracts/wallet-facing.md](contracts/wallet-facing.md).
+## Full script verification
 
-## Verifying everything yourself
-
-Mainnet skips historical script checks below the pinned assume-valid anchor.
-To verify every script from genesis:
+To disable assume-valid script skipping:
 
 ```sh
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs --assume-valid-height 0
 ```
 
-This runs full script execution on every transaction from block 0. It is the
-recommended mode for benchmarking and independent consensus audits.
+## More
 
-## Next
-
-- [../README.md](../README.md) for architecture overview and benchmark records
-- [../CONTRIBUTING.md](../CONTRIBUTING.md) for development workflows and testing
-- [README.md](README.md) for the documentation index
-- [contracts/](contracts/) for normative architecture and protocol contracts
+- [README.md](README.md): documentation index and release gates
+- [contracts/](contracts/): normative contracts
+- [../CONTRIBUTING.md](../CONTRIBUTING.md): development workflow
