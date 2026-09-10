@@ -110,6 +110,21 @@ class FetchGoldenTests(unittest.TestCase):
         self.assertEqual(self.requests(), [])
         self.assertEqual(self.block_path.read_bytes(), b"existing block")
 
+    def test_nonregular_cache_entries_fail_before_network(self):
+        self.seed_cache()
+        for path in (self.block_path, self.txids_path):
+            with self.subTest(path=path.name):
+                original = path.read_bytes()
+                path.unlink()
+                path.mkdir()
+                result = self.run_fetch("offline")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(path.name, result.stderr)
+                self.assertEqual(self.requests(), [])
+                self.assertEqual(list(path.iterdir()), [])
+                path.rmdir()
+                path.write_bytes(original)
+
     def test_complete_cache_needs_no_staging_directory(self):
         self.seed_cache()
         mktemp = self.bin / "mktemp"
