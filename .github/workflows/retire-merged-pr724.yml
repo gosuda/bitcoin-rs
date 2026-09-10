@@ -1,0 +1,26 @@
+name: retire-merged-pr724
+on:
+  push:
+    branches: [verify/retire-merged-pr724-run-20260910]
+    paths: [.github/workflows/retire-merged-pr724.yml]
+permissions: {}
+# Exact historical group read from PR724 head 39be872. PR724 merged at
+# 2026-09-09T22:54:02Z as 40013e9; its branch-specific tooling is retired.
+# Supersede only its unfinished run 34414432535, not current-main or live PR CI.
+# Cancellation is resource retirement, not a passing validation verdict.
+concurrency:
+  group: ci-ci-refs/pull/724/merge
+  cancel-in-progress: true
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Record the retired historical run
+        run: |
+          printf '%s\n' \
+            'Retired historical CI run 34414432535 for merged automation PR724.' \
+            'PR head: 39be872ced8b61e62184e3fadff4d22c1aca8df7' \
+            'Merge: 40013e910a26829ef0f4b25349d653b72c4fcf91' \
+            'Previous results remain historical; cancellation is NOT a pass.' \
+            'No production files, checks, invariants, or current-main runs changed.'
