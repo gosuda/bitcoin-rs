@@ -36,6 +36,10 @@ const MODELS: [&str; 3] = ["ChainAdmission", "PeerLeases", "ProjectionMining"];
 const SAFETY_INV: &str = "--inv=TypeOK,Safety,TransitionSafety";
 const TEMPORAL: &str = "--temporal=ConditionalProgress";
 const LENGTH: &str = "--length=128";
+// Additional deterministic shutdown regression; canonical proofs stay at 128.
+const SHUTDOWN_MODEL: &str = "ChainAdmissionShutdown";
+const SHUTDOWN_INV: &str = "--inv=TypeOK,Safety,TransitionSafety,ReachedDone";
+const SHUTDOWN_LENGTH: &str = "--length=5";
 const CONSTRAINTS: &str = "CONSTRAINTS.md";
 const JAR: &str = "lib/apalache.jar";
 const JVM_ARGS_DEFAULT: &str = "-Xmx4096m";
@@ -464,7 +468,11 @@ fn configured_smt_encoding(root: &Path) -> String {
     let suffix = "` (";
     constraints
         .lines()
-        .find_map(|line| line.strip_prefix(prefix)?.split_once(suffix).map(|(value, _)| value))
+        .find_map(|line| {
+            line.strip_prefix(prefix)?
+                .split_once(suffix)
+                .map(|(value, _)| value)
+        })
         .filter(|value| !value.is_empty())
         .unwrap_or(SMT_ENCODING_DEFAULT)
         .to_string()
@@ -472,27 +480,38 @@ fn configured_smt_encoding(root: &Path) -> String {
 
 fn run_one(root: &Path, exe: &Path, model: &str, kind: CheckKind, n: u8) {
     let mut args = vec![
-
         "check".to_string(),
         format!("--config=docs/models/{model}.cfg"),
     ];
-    match kind {
-        CheckKind::Safety => args.push(SAFETY_INV.to_string()),
-        CheckKind::Temporal => args.push(TEMPORAL.to_string()),
-    }
-    args.push(LENGTH.to_string());
+    let length = if model == SHUTDOWN_MODEL {
+        assert_eq!(kind, CheckKind::Safety);
+        args.extend([
+            "--init=ProbeInit".to_string(),
+            "--next=ProbeNext".to_string(),
+            SHUTDOWN_INV.to_string(),
+        ]);
+        SHUTDOWN_LENGTH
+    } else {
+        match kind {
+            CheckKind::Safety => args.push(SAFETY_INV.to_string()),
+            CheckKind::Temporal => args.push(TEMPORAL.to_string()),
+        }
+        LENGTH
+    };
+    args.push(length.to_string());
     let smt_encoding = configured_smt_encoding(root);
     args.push(format!("--smt-encoding={smt_encoding}"));
     args.push(format!("--out-dir=target/apalache/{model}"));
     args.push(format!("docs/models/{model}.tla"));
 
     assert!(
-        args.iter().any(|a| a == SAFETY_INV || a == TEMPORAL),
+        args.iter()
+            .any(|a| a == SAFETY_INV || a == TEMPORAL || a == SHUTDOWN_INV),
         "g20: argv missing expected property list"
     );
     assert!(
-        args.iter().any(|a| a == LENGTH),
-        "g20: argv missing --length=128"
+        args.iter().any(|a| a == length),
+        "g20: argv missing expected bound {length}"
     );
 
     let jvm_args = std::env::var("JVM_ARGS").unwrap_or_else(|_| JVM_ARGS_DEFAULT.to_string());
@@ -600,6 +619,33 @@ fn jvm_heap_default_matches_the_register() {
     );
 }
 
+/// Run serially with the canonical checks: a second concurrent 4 GiB JVM
+/// would consume the test runner's memory budget. The copied inputs remain
+/// in the existing formal-diagnostics artifact even when a later check fails.
+fn check_shutdown_stutter(root: &Path, exe: &Path) {
+    let regression = root.join("target/apalache/shutdown-regression");
+    let models = regression.join("docs/models");
+    fs::create_dir_all(&models).expect("create shutdown regression directory");
+    fs::copy(root.join(CONSTRAINTS), regression.join(CONSTRAINTS))
+        .expect("copy canonical checker configuration");
+    fs::copy(
+        root.join("docs/models/ChainAdmission.tla"),
+        models.join("ChainAdmission.tla"),
+    )
+    .expect("copy pinned canonical model for regression");
+    fs::copy(
+        root.join("docs/models/ChainAdmission.cfg"),
+        models.join(format!("{SHUTDOWN_MODEL}.cfg")),
+    )
+    .expect("copy unchanged canonical constants for regression");
+    fs::copy(
+        root.join(format!("docs/models/regressions/{SHUTDOWN_MODEL}.tla")),
+        models.join(format!("{SHUTDOWN_MODEL}.tla")),
+    )
+    .expect("copy shutdown regression fixture");
+    run_one(&regression, exe, SHUTDOWN_MODEL, CheckKind::Safety, 0);
+}
+
 #[test]
 fn all_model_specs_check_with_apalache() {
     let home = verify_tool_identity();
@@ -607,6 +653,7 @@ fn all_model_specs_check_with_apalache() {
     let root = workspace_root();
     let exe = apalache_executable(&home);
 
+    check_shutdown_stutter(&root, &exe);
     for model in MODELS {
         run_one(&root, &exe, model, CheckKind::Safety, 1);
     }

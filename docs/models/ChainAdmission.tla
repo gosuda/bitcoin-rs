@@ -12,8 +12,8 @@
 (* unbounded integers, no growing histories.                               *)
 (*                                                                         *)
 (* Next is the unrestricted union of every listed action plus stutter.     *)
-(* Stutter is supplied by [][Next]_vars at the use sites; no fairness or   *)
-(* priority occurs inside Next.  Weak fairness appears only inside the     *)
+(* Next explicitly includes UNCHANGED vars for INIT/NEXT checking; no     *)
+(* fairness or priority occurs inside Next. Weak fairness is only in the   *)
 (* antecedent of ConditionalProgress, written as explicit                  *)
 (* (<>[] ENABLED <<A>>_vars) => ([]<> <<A>>_vars) clauses because          *)
 (* Apalache 0.62.2 supports no WF_/SF_ macros.                             *)
@@ -866,7 +866,7 @@ StepSafe ==
 (* have their untouched members assigned explicitly, so every primed     *)
 (* variable is determined.  Every non-stutter action requires            *)
 (* chainPhase # 11 and lifePhase # 3; stutter is supplied by             *)
-(* [][Next]_vars.                                                        *)
+(* the explicit UNCHANGED vars branch in Next.                           *)
 (*************************************************************************)
 
 (* TransitionSafety: exported as the state invariant asserting that      *)
@@ -1822,7 +1822,7 @@ ObsTimeout ==
 (* Apalache inlines action bodies into the ~198 fairness conjuncts, so  *)
 (* a per-action observer multiplied StepSafe's body by every action     *)
 (* site and exhausted the translation heap under loop finding.          *)
-(* Stutter arises from [][Next]_vars at the use sites; no fairness or   *)
+(* Next adds the stutter closure explicitly; no fairness or             *)
 (* priority occurs inside NextCore.                                     *)
 (*************************************************************************)
 NextCore ==
@@ -1874,14 +1874,6 @@ NextCore ==
   \/ Settle
   \/ EnterDone
 
-(*************************************************************************)
-(* Next: one hoisted edge-observer conjunct over the whole union,       *)
-(* equivalent to the former per-action form by distribution and         *)
-(* identical on every [][Next]_vars behavior for each <<A>>_vars        *)
-(* fairness occurrence.                                                 *)
-(*************************************************************************)
-Next == NextCore /\ stepOK' = StepSafe
-
 (* The full state tuple, for <<A>>_vars and [][Next]_vars.               *)
 vars == <<epoch, generation, poolSeq, policyEpoch, diskRoot, liveRoot,
           priorRoot, proposedRoot, bodyFrames, undoFrames, bodyPos,
@@ -1896,6 +1888,18 @@ vars == <<epoch, generation, poolSeq, policyEpoch, diskRoot, liveRoot,
           lockOwner, chainRes, writerHeld, readerHeld, subscribed,
           subId, obsQN, obsQRec, obsDel, obsDelRec, gap, delReady,
           deadlineExp, compCredits, stepOK>>
+
+(*************************************************************************)
+(* Apalache consumes INIT/NEXT directly, not a SPECIFICATION containing *)
+(* [][Next]_vars. Include that closure explicitly: every original action *)
+(* still records StepSafe, while stutter preserves every variable,       *)
+(* including the last edge verdict. A completed shutdown can therefore  *)
+(* remain in Done instead of being reported as a deadlock.               *)
+(* This adds no fairness assumption and removes no original transition. *)
+(*************************************************************************)
+Next ==
+  \/ (NextCore /\ stepOK' = StepSafe)
+  \/ UNCHANGED vars
 
 (*************************************************************************)
 (* Conditional liveness.  Apalache 0.62.2 supports no WF_/SF_ macros and *)

@@ -40,7 +40,7 @@ antecedent of `ConditionalProgress`, never inside `Next`.
 
 | model | .tla sha256 | .cfg sha256 | CONSTANT values | K | last recorded outcome | native rc | skill rc |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| ChainAdmission | e82138365787f075f1ebe232e4c609cec47b515d29cd11d29fe7d35c6f522d83 | d9019ce0f244bde70e6fea34c99aff76c3f383bf9268630cab80e3f87506ce67 | EventBudget=12, JobSlots=12, MaxAttempts=4, CounterBound=1024, FrameBound=72, FactBound=36, ReqSlots=12 | 128 | UNMEASURED | UNMEASURED | UNMEASURED |
+| ChainAdmission | 7d43768179d15e35ab548604082a614d775221644a05f295ea3b28cf55e83c92 | d9019ce0f244bde70e6fea34c99aff76c3f383bf9268630cab80e3f87506ce67 | EventBudget=12, JobSlots=12, MaxAttempts=4, CounterBound=1024, FrameBound=72, FactBound=36, ReqSlots=12 | 128 | UNMEASURED | UNMEASURED | UNMEASURED |
 | PeerLeases | b3a50f1e4f95e635bfd992ffcacb2f17899ce3a3377b38fc7c11ad2051482d9a | 3b23777fb2dcdcee61ac81f29c06b99a33d140cef01fc5be8e1d5c71104aa7ea | Peer=P, S0, S1, G0, G1, R0, R1, F0, F1, D0, D1, CtrlCap=1, DataCap=1, InCap=1, OutCap=1, ExternalBudget=12 | 128 | temporal (ConditionalProgress) rc255 after 32248s: JVM ran out of heap space (max JVM memory 17179869184 = -Xmx16384m from detached-checks.sh) at Step 5 of --length=128 — tool resource exhaustion, NOT a counterexample and NOT a verified pass; outcome unverified per honest-failure rule; peer-safety (State 7) and chain-side runs still in flight | 255 | 14 |
 | ProjectionMining | 1ffc603ff9a12de825ac663478d4c859215ebe842aef092208e42ed431dc2e43 | f4d7dacc59d1d9c7bd87328bb0114a74d4b133f3a7a2bfa2b519aa127e1939c4 | O, A, B, TxLookup, ScriptLive, ScriptHistory, J0, J1, Rw0..Rw2, X0, X1, ExternalBudget=12 | 128 | safety rc12 on hash 64172c51 (request-decoupled ladder) repaired by ClearReq+ResolveSubmit binding on hash 90d41889; rc12 again at State 5: terminal submitIO=Failed leaked past request clear into a later Proposal success; repaired by ClearSubmitIO channel reset at all four clear sites v3 rc12 (hash fe87ebe5); third rc12 latent defect exposed sequentially: FaultAtomicity excluded the intentional Unknown-source commit resolution of ResolveCommit; invariant aligned to io \in {Pending, Unknown} (hash 1ffc603ff9a12de825ac663478d4c859215ebe842aef092208e42ed431dc2e43[:8]); UNMEASURED pending rerun | 12 | 13 |
 
@@ -58,6 +58,15 @@ spec-eval, `255` system error, timeout `-> 14`; hash divergence from this
 inventory `-> 15`; tool identity mismatch `-> 11`. Evidence is rc 0 for all six
 invocations plus the explicit property lists, model and config hashes, pin,
 constants, K, argv, and outcome line. Anything less is `BLOCKED`.
+
+Before the six canonical invocations, G20 also checks the focused
+`regressions/ChainAdmissionShutdown.tla` fixture: the four real shutdown
+actions followed by the canonical `Next`, with the original constants and
+`TypeOK,Safety,TransitionSafety,ReachedDone`. Its additional five-step
+regression catches a missing terminal stutter. It neither replaces any
+canonical invocation nor changes their K = 128 bound or proof denominator.
+The fixture, imported canonical source, config, and checker output are
+retained under `target/apalache/shutdown-regression/`.
 
 Model to implementer gates: ChainAdmission gates T08, T11, T18; PeerLeases
 gates T24; ProjectionMining gates T29, T35. A red model blocks the task, never
