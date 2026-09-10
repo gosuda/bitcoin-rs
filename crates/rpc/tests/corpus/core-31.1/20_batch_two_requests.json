@@ -4,6 +4,7 @@
   "description": "Batch of two JSON-RPC 2.0 requests: the response is an array of two, in request order, each echoing its string id. Known gap GAP-RPC-DIFFICULTY-1ULP: this node's difficulty is exactly one ULP below Core's for the regtest target (core bits 0x3dffffe03fffc081 vs 0x3dffffe03fffc080); the difficulty field is pinned on both sides and compared bit-exactly.",
   "provenance": {
     "core_version": "31.1.0",
+    "core_source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
     "core_binary_sha256": "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08",
     "network": "regtest",
     "tip_height": 0,

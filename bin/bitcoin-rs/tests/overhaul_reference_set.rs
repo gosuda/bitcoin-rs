@@ -113,6 +113,14 @@ fn the_embedded_manifest_loads_the_full_reference_set() {
     assert_eq!(set.kernel.kernel_crate_version, "0.2.1");
     assert_eq!(set.kernel.kernel_sys_crate, "libbitcoinkernel-sys");
     assert_eq!(set.kernel.kernel_sys_crate_version, "0.3.0");
+    assert_eq!(
+        set.kernel.kernel_vendor_commit,
+        "4b51ffdddfa82b84a03a1fa76bbfa72a4f0b6ccf"
+    );
+    assert_eq!(
+        set.kernel.kernel_source_commit,
+        "fb0e8612d6f74071af77b3f27d915da69e0a726b"
+    );
     assert!(!set.kernel.differential_harness);
 
     assert_eq!(set.corpora.len(), 2);
@@ -138,6 +146,79 @@ fn the_embedded_manifest_loads_the_full_reference_set() {
         digest(FORMAL_ARCHIVE_SHA256)
     );
     assert_eq!(set.formal_tool.jar_sha256, digest(FORMAL_JAR_SHA256));
+}
+
+/// REF-03: the source identity belongs to the actual locked oracle package,
+/// not another archive published under a similar version label.
+#[test]
+fn kernel_package_custody_matches_the_lockfile() {
+    let set = reference_set().expect("complete reference set");
+    let lock: toml::Table =
+        toml::from_str(include_str!("../../../Cargo.lock")).expect("Cargo.lock parses");
+    let packages = lock["package"].as_array().expect("locked packages");
+    let kernel = packages
+        .iter()
+        .find(|package| package["name"].as_str() == Some(set.kernel.kernel_sys_crate.as_str()))
+        .expect("the oracle package is locked");
+    assert_eq!(
+        kernel["version"].as_str(),
+        Some(set.kernel.kernel_sys_crate_version.as_str())
+    );
+    assert_eq!(
+        digest(
+            kernel["checksum"]
+                .as_str()
+                .expect("registry package checksum")
+        ),
+        set.kernel.kernel_sys_crate_sha256,
+        "a changed kernel package requires reviewing its source identity"
+    );
+}
+
+/// REF-02/REF-03: neither source identity can degrade to a branch, tag, short
+/// hash, non-hex string, or absent value.
+#[test]
+fn source_revisions_require_immutable_complete_identities() {
+    let original: toml::Table = toml::from_str(MANIFEST_TOML).expect("manifest parses");
+    for field in [
+        "source_commit",
+        "kernel_source_commit",
+        "kernel_vendor_commit",
+    ] {
+        for revision in [
+            None,
+            Some(""),
+            Some("master"),
+            Some("fb0e8612"),
+            Some("gggggggggggggggggggggggggggggggggggggggg"),
+        ] {
+            let mut edited = original.clone();
+            let reference = edited["reference"].as_table_mut().expect("reference table");
+            let section = if field == "source_commit" {
+                reference
+                    .get_mut("release")
+                    .expect("release")
+                    .as_table_mut()
+                    .expect("release table")
+            } else {
+                reference
+            };
+            if let Some(revision) = revision {
+                section.insert(field.to_owned(), toml::Value::String(revision.to_owned()));
+            } else {
+                section.remove(field);
+            }
+            let expected = if revision.is_none_or(str::is_empty) {
+                ReferenceError::VersionLabelOnly { field }
+            } else {
+                ReferenceError::RevisionMalformed { field }
+            };
+            assert_eq!(
+                load_reference_set(&toml::to_string(&edited).expect("edited manifest")),
+                Err(expected)
+            );
+        }
+    }
 }
 
 /// The release digest removed leaves only a version label, which is not a
