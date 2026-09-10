@@ -2081,7 +2081,7 @@ mod tests {
         assert!(!request.submit);
     }
 
-    /// API-05: generateblock requires the transactions array; null is not an empty list.
+    /// API-05, API-26: generateblock requires the transactions array; null is not an empty list, and bare-script output errors match Core.
     #[test]
     fn generateblock_requires_transactions_array() {
         let control = FakeMiningControl::with_template(sample_template());
