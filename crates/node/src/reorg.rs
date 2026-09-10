@@ -136,7 +136,9 @@ pub fn invalidate_block(
             &connect,
             &mut no_staged_body,
         );
-        if progress.disconnected == disconnect_nodes.len() {
+        if progress.disconnected == disconnect_nodes.len()
+              && !outcome.as_ref().is_err_and(ReorgError::requires_recovery)
+          {
             let mut tree = handles.block_tree.write();
             let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
             tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
