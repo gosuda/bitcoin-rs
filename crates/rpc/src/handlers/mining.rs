@@ -21,7 +21,7 @@ use crate::compat::convert::{
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::util::{generateblock_payout_script, payout_script_from_address};
-use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str, required_u64};
+use crate::handlers::{ensure_at_most_params, ensure_no_params, optional_bool, params_array, required_str, required_u64};
 use corepc_types::v31;
 
 const NONCE_RANGE: &str = "00000000ffffffff";
@@ -312,17 +312,6 @@ fn parse_network_hash_ps_args(params: &Value) -> Result<(i64, i64), RpcError> {
         ));
     }
     Ok((lookup, height))
-}
-
-fn ensure_at_most_params(params: &Value, max: usize) -> Result<(), RpcError> {
-    if params.is_null() {
-        return Ok(());
-    }
-    let array = params_array(params)?;
-    if array.len() > max {
-        return Err(RpcError::InvalidParams("too many parameters"));
-    }
-    Ok(())
 }
 
 fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcError> {
