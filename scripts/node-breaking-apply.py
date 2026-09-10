@@ -25,7 +25,24 @@ body = src[start:end].rstrip() + "\n"
 src = src[:start] + src[end:]
 src = src.replace("mod scratch;\n", "pub(crate) mod body_store;\nmod scratch;\n", 1)
 
-header = '''//! Durable block-body storage and ordered snapshot readers.\n//!\n//! This is the sole node owner of block-body persistence, flat-file position\n//! decoding, ranged reads, metadata reads, prefetch ordering, and durability.\n\nuse std::sync::Arc;\n\nuse bitcoin_rs_primitives::{Hash256, varint};\nuse bitcoin_rs_storage::{\n    BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,\n    WriteBatch, block_file_max_height_key, decode_block_file_max_height,\n    encode_block_file_max_height,\n};\n\nconst SERIALIZED_BLOCK_HEADER_LEN: usize = 80;\nconst SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;\n\n'''
+header = '''//! Durable block-body storage and ordered snapshot readers.
+//!
+//! This is the sole node owner of block-body persistence, flat-file position
+//! decoding, ranged reads, metadata reads, prefetch ordering, and durability.
+
+use std::sync::Arc;
+
+use bitcoin_rs_primitives::{Hash256, varint};
+use bitcoin_rs_storage::{
+    BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,
+    WriteBatch, block_file_max_height_key, decode_block_file_max_height,
+    encode_block_file_max_height,
+};
+
+const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;
+
+'''
 BODY.write_text(header + body)
 APPLY.write_text(src)
 
@@ -51,7 +68,17 @@ for path in (ROOT / "crates/node").rglob("*.rs"):
     if changed != text:
         path.write_text(changed)
 
-# The ownership cut is intentionally breaking: these names are no longer\n# exported from `crate::apply`; callers must name the body_store owner.\nfor legacy in ("crate::apply::PruneBodyStore", "crate::apply::PruneBodyReader", "crate::apply::FlatFilePruneBodyStore"):
-    for path in (ROOT / "crates/node").rglob("*.rs"):
-        if legacy in path.read_text():
-            raise SystemExit(f"legacy apply path remains in {path}: {legacy}")
+# Breaking contract: callers name the body-store owner directly; no apply-level
+# aliases survive this cut.
+legacy_paths = (
+    "crate::apply::PruneBodyStore",
+    "crate::apply::PruneBodyReader",
+    "crate::apply::FlatFilePruneBodyStore",
+)
+for path in (ROOT / "crates/node").rglob("*.rs"):
+    if path == BODY:
+        continue
+    text = path.read_text()
+    for old_path in legacy_paths:
+        if old_path in text:
+            raise SystemExit(f"legacy apply path remains in {path}: {old_path}")
