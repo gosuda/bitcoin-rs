@@ -96,6 +96,7 @@ fn explicit_false_zero_and_empty_values_override_lower_layers() {
 }
 
 #[test]
+// CONTRACT: docs/contracts/architecture.md#ARCH-05A
 fn network_aliases_preserve_the_selected_profile() {
     for (value, expected) in [
         (" BITCOIN ", NetworkSelection::Mainnet),
@@ -169,7 +170,7 @@ fn resolve_keeps_cookie_and_partial_basic_auth_precedence() -> anyhow::Result<()
 
 #[cfg(feature = "fjall")]
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+// CONTRACT: docs/contracts/architecture.md#ARCH-05A
 fn network_selection_resets_defaults_before_same_layer_overrides() -> anyhow::Result<()> {
     use std::net::SocketAddr;
 
@@ -201,5 +202,8 @@ fn network_selection_resets_defaults_before_same_layer_overrides() -> anyhow::Re
     assert!(config.p2p.dns_seeds_enabled);
     assert!(config.p2p.connect.is_empty());
     assert!(config.p2p.listen.is_empty());
+    Ok(())
+}
+!(config.p2p.listen.is_empty());
     Ok(())
 }
