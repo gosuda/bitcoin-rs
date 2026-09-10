@@ -38,7 +38,8 @@ jobs:
       - name: P2P tests
         run: cargo test --locked -p bitcoin-rs-p2p --lib
       - name: Node sync tests
-        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- sync::
+        run: |
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- sync::
       - name: Ownership gate
         run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
       - name: Publish clean validated commit
