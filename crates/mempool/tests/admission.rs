@@ -97,11 +97,12 @@ fn admission_request(
 #[test]
 #[expect(clippy::expect_used, reason = "test invariants are checked with expect")]
 fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
-    let limits = MempoolLimits {
-        min_relay_fee_sat_per_kvb: 1_000_000,
-        ..MempoolLimits::default()
-    };
-    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(limits)));
+    // Default limits: the request must pass `prepare_and_verify` in full so
+    // the parked admission reaches the writer recheck rather than failing
+    // policy before the seam.
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
+        MempoolLimits::default(),
+    )));
     let gateway = Arc::new(MempoolGateway::new(pool, None));
 
     let prev = outpoint(1, 0);
@@ -269,7 +270,9 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
 /// same view instead of counting the omission as zero.
 #[test]
 fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn Error>> {
-    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits::default())));
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
+        MempoolLimits::default(),
+    )));
     let gateway = Arc::new(MempoolGateway::new(pool, None));
 
     let parent = tx_one_input(
@@ -309,7 +312,11 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
         Err(AdmitError::Policy(AcceptanceRejectReason::TooManySigops)),
         "overlay-resolved P2SH sigops must trigger the standard limit despite the omission"
     );
-    assert_eq!(gateway.read().len(), 1, "only the parent must remain in the pool");
+    assert_eq!(
+        gateway.read().len(),
+        1,
+        "only the parent must remain in the pool"
+    );
     Ok(())
 }
 

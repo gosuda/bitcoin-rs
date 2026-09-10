@@ -598,14 +598,6 @@ impl MempoolGateway {
     /// before mutation.
     #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
-        // Test-only causal seam: parks the first admission BEFORE acquiring
-        // the write lock so a cross-crate test can mutate the pool and
-        // generation between the caller's capture and the gateway's
-        // re-check, forcing a deterministic transient error. Disarmed, this
-        // is a no-op. One shot: the park consumes the arm.
-        #[cfg(any(test, feature = "test-seam"))]
-        ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
-
         // Script verification runs OUTSIDE the pool writer (the lock-order
         // rule: never hold the mempool write lock during script
         // verification). The verdict computed here is only evidence; its
@@ -632,6 +624,16 @@ impl MempoolGateway {
         let Some((policy, fact)) = self.prepare_and_verify(&request, finality_height)? else {
             return Ok(AdmitOutcome::AlreadyKnown);
         };
+
+        // Test-only causal seam: parks the first admission AFTER the outside
+        // verdict and BEFORE acquiring the write lock, so a test can mutate
+        // the pool or generation between `prepare_and_verify` and the
+        // generation/sequence recheck under the writer, forcing a
+        // deterministic transient error on the recheck path itself (not the
+        // prepare-time precheck). Disarmed, this is a no-op. One shot: the
+        // park consumes the arm.
+        #[cfg(any(test, feature = "test-seam"))]
+        ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
         let mut pool = self.pool.write();
 
