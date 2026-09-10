@@ -157,6 +157,12 @@ posture.
   policy, `CURRENT_SCHEMA`).
 - A sample missing any of these four fields is inadmissible. It cannot
   fill a product cell or supply a promotion or regression verdict.
+- G18 binds each sample's canonical corpus id and backend to the corpus
+  and backend coordinates in its cell id. Matrix `c150` maps only to
+  evidence `C150`; `cmodern` maps only to `Cmodern`; backend spelling is
+  exact. The current sample schema has no separate canonical architecture
+  field, so G18 does not infer an architecture coordinate from the
+  free-form hardware identity.
 - Nested and concurrent intervals are never summed. Parallel worker
   walls and inclusive stage histograms are not addends.
 - All repeated samples and empty or missing cells are retained in the
@@ -187,7 +193,9 @@ posture.
   (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`), including
   `declared_sample_paths_preserve_repetitions_and_empty_cells`,
   `additional_declared_sample_paths_are_allowed`, and
-  `undeclared_sample_paths_are_rejected_in_later_histories` for HPA-05.
+  `undeclared_sample_paths_are_rejected_in_later_histories` for HPA-05;
+  `sample_corpus_and_backend_must_match_the_cell` and
+  `corpus_coordinate_mapping_is_exact` for HPA-12.
 - `bin/bitcoin-rs/tests/overhaul_evidence.rs` (planned): rejects evidence
   missing binary, corpus, configuration, or durability identity; rejects
   summing nested or concurrent intervals; retains repeated samples and
