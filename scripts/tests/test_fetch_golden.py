@@ -7,6 +7,8 @@ owns fixture paths and cache reuse; PR #740 adds failure-atomic publication
 and offline reuse. Heights come from the script, not a second inventory.
 Response bytes are synthetic transport fixtures, not Bitcoin validity vectors:
 expected file contents are the stub's input bytes, never downloader output.
+The regular-file-only cache contract is documented in
+`docs/contracts/fetch-golden-cache.md`.
 
 Run from the repository root: python3 -m unittest discover -s scripts/tests -v
 """
@@ -117,13 +119,40 @@ class FetchGoldenTests(unittest.TestCase):
                 original = path.read_bytes()
                 path.unlink()
                 path.mkdir()
-                result = self.run_fetch("offline")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(path.name, result.stderr)
-                self.assertEqual(self.requests(), [])
-                self.assertEqual(list(path.iterdir()), [])
-                path.rmdir()
-                path.write_bytes(original)
+                try:
+                    result = self.run_fetch("offline")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(path.name, result.stderr)
+                    self.assertEqual(self.requests(), [])
+                    self.assertEqual(list(path.iterdir()), [])
+                finally:
+                    if path.is_dir():
+                        path.rmdir()
+                    path.write_bytes(original)
+
+    def test_symlink_cache_entries_fail_before_network(self):
+        self.seed_cache()
+        for path, target in (
+            (self.block_path, self.output / "regular-target"),
+            (self.txids_path, self.output / "missing-target"),
+        ):
+            with self.subTest(path=path.name):
+                path.unlink()
+                if target.name == "regular-target":
+                    target.write_bytes(b"target")
+                path.symlink_to(target)
+                try:
+                    result = self.run_fetch("offline")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(path.name, result.stderr)
+                    self.assertEqual(self.requests(), [])
+                    self.assertTrue(path.is_symlink())
+                finally:
+                    path.unlink(missing_ok=True)
+                    target.unlink(missing_ok=True)
+                    path.write_bytes(
+                        b"existing block" if path == self.block_path else TXID + "\\n"
+                    )
 
     def test_complete_cache_needs_no_staging_directory(self):
         self.seed_cache()
