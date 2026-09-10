@@ -36,7 +36,32 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git checkout --detach "$PREVIOUS_HEAD"
-          git merge --no-commit --no-ff "$BASE_SHA"
+          if ! git merge --no-commit --no-ff "$BASE_SHA"; then
+            python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          path = 'crates/node/src/state.rs'
+          conflicts = subprocess.check_output(['git', 'diff', '--name-only', '--diff-filter=U'], text=True).splitlines()
+          if conflicts != [path]:
+              raise SystemExit(f'unexpected merge conflicts: {conflicts}')
+          def source(ref):
+              return subprocess.check_output(['git', 'show', ref + ':' + path], text=True)
+          ancestor = source('11a85c814801346a874311438db3a9a977f9cc3b')
+          old = 'crate::checkpoint::HeaderCheckpointConfig'
+          new = 'crate::checkpoint::headers::HeaderCheckpointConfig'
+          if ancestor.count(old) != 3:
+              raise SystemExit('checkpoint migration inventory changed')
+          expected_main = ancestor.replace(old, new).replace('            .flatten()\n\n    }', '            .flatten()\n    }', 1)
+          if source(os.environ['BASE_SHA']) != expected_main:
+              raise SystemExit('main state changes exceed the verified checkpoint migration')
+          candidate = source(os.environ['PREVIOUS_HEAD'])
+          if candidate.count(old) != 3 or 'pub mod events;' not in candidate:
+              raise SystemExit('event candidate no longer matches the verified overlap')
+          Path(path).write_text(candidate.replace(old, new))
+          subprocess.run(['git', 'add', path], check=True)
+          print('Preserved event candidate plus all three verified checkpoint owner migrations.')
+          PY
+          fi
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
