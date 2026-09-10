@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing::debug;
 use zerocopy::IntoBytes;
 
+use crate::reconcile::{SelectedWatermark, selected_watermark as reconcile_selected_watermark};
 use crate::types::{
     HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow,
 };
@@ -2108,28 +2109,10 @@ fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> Result<Option<IndexWatermark>, IndexError> {
-    let mut selected: Option<Option<IndexWatermark>> = None;
-    for capability in [
-        IndexCapability::TxLookup,
-        IndexCapability::ScriptHistory,
-        IndexCapability::ScriptLive,
-    ] {
-        if !capabilities.contains(capability) {
-            continue;
-        }
-        let cursor = watermarks.get(capability);
-        match selected {
-            None => selected = Some(cursor),
-            Some(first) if first == cursor => {}
-            Some(first) => {
-                return Err(IndexError::WatermarkMismatch {
-                    expected: first,
-                    actual: cursor,
-                });
-            }
-        }
+    match reconcile_selected_watermark(watermarks, capabilities) {
+        SelectedWatermark::Valid(watermark) => Ok(watermark),
+        SelectedWatermark::Invalid => Err(IndexError::NonContiguousPrepared { watermark: None }),
     }
-    selected.ok_or(IndexError::NonContiguousPrepared { watermark: None })
 }
 
 fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_identity: bool) {

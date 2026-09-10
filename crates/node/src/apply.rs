@@ -7794,7 +7794,7 @@ mod consensus_rule_tests {
         }
     }
 
-    impl crate::txindex_worker::TxIndexWriter for FailAfterStartupTxIndex {
+    impl bitcoin_rs_index::writer::TxIndexWriter for FailAfterStartupTxIndex {
         fn fenced_watermarks(
             &self,
         ) -> Result<
@@ -7883,7 +7883,7 @@ mod consensus_rule_tests {
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
         let index: Arc<FailAfterStartupTxIndex> = Arc::new(FailAfterStartupTxIndex::new()?);
-        let writer: Arc<dyn crate::txindex_worker::TxIndexWriter> = index.clone();
+        let writer: Arc<dyn bitcoin_rs_index::writer::TxIndexWriter> = index.clone();
         let evidence_dir = tempfile::tempdir()?;
         let _worker = crate::txindex_worker::TxIndexWorker::spawn(
             Arc::clone(&runtime),
