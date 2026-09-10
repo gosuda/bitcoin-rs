@@ -83,6 +83,21 @@ def map_p2p(source: Path, inventory: Path, output: Path, max_bytes: int) -> None
     print(f"p2p_message: imported={imported} skipped_short={skipped_short} unknown_command={unknown_command}")
 
 
+def _script_selectors(harness: Path) -> tuple[int, int]:
+    """Read the script target's flag inventory; never duplicate its positions."""
+    text = harness.read_text()
+    table = re.search(r"const\s+FLAGS\s*:\s*\[[^]]+\]\s*=\s*\[(.*?)\];", text, re.S)
+    if table is None:
+        raise ValueError("Cannot find script_eval FLAGS inventory")
+    entries = re.findall(r"VerifyFlags::([A-Z_]+)", table.group(1))
+    def selector(name: str) -> int:
+        matches = [index for index, value in enumerate(entries) if value == name]
+        if len(matches) != 1:
+            raise ValueError(f"Script FLAGS inventory must contain exactly one {name}")
+        return matches[0]
+    return selector("NONE"), selector("TAPROOT")
+
+
 def _frame(selector: int, script_pubkey: bytes, witness: Sequence[bytes]) -> bytes:
     # Empty scriptSig; remaining fields follow script_eval's documented framing.
     parts = [bytes([selector]), b"\0\0", len(script_pubkey).to_bytes(2, "little"),
@@ -99,6 +114,7 @@ def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: 
     if limit is None:
         raise ValueError("Cannot find script_eval ELEMENT_LEN_MAX")
     element_limit = int(limit.group(1).replace("_", ""))
+    none_selector, taproot_selector = _script_selectors(harness)
     # P2TR framing adds ten bytes relative to the retained source script.
     script_limit = min(element_limit, 0xffff, max_bytes - 10)
     if script_limit < 0:
@@ -108,9 +124,9 @@ def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: 
     for source in sources:
         for path in _seed_paths(source):
             script = _read_seed(path, script_limit)
-            _emit(output, _frame(0, script, []))
+            _emit(output, _frame(none_selector, script, []))
             if len(script) >= 32 and element_limit >= 34:
-                _emit(output, _frame(3, b"\x51\x20" + script[:32], [script[32:]]))
+                _emit(output, _frame(taproot_selector, b"\x51\x20" + script[:32], [script[32:]]))
             imported += 1
     print(f"script_eval: imported={imported} files (raw + P2TR variants)")
 

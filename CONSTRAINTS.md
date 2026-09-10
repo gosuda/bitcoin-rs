@@ -125,5 +125,4 @@ The versioned setup contract for `scripts/import-qa-assets.sh` is: a failure of
 probe exits with status 17, a failure of `mktemp` exits with status 23, a disk
 probe failure exits with status 7, and an insufficient-space check exits with
 status 1. Every setup failure removes the temporary staging directory and does
-not attempt the clone. `scripts/tests/test_import_qa_assets.py`
-`SetupFailureTests` is the regression suite for this contract.
+not attempt the clone. `scripts/tests/test_import_qa_assets.py` `ShellFlowTests` is the regression suite for this contract.
