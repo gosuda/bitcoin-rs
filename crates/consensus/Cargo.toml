@@ -40,3 +40,7 @@ sonic-rs.workspace = true
 [[bench]]
 name = "merkle"
 harness = false
+
+[[bench]]
+name = "block_facts"
+harness = false
