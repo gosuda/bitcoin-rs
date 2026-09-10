@@ -15,6 +15,12 @@ trap 'exit 143' TERM
 for height in "${heights[@]}"; do
   bin_path="${out_dir}/${height}.bin"
   txids_path="${out_dir}/${height}.txids.txt"
+  for cache_path in "${bin_path}" "${txids_path}"; do
+    if [[ -L "${cache_path}" || ( -e "${cache_path}" && ! -f "${cache_path}" ) ]]; then
+      printf 'Not a regular fixture file: %s\n' "${cache_path}" >&2
+      exit 1
+    fi
+  done
   if [[ -s "${bin_path}" && -s "${txids_path}" ]]; then
     continue
   fi
