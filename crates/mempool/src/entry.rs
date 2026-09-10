@@ -79,7 +79,7 @@ impl MempoolEntry {
         // Tx owns weight calculation. Reuse its result instead of calling
         // tx.vsize(), which computes the same weight and walks the tx again.
         let weight = tx.weight();
-        let bip141_vsize = u32::try_from(weight.div_ceil(4)).unwrap_or(u32::MAX);
+        let bip141_vsize = u32::try_from(Tx::vsize_from_weight(weight)).unwrap_or(u32::MAX);
         let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
         let sigop_cost = count_tx_legacy(&tx);
         Self {
@@ -416,6 +416,7 @@ mod wire_metadata_tests {
         }
     }
 
+    // Contract: /CONSTRAINTS.md, "Raw zero-input mempool entry contract".
     #[test]
     fn raw_empty_entry_keeps_zero_input_behavior() {
         let entry = MempoolEntry::new(Arc::new(Tx::default()), 0, 0, 0, 0);
