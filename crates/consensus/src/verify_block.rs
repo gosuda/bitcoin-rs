@@ -10,10 +10,10 @@ mod legacy {
     include!("verify_block_impl.rs");
 }
 
-pub(crate) use legacy::merkle_root_and_mutation_borrowed;
+pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 pub use legacy::{
     BlockRuleContext, block_has_witness, block_merkle_root_matches_txids,
-    block_witness_commitment_matches, verify_merkle_root_with_txids, witness_commitment,
+    block_witness_commitment_matches, verify_merkle_root_with_txids,
 };
 
 /// BIP141 maximum block weight in weight units.
@@ -69,8 +69,7 @@ pub fn verify_block_rules_precomputed(
     // presence. A selected commitment requires its reserved-value proof even
     // when every input witness is empty. Without an active commitment, witness
     // data is forbidden (including before SegWit activation).
-    let has_witness_commitment =
-        context.segwit_active && witness_commitment(block).is_some();
+    let has_witness_commitment = context.segwit_active && witness_commitment(block).is_some();
     if has_witness_commitment {
         let Some(wtxids) = facts.wtxids() else {
             return Err(ConsensusError::WitnessCommitment);
