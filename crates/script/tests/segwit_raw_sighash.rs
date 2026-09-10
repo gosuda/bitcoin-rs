@@ -31,11 +31,11 @@ const INPUT: usize = 1;
 
 fn hex(text: &str) -> Vec<u8> {
     assert!(text.len().is_multiple_of(2));
-    text.as_bytes()
-        .chunks_exact(2)
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
         .map(|pair| {
-            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
-                .expect("hex byte")
+            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16).expect("hex byte")
         })
         .collect()
 }

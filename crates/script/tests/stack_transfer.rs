@@ -57,14 +57,13 @@ fn transfers_preserve_error_precedence_and_capacity() -> Result<(), StackError> 
             assert_eq!(source.move_to(&mut destination), Err(StackError::Overflow));
             assert_eq!(source.len(), 1);
             assert_eq!(source.peek(), Ok(&ScriptItem::Num(9)));
-            assert_eq!(destination, before);
         } else {
             source.move_to(&mut destination)?;
             assert!(source.is_empty());
             assert_eq!(destination.len(), len + 1);
             assert_eq!(destination.pop(), Ok(ScriptItem::Num(9)));
-            assert_eq!(destination, before);
         }
+        assert_eq!(destination, before);
     }
     Ok(())
 }

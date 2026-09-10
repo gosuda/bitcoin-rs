@@ -458,8 +458,8 @@ fn execute_and_capture(
 }
 
 fn configured_smt_encoding(root: &Path) -> String {
-    let constraints =
-        fs::read_to_string(root.join(CONSTRAINTS)).expect("read canonical formal-tool configuration");
+    let constraints = fs::read_to_string(root.join(CONSTRAINTS))
+        .expect("read canonical formal-tool configuration");
     let prefix = "| SMT encoding | `";
     let suffix = "` (";
     constraints

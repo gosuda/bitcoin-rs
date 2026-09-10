@@ -13,8 +13,8 @@ pub use journal::{ChainstateJournalConfig, ChainstateJournalOverrides};
 pub use network::NetworkSelection;
 pub use resolve::resolve;
 pub use resolved::{
-    IndexConfig, MiningConfig, NodeConfig, ObservabilityConfig, P2pConfig, RpcConfig, StorageConfig,
-    ValidationConfig,
+    IndexConfig, MiningConfig, NodeConfig, ObservabilityConfig, P2pConfig, RpcConfig,
+    StorageConfig, ValidationConfig,
 };
 pub use runtime::RuntimeInputs;
 pub use user::{
