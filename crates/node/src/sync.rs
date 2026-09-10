@@ -181,16 +181,16 @@ fn settle_window_failure(
     transition: crate::apply::ChainTransition<'_>,
     mut error: crate::apply::WindowApplyError,
 ) -> crate::apply::WindowApplyError {
-    if !matches!(error.source, ApplyError::UtxoCommit(_)) {
-        if let Err(finish_source) = transition.finish() {
-            tracing::error!(
-                original = %error.source,
-                finish = %finish_source,
-                "chain transition could not be settled after a window failure; \
-                 mempool admission stays closed until recovery or restart"
-            );
-            error.disposition = crate::apply::WindowApplyDisposition::Fatal;
-        }
+    if matches!(error.source, ApplyError::UtxoCommit(_)) {
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
+    } else if let Err(finish_source) = transition.finish() {
+        tracing::error!(
+            original = %error.source,
+            finish = %finish_source,
+            "chain transition could not be settled after a window failure; \
+             mempool admission stays closed until recovery or restart"
+        );
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
     }
     error
 }
@@ -6292,8 +6292,8 @@ mod tests {
 
         assert_eq!(
             error.disposition,
-            crate::apply::WindowApplyDisposition::Operational,
-            "UtxoCommit must not attempt finish, so disposition stays Operational"
+            crate::apply::WindowApplyDisposition::Fatal,
+            "UtxoCommit settlement must be fatal and must not attempt finish"
         );
         assert!(
             matches!(

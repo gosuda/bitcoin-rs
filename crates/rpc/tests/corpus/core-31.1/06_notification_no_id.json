@@ -21,7 +21,12 @@
   },
   "core": {
     "status": 204,
-    "headers": [],
+    "headers": [
+        [
+          "Content-Length",
+          "0"
+        ]
+      ],
     "body": {
       "form": "empty"
     }

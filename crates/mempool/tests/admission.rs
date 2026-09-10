@@ -1,6 +1,10 @@
 //! Gateway admission defects: stale-verdict retryability and prevout-aware sigop
 //! counting.
 //!
+//! Admission expectations are governed by `docs/contracts/mempool-policy.md`,
+//! especially POL-03 (fresh stamped admission context) and POL-04 (owner-
+//! computed sigop limits).
+//!
 //! A failed pool or fixture invariant is a test failure, and panicking reports
 //! it with the offending call site. `expect` is deliberate on individual tests.
 

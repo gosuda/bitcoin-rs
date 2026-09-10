@@ -57,7 +57,7 @@ Owners:
     network, or filesystem I/O.
   - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
     batching primitives, and backend engine drivers.
-  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-utxo`,
+  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
     `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
     `bitcoin-rs-mining`. Domain services and capability runtimes.
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
