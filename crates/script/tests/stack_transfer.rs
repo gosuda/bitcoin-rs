@@ -1,4 +1,8 @@
 //! Ownership-preserving transfers between bounded script stacks.
+//!
+//! Contract: `crates/script/README.md#stack-transfer-contract` requires one-item
+//! ownership transfer, source-underflow-before-destination-overflow precedence,
+//! unchanged stacks on failure, and no duplication of the transferred item.
 use bitcoin_rs_script::{ScriptItem, Stack, StackError};
 use smallvec::SmallVec;
 
