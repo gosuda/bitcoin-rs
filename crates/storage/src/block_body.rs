@@ -13,6 +13,15 @@ use std::sync::Arc;
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;
 
+/// Block payload facts available without materializing a full block body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockBodyMetadata {
+    /// Serialized block byte length.
+    pub body_size: usize,
+    /// Number of transactions encoded in the block.
+    pub tx_count: usize,
+}
+
 fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
     let cursor = bytes.get(SERIALIZED_BLOCK_HEADER_LEN..)?;
     let (count, _) = varint::decode(cursor).ok()?;
@@ -121,14 +130,17 @@ pub trait BlockBodyStore: Send + Sync {
         &self,
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<(usize, usize)>, StorageError> {
+    ) -> Result<Option<BlockBodyMetadata>, StorageError> {
         let Some(body) = self.load_block_body(height, hash)? else {
             return Ok(None);
         };
         let Some(tx_count) = decode_block_tx_count(&body) else {
             return Ok(None);
         };
-        Ok(Some((body.len(), tx_count)))
+        Ok(Some(BlockBodyMetadata {
+              body_size: body.len(),
+              tx_count,
+          }))
     }
 
     /// Bytes this store's block files occupy on disk, when it keeps files.
@@ -373,7 +385,7 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
         &self,
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<(usize, usize)>, StorageError> {
+    ) -> Result<Option<BlockBodyMetadata>, StorageError> {
         let Some(position) = self.body_position(height, hash)? else {
             return Ok(None);
         };
@@ -391,7 +403,10 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
         };
         let body_size = usize::try_from(position.len)
             .map_err(|_| StorageError::InvalidOperation("block body length does not fit usize"))?;
-        Ok(Some((body_size, tx_count)))
+        Ok(Some(BlockBodyMetadata {
+              body_size,
+              tx_count,
+          }))
     }
 
     fn sync(&self) -> Result<(), StorageError> {

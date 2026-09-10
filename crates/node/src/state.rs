@@ -645,10 +645,7 @@ impl BlockBodySource for StoredBlockBodySource {
             .block_body_metadata(height, hash.0)
             .ok()
             .flatten()
-            .map(|(body_size, tx_count)| BlockBodyMetadata {
-                body_size,
-                tx_count,
-            })
+
     }
 }
 
