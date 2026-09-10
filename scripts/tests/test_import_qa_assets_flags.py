@@ -40,10 +40,12 @@ class FlagCommentTests(unittest.TestCase):
                 "const ELEMENT_LEN_MAX: usize = 1_024;\n"
             )
             _, none_selector, taproot_selector = mapper._script_contract(harness)
+            self.assertEqual(taproot_selector, 0)
+            self.assertEqual(none_selector, 2)
             mapper.map_script([source], harness, output, 65_536)
             seeds = {path.read_bytes() for path in output.iterdir()}
-            raw = bytes([none_selector]) + b"\0\0\x40\0" + script + b"\0"
-            taproot = (bytes([taproot_selector]) + b"\0\0\x22\0\x51\x20" + script[:32]
+            raw = bytes([2]) + b"\0\0\x40\0" + script + b"\0"
+            taproot = (bytes([0]) + b"\0\0\x22\0\x51\x20" + script[:32]
                        + b"\x01\x20\0" + script[32:])
             self.assertEqual(seeds, {raw, taproot})
 
