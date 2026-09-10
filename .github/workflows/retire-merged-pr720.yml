@@ -1,0 +1,22 @@
+name: retire-merged-pr720
+on:
+  push:
+    branches: [verify/retire-merged-pr724-run-20260910]
+    paths: [.github/workflows/retire-merged-pr720.yml]
+permissions: {}
+# PR720 changed only the completed review workflow and .review artifacts.
+# It merged as 67f0c72; these files were subsequently removed from main.
+# This exact group belongs to ordinary PR CI, not the completion/proof runner.
+concurrency:
+  group: ci-ci-refs/pull/720/merge
+  cancel-in-progress: true
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: |
+          printf '%s\n' \
+            'Retired obsolete ordinary PR720 CI run 34414470268.' \
+            'Run source: 45387d95e8c4cd930653f11e243a4c51921c0702.' \
+            'Cancellation is not a pass. Runtime PR, main, and proof runs are unchanged.'
