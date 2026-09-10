@@ -1,0 +1,152 @@
++    "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f",
++    "0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57",
++    "b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85",
++    "c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2",
++    "f0167faa815988ac11000000",
++);
++const TEST_KEY: &str = "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9";
++const SCRIPT_CODE: &str = "76a9141d0f172a0ecb48aee1be1f2687d2963ae33f71a188ac";
++const PROGRAM: &str = "00141d0f172a0ecb48aee1be1f2687d2963ae33f71a1";
++const VALUE: u64 = 600_000_000;
++const INPUT: usize = 1;
++
++fn hex(text: &str) -> Vec<u8> {
++    assert!(text.len().is_multiple_of(2));
++    text.as_bytes()
++        .chunks_exact(2)
++        .map(|pair| {
++            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
++                .expect("hex byte")
++        })
++        .collect()
++}
++
++fn fixture(outputs: usize) -> (Tx, bitcoin::Transaction) {
++    let bytes = hex(TX_HEX);
++    let mut native: Tx = deserialize(&bytes).expect("native fixture decode");
++    let mut oracle: bitcoin::Transaction = oracle_decode(&bytes).expect("oracle fixture decode");
++    native.outputs.truncate(outputs);
++    oracle.output.truncate(outputs);
++    (native, oracle)
++}
++
++fn double_sha256(bytes: &[u8]) -> [u8; 32] {
++    Sha256::digest(Sha256::digest(bytes)).into()
++}
++
++/// BIP143 reference serialization. Raw hash-type bits select fields using the
++/// low five bits and bit 7, but ALL 32 bits are appended to the preimage.
++fn reference_bip143(
++    tx: &bitcoin::Transaction,
++    input: usize,
++    script: &[u8],
++    value: u64,
++    raw: u32,
++) -> [u8; 32] {
++    let anyone = raw & 0x80 != 0;
++    let base = raw & 0x1f;
++    let mut prevouts = [0_u8; 32];
++    let mut sequences = [0_u8; 32];
++    let mut outputs = [0_u8; 32];
++    if !anyone {
++        let bytes: Vec<u8> = tx
++            .input
++            .iter()
++            .flat_map(|input| serialize(&input.previous_output))
++            .collect();
++        prevouts = double_sha256(&bytes);
++    }
++    if !anyone && base != 2 && base != 3 {
++        let bytes: Vec<u8> = tx
++            .input
++            .iter()
++            .flat_map(|input| serialize(&input.sequence))
++            .collect();
++        sequences = double_sha256(&bytes);
++    }
++    if base != 2 && base != 3 {
++        let bytes: Vec<u8> = tx.output.iter().flat_map(serialize).collect();
++        outputs = double_sha256(&bytes);
++    } else if base == 3 {
++        if let Some(output) = tx.output.get(input) {
++            outputs = double_sha256(&serialize(output));
++        }
++    }
++    let selected = &tx.input[input];
++    let mut preimage = serialize(&tx.version);
++    preimage.extend_from_slice(&prevouts);
++    preimage.extend_from_slice(&sequences);
++    preimage.extend(serialize(&selected.previous_output));
++    let script_len = u64::try_from(script.len()).expect("script length");
++    preimage.extend(serialize(&VarInt(script_len)));
++    preimage.extend_from_slice(script);
++    preimage.extend_from_slice(&value.to_le_bytes());
++    preimage.extend(serialize(&selected.sequence));
++    preimage.extend_from_slice(&outputs);
++    preimage.extend(serialize(&tx.lock_time));
++    preimage.extend_from_slice(&raw.to_le_bytes());
++    double_sha256(&preimage)
++}
++
++fn test_key() -> SecretKey {
++    SecretKey::from_slice(&hex(TEST_KEY)).expect("public BIP143 test key")
++}
++
++fn p2wpkh_prevout() -> TxOut {
++    TxOut {
++        value: VALUE,
++        script_pubkey: hex(PROGRAM),
++    }
++}
++
++fn verify_witness(
++    tx: &Tx,
++    prevout: &TxOut,
++    witness: &[Vec<u8>],
++    flags: VerifyFlags,
++) -> Result<bool, ScriptError> {
++    Interpreter.execute(
++        &prevout.script_pubkey,
++        &[],
++        witness,
++        flags,
++        prevout,
++        tx,
++        INPUT,
++    )
++}
++
++// The optional oracle is a real kernel call, not an availability-based skip.
++// Failure to parse or prepare the transaction fails the positive assertion.
++// Policy-only flags are intentionally excluded: the wrapper masks them off.
++#[cfg(feature = "kernel")]
++fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
++    use bitcoin_rs_consensus::{ConsensusError, kernel::verify_tx_scripts};
++
++    let mut signed = tx.clone();
++    signed.inputs[INPUT].witness = witness.to_vec();
++    // The other input has a synthetic OP_TRUE prevout. This is script-verdict
++    // parity, not contextual block validation or a claim about historical UTXOs.
++    let mut spent: Vec<_> = signed
++        .inputs
++        .iter()
++        .enumerate()
++        .map(|(index, input)| {
++            let output = if index == INPUT {
++                prevout.clone()
++            } else {
++                TxOut {
++                    value: VALUE,
++                    script_pubkey: vec![0x51],
++                }
++            };
++            (input.previous_output, output)
++        })
++        .collect();
++    verify_tx_scripts(&signed, &spent, VerifyFlags::MANDATORY)
++        .expect("kernel accepts independently signed BIP143 input");
++    // Every BIP143 mode commits to this amount. Ensure the oracle is not
++    // vacuously accepting, and require a script rejection, not an engine error.
++    spent[INPUT].1.value += 1;
++    assert!(matches!(
++        verify_tx_scripts(&signed, &spent, VerifyFlags::MANDATORY),
