@@ -57,7 +57,8 @@ impl Stack {
             .get(
                 self.items
                     .len()
-                    .checked_sub(depth + 1)
+                    .checked_sub(depth)
+                    .and_then(|index| index.checked_sub(1))
                     .ok_or(StackError::Underflow)?,
             )
             .ok_or(StackError::Underflow)
@@ -68,7 +69,8 @@ impl Stack {
         let index = self
             .items
             .len()
-            .checked_sub(depth + 1)
+            .checked_sub(depth)
+            .and_then(|index| index.checked_sub(1))
             .ok_or(StackError::Underflow)?;
         Ok(self.items.remove(index))
     }
