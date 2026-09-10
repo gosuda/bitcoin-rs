@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: c84a44eff9e6e2e41e6ac36ba92843b665380645
+          ref: 76baf086b861057f5700da34c4ad0d4f5aab5966
           path: source
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -37,12 +37,33 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: source -> target
-      - name: Record exact source and add failing contract regressions
+          cache-on-failure: true
+      - name: Record source and isolate inherited formatting
         run: |
           mkdir -p /tmp/manual-ban-evidence
           git rev-parse HEAD | tee /tmp/manual-ban-evidence/base.txt
           rustc --version --verbose | tee /tmp/manual-ban-evidence/toolchain.txt
-          python3 ../control/.github/audit/prepare_manual_bans.py tests
+          git archive HEAD > /tmp/manual-ban-evidence/base-source.tar
+          cargo fmt --all
+          python3 - <<'PY'
+          import subprocess
+          allowed = {'bin/bitcoin-rs/tests/gates/g20_formal_models.rs',
+                     'crates/utxo/src/set/persistent.rs',
+                     'crates/utxo/tests/overhaul_persistent_coins.rs'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert actual <= allowed, ('Unexpected formatting changes', sorted(actual))
+          PY
+          git diff --binary > /tmp/manual-ban-evidence/formatting.patch
+          git diff --check
+          if ! git diff --quiet; then
+            git add -- bin/bitcoin-rs/tests/gates/g20_formal_models.rs crates/utxo/src/set/persistent.rs crates/utxo/tests/overhaul_persistent_coins.rs
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style: apply current rustfmt to inherited formatting differences'
+          fi
+          git rev-parse HEAD > /tmp/manual-ban-evidence/format-head.txt
+          cargo fmt --all -- --check
+          git diff --exit-code
+      - name: Add failing contract regressions to verified source
+        run: python3 ../control/.github/audit/prepare_manual_bans.py tests
       - name: Require four behavioral failures on the original implementation
         run: |
           set +e
@@ -57,6 +78,7 @@ jobs:
           grep -q 'unrepresentable expiry must fail before ban mutation' /tmp/manual-ban-evidence/red.txt
           grep -q 'late ban must reject before registration and wire I/O' /tmp/manual-ban-evidence/red.txt
       - name: Apply the shared owner transition and check exact scope
+        id: fix
         run: |
           python3 ../control/.github/audit/prepare_manual_bans.py fix
           cargo fmt --all
@@ -73,27 +95,43 @@ jobs:
           git diff --exit-code -- Cargo.lock
           git diff --binary > /tmp/manual-ban-evidence/candidate.patch
       - name: P2P owner, listener, and protocol regressions
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo test --locked -p bitcoin-rs-p2p --lib --test listener_ban --test core_compat --no-fail-fast 2>&1 | tee /tmp/manual-ban-evidence/p2p.txt
-      - name: RPC and production ingress regressions
+      - name: RPC regressions
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast 2>&1 | tee /tmp/manual-ban-evidence/rpc.txt
+      - name: Production ingress regressions
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
           cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e 2>&1 | tee /tmp/manual-ban-evidence/ingress.txt
-      - name: All three strict native PR Clippy profiles
+      - name: Workspace strict Clippy
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-workspace.txt
+      - name: Native consensus strict Clippy
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
           cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-consensus.txt
+      - name: Native node strict Clippy
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
           cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-node.txt
       - name: Ownership and evidence schema gates
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership --test overhaul_evidence --test overhaul_reference_set 2>&1 | tee /tmp/manual-ban-evidence/contracts.txt
       - name: Publish the tested source only on a new branch
         run: |
-          test "$(git rev-parse HEAD)" = c84a44eff9e6e2e41e6ac36ba92843b665380645
+          test "$(git rev-parse HEAD)" = "$(cat /tmp/manual-ban-evidence/format-head.txt)"
           test -z "$(git ls-remote --heads origin refs/heads/validated/manual-ban-arm-20260910)"
           git diff --exit-code -- Cargo.lock
           cargo fmt --all -- --check
@@ -103,7 +141,13 @@ jobs:
           git diff --exit-code
           git rev-parse HEAD | tee /tmp/manual-ban-evidence/head.txt
           git show --stat --oneline HEAD | tee /tmp/manual-ban-evidence/scope.txt
+          git archive HEAD > /tmp/manual-ban-evidence/source.tar
           git push origin HEAD:refs/heads/validated/manual-ban-arm-20260910
+      - name: Capture partial source changes on failure
+        if: always()
+        run: |
+          mkdir -p /tmp/manual-ban-evidence
+          git diff --binary > /tmp/manual-ban-evidence/uncommitted.patch
       - name: Preserve deciding output on success and failure
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
