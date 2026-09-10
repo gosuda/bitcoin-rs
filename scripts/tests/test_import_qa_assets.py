@@ -27,6 +27,43 @@ assert spec.loader is not None
 spec.loader.exec_module(mapper)
 
 
+class SetupFailureTests(unittest.TestCase):
+    """Regression coverage for the shell setup contract in CONSTRAINTS.md."""
+
+    def run_setup(self, failing: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "bin"; bindir.mkdir()
+            log = Path(tmp) / "log"
+            for command in ("git", "rustc", "mktemp", "df"):
+                body = "#!/bin/sh\n"
+                if command == failing:
+                    body += "exit 1\n"
+                elif command == "git":
+                    body += "printf '%s\\n' /tmp/repo\n"
+                elif command == "rustc":
+                    body += "printf 'host: x86_64-unknown-linux-gnu\\n'\n"
+                elif command == "mktemp":
+                    body += "printf '%s\\n' \"$TMPDIR/staging\"; mkdir -p \"$TMPDIR/staging\"\n"
+                else:
+                    body += "printf 'Filesystem 1024 1 1 99% /\\n'\n"
+                path = bindir / command; path.write_text(body); path.chmod(0o755)
+            result = subprocess.run(["bash", str(SCRIPT)], env={**os.environ, "PATH": str(bindir), "TMPDIR": tmp},
+                                    capture_output=True, text=True)
+            return result.returncode
+
+    def test_git_failure_status(self):
+        self.assertEqual(self.run_setup("git"), 19)
+
+    def test_nightly_failure_status(self):
+        self.assertEqual(self.run_setup("rustc"), 17)
+
+    def test_mktemp_failure_status(self):
+        self.assertEqual(self.run_setup("mktemp"), 23)
+
+    def test_disk_probe_failure_status(self):
+        self.assertEqual(self.run_setup("df"), 7)
+
+
 class MapperTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -36,7 +73,7 @@ class MapperTests(unittest.TestCase):
         for name in names: (self.corpora / name).mkdir(parents=True)
         self.inv = self.root / "compat.rs"
         self.inv.write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }, Command { name: "pong" }];\n')
-        self.harness = self.root / "script_eval.rs"; self.harness.write_text("const ELEMENT_LEN_MAX: usize = 1_024;\n")
+        self.harness = self.root / "script_eval.rs"; self.harness.write_text("const QA_RAW_SELECTOR: usize = 0;\nconst QA_P2TR_SELECTOR: usize = 3;\nconst ELEMENT_LEN_MAX: usize = 1_024;\n")
 
     def msg(self, command: str, payload: bytes) -> None:
         (self.corpora / "p2p_deserialize_raw_net_msg" / command).write_bytes(
@@ -58,6 +95,7 @@ class MapperTests(unittest.TestCase):
         mapper.map_script([source, self.corpora / "bitcoin_script_bytes_to_asm_fmt"], self.harness, self.out, BUDGET)
         data = [p.read_bytes() for p in self.out.iterdir()]
         self.assertEqual(len(data), 2); self.assertTrue(all(len(seed) <= BUDGET for seed in data))
+        self.assertEqual({seed[0] for seed in data}, {0, 3})
         self.assertIn(b"\0\0\0\0\x04" + b"Q" * 1024 + b"\0", data)
 
     def test_direct_mapping_is_bounded_and_atomic(self):

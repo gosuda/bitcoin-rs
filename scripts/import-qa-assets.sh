@@ -23,7 +23,9 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+if ! REPO_ROOT="$(git rev-parse --show-toplevel)"; then
+    exit 19
+fi
 readonly REPO_ROOT
 readonly QA_ASSETS_URL="https://github.com/rust-bitcoin/qa-assets.git"
 readonly FOOTPRINT_ASSUME_MB=2048  # worst-case shallow-clone footprint
@@ -33,7 +35,9 @@ readonly MAX_SEED_BYTES=65536      # keep individual seeds bounded
 # cargo env hygiene for this repo (see repo AGENTS.md); fuzzing needs nightly
 # for -Zsanitizer, and an explicit host triple because cargo-fuzz 0.13
 # defaults to the musl target.
-HOST_TRIPLE="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+if ! HOST_TRIPLE="$(rustc +nightly -vV | sed -n 's/^host: //p')" || [ -z "${HOST_TRIPLE}" ]; then
+    exit 17
+fi
 readonly HOST_TRIPLE
 CARGO_ENV=(env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR RUSTUP_TOOLCHAIN=nightly)
 
@@ -44,7 +48,9 @@ log() { printf '[import-qa-assets] %s\n' "$*"; }
 # both filesystems must cover their share of footprint + reserve.
 available_mb() { df -Pm "$1" | awk 'NR == 2 { print $4 }'; }
 
-WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-assets.XXXXXX")"
+if ! WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-assets.XXXXXX")"; then
+    exit 23
+fi
 readonly WORKDIR
 cleanup() { rm -rf -- "${WORKDIR:?workdir unset}"; }
 trap cleanup EXIT
@@ -52,8 +58,10 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-FREE_TMP_MB="$(available_mb "${WORKDIR}")"
-FREE_REPO_MB="$(available_mb "${REPO_ROOT:?repo root unset}")"
+if ! FREE_TMP_MB="$(available_mb "${WORKDIR}")" || [ -z "${FREE_TMP_MB}" ] ||
+   ! FREE_REPO_MB="$(available_mb "${REPO_ROOT:?repo root unset}")" || [ -z "${FREE_REPO_MB}" ]; then
+    exit 7
+fi
 readonly FREE_TMP_MB FREE_REPO_MB
 readonly NEEDED_MB=$((FOOTPRINT_ASSUME_MB + RESERVE_MB))
 readonly NEEDED_REPO_MB=256
