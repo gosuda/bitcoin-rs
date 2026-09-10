@@ -1440,6 +1440,10 @@ pub enum PersistentUtxoError {
     /// the caller must treat this as a fault boundary (T12).
     #[error("store write failed: {0}")]
     Storage(#[from] bitcoin_rs_storage::StorageError),
+    /// A stored record failed canonical validation on reload.
+    #[deprecated(note = "retained for source compatibility; use the typed persistence errors")]
+    #[error("stored coin record failed validation for txid {0}")]
+    CorruptStoredRecord(Txid),
     /// A guarded durable write found the stored row in an unexpected state.
     #[error("guarded coin write found a mismatched row for txid {0}")]
     ConditionMismatch(Txid),
