@@ -18,6 +18,8 @@ end-state evidence roles.
   `script_eval.rs`.
 - Provenance rows must be updated in the same commit as any corpus re-import via
   `scripts/import-qa-assets.sh`.
+- Import scope is limited to regular files directly inside each named source
+  directory: nested-directory entries and symbolic links are not imported.
 
 ### `QAC-02`: End-state evidence roles
 
