@@ -86,10 +86,10 @@ fn reference_bip143(
     if base != 2 && base != 3 {
         let bytes: Vec<u8> = tx.output.iter().flat_map(serialize).collect();
         outputs = double_sha256(&bytes);
-    } else if base == 3 {
-        if let Some(output) = tx.output.get(input) {
-            outputs = double_sha256(&serialize(output));
-        }
+    } else if base == 3
+        && let Some(output) = tx.output.get(input)
+    {
+        outputs = double_sha256(&serialize(output));
     }
     let selected = &tx.input[input];
     let mut preimage = serialize(&tx.version);
@@ -325,6 +325,187 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
                 cache.segwit_v0_signature_hash(input, &script, VALUE, Sighash::Default),
                 Err(SighashError::DefaultOnlyTaproot),
             );
+        }
+    }
+}
+
+// This is a field-sensitivity check, not a second native digest implementation.
+// The expected commitment predicates below come from BIP143's field table.
+fn assert_field_commitment(
+    tx: &bitcoin::Transaction,
+    raw: u32,
+    committed: bool,
+    change: impl FnOnce(&mut bitcoin::Transaction),
+) {
+    let script = hex(SCRIPT_CODE);
+    let before = reference_bip143(tx, INPUT, &script, VALUE, raw);
+    let mut changed = tx.clone();
+    change(&mut changed);
+    let expected = reference_bip143(&changed, INPUT, &script, VALUE, raw);
+    let native: Tx = deserialize(&serialize(&changed)).expect("changed fixture decode");
+    let actual = SighashCache::new(&native)
+        .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, raw)
+        .expect("changed transaction digest");
+    assert_eq!(actual.as_byte_array(), &expected, "raw={raw:#x}");
+    assert_eq!(before != expected, committed, "raw={raw:#x}");
+}
+
+#[test]
+fn every_raw_hashtype_commits_only_the_fields_required_by_bip143() {
+    let (_, tx) = fixture(2);
+    for byte in 0_u8..=u8::MAX {
+        let raw = u32::from(byte);
+        let anyone = raw & 0x80 != 0;
+        let all_outputs = !matches!(raw & 0x1f, 2 | 3);
+        assert_field_commitment(&tx, raw, true, |tx| tx.version.0 ^= 1);
+        assert_field_commitment(&tx, raw, true, |tx| {
+            tx.lock_time = bitcoin::absolute::LockTime::from_consensus(18);
+        });
+        assert_field_commitment(&tx, raw, true, |tx| {
+            tx.input[INPUT].previous_output.vout ^= 1;
+        });
+        assert_field_commitment(&tx, raw, true, |tx| {
+            tx.input[INPUT].sequence = bitcoin::Sequence(0xffff_fffe);
+        });
+        assert_field_commitment(&tx, raw, !anyone, |tx| {
+            tx.input[0].previous_output.vout ^= 1;
+        });
+        assert_field_commitment(&tx, raw, !anyone && all_outputs, |tx| {
+            tx.input[0].sequence = bitcoin::Sequence(0xffff_fffe);
+        });
+        assert_field_commitment(&tx, raw, raw & 0x1f != 2, |tx| {
+            tx.output[INPUT].value = bitcoin::Amount::from_sat(1);
+        });
+        assert_field_commitment(&tx, raw, all_outputs, |tx| {
+            tx.output[0].value = bitcoin::Amount::from_sat(1);
+        });
+        assert_field_commitment(&tx, raw, false, |tx| {
+            tx.input[INPUT].script_sig = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+            tx.input[INPUT].witness = bitcoin::Witness::from_slice(&[vec![0x01]]);
+        });
+    }
+}
+
+#[test]
+fn raw_segwit_cache_preserves_script_bytes_and_per_call_context() {
+    // Digest API coverage, not block-valid transactions: zero outputs and
+    // u64::MAX amounts deliberately probe serialization rather than money rules.
+    for output_count in [0, 1, 2] {
+        let (tx, oracle) = fixture(output_count);
+        let mut cache = SighashCache::new(&tx);
+        for length in [0, 1, 252, 253, 10_000] {
+            let script = vec![0xab; length]; // BIP143 must not strip CODESEPARATOR.
+            for value in [0, VALUE, u64::MAX] {
+                for input in [1, 0] {
+                    for raw in [0, 1, 2, 3, 0x21, 0x22, 0x23, 0x80, 0x83, u32::MAX] {
+                        assert_eq!(
+                            cache
+                                .segwit_v0_signature_hash_raw(input, &script, value, raw)
+                                .expect("mixed-context digest")
+                                .as_byte_array(),
+                            &reference_bip143(&oracle, input, &script, value, raw),
+                            "outputs={output_count}, input={input}, len={length}, raw={raw:#x}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn single_anyonecanpay_allows_only_paired_input_output_permutation() {
+    let (native, original) = fixture(2);
+    let mut permuted = original.clone();
+    permuted.input.swap(0, INPUT);
+    permuted.output.swap(0, INPUT);
+    let moved: Tx = deserialize(&serialize(&permuted)).expect("permuted fixture decode");
+    let script = hex(SCRIPT_CODE);
+    for raw in [3, 0x23, 0x43, 0x63, 0x83, 0xa3, 0xc3, 0xe3] {
+        let before = SighashCache::new(&native)
+            .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, raw)
+            .expect("original SINGLE digest");
+        let after = SighashCache::new(&moved)
+            .segwit_v0_signature_hash_raw(0, &script, VALUE, raw)
+            .expect("permuted SINGLE digest");
+        assert_eq!(
+            before.as_byte_array(),
+            &reference_bip143(&original, INPUT, &script, VALUE, raw),
+        );
+        assert_eq!(
+            after.as_byte_array(),
+            &reference_bip143(&permuted, 0, &script, VALUE, raw),
+        );
+        assert_eq!(before == after, raw & 0x80 != 0, "raw={raw:#x}");
+        // Moving only the inputs or only the outputs is not the paired
+        // permutation allowed by SINGLE|ANYONECANPAY.
+        for inputs_only in [false, true] {
+            let mut unpaired = original.clone();
+            let index = if inputs_only {
+                unpaired.input.swap(0, INPUT);
+                0
+            } else {
+                unpaired.output.swap(0, INPUT);
+                INPUT
+            };
+            let native: Tx = deserialize(&serialize(&unpaired)).expect("unpaired fixture");
+            let hash = SighashCache::new(&native)
+                .segwit_v0_signature_hash_raw(index, &script, VALUE, raw)
+                .expect("unpaired digest");
+            assert_eq!(
+                hash.as_byte_array(),
+                &reference_bip143(&unpaired, index, &script, VALUE, raw),
+            );
+            assert_ne!(before, hash, "unpaired permutation: raw={raw:#x}");
+        }
+    }
+}
+
+#[test]
+fn p2wsh_signatures_preserve_unexecuted_codeseparators_for_every_hashtype() {
+    let (tx, oracle) = fixture(2);
+    let key = test_key();
+    let pubkey = PublicKey::from_secret_key(SECP256K1, &key).serialize();
+    let mut suffix = vec![0x21]; // push compressed pubkey
+    suffix.extend_from_slice(&pubkey);
+    suffix.extend_from_slice(&[0xac, 0x00, 0x63, 0xab, 0x68]); // CHECKSIG 0 IF CODESEP ENDIF
+    let mut script = vec![0xab]; // executed separator is excluded from scriptCode
+    script.extend_from_slice(&suffix);
+    let mut program = vec![0x00, 0x20];
+    program.extend_from_slice(&Sha256::digest(&script));
+    let prevout = TxOut {
+        value: VALUE,
+        script_pubkey: program,
+    };
+    // Remove the unexecuted opcode only, never matching bytes in pushed data.
+    let mut incorrectly_stripped = suffix.clone();
+    incorrectly_stripped.remove(suffix.len() - 2);
+    for byte in 0_u8..=u8::MAX {
+        let raw = u32::from(byte);
+        let expected = reference_bip143(&oracle, INPUT, &suffix, VALUE, raw);
+        let wrong = reference_bip143(&oracle, INPUT, &incorrectly_stripped, VALUE, raw);
+        assert_ne!(expected, wrong);
+        for (digest, valid) in [(expected, true), (wrong, false)] {
+            let mut signature = SECP256K1
+                .sign_ecdsa(&Message::from_digest(digest), &key)
+                .serialize_der()
+                .to_vec();
+            signature.push(byte);
+            let witness = vec![signature, script.clone()];
+            let result = verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY);
+            if valid {
+                assert_eq!(result, Ok(true), "raw={raw:#x}");
+                #[cfg(feature = "kernel")]
+                kernel_witness_parity(&tx, &prevout, &witness);
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::EvalFalse,
+                    }),
+                    "stripped scriptCode must not verify: raw={raw:#x}",
+                );
+            }
         }
     }
 }
