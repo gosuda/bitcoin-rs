@@ -154,14 +154,14 @@ impl<'a> TxSignatureChecker<'a> {
         sigversion: SigVersion,
         flags: VerifyFlags,
     ) -> Result<bool, ScriptError> {
-        // NULLFAIL: empty signature is a clean false, not an error.
+        // Core checks both encodings before signature verification. An empty
+        // signature is permitted, but does not waive public-key encoding rules.
+        check_signature_encoding(sig, flags)?;
+        check_pubkey_encoding(pubkey, flags, sigversion)?;
+
         if sig.is_empty() {
             return Ok(false);
         }
-
-        // Encoding checks driven by flags.
-        check_signature_encoding(sig, flags)?;
-        check_pubkey_encoding(pubkey, flags, sigversion)?;
 
         // Parse the pubkey; an invalid pubkey is a clean false (not an error)
         // matching Core's `CPubKey::IsValid()` returning false.
