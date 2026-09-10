@@ -38,7 +38,13 @@ fn fixture(inputs: usize, script_len: usize, witness_len: Option<usize>) -> Tx {
 }
 
 // Exact original constructor, benchmark-only; no production compatibility path.
-fn baseline_entry(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32) -> MempoolEntry {
+fn baseline_entry(
+    tx: Arc<Tx>,
+    vsize: u32,
+    fee: u64,
+    time: u64,
+    height: u32,
+) -> MempoolEntry {
     let own_size = u64::from(vsize);
     let txid = tx.txid();
     let wtxid = tx.wtxid();
@@ -117,7 +123,10 @@ fn main() {
                     }
                     let elapsed_ns = started.elapsed().as_nanos();
                     println!(
-                        "entry_sample,inputs={inputs},witness={},optimized={optimized},sample={sample},iterations={iterations},elapsed_ns={elapsed_ns}",
+                        concat!(
+                              "entry_sample,inputs={inputs},witness={},optimized={optimized},",
+                              "sample={sample},iterations={iterations},elapsed_ns={elapsed_ns}",
+                          ),
                         witness.is_some()
                     );
                 }
