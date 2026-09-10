@@ -126,4 +126,63 @@ class MapperTests(unittest.TestCase):
         self.assertEqual({p.name for p in self.out.iterdir()}, {"p2p_message", "script_eval", "block_decode", "tx_decode"})
 
 
+class ShellFlowTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name); self.bin = self.root / "bin"; self.bin.mkdir(); self.stage = self.root / "stage"; self.stage.mkdir()
+        scripts = self.root / "scripts"; scripts.mkdir(); (scripts / MAPPER.name).write_bytes(MAPPER.read_bytes())
+        (self.root / "crates/p2p/src").mkdir(parents=True); (self.root / "fuzz/fuzz_targets").mkdir(parents=True)
+        (self.root / "crates/p2p/src/compat.rs").write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }];')
+        (self.root / "fuzz/fuzz_targets/script_eval.rs").write_text("const ELEMENT_LEN_MAX: usize = 1_024;\n")
+        self.prov = self.root / "fuzz/CORPUS_PROVENANCE.md"; self.prov.parent.mkdir(exist_ok=True); self.prov.write_text("old\n")
+        self.pin = re.search(r'^readonly QA_ASSETS_PIN="([0-9a-f]{40})"', SCRIPT.read_text(), re.M).group(1)
+        corpus = self.stage / "fuzz_corpora"
+        for name in ["p2p_deserialize_raw_net_msg", "bitcoin_deserialize_script", "bitcoin_script_bytes_to_asm_fmt",
+                     "bitcoin_deserialize_block", "bitcoin_deserialize_transaction"]: (corpus / name).mkdir(parents=True)
+        (corpus / "p2p_deserialize_raw_net_msg/s").write_bytes(b"\0"*4+b"ping"+b"\0"*8+b"\0"*8+b"p")
+        (corpus / "bitcoin_deserialize_script/s").write_bytes(b"Q")
+        for name in ("bitcoin_deserialize_block", "bitcoin_deserialize_transaction"): (corpus / name / "s").write_bytes(b"D")
+        self.install_stubs()
+
+    def stub(self, name, body):
+        p = self.bin / name; p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + body + "\n"); p.chmod(0o755)
+
+    def install_stubs(self):
+        self.stub("rustc", "printf 'host: x86_64-unknown-linux-gnu\\n'")
+        self.stub("df", "printf 'Filesystem B U A C M\\nX 1 0 100000 0%% /\\n'")
+        self.stub("du", "[[ ${FAIL:-} != du ]] || exit 31; printf '1\\tclone\\n'")
+        self.stub("date", "[[ ${FAIL:-} != date ]] || exit 47; [[ -f ${TEST_ROOT}/cmin.log ]] && [[ $(cat ${TEST_ROOT}/cmin.log) == $'p2p_message\\nblock_decode\\ntx_decode\\nscript_eval' ]] || exit 48; printf '2000-01-01T00:00:00Z\\n'")
+        self.stub("cargo", "[[ ${FAIL:-} != cmin ]] || exit 43; [[ $1 == fuzz && $2 == cmin ]] || exit 99; printf '%s\\n' \"$5\" >> \"${TEST_ROOT}/cmin.log\"")
+        self.stub("git", r'''
+if [[ $1 == rev-parse ]]; then printf '%s\n' "$TEST_ROOT"; exit; fi
+if [[ $1 == init ]]; then mkdir -p "${!#}/fuzz_corpora"; exit; fi
+[[ $1 == -C ]] || exit 99
+case "$3" in
+ remote|fetch) exit 0 ;;
+ checkout) cp -a "$SOURCE/." "$2/" ;;
+ rev-parse) [[ ${FAIL:-} != git_head ]] || exit 29; printf '%s\n' "$PIN" ;;
+ *) exit 99 ;;
+esac''')
+
+    def run_import(self, fail=""):
+        env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", TEST_ROOT=str(self.root), SOURCE=str(self.stage), PIN=self.pin,
+                   TMPDIR=str(self.root / "tmp"), FAIL=fail, RUSTC_WRAPPER="x", CARGO_BUILD_BUILD_DIR="x")
+        Path(env["TMPDIR"]).mkdir(exist_ok=True)
+        return subprocess.run(["bash", str(SCRIPT)], cwd=self.root, env=env, capture_output=True, text=True, timeout=15)
+
+    def test_success_replaces_provenance_after_cmin(self):
+        result = self.run_import(); self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.prov.read_text(); self.assertIn(self.pin, text); self.assertIn("2000-01-01T00:00:00Z", text)
+        self.assertEqual((self.root / "cmin.log").read_text().splitlines(), ["p2p_message", "block_decode", "tx_decode", "script_eval"])
+        self.assertEqual(self.prov.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(any(self.prov.parent.glob(".corpus-provenance.*")))
+
+    def test_acquisition_failures_preserve_provenance(self):
+        for fail, code in (("git_head", 29), ("du", 31), ("cmin", 43), ("date", 47)):
+            with self.subTest(fail=fail):
+                self.prov.write_text("old\n"); result = self.run_import(fail)
+                self.assertEqual(result.returncode, code, result.stderr); self.assertEqual(self.prov.read_text(), "old\n")
+                self.assertFalse(any(self.prov.parent.glob(".corpus-provenance.*")))
+
+
 if __name__ == "__main__": unittest.main()
