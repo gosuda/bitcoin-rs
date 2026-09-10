@@ -31,7 +31,9 @@ fn scrape(addr: SocketAddr) -> (u16, String) {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
             Ok(mut stream) => {
                 stream
-                    .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .write_all(
+                        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
                     .unwrap_or_else(|error| panic!("write scrape request: {error}"));
                 stream
                     .flush()

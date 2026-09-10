@@ -27,13 +27,13 @@ pub struct ChainstateJournalOverrides {
 
 impl ChainstateJournalOverrides {
     pub(super) fn overlay(&mut self, other: &Self) {
-        overlay_some(&mut self.enabled, &other.enabled);
-        overlay_some(&mut self.blocks, &other.blocks);
-        overlay_some(&mut self.seconds, &other.seconds);
-        overlay_some(&mut self.rotate_mib, &other.rotate_mib);
-        overlay_some(&mut self.max_journal_mib, &other.max_journal_mib);
-        overlay_some(&mut self.max_lag_blocks, &other.max_lag_blocks);
-        overlay_some(&mut self.max_lag_seconds, &other.max_lag_seconds);
+        overlay_some(&mut self.enabled, other.enabled.as_ref());
+        overlay_some(&mut self.blocks, other.blocks.as_ref());
+        overlay_some(&mut self.seconds, other.seconds.as_ref());
+        overlay_some(&mut self.rotate_mib, other.rotate_mib.as_ref());
+        overlay_some(&mut self.max_journal_mib, other.max_journal_mib.as_ref());
+        overlay_some(&mut self.max_lag_blocks, other.max_lag_blocks.as_ref());
+        overlay_some(&mut self.max_lag_seconds, other.max_lag_seconds.as_ref());
     }
 
     pub(super) fn apply_to(self, config: &mut ChainstateJournalConfig) {
@@ -87,8 +87,14 @@ pub struct ChainstateJournalConfig {
 
 impl ChainstateJournalConfig {
     pub(super) fn validate(&self) -> Result<()> {
-        anyhow::ensure!(self.blocks > 0, "chainstate_journal.blocks must be positive");
-        anyhow::ensure!(self.seconds > 0, "chainstate_journal.seconds must be positive");
+        anyhow::ensure!(
+            self.blocks > 0,
+            "chainstate_journal.blocks must be positive"
+        );
+        anyhow::ensure!(
+            self.seconds > 0,
+            "chainstate_journal.seconds must be positive"
+        );
         anyhow::ensure!(
             self.rotate_mib > 0,
             "chainstate_journal.rotate_mib must be positive"

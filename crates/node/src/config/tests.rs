@@ -167,7 +167,6 @@ fn absent_fields_preserve_values_and_explicit_empty_values_win() {
     );
 }
 
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 // CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn journal_validation_keeps_each_bound_and_its_error() {
@@ -175,36 +174,56 @@ fn journal_validation_keeps_each_bound_and_its_error() {
     assert!(defaults.validate().is_ok());
     let cases = [
         (
-            ChainstateJournalConfig { blocks: 0, ..defaults },
+            ChainstateJournalConfig {
+                blocks: 0,
+                ..defaults
+            },
             "chainstate_journal.blocks must be positive",
         ),
         (
-            ChainstateJournalConfig { seconds: 0, ..defaults },
+            ChainstateJournalConfig {
+                seconds: 0,
+                ..defaults
+            },
             "chainstate_journal.seconds must be positive",
         ),
         (
-            ChainstateJournalConfig { rotate_mib: 0, ..defaults },
+            ChainstateJournalConfig {
+                rotate_mib: 0,
+                ..defaults
+            },
             "chainstate_journal.rotate_mib must be positive",
         ),
         (
-            ChainstateJournalConfig { max_journal_mib: 0, ..defaults },
+            ChainstateJournalConfig {
+                max_journal_mib: 0,
+                ..defaults
+            },
             "chainstate_journal.max_journal_mib must be >= rotate_mib",
         ),
         (
-            ChainstateJournalConfig { max_lag_blocks: 0, ..defaults },
+            ChainstateJournalConfig {
+                max_lag_blocks: 0,
+                ..defaults
+            },
             "chainstate_journal.max_lag_blocks must be >= blocks",
         ),
         (
-            ChainstateJournalConfig { max_lag_seconds: 0, ..defaults },
+            ChainstateJournalConfig {
+                max_lag_seconds: 0,
+                ..defaults
+            },
             "chainstate_journal.max_lag_seconds must be positive",
         ),
     ];
     for (journal, expected) in cases {
-        assert_eq!(journal.validate().map_err(|error| error.to_string()), Err(expected.into()));
+        assert_eq!(
+            journal.validate().map_err(|error| error.to_string()),
+            Err(expected.into())
+        );
     }
 }
 
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 // CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn disabled_journal_still_validates_settings() {
@@ -251,7 +270,6 @@ mod resolution {
         Ok(())
     }
 
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn explicit_fields_override_the_same_layers_network_defaults() -> anyhow::Result<()> {
@@ -268,7 +286,6 @@ mod resolution {
         Ok(())
     }
 
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn mining_address_is_decoded_against_the_final_network() -> anyhow::Result<()> {
@@ -289,7 +306,6 @@ mod resolution {
         Ok(())
     }
 
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn only_the_last_set_mining_address_is_decoded() -> anyhow::Result<()> {
@@ -306,12 +322,16 @@ mod resolution {
             ..UserConfig::default()
         };
         let absent = UserConfig::default();
-        assert!(!resolve(&[&invalid, &valid, &absent])?.mining.payout_script.is_empty());
+        assert!(
+            !resolve(&[&invalid, &valid, &absent])?
+                .mining
+                .payout_script
+                .is_empty()
+        );
         assert!(resolve(&[&valid, &invalid]).is_err());
         Ok(())
     }
 
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn an_explicit_empty_mining_address_is_not_absent() {
@@ -324,8 +344,8 @@ mod resolution {
         assert!(resolve(&[&layer]).is_err());
     }
 
-    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     // CONTRACT: docs/contracts/external-api.md#API-06
     fn cookie_wins_within_a_layer_and_later_basic_auth_uses_defaults() -> anyhow::Result<()> {
         let cookie = UserConfig {
@@ -337,7 +357,12 @@ mod resolution {
             },
             ..UserConfig::default()
         };
-        assert_eq!(resolve(&[&cookie])?.rpc.auth, Auth::Cookie { path: ".cookie".into() });
+        assert_eq!(
+            resolve(&[&cookie])?.rpc.auth,
+            Auth::Cookie {
+                path: ".cookie".into()
+            }
+        );
         let basic = UserConfig {
             rpc: RpcOverrides {
                 user: Some("operator".into()),
@@ -345,7 +370,10 @@ mod resolution {
             },
             ..UserConfig::default()
         };
-        assert_eq!(resolve(&[&cookie, &basic])?.rpc.auth, Auth::basic("operator", "bitcoin-rs"));
+        assert_eq!(
+            resolve(&[&cookie, &basic])?.rpc.auth,
+            Auth::basic("operator", "bitcoin-rs")
+        );
         Ok(())
     }
 }

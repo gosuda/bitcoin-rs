@@ -14,14 +14,14 @@ pub enum Auth {
     /// HTTP Basic credentials.
     Basic {
         /// RPC username.
-        pub user: String,
+        user: String,
         /// RPC password.
-        pub password: String,
+        password: String,
     },
     /// Bitcoin Core cookie-auth file.
     Cookie {
         /// Cookie file path.
-        pub path: PathBuf,
+        path: PathBuf,
     },
 }
 

@@ -53,7 +53,8 @@ impl Warnings {
     /// keeps its original message and returns `false`, matching Core's
     /// `Warnings::Set`.
     pub fn set(&self, kind: WarningKind, message: impl Into<String>) -> bool {
-        match self.active.lock().entry(kind) {
+        let mut active = self.active.lock();
+        match active.entry(kind) {
             Entry::Vacant(entry) => {
                 entry.insert(message.into());
                 true
@@ -127,10 +128,10 @@ mod tests {
         }
     }
 
-    // CONTRACT: docs/contracts/external-api.md#API-08
     #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-08
     // CONTRACT: docs/contracts/external-api.md#API-06
-fn an_active_warning_does_not_convert_a_replacement_message() {
+    fn an_active_warning_does_not_convert_a_replacement_message() {
         let warnings = Warnings::new();
         assert!(warnings.set(WarningKind::ClockOutOfSync, "first"));
         assert!(!warnings.set(WarningKind::ClockOutOfSync, UnexpectedMessage));

@@ -109,34 +109,40 @@ pub struct UserConfig {
 impl UserConfig {
     /// Applies set fields from `other` over this layer. `other` wins.
     pub fn overlay(&mut self, other: &Self) {
-        overlay_some(&mut self.network, &other.network);
-        overlay_some(&mut self.data_dir, &other.data_dir);
-        overlay_some(&mut self.storage.backend, &other.storage.backend);
-        overlay_some(&mut self.storage.dbcache_mb, &other.storage.dbcache_mb);
+        overlay_some(&mut self.network, other.network.as_ref());
+        overlay_some(&mut self.data_dir, other.data_dir.as_ref());
+        overlay_some(&mut self.storage.backend, other.storage.backend.as_ref());
+        overlay_some(
+            &mut self.storage.dbcache_mb,
+            other.storage.dbcache_mb.as_ref(),
+        );
         overlay_some(
             &mut self.storage.prune_target_mb,
-            &other.storage.prune_target_mb,
+            other.storage.prune_target_mb.as_ref(),
         );
-        overlay_some(&mut self.p2p.magic, &other.p2p.magic);
-        overlay_some(&mut self.p2p.listen, &other.p2p.listen);
-        overlay_some(&mut self.p2p.dns_seeds, &other.p2p.dns_seeds);
-        overlay_some(&mut self.p2p.connect, &other.p2p.connect);
-        overlay_some(&mut self.rpc.bind, &other.rpc.bind);
-        overlay_some(&mut self.rpc.rest, &other.rpc.rest);
-        overlay_some(&mut self.rpc.user, &other.rpc.user);
-        overlay_some(&mut self.rpc.password, &other.rpc.password);
-        overlay_some(&mut self.rpc.cookie, &other.rpc.cookie);
-        overlay_some(&mut self.indexes.txindex, &other.indexes.txindex);
-        overlay_some(&mut self.indexes.script_index, &other.indexes.script_index);
+        overlay_some(&mut self.p2p.magic, other.p2p.magic.as_ref());
+        overlay_some(&mut self.p2p.listen, other.p2p.listen.as_ref());
+        overlay_some(&mut self.p2p.dns_seeds, other.p2p.dns_seeds.as_ref());
+        overlay_some(&mut self.p2p.connect, other.p2p.connect.as_ref());
+        overlay_some(&mut self.rpc.bind, other.rpc.bind.as_ref());
+        overlay_some(&mut self.rpc.rest, other.rpc.rest.as_ref());
+        overlay_some(&mut self.rpc.user, other.rpc.user.as_ref());
+        overlay_some(&mut self.rpc.password, other.rpc.password.as_ref());
+        overlay_some(&mut self.rpc.cookie, other.rpc.cookie.as_ref());
+        overlay_some(&mut self.indexes.txindex, other.indexes.txindex.as_ref());
+        overlay_some(
+            &mut self.indexes.script_index,
+            other.indexes.script_index.as_ref(),
+        );
         overlay_some(
             &mut self.observability.log_level,
-            &other.observability.log_level,
+            other.observability.log_level.as_ref(),
         );
         overlay_some(
             &mut self.observability.metrics_bind,
-            &other.observability.metrics_bind,
+            other.observability.metrics_bind.as_ref(),
         );
-        overlay_some(&mut self.notifications, &other.notifications);
+        overlay_some(&mut self.notifications, other.notifications.as_ref());
         if let Some(other_journal) = other.chainstate_journal {
             if let Some(journal) = &mut self.chainstate_journal {
                 journal.overlay(&other_journal);
@@ -146,19 +152,24 @@ impl UserConfig {
         }
         overlay_some(
             &mut self.validation.assume_valid_height,
-            &other.validation.assume_valid_height,
+            other.validation.assume_valid_height.as_ref(),
         );
         overlay_some(
             &mut self.mining.payout_address,
-            &other.mining.payout_address,
+            other.mining.payout_address.as_ref(),
         );
     }
 }
 
 /// An absent field is not an instruction to clear a lower-precedence value.
 /// In particular, `Some(false)`, `Some(0)`, and `Some(Vec::new())` still win.
-pub(super) fn overlay_some<T: Clone>(target: &mut Option<T>, source: &Option<T>) {
-    if source.is_some() {
+pub(super) fn overlay_some<T: Clone>(target: &mut Option<T>, source: Option<&T>) {
+    let Some(source) = source else {
+        return;
+    };
+    if let Some(target) = target {
         target.clone_from(source);
+    } else {
+        *target = Some(source.clone());
     }
 }
