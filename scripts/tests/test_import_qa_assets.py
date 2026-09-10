@@ -1,4 +1,12 @@
-"""Offline tests of the importer's actual embedded mappers and setup failures."""
+"""Offline tests for the QAC-01 import boundary and its actual mapper bodies.
+
+QAC-01 is owned by docs/contracts/qa-corpus.md. PR #747 records the reproduced
+metadata, framing, and setup failures against original importer Git blob
+22a14e444732dd71913bc5043feed231f4a53d03. Fixtures here are synthetic transport
+and framing inputs, not Bitcoin validity vectors; expected bytes are assembled
+independently from the documented harness framing, never mapper output.
+The live seed budget is read from the importer, not duplicated in this suite.
+"""
 
 from contextlib import redirect_stdout
 import hashlib
@@ -102,7 +110,7 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
         self.assert_seed("p2p_message", b"\0" + b"P" * (BUDGET - 1))
 
     def test_65536_byte_script_frames_match_the_harness(self):
-        script = b"Q" * BUDGET
+        script = b"Q" * (1 << 16)  # Historical u16 overflow, independent of today's cap.
         (self.scripts / "boundary").write_bytes(script)
         self.run_mapper("map_script")
         raw = b"\0\0\0" + (1024).to_bytes(2, "little") + script[:1024] + b"\0"
@@ -183,15 +191,124 @@ REPO_ROOT="$1"
 CORPORA="$2"
 FUZZ_DIR="$3"
 OUT_BASE="$4"
-MAX_SEED_BYTES=65536
+MAX_SEED_BYTES="$5"
 '''
         command += mapper_function("map_p2p") + "\n" + mapper_function("map_script") + "\nmap_p2p\nmap_script\n"
         result = subprocess.run(["bash", "-c", command, "mapper-tests", str(self.root), str(self.corpora),
-                                 str(self.fuzz), str(self.output)], capture_output=True, text=True,
+                                 str(self.fuzz), str(self.output), str(BUDGET)], capture_output=True, text=True,
                                 timeout=30, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_seed("p2p_message", b"\x01payload")
         self.assert_seed("script_eval", b"\0\0\0\x01\0Q\0")
+
+
+class DirectMapperTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.source = self.root / "input seeds"
+        self.output = self.root / "output seeds"
+        self.source.mkdir()
+
+    def run_direct(self):
+        match = re.search(r"^map_direct\(\) \{\n.*?^\}", SCRIPT.read_text(), re.M | re.S)
+        self.assertIsNotNone(match, "missing direct mapper")
+        command = """set -euo pipefail
+CARGO_ENV=(env)
+MAX_SEED_BYTES="$3"
+log() { printf '%s\\n' "$*"; }
+""" + match.group(0) + '\nmap_direct "$1" "$2" tx_decode\n'
+        return subprocess.run(["bash", "-c", command, "direct-tests", str(self.source),
+                               str(self.output), str(BUDGET)], capture_output=True, text=True,
+                              timeout=30, check=False)
+
+    def test_missing_source_fails_instead_of_reporting_empty_success(self):
+        self.source.rmdir()
+        result = self.run_direct()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("imported=0", result.stdout)
+
+    def test_direct_bytes_and_unusual_names_are_preserved(self):
+        files = {"empty": b"", "with space": b"seed", "line\nbreak": bytes(range(256)),
+                 "-option": b"not a flag", "high-byte": b"\xff\x00"}
+        for name, data in files.items():
+            (self.source / name).write_bytes(data)
+        result = self.run_direct()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({p.name: p.read_bytes() for p in self.output.iterdir()}, files)
+        self.assertIn(f"imported={len(files)} skipped_oversize=0", result.stdout)
+
+    def test_size_boundary_is_exclusive(self):
+        (self.source / "below").write_bytes(b"Q" * (BUDGET - 1))
+        (self.source / "equal").write_bytes(b"Q" * BUDGET)
+        with (self.source / "sparse").open("wb") as stream:
+            stream.truncate(8 * 1024 * 1024)
+        result = self.run_direct()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([p.name for p in self.output.iterdir()], ["below"])
+        self.assertEqual((self.output / "below").read_bytes(), b"Q" * (BUDGET - 1))
+        self.assertIn("imported=1 skipped_oversize=2", result.stdout)
+
+    def test_non_regular_entries_are_not_followed(self):
+        (self.source / "seed").write_bytes(b"payload")
+        (self.source / "directory").mkdir()
+        (self.source / "link").symlink_to(self.source / "seed")
+        (self.source / "broken").symlink_to(self.source / "absent")
+        os.mkfifo(self.source / "fifo")
+        result = self.run_direct()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([p.name for p in self.output.iterdir()], ["seed"])
+
+    def test_growing_direct_read_is_bounded_before_allocation(self):
+        path = self.source / "growing"
+        path.write_bytes(b"Q")
+        requests = []
+        original_open = open
+
+        class GuardedReader:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def read(self, size=-1):
+                requests.append(size)
+                if not 0 <= size <= BUDGET:
+                    raise AssertionError(f"unbounded direct read: {size}")
+                return self.stream.read(size)
+
+        def guarded_open(name, *args, **kwargs):
+            # Grow after the metadata guard but before its bounded read.
+            with original_open(name, "r+b") as stream:
+                stream.truncate(8 * 1024 * 1024)
+            return GuardedReader(original_open(name, *args, **kwargs))
+
+        args = ["-", str(self.source), str(self.output), "tx_decode", str(BUDGET)]
+        with patch.object(sys, "argv", args), patch("builtins.open", guarded_open), redirect_stdout(io.StringIO()):
+            exec(compile(mapper_body("map_direct"), str(SCRIPT), "exec"), {"__name__": "__main__"})
+        self.assertEqual(requests, [BUDGET])
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_known_oversized_files_need_no_payload_read(self):
+        with (self.source / "large").open("wb") as stream:
+            stream.truncate(8 * 1024 * 1024)
+        args = ["-", str(self.source), str(self.output), "tx_decode", str(BUDGET)]
+        with patch.object(sys, "argv", args), patch("builtins.open", side_effect=AssertionError("payload opened")), redirect_stdout(io.StringIO()):
+            exec(compile(mapper_body("map_direct"), str(SCRIPT), "exec"), {"__name__": "__main__"})
+        self.assertEqual(list(self.output.iterdir()), [])
+
+    def test_output_failure_is_not_reported_as_success(self):
+        self.output.write_bytes(b"existing non-directory")
+        (self.source / "seed").write_bytes(b"payload")
+        result = self.run_direct()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.output.read_bytes(), b"existing non-directory")
 
 
 class SetupFailureTests(unittest.TestCase):
@@ -244,6 +361,30 @@ printf 'test 100 100 0 100%% /\\n' ''',
 
     def test_disk_probe_failure_cleans_staging(self):
         self.check_failure("df", 7)
+
+
+class MetadataFailureTests(unittest.TestCase):
+    def test_metadata_commands_preserve_failure_status(self):
+        # Exercise the actual declarations under the script's shell flags;
+        # readonly must not turn a failed provenance probe into success.
+        for variable, command, status in (("UPSTREAM_COMMIT", "git", 17),
+                                          ("UPSTREAM_SIZE_MB", "du", 19),
+                                          ("IMPORT_DATE", "date", 23)):
+            with self.subTest(variable=variable), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                stub = root / command
+                stub.write_text(f"#!/bin/bash\nexit {status}\n")
+                stub.chmod(0o755)
+                declaration = re.search(rf"^(?:readonly )?{variable}=.*$(?:\nreadonly {variable}$)?",
+                                        SCRIPT.read_text(), re.M)
+                self.assertIsNotNone(declaration)
+                result = subprocess.run(["bash", "-c", 'set -euo pipefail\nWORKDIR="$1"\n'
+                                         + declaration.group(0) + "\nprintf continued\n",
+                                         "metadata-tests", str(root)],
+                                        env=dict(os.environ, PATH=f"{root}{os.pathsep}{os.environ['PATH']}"),
+                                        capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertNotIn("continued", result.stdout)
 
 
 if __name__ == "__main__":

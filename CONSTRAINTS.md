@@ -120,10 +120,11 @@ candidate baselines before production edits; owner gates append final values.
 
 ## QA corpus importer setup contract
 
-The versioned setup contract for `scripts/import-qa-assets.sh` is: a failure of
-`git rev-parse` exits with status 19, a failure of the nightly `rustc` host
-probe exits with status 17, a failure of `mktemp` exits with status 23, a disk
-probe failure exits with status 7, and an insufficient-space check exits with
-status 1. Every setup failure removes the temporary staging directory and does
-not attempt the clone. `scripts/tests/test_import_qa_assets.py`
-`SetupFailureTests` is the regression suite for this contract.
+The initial repository-root, nightly-host, temporary-directory, and disk probes
+in `scripts/import-qa-assets.sh` propagate the failing command's exit status;
+an insufficient-space check exits with status 1. Any staging directory already
+created is removed on an initial setup failure, and the clone is not attempted.
+`scripts/tests/test_import_qa_assets.py` `SetupFailureTests` injects distinct
+statuses (19, 17, 23, and 7) to verify propagation and cleanup. These are test
+fixture statuses, not exit codes promised by real `git`, `rustc`, `mktemp`, or
+`df` commands. Post-clone provenance probes likewise propagate command failures.

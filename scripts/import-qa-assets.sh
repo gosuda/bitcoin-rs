@@ -73,12 +73,14 @@ git init --quiet "${WORKDIR}/qa-assets"
 git -C "${WORKDIR}/qa-assets" remote add origin "${QA_ASSETS_URL}"
 git -C "${WORKDIR}/qa-assets" fetch --depth 1 --quiet origin "${QA_ASSETS_PIN}"
 git -C "${WORKDIR}/qa-assets" checkout --quiet FETCH_HEAD
-readonly UPSTREAM_COMMIT="$(git -C "${WORKDIR}/qa-assets" rev-parse HEAD)"
+UPSTREAM_COMMIT="$(git -C "${WORKDIR}/qa-assets" rev-parse HEAD)"
+readonly UPSTREAM_COMMIT
 [ "${UPSTREAM_COMMIT}" = "${QA_ASSETS_PIN}" ] || {
     log "ABORT: fetched ${UPSTREAM_COMMIT}, expected pin ${QA_ASSETS_PIN}"
     exit 1
 }
-readonly UPSTREAM_SIZE_MB="$(du -sm "${WORKDIR}/qa-assets" | cut -f1)"
+UPSTREAM_SIZE_MB="$(du -sm "${WORKDIR}/qa-assets" | cut -f1)"
+readonly UPSTREAM_SIZE_MB
 log "clone at ${UPSTREAM_COMMIT} (${UPSTREAM_SIZE_MB} MiB actual)"
 
 readonly CORPORA="${WORKDIR}/qa-assets/fuzz_corpora"
@@ -182,18 +184,33 @@ PYEOF
 # fuzz targets' own input caps) and the skip count is recorded so the mapping
 # stays honest about what it left behind.
 map_direct() {
-    local src="$1" dst="$2" name="$3"
-    mkdir -p "${dst:?}"
-    local count=0 skipped=0
-    while IFS= read -r -d '' file; do
-        if [ "$(stat -c %s -- "${file:?}")" -ge "${MAX_SEED_BYTES}" ]; then
-            skipped=$((skipped + 1))
-            continue
-        fi
-        cp -- "${file:?}" "${dst}/$(basename -- "${file:?}")"
-        count=$((count + 1))
-    done < <(find "${src:?}" -maxdepth 1 -type f -print0 | sort -z)
-    log "${name}: imported=${count} skipped_oversize=${skipped} (>= ${MAX_SEED_BYTES} bytes)"
+    "${CARGO_ENV[@]}" python3 - "$1" "$2" "$3" "${MAX_SEED_BYTES}" <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+src, dst, name, max_bytes = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+# Enumerate before creating output: a missing/unreadable source is a failure,
+# not a successful empty import hidden inside shell process substitution.
+with os.scandir(src) as scan:
+    files = sorted((entry for entry in scan if entry.is_file(follow_symlinks=False)),
+                   key=lambda entry: entry.name)
+dst.mkdir(parents=True, exist_ok=True)
+count = skipped = 0
+for entry in files:
+    if entry.stat(follow_symlinks=False).st_size >= max_bytes:
+        skipped += 1
+        continue
+    # Reading the cap also detects files that grow after directory enumeration.
+    with open(entry.path, "rb") as source:
+        seed = source.read(max_bytes)
+    if len(seed) >= max_bytes:
+        skipped += 1
+        continue
+    (dst / entry.name).write_bytes(seed)
+    count += 1
+print(f"[import-qa-assets] {name}: imported={count} skipped_oversize={skipped} (>= {max_bytes} bytes)")
+PYEOF
 }
 map_p2p
 map_script
@@ -208,7 +225,8 @@ map_direct "${CORPORA}/bitcoin_deserialize_transaction" "${OUT_BASE}/tx_decode" 
 
 # --- 7. Provenance ------------------------------------------------------------
 readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"
-readonly IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly IMPORT_DATE
 cat > "${PROVENANCE}" <<EOF
 # Fuzz corpus provenance
 
