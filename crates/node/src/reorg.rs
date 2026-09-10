@@ -417,8 +417,23 @@ where
         for body in &connect[..progress.connected] {
             connected_body(body.hash);
         }
-        if matches!(&outcome, Ok(())) {
-            let _ = transition.finish();
+        // Operational connect failures happen before the UTXO commit and
+        // leave a coherent committed prefix. Settle the transition so the
+        // next retry can acquire a fresh generation. A UTXO commit failure
+        // or fatal disconnect leaves the chain fenced and must not be
+        // reopened.
+        let settle = match &outcome {
+            Ok(()) => true,
+            Err(ReorgError::ConnectFailed { source, .. }) => {
+                !matches!(source.as_ref(), ApplyError::UtxoCommit(_))
+            }
+            Err(ReorgError::Fatal(_)) => false,
+            Err(_) => true,
+        };
+        if settle {
+            if let Err(error) = transition.finish() {
+                return Err(ReorgError::Unavailable(Box::new(error)));
+            }
         } else {
             drop(transition);
         }
