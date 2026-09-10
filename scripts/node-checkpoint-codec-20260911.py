@@ -4,7 +4,6 @@ from collections import Counter
 import hashlib
 from pathlib import Path
 import re
-import subprocess
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,7 +35,8 @@ for line in constants:
     src = src.replace(line, '', 1)
 start = src.index('#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) struct HeaderCheckpointConfig')
 end = src.index('#[derive(Clone, Debug, Serialize, Deserialize)]\n#[serde(deny_unknown_fields)]\nstruct CurrentV1', start)
-codec = src[start:end]
+original_codec = src[start:end]
+codec = original_codec
 src = src[:start] + src[end:]
 marker = '#[cfg(test)]\nmod tests {'
 start = src.index(marker)
@@ -62,10 +62,25 @@ for name in names:
         codec = re.sub(r'^fn ' + re.escape(name) + r'\b', 'pub(super) fn ' + name, codec, flags=re.M)
         constants = [re.sub(r'^const ' + re.escape(name) + r'\b', 'pub(super) const ' + name, line) for line in constants]
 
-pattern = re.compile(r'\b(' + '|'.join(map(re.escape, names)) + r')\b')
-production = pattern.sub(lambda m: 'headers::' + m.group(), production)
-tests = pattern.sub(lambda m: 'headers::' + m.group(), tests)
-tests = '//! Checkpoint codec and immutable-publication regressions.\n\nuse super::headers;\n\n' + tests
+# Preserve comments and literals, and qualify function calls rather than local
+# variables with common names such as `prefix`.
+protected = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|(?:br|r)(?P<hash>#{0,16})"[\s\S]*?"(?P=hash)|b?"(?:\\[\s\S]|[^"\\])*"')
+type_pattern = re.compile(r'\b(' + '|'.join(re.escape(n) for n in names if n[0].isupper()) + r')\b')
+call_pattern = re.compile(r'(?<!\.)\b(' + '|'.join(re.escape(n) for n in names if n[0].islower()) + r')\b(?=\s*(?:\(|::<))')
+
+def qualify(text):
+    def code(part):
+        part = type_pattern.sub(lambda m: 'headers::' + m.group(), part)
+        return call_pattern.sub(lambda m: 'headers::' + m.group(), part)
+    parts, last = [], 0
+    for match in protected.finditer(text):
+        parts.extend((code(text[last:match.start()]), match.group()))
+        last = match.end()
+    parts.append(code(text[last:]))
+    return ''.join(parts)
+
+production = qualify(production)
+tests = '//! Checkpoint codec and immutable-publication regressions.\n\nuse super::headers;\n\n' + qualify(tests)
 
 # Imports that belonged solely to the extracted header codec.
 production = production.replace(
@@ -120,8 +135,7 @@ for path in (ROOT / 'crates/node').rglob('*.rs'):
         path.write_text(changed)
 
 # Verify that extraction did not alter a function body or drop a regression.
-normalized = re.sub(r'pub\(super\) fn ', 'fn ', codec)
-if normalized != original.decode()[original.decode().index('#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) struct HeaderCheckpointConfig'):original.decode().index('#[derive(Clone, Debug, Serialize, Deserialize)]\n#[serde(deny_unknown_fields)]\nstruct CurrentV1')]:
+if re.sub(r'pub\(super\) fn ', 'fn ', codec) != original_codec:
     raise SystemExit('codec body changed beyond parent visibility')
 if tests_in(SOURCE.read_text()) + tests_in(TESTS.read_text()) + tests_in(HEADERS.read_text()) != original_tests:
     raise SystemExit('checkpoint regression inventory changed')
