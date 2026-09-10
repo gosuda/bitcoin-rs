@@ -36,4 +36,3 @@ pub fn run(config: NodeConfig, runtime: RuntimeInputs) -> Result<()> {
     node.shutdown_blocking()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
-
