@@ -37,6 +37,8 @@ pub mod peer_table;
 pub mod service;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
+/// Bounded transaction announcements and their peer relay worker.
+pub mod tx_relay;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
@@ -48,6 +50,7 @@ pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerSta
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
+pub use inv::request_missing_parents;
 pub use listener::{ListenerExtras, spawn_outbound_connection};
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
@@ -62,6 +65,10 @@ pub use service::{
     apply_network_active,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
+pub use tx_relay::{
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
+    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+};
 pub use wire::{Message, PeerError};
 
 pub use download_window::{

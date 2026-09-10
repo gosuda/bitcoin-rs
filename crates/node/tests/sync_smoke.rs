@@ -435,13 +435,13 @@ fn uint_be(bytes: &[u8; 32]) -> [u8; 32] {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut chunks = hex.as_bytes().chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "odd hex length").into());
     }
 
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in &mut chunks {
+    for pair in chunks {
         let high = hex_nibble(pair[0])?;
         let low = hex_nibble(pair[1])?;
         bytes.push((high << 4) | low);

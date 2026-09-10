@@ -108,9 +108,9 @@ pub struct PrioritisedTransaction {
 pub struct Mempool {
     /// Entry arena. Public ids are slab indices represented as `u32`.
     pub(crate) entries: Slab<MempoolEntry>,
-    /// Tx id to entry id lookup. Owned by this module; reach it
+    /// Tx id to entry id and acceptance sequence. Owned by this module; reach it
     /// through `contains_txid`, `entry_id_by_txid`, and `entry_by_txid`.
-    by_txid: HashMap<Txid, EntryId>,
+    by_txid: HashMap<Txid, IndexedEntry>,
     /// Funding index keyed by script hash then entry id. Owned by this
     /// module; reach it through `entries_funding_script`.
     funding: std::collections::BTreeSet<(ScriptHash, EntryId)>,
@@ -159,6 +159,13 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+}
+
+/// Current pool membership, retired together with the existing txid index row.
+#[derive(Clone, Copy, Debug)]
+struct IndexedEntry {
+    id: EntryId,
+    admitted_sequence: u64,
 }
 
 pub(crate) struct PreparedInsert {
@@ -385,7 +392,7 @@ impl Mempool {
         if entry.tx.inputs.iter().any(|input| {
             self.by_txid
                 .get(&input.previous_output.txid)
-                .is_some_and(|id| excluded.contains(id))
+                .is_some_and(|indexed| excluded.contains(&indexed.id))
         }) {
             return Err(MempoolError::EvictedParent);
         }
@@ -443,7 +450,15 @@ impl Mempool {
             self.fee_rate_floor
                 .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
         );
-        self.by_txid.insert(txid, id);
+        let mut changes = Vec::new();
+        self.push_change(&mut changes, txid, MutationOutcome::Accepted);
+        self.by_txid.insert(
+            txid,
+            IndexedEntry {
+                id,
+                admitted_sequence: self.mempool_sequence,
+            },
+        );
         self.index_entry(id);
         // The closure is taken after `index_entry`, because a transaction can
         // arrive after something that already spends its outputs — an orphan
@@ -451,8 +466,6 @@ impl Mempool {
         // become reachable once this entry is in the spend indexes.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
-        let mut changes = Vec::new();
-        self.push_change(&mut changes, txid, MutationOutcome::Accepted);
         if self.limits.max_total_bytes > 0 && self.total_vsize() > self.limits.max_total_bytes {
             changes.extend(crate::evict_lowest_fee_packages(
                 self,
@@ -488,12 +501,11 @@ impl Mempool {
     /// Returns a reference to the `MempoolEntry` for `txid`, or `None` if the
     /// transaction is not in the pool.
     ///
-    /// Composite of `self.by_txid.get(txid)` and `self.entry(*id)`. Saves the
+    /// Composite of `self.entry_id_by_txid(txid)` and `self.entry(id)`. Saves the
     /// 2-step lookup pattern at HTTP/RPC handler callsites.
     #[must_use]
     pub fn entry_by_txid(&self, txid: &Txid) -> Option<&MempoolEntry> {
-        let id = *self.by_txid.get(txid)?;
-        self.entry(id)
+        self.entry(self.entry_id_by_txid(txid)?)
     }
 
     /// Returns a clone of the shared `Arc<Tx>` for `txid`, or `None`
@@ -514,7 +526,23 @@ impl Mempool {
     /// this lookup after dropping and re-acquiring a pool lock.
     #[must_use]
     pub fn entry_id_by_txid(&self, txid: &Txid) -> Option<EntryId> {
-        self.by_txid.get(txid).copied()
+        self.by_txid.get(txid).map(|indexed| indexed.id)
+    }
+
+    /// Returns the resident entry only when its acceptance has `sequence`.
+    ///
+    /// Compare with the sequence of an `Accepted` mutation change from this
+    /// pool. Removal and re-admission invalidate the old receipt, even when
+    /// the same transaction allocation is reused. Unrelated mutations and fee
+    /// prioritisation do not invalidate it. The returned reference shares the
+    /// pool borrow, so identity and body are observed together.
+    #[must_use]
+    pub fn entry_by_txid_at_sequence(&self, txid: &Txid, sequence: u64) -> Option<&MempoolEntry> {
+        let indexed = self.by_txid.get(txid)?;
+        if indexed.admitted_sequence != sequence {
+            return None;
+        }
+        self.entry(indexed.id)
     }
 
     /// Returns whether the pool currently holds zero entries.
@@ -673,7 +701,7 @@ impl Mempool {
         // B-tree sets of fixed-size keys.
         let by_txid = u64::try_from(self.by_txid.capacity())
             .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(Txid, EntryId)>()).unwrap_or(0));
+            .saturating_mul(u64::try_from(size_of::<(Txid, IndexedEntry)>()).unwrap_or(0));
         let funding = u64::try_from(self.funding.len())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(ScriptHash, EntryId)>()).unwrap_or(0));
@@ -973,7 +1001,7 @@ impl Mempool {
             self.fee_deltas.insert(txid, accumulated);
         }
 
-        let Some(&id) = self.by_txid.get(&txid) else {
+        let Some(id) = self.entry_id_by_txid(&txid) else {
             return Ok(());
         };
         if let Some(entry) = self.entry_mut(id) {
@@ -1002,10 +1030,7 @@ impl Mempool {
                 txid,
                 fee_delta,
                 in_mempool: self.by_txid.contains_key(&txid),
-                modified_fee: self
-                    .by_txid
-                    .get(&txid)
-                    .and_then(|&id| self.entry(id).map(MempoolEntry::modified_fee)),
+                modified_fee: self.entry_by_txid(&txid).map(MempoolEntry::modified_fee),
             })
             .collect()
     }
@@ -1034,7 +1059,7 @@ impl Mempool {
         reason: RemovalReason,
         changes: &mut Vec<MutationChange>,
     ) {
-        let Some(id) = self.by_txid.get(txid).copied() else {
+        let Some(id) = self.entry_id_by_txid(txid) else {
             return;
         };
         self.remove_entry_and_descendants_into(id, reason, changes);
@@ -1080,7 +1105,7 @@ impl Mempool {
 
         let mut changes = Vec::new();
         for (tx, txid) in block_txs.iter().zip(block_txids) {
-            if let Some(id) = self.by_txid.get(txid).copied() {
+            if let Some(id) = self.entry_id_by_txid(txid) {
                 self.remove_entries_with_reasons(
                     &[(id, RemovalReason::BlockInclusion)],
                     &mut changes,
@@ -1542,7 +1567,7 @@ impl Mempool {
                     .tx
                     .inputs
                     .iter()
-                    .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+                    .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
                     .collect::<Vec<_>>()
             });
             for neighbour in parents.into_iter().chain(self.child_ids(id)) {
@@ -1581,7 +1606,7 @@ impl Mempool {
         let mut seeds = tx
             .inputs
             .iter()
-            .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+            .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
             .collect::<Vec<_>>();
         seeds.extend(self.existing_spenders_of(txid, tx.outputs.len()));
         let cluster = self.cluster_ids_seeded_by(&seeds, excluded);
@@ -1635,7 +1660,7 @@ impl Mempool {
         let mut stack = tx
             .inputs
             .iter()
-            .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+            .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
             .collect::<Vec<_>>();
         while let Some(id) = stack.pop() {
             if ancestors.contains(&id) {
@@ -1644,8 +1669,8 @@ impl Mempool {
             ancestors.push(id);
             if let Some(entry) = self.entry(id) {
                 for input in &entry.tx.inputs {
-                    if let Some(parent) = self.by_txid.get(&input.previous_output.txid) {
-                        stack.push(*parent);
+                    if let Some(parent) = self.entry_id_by_txid(&input.previous_output.txid) {
+                        stack.push(parent);
                     }
                 }
             }

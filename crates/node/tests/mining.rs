@@ -1,25 +1,35 @@
 //! Focused behavioral tests for the node-owned mining coordinator.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
     MiningControlError,
 };
+
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, NodeConfig, UserConfig, resolve,
     state::NodeState,
 };
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+
+use bitcoin_rs_primitives::{
+    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, encode::double_sha256,
+};
+
 use compact_str::CompactString;
+
 use crossbeam_channel::bounded;
+
 use parking_lot::Mutex;
-use std::str::FromStr as _;
+
+use std::{
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 fn open_regtest() -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
@@ -39,7 +49,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.applied_tip(),
         state.block_tree(),
         state.mempool(),
-        state.apply_handles(),
+        state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
@@ -635,7 +645,7 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -672,7 +682,7 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -1039,7 +1049,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             state.shutdown(),
@@ -1114,7 +1124,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
     assert_eq!(tip.height, 2);
     assert_eq!(
         tip.hash,
-        Hash256::from(hashes.last().expect("two hashes").hash)
+        Hash256::from(hashes.last().unwrap_or_else(|| panic!("two hashes")).hash)
     );
     Ok(())
 }
@@ -1134,7 +1144,8 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
             selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
             submit: true,
         })
-        .expect_err("missing mempool txid must fail");
+        .err()
+        .unwrap_or_else(|| panic!("missing mempool txid must fail"));
     assert!(matches!(error, MiningControlError::InvalidRequest(_)));
     Ok(())
 }
@@ -1169,7 +1180,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
             selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
             submit: false,
         })
-        .expect_err("invalid raw spend must fail validation, not mempool lookup");
+        .err()
+        .unwrap_or_else(|| panic!("invalid raw spend must fail validation, not mempool lookup"));
     assert!(
         matches!(error, MiningControlError::Failed(_)),
         "raw generateblock txs skip mempool membership: {error:?}"
@@ -1184,7 +1196,11 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     let rate = mining.network_hash_ps(120, -1)?;
-    assert_eq!(rate, info.network_hashes_per_second);
+    assert!(
+        (rate - info.network_hashes_per_second).abs() < f64::EPSILON,
+        "default-window hash rate must match mining info: {rate} vs {}",
+        info.network_hashes_per_second
+    );
     Ok(())
 }
 
