@@ -58,6 +58,17 @@ are tracked via the file-persisted `BanList` of the `banlist` module, whole subn
 excluded as a `BannedSubnet` built from an `IpSubnet`, and BIP155 addrv2 and BIP339
 wtxid-relay state live in `addrv2` and `wtxid`.
 
+## Ban-list persistence contract
+
+`BanList::load` and `BanList::save` own the score-list file. Each non-empty row is
+`<ip>\t<score>\t<until-seconds>\t<reason>`; `until-seconds = 0` means no expiry,
+and non-zero values are seconds since `UNIX_EPOCH`. A missing file loads as an
+empty list. Other open or read failures are unavailable and propagate as
+`PeerError::Io`, consistent with `CONSTRAINTS.md` `CL-23` (unavailable is not
+empty). Malformed fields and expiry values that cannot be represented by
+`SystemTime` fail as `PeerError::InvalidBanEntry`. Loading does not rewrite the
+source file. This contract does not make `save` crash-atomic.
+
 ## Features
 - `default` (enables `fjall`): build with the fjall storage backend selected.
 - `rocksdb`: forward the rocksdb storage backend to `bitcoin-rs-storage`.
