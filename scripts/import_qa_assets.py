@@ -21,6 +21,8 @@ from collections.abc import Iterator, Sequence
 def _seed_paths(source: Path) -> Iterator[Path]:
     # Filenames (direct copies) or content hashes own output identity, not order.
     # Stream entries rather than retaining a directory-sized list of Path objects.
+    # This bounds importer retention; performance promotion still requires the
+    # repository's benchmark and owner-gate evidence.
     with os.scandir(source) as entries:
         for entry in entries:
             if entry.is_file(follow_symlinks=False):
@@ -91,7 +93,26 @@ def _frame(selector: int, script_pubkey: bytes, witness: Sequence[bytes]) -> byt
     return b"".join(parts)
 
 
+def _script_flag_indices(harness: Path) -> tuple[int, int]:
+    inventory = re.search(
+        r"const\s+FLAGS\s*:\s*\[VerifyFlags;\s*\d+\]\s*=\s*\[(.*?)\];",
+        harness.read_text(), re.S,
+    )
+    if inventory is None:
+        raise ValueError("Cannot find script_eval FLAGS inventory")
+    entries = [entry.strip() for entry in inventory.group(1).split(",") if entry.strip()]
+    try:
+        none = entries.index("VerifyFlags::NONE")
+        taproot = entries.index("VerifyFlags::TAPROOT")
+    except ValueError as error:
+        raise ValueError("Cannot find NONE and TAPROOT in script_eval FLAGS") from error
+    if entries.count("VerifyFlags::NONE") != 1 or entries.count("VerifyFlags::TAPROOT") != 1:
+        raise ValueError("Duplicate NONE or TAPROOT in script_eval FLAGS")
+    return none, taproot
+
+
 def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: int) -> None:
+    none_selector, taproot_selector = _script_flag_indices(harness)
     limit = re.search(
         r"const\s+ELEMENT_LEN_MAX\s*:\s*usize\s*=\s*([0-9_]+)\s*;",
         harness.read_text(),
@@ -108,9 +129,9 @@ def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: 
     for source in sources:
         for path in _seed_paths(source):
             script = _read_seed(path, script_limit)
-            _emit(output, _frame(0, script, []))
+            _emit(output, _frame(none_selector, script, []))
             if len(script) >= 32 and element_limit >= 34:
-                _emit(output, _frame(3, b"\x51\x20" + script[:32], [script[32:]]))
+                _emit(output, _frame(taproot_selector, b"\x51\x20" + script[:32], [script[32:]]))
             imported += 1
     print(f"script_eval: imported={imported} files (raw + P2TR variants)")
 

@@ -56,7 +56,12 @@ pub const COMMANDS: &[Command] = &[
 ];
 pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
 ''')
-        self.script_target.write_text("const ELEMENT_LEN_MAX: usize = 1_024;\n")
+        self.script_target.write_text("""const FLAGS: [VerifyFlags; 2] = [
+    VerifyFlags::NONE,
+    VerifyFlags::TAPROOT,
+];
+const ELEMENT_LEN_MAX: usize = 1_024;
+""")
 
     def run_mapper(self, name, budget=BUDGET):
         with redirect_stdout(io.StringIO()):
@@ -111,8 +116,25 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
         self.assert_seed("script_eval", taproot)
         self.assertEqual(len(list((self.output / "script_eval").iterdir())), 2)
 
+    def test_script_selectors_follow_inventory_order(self):
+        self.script_target.write_text("""const FLAGS: [VerifyFlags; 2] = [
+    VerifyFlags::TAPROOT,
+    VerifyFlags::NONE,
+];
+const ELEMENT_LEN_MAX: usize = 1_024;
+""")
+        (self.scripts / "script").write_bytes(b"Q" * 32)
+        self.run_mapper("map_script")
+        self.assert_seed("script_eval", b"\x01\0\0\x20\0" + b"Q" * 32 + b"\0")
+        self.assert_seed("script_eval", b"\0\0\0\x22\0\x51\x20" + b"Q" * 32 + b"\x01\0\0")
+
     def test_script_limit_follows_the_owner_constant(self):
-        self.script_target.write_text("const ELEMENT_LEN_MAX: usize = 512;\n")
+        self.script_target.write_text("""const FLAGS: [VerifyFlags; 2] = [
+    VerifyFlags::NONE,
+    VerifyFlags::TAPROOT,
+];
+const ELEMENT_LEN_MAX: usize = 512;
+""")
         (self.scripts / "script").write_bytes(b"Q" * 1024)
         self.run_mapper("map_script")
         self.assert_seed("script_eval", b"\0\0\0\0\x02" + b"Q" * 512 + b"\0")
