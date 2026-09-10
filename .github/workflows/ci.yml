@@ -132,13 +132,12 @@ jobs:
       - name: RPC tests without default features
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-      # Keep backend-sensitive Rust tests in their existing full-backend profile.
-      # G20's solver uses the same pinned checker, models, configuration, and
-      # properties regardless of Cargo storage features. Run that one expensive
-      # test in the unfiltered workspace pass below, not again for each backend
-      # profile. G20's tool/inventory and JVM-default tests still run here.
-      # Run backend tests before the solver so its timeout cannot delay their
-      # results. Either profile failing still fails this job.
+      # The full-backend profile runs all its Rust tests except the G20 solver.
+      # The unfiltered workspace step below owns that external proof pass:
+      # six invocations, with unchanged inputs, properties, and bound, as
+      # specified by CONSTRAINTS.md's Formal model tool identity / Proof inventory.
+      # Tool/inventory and JVM-default tests still run in both profiles.
+      # Either profile failing still fails this job.
       - name: Full-backend native binary tests
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         run: |
