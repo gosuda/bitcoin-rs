@@ -277,6 +277,7 @@ fn missing_reference_binary_names_the_pinned_digest() {
     assert!(text.contains(&pinned) && text.contains("/nonexistent/reference/bitcoind"));
 }
 
+/// REF-07a: a value difference is behavioral evidence, never transport success.
 #[test]
 fn deliberately_different_reply_is_a_behavior_failure() {
     let reference = json!({"txids": ["expected"], "mempool_sequence": 2});
@@ -288,6 +289,7 @@ fn deliberately_different_reply_is_a_behavior_failure() {
     ));
 }
 
+/// REF-07b: rejected startup must report and reap the exact child process.
 #[test]
 fn rejected_startup_options_leave_no_child() {
     let error = match ProcessNode::start_with_options(
@@ -315,6 +317,7 @@ fn rejected_startup_options_leave_no_child() {
     assert_reaped(pid);
 }
 
+/// REF-07b: an early successful exit is not readiness and leaves no child.
 #[test]
 fn successful_child_exit_before_readiness_is_not_startup_success() {
     let error = match ProcessNode::start_with_options(
@@ -332,6 +335,7 @@ fn successful_child_exit_before_readiness_is_not_startup_success() {
     assert_reaped(pid);
 }
 
+/// REF-07c: readiness is deadline-bounded and expiration reaps the child.
 #[test]
 fn readiness_deadline_reaps_the_child() {
     let error = match ProcessNode::start_with_options(NodeBinary::BitcoinRs, &[], Duration::ZERO) {
@@ -399,6 +403,7 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
     (addr, server)
 }
 
+/// REF-07d: malformed HTTP and JSON are transport failures, not comparisons.
 #[test]
 fn malformed_http_and_json_replies_are_transport_failures() {
     for reply in [
@@ -421,6 +426,7 @@ fn malformed_http_and_json_replies_are_transport_failures() {
     }
 }
 
+/// REF-07c: each reference request obeys its fixed deadline.
 #[test]
 fn stalled_response_respects_the_request_deadline() {
     let (addr, server) = serve_reply(b"", Duration::from_millis(250));

@@ -221,6 +221,55 @@ fn source_revisions_require_immutable_complete_identities() {
     }
 }
 
+/// REF-02/REF-03: a different full-length commit is still unrelated to the
+/// checksum-pinned release or crate. Syntax alone cannot establish custody.
+#[test]
+fn well_formed_but_unbound_source_revisions_are_rejected() {
+    for (revision, identity) in [
+        (
+            "9be056a8a72b624dae9623b2f7bded92c2a21c91",
+            "reference.release",
+        ),
+        (
+            "4b51ffdddfa82b84a03a1fa76bbfa72a4f0b6ccf",
+            "reference.kernel",
+        ),
+        (
+            "fb0e8612d6f74071af77b3f27d915da69e0a726b",
+            "reference.kernel",
+        ),
+    ] {
+        let edited = edit_manifest(revision, "0000000000000000000000000000000000000000");
+        assert_eq!(
+            load_reference_set(&edited),
+            Err(ReferenceError::CustodyMismatch { identity })
+        );
+    }
+}
+
+/// REF-02/REF-03: source revisions and artifact hashes form one custody unit.
+/// A valid but different digest cannot retain the old source claim.
+#[test]
+fn well_formed_but_unbound_artifact_digests_are_rejected() {
+    for (digest, identity) in [
+        (RELEASE_ARCHIVE_SHA256, "reference.release"),
+        (RELEASE_BITCOIND_SHA256, "reference.release"),
+        (
+            "2906bc31f02dff7af9611fe9129c9eae021bd359f9d8e79824026fe1aaf28ab1",
+            "reference.kernel",
+        ),
+    ] {
+        let edited = edit_manifest(
+            digest,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert_eq!(
+            load_reference_set(&edited),
+            Err(ReferenceError::CustodyMismatch { identity })
+        );
+    }
+}
+
 /// The release digest removed leaves only a version label, which is not a
 /// reference.
 #[test]

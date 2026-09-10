@@ -1003,28 +1003,27 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), CAPTURED_FIXTURE)?;
-        let original: toml::Table = toml::from_str(bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML)?;
-        for (field, replacement, reason) in [
-            ("core_version", "31.2", "pinned version"),
-            (
-                "source_commit",
-                "0000000000000000000000000000000000000000",
-                "pinned source commit",
-            ),
-            (
-                "bitcoind_sha256",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                "pinned binary digest",
-            ),
-            (
-                "version_output",
-                "Bitcoin Core daemon version v31.2.0",
-                "pinned version",
-            ),
+        let reference = reference_set::load_reference_set(
+            bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML,
+        )?;
+        for (field, reason) in [
+            ("core_version", "pinned version"),
+            ("source_commit", "pinned source commit"),
+            ("bitcoind_sha256", "pinned binary digest"),
+            ("version_output", "pinned version"),
         ] {
-            let mut edited = original.clone();
-            edited["reference"]["release"][field] = toml::Value::String(replacement.to_owned());
-            let reference = reference_set::load_reference_set(&toml::to_string(&edited)?)?;
+            let mut edited = reference.release.clone();
+            match field {
+                "core_version" => edited.core_version = "31.2".to_owned(),
+                "source_commit" => {
+                    edited.source_commit = "0000000000000000000000000000000000000000".to_owned()
+                }
+                "bitcoind_sha256" => edited.bitcoind_sha256 = [0; 32],
+                "version_output" => {
+                    edited.version_output = "Bitcoin Core daemon version v31.2.0".to_owned()
+                }
+                _ => unreachable!(),
+            }
             let Err(error) = load_corpus_from(dir.path(), &reference.release) else {
                 return Err(format!("old fixture was accepted after changing {field}").into());
             };

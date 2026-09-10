@@ -1,10 +1,21 @@
 //! Reference identities and validation used by the process and formal gates.
 //! The production RPC module owns the embedded manifest, not test orchestration.
 
+use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
 
 /// The corpus identifiers every reference set must carry.
 const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
+
+/// Audited fingerprints of the complete release and kernel identity tuples.
+///
+/// These are trust anchors, not a second registry of the tuple fields. The
+/// manifest remains their value owner; changing any value requires reviewing
+/// the external artifact evidence and deliberately updating its fingerprint.
+const RELEASE_CUSTODY_SHA256: &str =
+    "7062cbdb6122b6287ccd12688fe9fa193d02b22ad02784e08c59887c03305a00";
+const KERNEL_CUSTODY_SHA256: &str =
+    "86e246d78dcb313f55c367785e59ef51b38c45867b550bf68c45ce9df2221ddd";
 
 /// The immutable reference identities the compatibility manifest is claimed
 /// against.
@@ -168,6 +179,13 @@ pub(crate) enum ReferenceError {
         /// The malformed source revision field.
         field: &'static str,
     },
+    /// A syntactically valid identity does not match the audited artifact
+    /// tuple selected by this test gate.
+    #[error("`{identity}` does not match its audited artifact custody binding")]
+    CustodyMismatch {
+        /// The complete identity tuple that did not match.
+        identity: &'static str,
+    },
     /// The released product and the kernel development tree were confused.
     #[error(
         "the released product identity and the 31.99.x kernel tree identity were \
@@ -224,6 +242,7 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
     let formal_tool = formal_tool(reference)?;
 
     check_identity_confusion(&release.core_version, &kernel.core_version)?;
+    check_custody_bindings(&release, &kernel)?;
 
     Ok(ReferenceSet {
         release,
@@ -231,6 +250,58 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
         corpora,
         formal_tool,
     })
+}
+
+/// Binds human-readable revisions to the package and binary digests that
+/// provide their custody. A full, well-formed but unrelated commit must not
+/// silently pass merely because it looks like a Git object id.
+fn check_custody_bindings(
+    release: &ReleaseIdentity,
+    kernel: &KernelIdentity,
+) -> Result<(), ReferenceError> {
+    let release_archive = sha256::Hash::from_byte_array(release.archive_sha256).to_string();
+    let release_binary = sha256::Hash::from_byte_array(release.bitcoind_sha256).to_string();
+    let release_tuple = [
+        "bitcoin-rs/reference-release/v1",
+        release.core_version.as_str(),
+        release.git_tag.as_str(),
+        release.source_commit.as_str(),
+        release.archive.as_str(),
+        release_archive.as_str(),
+        release_binary.as_str(),
+        release.version_output.as_str(),
+    ]
+    .join("\0");
+    check_custody_fingerprint("reference.release", &release_tuple, RELEASE_CUSTODY_SHA256)?;
+
+    let kernel_package = sha256::Hash::from_byte_array(kernel.kernel_sys_crate_sha256).to_string();
+    let differential_harness = kernel.differential_harness.to_string();
+    let kernel_tuple = [
+        "bitcoin-rs/reference-kernel/v1",
+        kernel.core_version.as_str(),
+        kernel.kernel_crate.as_str(),
+        kernel.kernel_crate_version.as_str(),
+        kernel.kernel_sys_crate.as_str(),
+        kernel.kernel_sys_crate_version.as_str(),
+        kernel.kernel_vendor_commit.as_str(),
+        kernel.kernel_source_commit.as_str(),
+        kernel_package.as_str(),
+        differential_harness.as_str(),
+    ]
+    .join("\0");
+    check_custody_fingerprint("reference.kernel", &kernel_tuple, KERNEL_CUSTODY_SHA256)
+}
+
+fn check_custody_fingerprint(
+    identity: &'static str,
+    tuple: &str,
+    expected: &'static str,
+) -> Result<(), ReferenceError> {
+    let actual = sha256::Hash::hash(tuple.as_bytes()).to_byte_array();
+    if actual != parse_sha256("custody_sha256", expected)? {
+        return Err(ReferenceError::CustodyMismatch { identity });
+    }
+    Ok(())
 }
 
 /// Loads the reference set from the manifest embedded at compile time.
