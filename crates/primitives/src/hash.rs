@@ -190,8 +190,10 @@ mod tests {
     fn display_preserves_existing_format_options() {
         let hash = Hash256::from_le_bytes(&[0xab; 32]);
         let expected = "ab".repeat(32);
-        // The existing Display contract ignores outer width, precision, and
-        // numeric flags; switching to Formatter::pad would change its output.
+        // Rust Reference, "Formatting parameters": Display receives these
+        // parameters, but `write_str` does not apply outer padding or numeric
+        // formatting; using `Formatter::pad` would change this Display output.
+        // https://doc.rust-lang.org/reference/format-args.html#formatting-parameters
         assert_eq!(format!("{hash:>80}"), expected);
         assert_eq!(format!("{hash:<80}"), expected);
         assert_eq!(format!("{hash:^80}"), expected);
