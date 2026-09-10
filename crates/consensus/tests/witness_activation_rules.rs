@@ -9,7 +9,7 @@ use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
 };
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{Block, BlockHash, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 // SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
