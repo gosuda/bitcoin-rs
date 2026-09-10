@@ -199,6 +199,43 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertEqual(result.returncode, TERM_STATUS, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
+    def test_nonnumeric_disk_probe_cannot_authorize_an_import(self):
+        probe = self.bin / "df"
+        probe.write_text("#!/usr/bin/env bash\nprintf 'Filesystem Blocks Used Available Capacity Mounted\\n'\n"
+                         "printf 'test 100000 0 unknown 0%% /\\n'\n")
+        result = self.run_import()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((self.root / "fuzz/corpus").exists())
+        self.assertFalse((self.root / "cmin.log").exists())
+        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+
+    def test_overflowing_disk_probe_cannot_authorize_an_import(self):
+        probe = self.bin / "df"
+        probe.write_text("#!/usr/bin/env bash\nprintf 'Filesystem Blocks Used Available Capacity Mounted\\n'\n"
+                         "printf 'test 100000 0 999999999999999999999999999999999999 0%% /\\n'\n")
+        result = self.run_import()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse((self.root / "fuzz/corpus").exists())
+        self.assertFalse((self.root / "cmin.log").exists())
+        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+
+    def test_provenance_does_not_claim_fixed_selectors_after_owner_reordering(self):
+        harness = self.root / "fuzz/fuzz_targets/script_eval.rs"
+        text = harness.read_text()
+        text = text.replace("    VerifyFlags::NONE,", "    SWAP_NONE,")
+        text = text.replace("    VerifyFlags::TAPROOT,", "    VerifyFlags::NONE,")
+        text = text.replace("    SWAP_NONE,", "    VerifyFlags::TAPROOT,")
+        harness.write_text(text)
+        result = self.run_import()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.provenance.read_text()
+        self.assertNotIn("selector 0x00", record)
+        self.assertNotIn("selector 0x03", record)
+        self.assertIn("NONE", record)
+        self.assertIn("TAPROOT", record)
+        self.assertIn("FLAGS", record)
+
+
 
 if __name__ == "__main__":
     unittest.main()
