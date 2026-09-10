@@ -1,0 +1,32 @@
+name: node-refactor-snapshot
+
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths: [.github/workflows/node-refactor-snapshot.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: a1be979848253ec7d5763375a13b6af1d8e66dfc
+          persist-credentials: false
+      - name: Archive pinned current main
+        run: |
+          git rev-parse HEAD > /tmp/HEAD
+          git archive --format=tar.gz HEAD > /tmp/node-source-latest.tgz
+          sha256sum /tmp/node-source-latest.tgz > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-source-latest
+          path: |
+            /tmp/node-source-latest.tgz
+            /tmp/HEAD
+            /tmp/SHA256SUMS
+          retention-days: 1
