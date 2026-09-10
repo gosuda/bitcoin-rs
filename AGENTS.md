@@ -1,6 +1,4 @@
-# Agent guidelines
-
-Read the relevant source, tests, current contract, and PR discussion before changing settled behavior. Architecture belongs in `CONCEPTS.md` and `docs/contracts/`.
+# AGENTS.md
 
 - Keep one owner per invariant and durable representation. Reuse existing boundaries; do not add parallel state, forwarding wrappers, or speculative APIs.
 - Describe implemented behavior as implemented and target design as target design.
