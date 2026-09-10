@@ -10,6 +10,11 @@ on:
     # reporting no failing checks, which reads exactly like green.
     branches: ['**']
 
+# The PR gate only needs to read repository contents. Keep the token scope
+# explicit so repository-level default permissions cannot grant more access.
+permissions:
+  contents: read
+
 # Bounded because the trigger above is wider: a superseded pull-request run is
 # cancelled when a newer commit lands on the same PR.
 #
@@ -23,20 +28,17 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Fast PR gate. The ordinary lint and test jobs avoid libbitcoinkernel and do
-# not install CMake/Boost; bench-smoke intentionally compiles the kernel-enabled
-# benchmark surface, runs the witness-activation regression, and installs
-# those prerequisites. Deeper fuzz, nightly,
-# feature-matrix, and kernel-oracle lanes live in main.yml and run on `main`.
+# Required PR gate (issue #171): the shortest useful failure signal. `fmt` and
+# `deny` stay parallel (no workspace compile); `rust` compiles the kernel-free
+# graph once and runs clippy before the test profiles so a lint failure does
+# not wait for the fixture downloads or the test suite. Every command lives in
+# scripts/ci-pr.sh. The kernel C++ surface, MSRV compile, native-script
+# evidence, comparator corpus, and bench smoke are deep lanes in main.yml and
+# run on `main` only.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Feature set for the full dependency-graph deny check: all four storage
-  # backends plus the bitcoinkernel script-verification engine. cargo-deny
-  # resolves metadata without compiling, so checking the full graph costs no
-  # C++ toolchain here.
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
 
 jobs:
   fmt:
@@ -46,118 +48,47 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: ./scripts/ci-pr.sh fmt
 
-  clippy:
+  deny:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: toolchain
+      - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-deny
+        with:
+          tool: cargo-deny@0.20.2
+      # Full dependency graph (all backends + kernel); commands owned by the
+      # script. cargo-deny resolves metadata without compiling, so this job
+      # installs no C++ toolchain.
+      - run: ./scripts/ci-pr.sh deny
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Keep the three native all-target profiles independent. A lint failure
-      # must not hide later diagnostics, but still fails this job. Do not run
-      # after cancellation or a failed toolchain installation. Kernel and
-      # backend-specific profiles remain in main.yml.
-      - name: Workspace Clippy
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          cargo clippy --locked --workspace --all-targets \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
-            -- -D warnings
-      - name: Native consensus Clippy
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          cargo clippy --locked -p bitcoin-rs-consensus \
-            --no-default-features --all-targets -- -D warnings
-      - name: Native node Clippy
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          cargo clippy --locked -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq --all-targets -- -D warnings
-
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: toolchain
-        with:
-          toolchain: "1.95.0"
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # Compile only: the policy promise is that workspace crates build on the
-      # declared MSRV. Tests, benches, kernel/C++ features, and deep feature
-      # combinations remain owned by their existing stable/nightly lanes.
-      - name: Workspace default targets on Rust 1.95
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          cargo check --locked --workspace \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-      - name: Native consensus on Rust 1.95
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          cargo check --locked -p bitcoin-rs-consensus \
-            --no-default-features
-      - name: Native node on Rust 1.95
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: |
-          cargo check --locked -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: toolchain
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      # One kernel-free compile graph. Clippy first: a lint failure fails the
+      # job before the fixture downloads or the test suite. Profile commands
+      # live in scripts/ci-pr.sh.
+      - run: ./scripts/ci-pr.sh clippy
       - name: Provision pinned Core and Apalache fixtures
-        id: fixtures
         run: bash scripts/provision-ci-reference-fixtures.sh
-      # Each profile must report independently: a failing workspace/formal
-      # test must not hide the native consensus, node, or isolated RPC tests.
-      # Run the smaller profiles before the long fixture-backed binary tests.
-      # Failures still fail the job; cancellation and failed setup stop tests.
-      - name: Native consensus tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast
-      - name: Native node tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+      # Never attribute cached or earlier-profile diagnostics to this run.
+      # The workspace test profile owns the single formal solver execution.
+      - name: Reset formal-solver run context
         run: |
-          cargo test --locked -p bitcoin-rs-node \
-            --no-default-features --features fjall,zmq --no-fail-fast
-      # Isolated so node's default `zmq` feature cannot unify this package on.
-      - name: RPC tests without default features
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        run: cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-      # The full-backend profile runs all its Rust tests except the G20 solver.
-      # The unfiltered workspace step below owns that external proof pass:
-      # six invocations, with unchanged inputs, properties, and bound, as
-      # specified by CONSTRAINTS.md's Formal model tool identity / Proof inventory.
-      # Tool/inventory and JVM-default tests still run in both profiles.
-      # Either profile failing still fails this job.
-      - name: Full-backend native binary tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
-        run: |
-          cargo test --locked -p bitcoin-rs --no-fail-fast \
-            --no-default-features --features "rocksdb,fjall,redb" \
-            -- --exact --skip all_model_specs_check_with_apalache
-      # consensus and node have kernel-enabled defaults, so the workspace
-      # pass excludes them and the explicit native profiles above cover them.
-      # This pass includes the binary's process and formal gates, unfiltered.
-      - name: Workspace tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
-        run: |
-          # Never attribute cached or earlier-profile diagnostics to this run.
           rm -rf -- target/apalache
           mkdir -p target/apalache
           printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=workspace\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             > target/apalache/run-context.txt
-          cargo test --locked --workspace --no-fail-fast \
-            --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
+      # Kernel-free test profiles, smallest first, ending with the workspace
+      # pass that includes the binary's process and formal gates.
+      - run: ./scripts/ci-pr.sh test
       # Preserve the single solver run, including failures and timeouts.
       # Only formal diagnostics are uploaded, never downloaded executables.
       - name: Preserve workspace formal evidence
@@ -179,154 +110,3 @@ jobs:
           path: target/process-harness/**
           if-no-files-found: warn
           retention-days: 7
-
-  native-script:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    env:
-      CARGO_TARGET_DIR: target/script-native
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: toolchain
-        with:
-          toolchain: "1.95.0"
-          components: clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The same permanent script tests run without external reference setup.
-      # Record compiler identity and retain both successful and failed output.
-      - name: Native script tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p target/script-native-evidence
-          {
-            git rev-parse HEAD
-            rustc -Vv
-            cargo -V
-            sha256sum Cargo.lock
-          } | tee target/script-native-evidence/context.txt
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
-            --no-fail-fast -- --nocapture 2>&1 | tee target/script-native-evidence/tests.log
-      - name: Native script Clippy
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p target/script-native-evidence
-          cargo clippy --locked -p bitcoin-rs-script --no-default-features \
-            --all-targets -- -D warnings 2>&1 | tee target/script-native-evidence/clippy.log
-      - name: Preserve native script evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: script-native-${{ github.run_attempt }}
-          path: target/script-native-evidence/
-          if-no-files-found: warn
-          retention-days: 7
-
-  bench-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: toolchain
-        with:
-          toolchain: "1.95.0"
-          components: clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The kernel engine is built from C++ (cmake + libboost-dev); the default
-      # feature set now includes it, so every production lane installs the
-      # prerequisites up front.
-      - name: Kernel prerequisites
-        id: kernel_deps
-        run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      # Reuse this lane's C++ prerequisites for the focused kernel regression;
-      # the ordinary test job exercises the same target with the native backend.
-      - name: Witness activation kernel regression
-        run: |
-          cargo test --locked -p bitcoin-rs-consensus \
-            --no-default-features --features kernel --test witness_sigop_activation
-      - run: |
-          cargo bench --locked -p bitcoin-rs --no-run \
-            --no-default-features --features "${FULL_NODE_FEATURES}"
-      # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
-      # the production-allocator benchmark so bench breakage is visible to CI.
-      - run: cargo bench --locked -p bitcoin-rs-utxo --no-run
-      # The chainstate replay gate is an explicit harness: compile it on every
-      # PR, while measured executions remain release/PR evidence.
-      - run: |
-          cargo bench --locked -p bitcoin-rs-node --no-run \
-            --no-default-features --features fjall --bench chainstate_journal
-
-      # Native script tests do not compile this feature-gated oracle. Exercise
-      # it before merge, with separate build output and retained diagnostics.
-      - name: SegWit-v0 kernel parity
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.kernel_deps.outcome == 'success' }}
-        shell: bash
-        env:
-          CARGO_TARGET_DIR: target/script-kernel-oracle
-        run: |
-          set -euo pipefail
-          mkdir -p target/script-kernel-evidence
-          {
-            git rev-parse HEAD
-            rustc -Vv
-            cargo -V
-            sha256sum Cargo.lock
-          } | tee target/script-kernel-evidence/context.txt
-          cargo test --locked -p bitcoin-rs-script --no-default-features \
-            --features kernel --test segwit_v0_sighash_edges -- --nocapture \
-            2>&1 | tee target/script-kernel-evidence/tests.log
-      - name: SegWit-v0 kernel Clippy
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.kernel_deps.outcome == 'success' }}
-        shell: bash
-        env:
-          CARGO_TARGET_DIR: target/script-kernel-oracle
-        run: |
-          set -euo pipefail
-          mkdir -p target/script-kernel-evidence
-          cargo clippy --locked -p bitcoin-rs-script --no-default-features \
-            --features kernel --test segwit_v0_sighash_edges -- -D warnings \
-            2>&1 | tee target/script-kernel-evidence/clippy.log
-      - name: Preserve kernel script evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: script-kernel-${{ github.run_attempt }}
-          path: target/script-kernel-evidence/
-          if-no-files-found: warn
-          retention-days: 7
-
-  deny:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
-        with:
-          rust-version: "stable"
-          # Check the full dependency graph (all backends + kernel).
-          # cargo-deny resolves metadata without compiling, so this costs no
-          # C++ toolchain. The opt-in kernel/full-backend graph is also
-          # audited by the main-only `deny-full` lane in main.yml.
-          arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
-
-  # Comparator campaign behavioral tests and the C150/Cmodern corpus freeze.
-  # Pure Python, self-contained -- no bitcoind, no external services. The
-  # comparator tests use typing.TypeIs (Python 3.13+); actions/setup-python
-  # downloads the runtime from GitHub's release hosting, which is a
-  # first-party action but network-dependent.
-  comparator-tests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-      - run: |
-          cd tools/benchmark-campaign
-          for f in test_*.py; do python3 "$f" || exit 1; done
-      - run: python3 tools/campaign-corpus/test_corpus.py
