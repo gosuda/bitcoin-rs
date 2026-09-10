@@ -918,6 +918,11 @@ mod tests {
             max_write: 0,
             interrupt_once: false,
         };
+        // This follows `std::io::Write::write_vectored`: callers must retry
+        // short writes and `Interrupted`, while a successful zero-byte write
+        // makes `write_all` report `ErrorKind::WriteZero` (see the standard
+        // library's `Write::write_all` contract).
+
         let Err(error) = write_record(&mut writer, b"header", b"body") else {
             return Err(io::Error::other("a zero write must fail"));
         };
