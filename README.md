@@ -1,12 +1,24 @@
 # bitcoin-rs
 
-A Bitcoin full node in Rust 2024. The default binary build is pure Rust (no
-C++ toolchain required) and runs the native script interpreter for every
-consensus spend class. Enable `--features kernel` to route the same checks
-through `libbitcoinkernel` as an independent oracle. The `kernel` feature
-remains the default in the `bitcoin-rs-consensus` and `bitcoin-rs-node`
-library crates, and in the Compose image, until issue #213 promotes native
-(`docs/contracts/validation-default.md`).
+**Go deeper into Bitcoin. Build in Rust.**
+
+A modular Bitcoin full-node project for Rust developers. Explore node internals,
+evaluate typed in-process access, or work with wallet-free public interfaces.
+Start with a local test node and follow the component that interests you.
+
+[Try regtest locally](docs/getting-started.md#esplora) ·
+[Explore the architecture](docs/contracts/architecture.md) ·
+[Read the evidence](docs/benchmarks/end-to-end-sync.md)
+
+This is `gosuda/bitcoin-rs`, a separate project from
+[`rust-bitcoin/rust-bitcoin`](https://github.com/rust-bitcoin/rust-bitcoin).
+
+The default binary runs the native script interpreter without
+`libbitcoinkernel`. Enable `--features kernel` to use that independent oracle.
+The consensus and node library crates retain different defaults, governed by the
+[validation-default contract](docs/contracts/validation-default.md). Other
+dependencies can still require native build tools; see
+[build prerequisites](CONTRIBUTING.md#prerequisites).
 
 [![CI](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/gosuda/bitcoin-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
@@ -14,70 +26,28 @@ library crates, and in the Compose image, until issue #213 promotes native
 
 ## Why bitcoin-rs
 
-[Bitcoin Core](https://github.com/bitcoin/bitcoin) is the most successful
-implementation of Bitcoin. Its conservatism, stability, and compatibility
-discipline are major reasons for
-that success. Over time, however, those safeguards also shape which changes are
-practical: existing boundaries accumulate dependencies, and implementation
-choices harden into assumptions that Bitcoin consensus does not require.
+**Explore Bitcoin, one module at a time.** The workspace separates protocol
+types, script checks, storage, networking, indexes, and node assembly. The
+[architecture contract](docs/contracts/architecture.md) defines the dependency
+boundaries and records extraction work that remains. A crate boundary is not a
+promise of a stable standalone API or an isolated plugin runtime.
 
-bitcoin-rs asks a simple question:
+**Connect a Rust application through typed node access.** The
+[`Node` API](docs/contracts/embedding.md) exposes lifecycle operations, snapshots,
+and capabilities without serializing those calls through JSON-RPC. Startup and
+shutdown still drive synchronous work despite their async signatures.
 
-> **If a Bitcoin full node were designed again today, what would we keep, and
-> what would we change?**
+**Keep wallet keys outside the node.** Explore public Esplora routes and
+wallet-free JSON-RPC. The [wallet-facing contract](docs/contracts/wallet-facing.md)
+and [RPC reference](docs/rpc-reference.md) describe the available operations,
+index requirements, and compatibility limits. A familiar HTTP dialect is not
+proof that every wallet or external client version works.
 
-### Why now?
-
-AI is changing how software is built. Work that once required large teams and
-long development cycles can now be attempted by much smaller teams with far
-faster iteration. Bitcoin is unusually well suited to this model because
-implementations can be checked against Bitcoin Core, `libbitcoinkernel`,
-historical chain data, consensus test vectors, fuzzing, and differential tests.
-
-**Bitcoin is well suited to AI-native development; Bitcoin Core's development
-culture is not.** Its review process prioritizes minimizing change risk,
-rewarding incrementalism, entrenching existing boundaries, and making radical
-architectural experimentation prohibitively expensive.
-
-**That is why we built `bitcoin-rs`: to preserve Bitcoin's consensus while
-making bold architectural experimentation practical—build alternatives,
-verify them against reproducible evidence, and keep iterating until better
-designs emerge.**
-
-### What can be improved
-
-- **Performance is a first-class requirement.** `bitcoin-rs` is not aiming for
-  parity with Bitcoin Core simply by changing languages. Synchronization,
-  storage, memory ownership, concurrency, caching, I/O, and indexing can all be
-  reconsidered. Improvements must be demonstrated with matched whole-node
-  benchmarks against Core.
-- **The UTXO set is the node's authoritative coin state.** Much of the Bitcoin
-  application ecosystem grew by rebuilding or duplicating wallet-, Electrum-,
-  and explorer-specific views around the same chain data. `bitcoin-rs`
-  simplifies that boundary: the node owns the canonical UTXO set used for
-  validation and an integrated script index exposed through Esplora-compatible
-  APIs. This eliminates the need for a separate Electrum server with its own
-  duplicate chain state and ingestion pipeline.
-  Wallet-specific keys, policies, and metadata remain outside the node.
-  Consumers build on node state; they do not redefine where Bitcoin's coin
-  state lives.
-- **Modularity keeps the core isolated and components composable.** Clear
-  dependency and failure boundaries keep extensions from destabilizing
-  validation or chainstate while allowing components to be reused independently.
-  Extensions own their state and lifecycle and may build on core capabilities,
-  but they do not become dependencies of the core.
-- **Rust-native integration is a primary path.** Applications and extensions in
-  the Rust Bitcoin ecosystem can attach to the node as typed, in-process
-  components instead of routing through serialized RPC or separate processes.
-  This improves runtime efficiency and simplifies integration and deployment,
-  making the full node a native, composable part of the ecosystem.
-
-Bitcoin is not defined by the continued preservation of one codebase. **The code
-can change; consensus is what must remain.** `bitcoin-rs` aims to challenge
-Bitcoin Core and build a better Bitcoin implementation. That challenge
-strengthens the Bitcoin ecosystem: a separately designed codebase cross-checks
-consensus interpretation, increases implementation diversity, and reduces the
-risk of correlated implementation failures.
+Bitcoin consensus is the compatibility target. Architectural experiments need
+independent tests and reproducible evidence; neither a new implementation nor a
+passing bounded test establishes exhaustive equivalence. This introduction does
+not claim production readiness, an independent security audit, or a current
+speed advantage over Bitcoin Core.
 
 ## Features
 
@@ -90,7 +60,7 @@ risk of correlated implementation failures.
 - Kernel feature: `--features kernel` enables `libbitcoinkernel`. The
   `crates/consensus` and `crates/node` library crates still default to `kernel`;
   the `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no kernel)
-  so a default binary build is pure Rust. Issue #213 keeps that split until
+  so a default binary build excludes the kernel. Issue #213 keeps that split until
   native wins the signed-spend and full-replay gates
   (`docs/contracts/validation-default.md`).
 - Pure-Rust storage defaults: LSM-tree storage backed by `fjall` by default,
@@ -112,18 +82,17 @@ risk of correlated implementation failures.
 
 ## Quick start
 
-Build and run the default node with the quick-start profile (pure Rust, no
-C++ toolchain required):
+For a bounded first evaluation, use the [regtest setup](docs/getting-started.md#esplora).
+The commands below instead start mainnet with the kernel-free default binary:
 
 ```sh
-cargo build --profile quickstart -p bitcoin-rs
+cargo build --locked --profile quickstart -p bitcoin-rs
 ./target/quickstart/bitcoin-rs --data-dir .bitcoin-rs
 ```
 
-The `quickstart` profile builds ~3x faster than `--release` by dropping LTO
-and raising codegen-units, at the cost of lower runtime throughput — fine for
-booting and exploring.  For sustained IBD or benchmarking, use
-`cargo build --release` instead.
+The `quickstart` profile drops LTO and raises codegen-units for exploration.
+For sustained IBD or benchmarking, use `cargo build --release` instead. Build
+time and runtime comparisons require measurements on the selected platform.
 
 This starts a mainnet node storing state in `.bitcoin-rs` and listening for
 JSON-RPC on `127.0.0.1:8332`.
@@ -148,9 +117,15 @@ cargo build --release -p bitcoin-rs --features kernel
 ./target/release/bitcoin-rs --data-dir .bitcoin-rs
 ```
 
-## Measured performance
+<a id="measured-performance"></a>
 
-Performance measurements from the bounded disk-backed campaign documented in
+## Historical performance
+
+These are historical candidate measurements, not evidence for the current
+implementation. The benchmark owner records the end-state comparison cells as
+`planned_not_executed`; those cells must not be presented as passed.
+
+The bounded disk-backed campaign is documented in
 [docs/benchmarks/end-to-end-sync.md](docs/benchmarks/end-to-end-sync.md) (commit
 `de8001e`, mainnet blocks 0 to 150,000, full validation with
 `--assume-valid-height 0`, CPU set 0–31 on Intel Xeon Gold 6138):
@@ -163,7 +138,8 @@ Performance measurements from the bounded disk-backed campaign documented in
 
 These measurements reflect a bounded 0–150,000 historical block range before
 SegWit and Taproot activation. Full-tip live network sync measurements remain
-pending fresh benchmarking runs. See
+pending fresh benchmarking runs. These results do not establish a current
+speed advantage over Bitcoin Core. See
 [docs/benchmarks/end-to-end-sync.md](docs/benchmarks/end-to-end-sync.md) for full
 methodology, hardware constraints, and artifact custody.
 
@@ -208,7 +184,7 @@ genesis.
 ## Build and test
 
 ```sh
-# Build default binary (pure Rust)
+# Build default binary (kernel-free)
 cargo build --release -p bitcoin-rs
 
 # Run workspace unit and integration tests
