@@ -1,0 +1,24 @@
+name: fuzz-corpus-tools
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-corpus-tools-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  corpus-import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check importer syntax
+        run: bash -n scripts/import-qa-assets.sh
+      - name: Run offline corpus-import regressions
+        run: python3 -m unittest discover -s scripts/tests -p test_import_qa_assets.py -v

@@ -117,3 +117,13 @@ candidate baselines before production edits; owner gates append final values.
   false; an existing true contract may not regress. An exception requires
   separate explicit human approval with a named normative owner, exact scope,
   reason, and expiry, recorded apart from measured verdicts.
+
+## QA corpus importer setup contract
+
+The versioned setup contract for `scripts/import-qa-assets.sh` is: a failure of
+`git rev-parse` exits with status 19, a failure of the nightly `rustc` host
+probe exits with status 17, a failure of `mktemp` exits with status 23, a disk
+probe failure exits with status 7, and an insufficient-space check exits with
+status 1. Every setup failure removes the temporary staging directory and does
+not attempt the clone. `scripts/tests/test_import_qa_assets.py`
+`SetupFailureTests` is the regression suite for this contract.

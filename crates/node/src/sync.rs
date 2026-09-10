@@ -829,6 +829,10 @@ impl BlockSync {
                     "block sync: chainstate torn by a failed disconnect, shutting down"
                 );
             }
+            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
+                // The reorg owner has closed admission and requested shutdown.
+                tracing::error!(%error, "block sync: reorg generation settlement failed");
+            }
             Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
                 tracing::error!(
                     %error,
@@ -2814,13 +2818,24 @@ mod tests {
         assert!(!stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 0);
+        // MPL-04: rejecting the invalid branch must still allow the selected
+        // valid main branch to reconnect through ordinary forward apply.
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(main_hash)
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
+    /// Generation settlement: MPL-04 in docs/contracts/mempool-mutations.md.
+    /// Prefix and body ownership: docs/solutions/architecture-patterns/node-reorg-execution-design.md.
     #[test]
-    fn operational_reorg_failure_preserves_branch_and_ownership()
+    fn operational_reorg_failure_preserves_branch_and_retries_without_restart()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+        let (mut sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
         assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
@@ -2861,7 +2876,30 @@ mod tests {
                 .mark_received(hash, bytes, Instant::now());
         }
 
-        sync.switch_branch_if_outweighed();
+        let outcome = crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            descendant_id,
+            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.retire_applied_reorg_body(hash),
+        );
+        assert!(
+            matches!(
+                &outcome,
+                Err(crate::reorg::ReorgError::ConnectFailed {
+                    disconnected: 1,
+                    connected: 0,
+                    source,
+                    ..
+                }) if matches!(source.as_ref(), crate::ApplyError::BlockBodyPersistence(_))
+            ),
+            "the body-store refusal must follow a committed disconnect, got {outcome:?}"
+        );
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.hash),
+            Some(Hash256::from_le_bytes(genesis.block_hash().as_bytes())),
+            "a refused pre-UTXO connect leaves the fork point as the committed tip"
+        );
 
         {
             let tree = sync.handles.block_tree.read();
@@ -2874,6 +2912,29 @@ mod tests {
         assert!(stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 2);
+        // MPL-04: a known committed prefix must finish its generation, so a
+        // transient pre-UTXO refusal cannot wedge admission and later applies.
+        assert!(
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "admission must reopen after the clean connect refusal"
+        );
+
+        crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            descendant_id,
+            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.retire_applied_reorg_body(hash),
+        )?;
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.hash),
+            Some(descendant_hash),
+            "retrying the same reorg must reach the target without restarting"
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert!(!sync.block_stager.lock().contains(&fork_hash));
+        assert!(!sync.block_stager.lock().contains(&descendant_hash));
+        assert_eq!(sync.download_window.lock().received_len(), 0);
         Ok(())
     }
 
@@ -8217,6 +8278,8 @@ mod tests {
             Some(connected_tip),
             "the successful connected prefix is the final active chain"
         );
+        // MPL-04: the valid connected prefix reopens only after re-admission.
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         let mempool = handles.mempool.read();
         assert_eq!(
             mempool.len(),
@@ -8295,6 +8358,9 @@ mod tests {
             "a fatal disconnect must never reconsider disconnected transactions"
         );
         assert_eq!(handles.mempool.read().sequence_number(), 0);
+        // MPL-04: a stuck marker must keep all later chain changes fenced.
+        assert!(handles.mempool_gateway.stable_generation().is_none());
+        assert!(handles.begin_transition().is_err());
         let spend_in_pool = handles.mempool.read().contains_txid(&spend_txid);
         assert!(
             !spend_in_pool,

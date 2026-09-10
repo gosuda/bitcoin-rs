@@ -23,7 +23,8 @@
 
 set -euo pipefail
 
-readonly REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+readonly REPO_ROOT
 readonly QA_ASSETS_URL="https://github.com/rust-bitcoin/qa-assets.git"
 readonly FOOTPRINT_ASSUME_MB=2048  # worst-case shallow-clone footprint
 readonly RESERVE_MB=1024           # free-space reserve on top of the footprint
@@ -32,7 +33,8 @@ readonly MAX_SEED_BYTES=65536      # keep individual seeds bounded
 # cargo env hygiene for this repo (see repo AGENTS.md); fuzzing needs nightly
 # for -Zsanitizer, and an explicit host triple because cargo-fuzz 0.13
 # defaults to the musl target.
-readonly HOST_TRIPLE="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+HOST_TRIPLE="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+readonly HOST_TRIPLE
 CARGO_ENV=(env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR RUSTUP_TOOLCHAIN=nightly)
 
 log() { printf '[import-qa-assets] %s\n' "$*"; }
@@ -42,9 +44,17 @@ log() { printf '[import-qa-assets] %s\n' "$*"; }
 # both filesystems must cover their share of footprint + reserve.
 available_mb() { df -Pm "$1" | awk 'NR == 2 { print $4 }'; }
 
-readonly WORKDIR="$(mktemp -d /tmp/qa-assets.XXXXXX)"
-readonly FREE_TMP_MB="$(available_mb "${WORKDIR}")"
-readonly FREE_REPO_MB="$(available_mb "${REPO_ROOT:?repo root unset}")"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-assets.XXXXXX")"
+readonly WORKDIR
+cleanup() { rm -rf -- "${WORKDIR:?workdir unset}"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+FREE_TMP_MB="$(available_mb "${WORKDIR}")"
+FREE_REPO_MB="$(available_mb "${REPO_ROOT:?repo root unset}")"
+readonly FREE_TMP_MB FREE_REPO_MB
 readonly NEEDED_MB=$((FOOTPRINT_ASSUME_MB + RESERVE_MB))
 readonly NEEDED_REPO_MB=256
 if [ "${FREE_TMP_MB:?free space unknown}" -lt "${NEEDED_MB}" ] ||
@@ -53,9 +63,6 @@ if [ "${FREE_TMP_MB:?free space unknown}" -lt "${NEEDED_MB}" ] ||
     exit 1
 fi
 log "disk ok: ${FREE_TMP_MB} MiB free for the clone (>= ${NEEDED_MB} MiB), ${FREE_REPO_MB} MiB free on repo (>= ${NEEDED_REPO_MB} MiB)"
-
-cleanup() { rm -rf -- "${WORKDIR:?workdir unset}"; }
-trap cleanup EXIT
 
 # --- 2. Clone pinned to the provenance commit ---------------------------------
 # CORPUS_PROVENANCE.md records this exact commit; a rerun must reproduce that
@@ -81,11 +88,11 @@ readonly OUT_BASE="${FUZZ_DIR}/corpus"
 # --- 3. p2p_message: reframe raw network messages ----------------------------
 # The harness input is [selector][payload]; it derives the envelope itself.
 # Extract the command from the corpus file 24-byte header and map it to the
-# selector index used by fuzz/fuzz_targets/p2p_message.rs COMMANDS (single
-# source of truth: the array is parsed out of the target source).
+# selector index in crates/p2p/src/compat.rs COMMANDS, the same inventory
+# consumed by fuzz/fuzz_targets/p2p_message.rs.
 map_p2p() {
     "${CARGO_ENV[@]}" python3 - "${CORPORA}/p2p_deserialize_raw_net_msg" \
-        "${FUZZ_DIR}/fuzz_targets/p2p_message.rs" "${OUT_BASE}/p2p_message" \
+        "${REPO_ROOT}/crates/p2p/src/compat.rs" "${OUT_BASE}/p2p_message" \
         "${MAX_SEED_BYTES}" <<'PYEOF'
 import hashlib
 import re
@@ -93,13 +100,20 @@ import sys
 from pathlib import Path
 
 corpus_dir, target_src, out_dir, max_bytes = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
-commands = re.findall(r'"([a-z0-9]+)"', target_src.read_text().split("COMMANDS", 1)[1].split("];", 1)[0])
+table = re.search(r"pub\s+const\s+COMMANDS\s*:\s*&\[Command\]\s*=\s*&\[(.*?)\];", target_src.read_text(), re.S)
+if table is None:
+    sys.exit("Cannot find the P2P COMMANDS inventory")
+commands = re.findall(r'\bname\s*:\s*"([a-z0-9]{1,12})"', table.group(1))
+if (not commands or len(commands) > 256 or len(set(commands)) != len(commands)
+        or len(commands) != len(re.findall(r"\bCommand\s*\{", table.group(1)))):
+    sys.exit("Invalid P2P COMMANDS inventory")
 selector = {name: bytes([idx]) for idx, name in enumerate(commands)}
 
 out_dir.mkdir(parents=True, exist_ok=True)
 imported = skipped_short = unknown_cmd = 0
 for path in sorted(corpus_dir.iterdir()):
-    blob = path.read_bytes()
+    with path.open("rb") as source:
+        blob = source.read(24 + max_bytes - 1)
     if len(blob) <= 24:
         skipped_short += 1
         continue
@@ -108,7 +122,7 @@ for path in sorted(corpus_dir.iterdir()):
     if sel is None:
         unknown_cmd += 1
         continue
-    payload = blob[24:][:max_bytes]
+    payload = blob[24:]
     seed = sel + payload
     (out_dir / hashlib.sha256(seed).hexdigest()[:32]).write_bytes(seed)
     imported += 1
@@ -119,14 +133,24 @@ PYEOF
 # --- 4. script_eval: wrap raw script bytes into the harness framing ----------
 map_script() {
     "${CARGO_ENV[@]}" python3 - "${CORPORA}/bitcoin_deserialize_script" \
-        "${CORPORA}/bitcoin_script_bytes_to_asm_fmt" "${OUT_BASE}/script_eval" \
+        "${CORPORA}/bitcoin_script_bytes_to_asm_fmt" \
+        "${FUZZ_DIR}/fuzz_targets/script_eval.rs" "${OUT_BASE}/script_eval" \
         "${MAX_SEED_BYTES}" <<'PYEOF'
 import hashlib
+import re
 import sys
 from pathlib import Path
 
 dirs = [Path(sys.argv[1]), Path(sys.argv[2])]
-out_dir, max_bytes = Path(sys.argv[3]), int(sys.argv[4])
+target_src, out_dir, max_bytes = Path(sys.argv[3]), Path(sys.argv[4]), int(sys.argv[5])
+limit = re.search(r"const\s+ELEMENT_LEN_MAX\s*:\s*usize\s*=\s*([0-9_]+)\s*;", target_src.read_text())
+if limit is None:
+    sys.exit("Cannot find script_eval ELEMENT_LEN_MAX")
+element_limit = int(limit.group(1).replace("_", ""))
+# A P2TR frame adds ten bytes relative to the retained script; lengths are u16.
+script_limit = min(element_limit, 0xffff, max_bytes - 10)
+if script_limit < 0:
+    sys.exit("Seed budget is too small for script framing")
 NONE, TAPROOT = b"\x00", b"\x03"  # FLAGS indices in fuzz_targets/script_eval.rs
 
 out_dir.mkdir(parents=True, exist_ok=True)
@@ -143,10 +167,11 @@ def frame(selector: bytes, script_sig: bytes, script_pubkey: bytes, witness: lis
 imported = 0
 for corpus_dir in dirs:
     for path in sorted(corpus_dir.iterdir()):
-        script = path.read_bytes()[:max_bytes]
+        with path.open("rb") as source:
+            script = source.read(script_limit)
         emit(frame(NONE, b"", script, []))  # raw scriptPubKey
-        if len(script) >= 32:               # P2TR key-path variant
-            emit(frame(TAPROOT, b"", b"\x51\x20" + script[:32], [script[32:1024]]))
+        if len(script) >= 32 and element_limit >= 34:  # P2TR key-path variant
+            emit(frame(TAPROOT, b"", b"\x51\x20" + script[:32], [script[32:]]))
         imported += 1
 print(f"script_eval: imported={imported} files (raw + P2TR variants)")
 PYEOF
@@ -203,10 +228,10 @@ Seeds under fuzz/corpus/ were imported from
 
 | Target | Upstream corpus | Transformation |
 |---|---|---|
-| p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload kept as-is (harness rebuilds magic/length/checksum) |
+| p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload bounded so the selector plus payload fits ${MAX_SEED_BYTES} bytes (harness rebuilds magic/length/checksum) |
 | block_decode | fuzz_corpora/bitcoin_deserialize_block | direct copy (raw consensus bytes) |
 | tx_decode | fuzz_corpora/bitcoin_deserialize_transaction | direct copy (raw consensus bytes) |
-| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector 0x00 = NONE); files >= 32 bytes also emit a P2TR key-path variant (selector 0x03 = TAPROOT) |
+| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes bounded by the harness ELEMENT_LEN_MAX and seed budget, then wrapped into the script_eval framing (selector 0x00 = NONE); files >= 32 bytes also emit a P2TR key-path variant (selector 0x03 = TAPROOT) |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the script after major decoder changes to
