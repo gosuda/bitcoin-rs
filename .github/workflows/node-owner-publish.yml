@@ -6,6 +6,7 @@ on:
       - .github/workflows/node-owner-publish.yml
       - .github/node-owner-plan.json
       - .github/prepare-node-publisher.py
+      - .github/node-owner-deletions.json
 permissions:
   contents: read
 jobs:
