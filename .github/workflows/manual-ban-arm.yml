@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/manual-ban-arm.yml
       - .github/audit/prepare_manual_bans.py
+      - .github/audit/prepare_block_delivery.py
 permissions:
   contents: write
 concurrency:
@@ -129,20 +130,67 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership --test overhaul_evidence --test overhaul_reference_set 2>&1 | tee /tmp/manual-ban-evidence/contracts.txt
-      - name: Publish the tested source only on a new branch
+      - name: Record the tested manual-ban commit separately
         run: |
           test "$(git rev-parse HEAD)" = "$(cat /tmp/manual-ban-evidence/format-head.txt)"
-          test -z "$(git ls-remote --heads origin refs/heads/validated/manual-ban-arm-20260910)"
           git diff --exit-code -- Cargo.lock
           cargo fmt --all -- --check
           git diff --check
           git add -- crates/p2p/src/lib.rs crates/p2p/src/service.rs crates/p2p/src/listener.rs crates/p2p/src/peer.rs crates/rpc/src/handlers/network.rs
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(p2p): apply manual bans atomically with session registration'
           git diff --exit-code
+          git rev-parse HEAD | tee /tmp/manual-ban-evidence/manual-ban-head.txt
+          git show --stat --oneline HEAD | tee /tmp/manual-ban-evidence/manual-ban-scope.txt
+          git archive HEAD > /tmp/manual-ban-evidence/manual-ban-source.tar
+      - name: Repair blocked-reader cancellation without another shutdown flag
+        id: delivery
+        run: |
+          python3 ../control/.github/audit/prepare_block_delivery.py fix
+          cargo fmt --all
+          python3 - <<'PY'
+          import subprocess
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed == {'crates/p2p/src/listener.rs', 'docs/contracts/p2p-wire.md'}, sorted(changed)
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --binary > /tmp/manual-ban-evidence/block-delivery.patch
+      - name: Require the original cancellation predicate to fail the regression
+        run: python3 ../control/.github/audit/prepare_block_delivery.py negative-control
+      - name: Validate corrected cancellation and production ingress
+        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-p2p --lib --test listener_ban --test core_compat --no-fail-fast 2>&1 | tee /tmp/manual-ban-evidence/block-delivery-p2p.txt
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e 2>&1 | tee /tmp/manual-ban-evidence/block-delivery-ingress.txt
+      - name: Final workspace strict Clippy
+        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/final-clippy-workspace.txt
+      - name: Final native consensus strict Clippy
+        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/final-clippy-consensus.txt
+      - name: Final native node strict Clippy
+        if: ${{ !cancelled() && steps.delivery.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/final-clippy-node.txt
+      - name: Publish both tested atomic source changes without staging machinery
+        run: |
+          test -z "$(git ls-remote --heads origin refs/heads/validated/manual-ban-arm-20260910 refs/heads/validated/block-delivery-cancel-arm-20260910)"
+          git diff --exit-code -- Cargo.lock
+          cargo fmt --all -- --check
+          git diff --check
+          git add -- crates/p2p/src/listener.rs docs/contracts/p2p-wire.md
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(p2p): stop blocked block delivery when its peer lease is cancelled'
+          git diff --exit-code
           git rev-parse HEAD | tee /tmp/manual-ban-evidence/head.txt
           git show --stat --oneline HEAD | tee /tmp/manual-ban-evidence/scope.txt
           git archive HEAD > /tmp/manual-ban-evidence/source.tar
-          git push origin HEAD:refs/heads/validated/manual-ban-arm-20260910
+          git push --atomic origin "$(cat /tmp/manual-ban-evidence/manual-ban-head.txt):refs/heads/validated/manual-ban-arm-20260910" HEAD:refs/heads/validated/block-delivery-cancel-arm-20260910
       - name: Capture partial source changes on failure
         if: always()
         run: |
