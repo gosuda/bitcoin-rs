@@ -38,7 +38,7 @@ body = body.replace('`BlockBodyStore::load_block_body` (`crate::apply`)', '`Bloc
 prelude = '''//! Applied-chain event publication and durable process-epoch allocation.
 //!
 //! Owns the live coherent snapshot cell, bounded nonblocking hint channel, and
-//! serialized on-disk epoch transaction. NodeState composes this owner; apply
+//! serialized on-disk epoch transaction. `NodeState` composes this owner; apply
 //! records committed results, and derived consumers reconcile from snapshots.
 //! This move preserves publication order, channel capacity, lock lifetime,
 //! epoch filenames, typed failures, and file/directory durability barriers.
@@ -56,6 +56,15 @@ use super::INBOUND_BLOCK_CHANNEL_LIMIT;
 '''
 EVENTS.parent.mkdir(parents=True, exist_ok=True)
 EVENTS.write_text(prelude + hint_bound + '\n' + body.rstrip() + '\n')
+
+# Remove the moved owner's imports before qualifying bare io paths; otherwise
+# the nested std use tree would incorrectly become std::std::io.
+io_import = '    io::{self, Write as _},\n'
+if src.count(io_import) != 1:
+    raise SystemExit('state I/O import anchor changed')
+src = src.replace(io_import, '', 1)
+src = src.replace('    Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,',
+                  '    Block, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,', 1)
 
 exports = {'ChainSnapshot', 'ChainEventHint', 'ChainEventPublisher', 'HintKind', 'CHAIN_HINT_CHANNEL_LIMIT'}
 internal = exports | set(constants) | {'load_process_epoch', 'allocate_process_epoch'}
@@ -86,8 +95,6 @@ parts.append(qualify_code(src[last:]))
 src = ''.join(parts)
 for name in exports:
     src = src.replace('[`' + name + '`]', '[`events::' + name + '`]')
-# The epoch owner now owns the only state-local std::io writer use.
-src = src.replace('    io::{self, Write as _},\n', '', 1)
 if '.write_all(' in src:
     src = src.replace('use anyhow::', 'use std::io::Write as _;\n\nuse anyhow::', 1)
 anchor = 'use anyhow::{Context as _, Result, bail};'
