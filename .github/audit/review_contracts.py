@@ -18,6 +18,7 @@ CASES = {
 }
 FORMATTING = {
     'bin/bitcoin-rs/tests/gates/g20_formal_models.rs',
+    'bin/bitcoin-rs/tests/support/ownership_scan.rs',
     'crates/utxo/src/set/persistent.rs',
     'crates/utxo/tests/overhaul_persistent_coins.rs',
 }
