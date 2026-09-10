@@ -1,17 +1,13 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::script_util::{opcode, push_data};
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_mempool::accounting::prepared_context;
-use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext as MempoolPackageTxContext,
-    evaluate_package_acceptance_all,
-};
+use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{AdmissionOrigin, MutationResult, SubmitError, SubmitOutcome};
 use bitcoin_rs_primitives::{
     Block as NativeBlock, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -524,17 +520,18 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
         txs.push(decode_tx(raw)?);
     }
 
-    let pool = ctx.mempool.read();
-    let policy = pool.policy_snapshot();
-    let contexts = package_contexts(ctx, &pool, &txs);
-    let facts = evaluate_package_acceptance_all(
-        &pool,
-        &policy.standardness,
-        &txs,
-        &contexts,
-        max_feerate,
-        policy.incremental_relay_fee_sat_per_kvb,
-    );
+    let facts = ctx
+        .mempool
+        .preview_transactions(&txs, max_feerate, &ctx.admission_chain())
+        .map_err(|error| match error {
+            SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
+            SubmitError::Consensus => {
+                RpcError::TxRejected("consensus-verification-failed".to_owned())
+            }
+            SubmitError::RetryExhausted => {
+                RpcError::Internal(AdmissionFailure::RETRY_EXHAUSTED.to_owned())
+            }
+        })?;
 
     let mut rows = Vec::with_capacity(facts.results.len());
     for fact in &facts.results {
@@ -778,53 +775,6 @@ fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
     }
 }
 
-fn package_contexts(
-    ctx: &Context,
-    pool: &bitcoin_rs_mempool::Mempool,
-    txs: &[Tx],
-) -> Vec<MempoolPackageTxContext> {
-    let mut package_outputs: HashMap<OutPoint, &TxOut> = HashMap::new();
-    let mut contexts = Vec::with_capacity(txs.len());
-
-    for tx in txs {
-        let mut missing_inputs = false;
-        let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
-
-        for input in &tx.inputs {
-            if input.previous_output == OutPoint::default() {
-                missing_inputs = true;
-                continue;
-            }
-            if let Some(&output) = package_outputs.get(&input.previous_output) {
-                prevouts.push((input.previous_output, output.clone()));
-                continue;
-            }
-            if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-                && let Ok(vout) = usize::try_from(input.previous_output.vout)
-                && let Some(output) = parent.outputs.get(vout)
-            {
-                prevouts.push((input.previous_output, output.clone()));
-                continue;
-            }
-            if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-                prevouts.push((input.previous_output, live.txout.clone()));
-                continue;
-            }
-            missing_inputs = true;
-        }
-
-        contexts.push(prepared_context(tx, &prevouts, missing_inputs));
-
-        let txid = tx.txid();
-        for (vout, output) in tx.outputs.iter().enumerate() {
-            let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert(OutPoint::new(txid, vout), output);
-        }
-    }
-
-    contexts
-}
-
 pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "psbt is required")?;
     let extract = optional_bool(params, 1, true)?;
@@ -1063,101 +1013,6 @@ mod tests {
                 .collect();
         }
         layer.first().copied().unwrap_or_default()
-    }
-
-    /// POL-01 / BIP141: package prevouts retain the scripts used by accounting.
-    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
-    #[test]
-    fn package_prevouts_preserve_sigops_without_mutating_the_pool()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let ctx = Context::new();
-        let pool = ctx.mempool.read();
-        let sequence = pool.sequence_number();
-        let p2sh = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
-        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
-        let p2wsh = [vec![0x00, 0x20], vec![3; 32]].concat();
-        let multisig = vec![0x52, 0xae];
-        let cases = [
-            (p2wpkh, Vec::new(), Vec::new(), 1),
-            (p2sh.clone(), vec![2, 0x52, 0xae], Vec::new(), 8),
-            (p2wsh.clone(), Vec::new(), vec![multisig.clone()], 2),
-            (p2sh, [vec![34], p2wsh].concat(), vec![multisig], 2),
-        ];
-        for (script_pubkey, script_sig, witness, input_cost) in cases {
-            let parent = Tx {
-                version: 2,
-                lock_time: 0,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
-                }],
-                outputs: vec![
-                    TxOut {
-                        value: 1,
-                        script_pubkey: vec![0x51],
-                    },
-                    TxOut {
-                        value: 9_000,
-                        script_pubkey,
-                    },
-                ],
-            };
-            let child = Tx {
-                version: 2,
-                lock_time: 0,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::new(parent.txid(), 1),
-                    script_sig,
-                    sequence: u32::MAX,
-                    witness,
-                }],
-                outputs: vec![TxOut {
-                    value: 8_000,
-                    script_pubkey: vec![0xac],
-                }],
-            };
-            // Preparation only: no script execution or successful package
-            // acceptance is claimed. The parent's chain input is absent.
-            let oracle: bitcoin::Transaction =
-                bitcoin::consensus::deserialize(&consensus_bytes(&child))?;
-            let expected_outpoint = oracle.input[0].previous_output;
-            let oracle_output = bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(parent.outputs[1].value),
-                script_pubkey: bitcoin::ScriptBuf::from_bytes(
-                    parent.outputs[1].script_pubkey.clone(),
-                ),
-            };
-            assert_eq!(
-                u32::try_from(oracle.total_sigop_cost(|outpoint| {
-                    (*outpoint == expected_outpoint).then(|| oracle_output.clone())
-                }))?,
-                4 + input_cost,
-                "independent rust-bitcoin oracle",
-            );
-            let vsize = child.vsize();
-            let txs = [parent, child];
-            let contexts = super::package_contexts(&ctx, &pool, &txs);
-            assert_eq!(contexts.len(), 2);
-            assert!(contexts[0].missing_inputs);
-            assert!(!contexts[1].missing_inputs);
-            assert_eq!(contexts[1].fee, 1_000);
-            assert_eq!(u64::from(contexts[1].vsize), vsize);
-            // BIP141: the legacy output CHECKSIG adds four to the input cost.
-            assert_eq!(contexts[1].sigop_cost, 4 + input_cost);
-            for vout in [2, u32::MAX] {
-                let mut missing = txs[1].clone();
-                missing.inputs[0].previous_output.vout = vout;
-                let contexts = super::package_contexts(&ctx, &pool, &[txs[0].clone(), missing]);
-                assert!(contexts[1].missing_inputs);
-                assert_eq!(contexts[1].fee, 0);
-                assert_eq!(contexts[1].sigop_cost, 4);
-            }
-            assert_eq!(pool.sequence_number(), sequence);
-            assert!(pool.is_empty());
-        }
-        Ok(())
     }
 
     #[test]
@@ -2136,17 +1991,7 @@ mod tests {
         let child_txid = child.txid();
         let child_hex = retry_raw_hex(&child);
 
-        // Admit the parent first: the child's `prepare_and_verify` must pass
-        // in full to reach the park seam after it, so the parent's output has
-        // to be resolvable before the first attempt starts.
-        let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
-        ctx.mempool
-            .insert_entry(
-                AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
-            )
-            .expect("parent admitted to the mempool");
-
+        // Provisional refusals reach this seam too, so retry must rebuild missing inputs.
         // Arm the admission park gate: the first `admit_transaction` on this
         // gateway will block before the write lock, signal `parked`, and wait
         // for `release`.
@@ -2165,11 +2010,10 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("first admission parked at the gateway seam");
 
-        // While the first attempt is parked (after its outside verdict,
-        // before the write lock, holding no guard), change the chain
-        // generation so the first attempt's captured generation token is
-        // stale. The sequence is untouched, so the writer recheck must fire
-        // on generation.
+        // While the first attempt is parked (before the write lock, holding
+        // no guard), change the chain generation so the first attempt's
+        // captured generation token is stale, and admit the parent so the
+        // mempool sequence bumps and the parent's output is available.
         let guard = ctx_clone
             .mempool
             .begin_chain_change()
@@ -2177,6 +2021,15 @@ mod tests {
         guard
             .finish()
             .expect("finish chain change to next even generation");
+
+        let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
+        ctx_clone
+            .mempool
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
+            )
+            .expect("parent admitted to the mempool");
 
         // Release the park: the first attempt proceeds, sees the stale
         // generation token, and returns `GenerationChanged` — retrying with

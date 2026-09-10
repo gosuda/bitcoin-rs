@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_rpc::manifest::{MANIFEST, SurfaceKind};
 use serde::Deserialize;
 use serde_json::Value;
@@ -19,6 +20,15 @@ use serde_json::Value;
 use super::compare::EnvelopeCheck;
 use super::limits::{MAX_CORPUS_BYTES, MAX_FIXTURE_BYTES, MAX_FIXTURE_COUNT, MAX_JSON_DEPTH};
 use super::manifest_check;
+
+// Reuse the process gates' typed identity owner in this test binary; no
+// production crate dependency or second reference parser is introduced.
+#[expect(
+    dead_code,
+    reason = "the RPC fixture gate consumes only the release identity"
+)]
+#[path = "../../../../bin/bitcoin-rs/tests/support/reference_set.rs"]
+mod reference_set;
 
 /// Converts an in-memory byte length to `u64` for ceiling comparisons; a
 /// length that does not fit is above every ceiling and is refused by them.
@@ -44,6 +54,8 @@ pub(crate) enum Relation {
 pub(crate) struct Provenance {
     /// Pinned Core version string; must be `31.1.0`.
     pub core_version: String,
+    /// Bitcoin Core source commit corresponding to the captured binary.
+    pub core_source_commit: String,
     /// SHA-256 of the exact `bitcoind` binary the probe captured.
     pub core_binary_sha256: String,
     /// Network the capture ran on; must be `regtest`.
@@ -249,13 +261,6 @@ pub(crate) enum BodyCheck {
     },
 }
 
-/// Version the corpus is pinned to.
-pub(crate) const PINNED_CORE_VERSION: &str = "31.1.0";
-
-/// SHA-256 of the exact `bitcoind` binary the probe captured.
-pub(crate) const PINNED_CORE_SHA256: &str =
-    "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08";
-
 /// The one supported capture network.
 pub(crate) const PINNED_NETWORK: &str = "regtest";
 
@@ -292,10 +297,15 @@ impl std::error::Error for LoadError {}
 /// [`LoadError::Violation`] when any ceiling, strict-parse rule or provenance
 /// pin fails; [`LoadError::Io`] when the corpus directory cannot be read.
 pub(crate) fn load_corpus() -> Result<BTreeMap<String, Fixture>, LoadError> {
-    load_corpus_from(&corpus_dir())
+    let reference =
+        reference_set::reference_set().map_err(|error| LoadError::Violation(error.to_string()))?;
+    load_corpus_from(&corpus_dir(), &reference.release)
 }
 
-fn load_corpus_from(dir: &Path) -> Result<BTreeMap<String, Fixture>, LoadError> {
+fn load_corpus_from(
+    dir: &Path,
+    release: &reference_set::ReleaseIdentity,
+) -> Result<BTreeMap<String, Fixture>, LoadError> {
     // Root custody: the corpus directory itself is opened no-follow, and
     // every entry is read from and opened relative to that one descriptor.
     // A replacement of the directory name after this point cannot redirect
@@ -369,7 +379,7 @@ fn load_corpus_from(dir: &Path) -> Result<BTreeMap<String, Fixture>, LoadError> 
         let mut fixture: Fixture = sonic_rs::from_str(&text)
             .map_err(|error| LoadError::Violation(format!("{}: {error}", path.display())))?;
         settle_body_lengths(&mut fixture);
-        validate_fixture(&fixture, &path)?;
+        validate_fixture(&fixture, &path, release)?;
         if fixtures.insert(fixture.id.clone(), fixture).is_some() {
             return Err(LoadError::Violation(format!(
                 "duplicate fixture id in {}",
@@ -554,7 +564,11 @@ fn validate_tuple_content_length(
     }
 }
 
-fn validate_fixture(fixture: &Fixture, path: &Path) -> Result<(), LoadError> {
+fn validate_fixture(
+    fixture: &Fixture,
+    path: &Path,
+    release: &reference_set::ReleaseIdentity,
+) -> Result<(), LoadError> {
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -588,39 +602,7 @@ fn validate_fixture(fixture: &Fixture, path: &Path) -> Result<(), LoadError> {
         )));
     }
 
-    let provenance = &fixture.provenance;
-    if provenance.core_version != PINNED_CORE_VERSION {
-        return Err(LoadError::Violation(format!(
-            "{}: pinned version {:?} is not {PINNED_CORE_VERSION}",
-            path.display(),
-            provenance.core_version
-        )));
-    }
-    if provenance.tip_height != PINNED_TIP_HEIGHT || provenance.tip_hash != PINNED_TIP_HASH {
-        return Err(LoadError::Violation(format!(
-            "{}: pinned tip identity does not match the captured regtest genesis",
-            path.display()
-        )));
-    }
-    if provenance.evidence.trim().is_empty() {
-        return Err(LoadError::Violation(format!(
-            "{}: every fixture must cite the probe evidence it was transcribed from",
-            path.display()
-        )));
-    }
-    if provenance.core_binary_sha256 != PINNED_CORE_SHA256 {
-        return Err(LoadError::Violation(format!(
-            "{}: pinned binary digest does not match the audited Core 31.1 build",
-            path.display()
-        )));
-    }
-    if provenance.network != PINNED_NETWORK {
-        return Err(LoadError::Violation(format!(
-            "{}: capture network {:?} is not {PINNED_NETWORK}",
-            path.display(),
-            provenance.network
-        )));
-    }
+    validate_provenance(&fixture.provenance, path, release)?;
     match (
         &fixture.relation,
         &fixture.current,
@@ -652,6 +634,56 @@ fn validate_fixture(fixture: &Fixture, path: &Path) -> Result<(), LoadError> {
     }
     validate_header_partition(fixture, path)?;
     validate_result_partition(fixture, path)
+}
+
+fn validate_provenance(
+    provenance: &Provenance,
+    path: &Path,
+    release: &reference_set::ReleaseIdentity,
+) -> Result<(), LoadError> {
+    if provenance.core_version != format!("{}.0", release.core_version)
+        || format!("Bitcoin Core daemon version v{}", provenance.core_version)
+            != release.version_output
+    {
+        return Err(LoadError::Violation(format!(
+            "{}: pinned version {:?} does not match selected release {:?}",
+            path.display(),
+            provenance.core_version,
+            release.version_output
+        )));
+    }
+    if provenance.core_source_commit != release.source_commit {
+        return Err(LoadError::Violation(format!(
+            "{}: pinned source commit does not match the selected Core release",
+            path.display()
+        )));
+    }
+    if provenance.tip_height != PINNED_TIP_HEIGHT || provenance.tip_hash != PINNED_TIP_HASH {
+        return Err(LoadError::Violation(format!(
+            "{}: pinned tip identity does not match the captured regtest genesis",
+            path.display()
+        )));
+    }
+    if provenance.evidence.trim().is_empty() {
+        return Err(LoadError::Violation(format!(
+            "{}: every fixture must cite the probe evidence it was transcribed from",
+            path.display()
+        )));
+    }
+    if provenance.core_binary_sha256 != release.bitcoind_sha256.to_lower_hex_string() {
+        return Err(LoadError::Violation(format!(
+            "{}: pinned binary digest does not match the selected Core release",
+            path.display()
+        )));
+    }
+    if provenance.network != PINNED_NETWORK {
+        return Err(LoadError::Violation(format!(
+            "{}: capture network {:?} is not {PINNED_NETWORK}",
+            path.display(),
+            provenance.network
+        )));
+    }
+    Ok(())
 }
 
 /// Every header name on the pinned side (current for a known gap, core for
@@ -885,7 +917,7 @@ fn pinned_current_result(fixture: &Fixture, envelope_index: usize) -> Option<&se
 mod tests {
     use serde_json::Value;
 
-    use super::load_corpus_from;
+    use super::{load_corpus_from, reference_set};
 
     const FIXTURE_NAME: &str = "01_getblockchaininfo_v2_positional.json";
     const CAPTURED_FIXTURE: &str =
@@ -901,7 +933,8 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), serde_json::to_vec(fixture)?)?;
-        let Err(error) = load_corpus_from(dir.path()) else {
+        let Err(error) = load_corpus_from(dir.path(), &reference_set::reference_set()?.release)
+        else {
             return Err("invalid Core reference was accepted".into());
         };
         let message = error.to_string();
@@ -916,7 +949,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let fixture = captured_fixture()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), serde_json::to_vec(&fixture)?)?;
-        let corpus = load_corpus_from(dir.path())?;
+        let corpus = load_corpus_from(dir.path(), &reference_set::reference_set()?.release)?;
         assert_eq!(corpus.len(), 1);
         Ok(())
     }
@@ -924,7 +957,7 @@ mod tests {
     /// API-07: absent identities cannot silently acquire default values.
     #[test]
     fn corpus_rejects_missing_core_reference_fields() -> Result<(), Box<dyn std::error::Error>> {
-        for field in ["core_version", "core_binary_sha256"] {
+        for field in ["core_version", "core_source_commit", "core_binary_sha256"] {
             let mut fixture = captured_fixture()?;
             fixture["provenance"]
                 .as_object_mut()
@@ -959,6 +992,45 @@ mod tests {
             let mut fixture = original.clone();
             fixture["provenance"]["core_binary_sha256"] = Value::from(digest);
             assert_reference_rejected(&fixture, "pinned binary digest")?;
+        }
+        Ok(())
+    }
+
+    /// REF-02/API-07: changing the selected release cannot relabel old captures
+    /// as evidence for a new source, binary, or version.
+    #[test]
+    fn corpus_rejects_stale_fixture_after_reference_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join(FIXTURE_NAME), CAPTURED_FIXTURE)?;
+        let original: toml::Table = toml::from_str(bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML)?;
+        for (field, replacement, reason) in [
+            ("core_version", "31.2", "pinned version"),
+            (
+                "source_commit",
+                "0000000000000000000000000000000000000000",
+                "pinned source commit",
+            ),
+            (
+                "bitcoind_sha256",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "pinned binary digest",
+            ),
+            (
+                "version_output",
+                "Bitcoin Core daemon version v31.2.0",
+                "pinned version",
+            ),
+        ] {
+            let mut edited = original.clone();
+            edited["reference"]["release"][field] = toml::Value::String(replacement.to_owned());
+            let reference = reference_set::load_reference_set(&toml::to_string(&edited)?)?;
+            let Err(error) = load_corpus_from(dir.path(), &reference.release) else {
+                return Err(format!("old fixture was accepted after changing {field}").into());
+            };
+            let message = error.to_string();
+            assert!(message.contains(FIXTURE_NAME), "{message}");
+            assert!(message.contains(reason), "{message}");
         }
         Ok(())
     }

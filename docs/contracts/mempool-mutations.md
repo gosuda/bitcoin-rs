@@ -105,18 +105,27 @@ state (`crates/mempool/src/orphan.rs`).
   transactions or checkpoint possibly torn state. A failed `finish` is a
   fatal invariant failure: retain the execution cause, close apply admission
   and request shutdown rather than report success or retry the chain walk.
-- `submit_transaction` owns common preparation and bounded retry for RPC
-  and peer submissions in mempool. `admit_transaction` remains their
-  atomic admission operation:
-  capture `expected_generation` (an even value from `stable_generation`)
-  and `expected_sequence` (from a pool read guard), release the pool guard,
-  resolve chain facts, then call `admit_transaction` with both tokens. Chain
-  lookups and external callbacks never run under the admission-state lock.
-  The gateway takes the write lock once and checks, in order: (1) exact
-  chain generation equals the request and is even, (2) current pool sequence
-  equals the request, (3) exact transaction identity. A mismatch returns a
-  transient error (`GenerationChanged` or `MempoolChanged`) and mempool retries
-  with fresh facts — it never re-uses a captured even generation.
+- `submit_transaction` owns common preparation and four bounded attempts for
+  RPC and peer submissions. `preview_transactions` uses the same policy and
+  script evaluator, with the same retry bound. Each attempt captures an even
+  chain generation and pool sequence before reading chain facts. Preparation
+  copies the input outputs under a pool read, then executes scripts without
+  any pool or lifecycle lock. The commit writer validates the exact generation
+  and sequence, the enforced policy snapshot and all `MempoolLimits`, then the
+  resident orphan claim and duplicate identity, before using that verdict.
+  Policy values are compared directly because limits can change without a
+  membership sequence change; there is no second policy owner or shadow counter.
+  Stale approvals and stale rejections both retry with newly resolved facts.
+- Preview rechecks generation, sequence and policy before returning all rows.
+  It changes no membership, mutation sequence, fee-estimator history, orphan
+  or reject state, or observer output. It preserves the documented independent
+  row package behavior and earlier-offered output lookup; it is not atomic
+  package admission. RPC supplies maximum fee and renders the returned facts.
+  The maximum applies only after an admission-valid script result, matching
+  Core v31.1's `BroadcastTransaction` and `testmempoolaccept` ordering.
+- RPC duplicate submission remains an idempotent success, while preview
+  reports `AlreadyInMempool`. Only submission may finalize peer orphan/reject
+  state. The writer validates every captured token before either transition.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
   `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,
