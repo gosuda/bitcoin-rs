@@ -140,8 +140,11 @@ state (`crates/mempool/src/orphan.rs`).
   count and aggregate BIP141 transaction weight, using `DEFAULT_ORPHAN_QUOTA`
   and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`. Insertions, witness
   refreshes, and removals update the resident weight; FIFO eviction restores
-  both bounds. Witness refresh preserves FIFO position; expiry is not
-  implemented. These private defaults and indexes have one owner; RPC
+  both bounds. Witness refresh preserves FIFO position and the first-seen
+  timestamp. The ingress poll applies the mempool-owned two-minute expiry and
+  removes bodies whose exact delivering connection token is no longer live;
+  a same-address reconnect cannot inherit the old allocation. These private
+  defaults and indexes have one owner; RPC
   missing-input rejections do not populate peer orphan state. An out-of-range output index
   on a resident mempool parent is rejected under the same token and retry-claim
   checks, rather than retained as an orphan awaiting an impossible parent.
@@ -256,6 +259,9 @@ state (`crates/mempool/src/orphan.rs`).
   `zero_quota_retains_no_body_or_index`,
   `witness_refresh_keeps_fifo_position_and_source_identity`,
   `readiness_is_deduplicated_and_removed_with_eviction`,
+  `maintenance_expires_old_bodies_and_cleans_every_index`,
+  `maintenance_uses_exact_connection_identity`,
+  `witness_refresh_does_not_extend_expiry`,
   `rejects_are_bounded_and_chain_reset_clears_both_indexes`,
   `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`,
   `rejecting_another_witness_preserves_the_resident_body_and_ready_work`,
@@ -269,6 +275,8 @@ state (`crates/mempool/src/orphan.rs`).
 - `crates/node/src/chain_effects.rs` (inline tests):
   `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
   `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`.
+- `crates/node/src/tx_ingress.rs` (inline tests):
+  `retry_poll_evicts_an_orphan_after_its_connection_is_gone`.
 - `crates/rpc/src/zmq.rs`:
   `admission_publishes_one_a_frame_with_core_payload_bytes`,
   `policy_eviction_publishes_r_frames_in_commit_order`,

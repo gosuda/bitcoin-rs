@@ -958,7 +958,9 @@ impl MempoolGateway {
             );
         let mut lifecycle = self.lifecycle.lock();
         if hold {
-            lifecycle.orphans.insert(Arc::clone(&request.tx), source);
+            lifecycle
+                .orphans
+                .insert(Arc::clone(&request.tx), source, request.time);
         } else {
             lifecycle.reject(&request.tx, scope);
         }

@@ -325,6 +325,20 @@ impl MempoolGateway {
         results
     }
 
+    /// Applies the orphan retention policy to one snapshot of live connections.
+    ///
+    /// Expiry and peer-disconnect cleanup are mempool-owned transitions. The node
+    /// supplies only the current P2P connection tokens; a same-address replacement
+    /// has a different token and cannot retain its predecessor's bodies.
+    pub fn maintain_orphans(
+        &self,
+        time: u64,
+        live_peers: impl IntoIterator<Item = PeerToken>,
+    ) -> usize {
+        let live_peers: hashbrown::HashSet<PeerToken> = live_peers.into_iter().collect();
+        self.lifecycle.lock().orphans.maintain(time, &live_peers)
+    }
+
     /// Called for every committed connect/disconnect, including ones with no
     /// pool mutation, while the caller still holds its chain transition.
     pub fn chain_changed(&self, available_parents: &[Txid]) {
