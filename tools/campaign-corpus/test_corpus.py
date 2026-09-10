@@ -265,6 +265,20 @@ class _FlakyWrites:
         return getattr(self._stream, name)
 
 
+class _ShortWrites:
+    """Writable stream wrapper that succeeds after writing only a short prefix."""
+
+    def __init__(self, stream: io.BufferedIOBase, chunk: int) -> None:
+        self._stream = stream
+        self._chunk = chunk
+
+    def write(self, data) -> int:
+        return self._stream.write(data[: self._chunk])
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+
 class _RestHandler(BaseHTTPRequestHandler):
     def log_message(self, *args: object) -> None:
         pass
@@ -999,6 +1013,27 @@ class ManifestSchema(unittest.TestCase):
                 doc["manifest_sha256"] = _digest_over(doc)
                 with self.assertRaises(ContractError):
                     _verify(self.freeze, self.root, _canonical(doc) + b"\n")
+
+    def test_leading_zero_json_integer_is_rejected(self) -> None:
+        canonical = _GOLDEN_MANIFEST.decode("ascii")
+        malformed = canonical.replace('"version":1', '"version":01', 1)
+        self.assertNotEqual(malformed, canonical)
+        # Decoding 01 as integer 1 would reproduce the same canonical
+        # preimage and therefore pass the digest check. JSON itself forbids it.
+        with self.assertRaisesRegex(ContractError, "leading-zero JSON integer"):
+            _verify(self.freeze, self.root, malformed.encode("ascii"))
+
+    def test_manifest_entry_spool_survives_successful_short_writes(self) -> None:
+        archive = io.BytesIO(_GOLDEN_ARCHIVE)
+        manifest = io.BytesIO(_GOLDEN_MANIFEST)
+        backing = io.BytesIO()
+        spool = _ShortWrites(backing, 3)
+        product = corpus.verify_archive(self.freeze, archive, manifest, entries=spool)
+        self.assertEqual(product.corpus_id, FIX_CORPUS)
+        backing.seek(0)
+        lines = backing.readlines()
+        self.assertEqual(len(lines), len(_expected_entries()))
+        self.assertTrue(all(line.endswith(b"\n") for line in lines))
 
     def test_out_of_domain_scalars_are_rejected(self) -> None:
         for label, mutate in (

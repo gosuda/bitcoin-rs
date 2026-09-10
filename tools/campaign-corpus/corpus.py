@@ -630,7 +630,7 @@ class _ManifestReader:
                 _entry_int(entry_holder, "offset"),
                 _entry_int(entry_holder, "payload_length"),
             )
-            self._entries.write(line + b"\n")
+            _write_all(self._entries, line + b"\n")
             count += 1
             self._skip_ws()
             char = self._peek()
@@ -726,6 +726,8 @@ class _ManifestReader:
                 raise ContractError(f"manifest {label} exceeds its schema-derived bound")
         if not digits:
             raise ContractError(f"manifest {label} is not a JSON integer")
+        if len(digits) > 1 and digits[0] == ord("0"):
+            raise ContractError(f"manifest {label} has a leading-zero JSON integer")
         return int(digits.decode("ascii"))
 
     def _skip_ws(self) -> None:
