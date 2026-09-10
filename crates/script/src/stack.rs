@@ -121,7 +121,11 @@ impl Stack {
         Ok(self.items.drain(start..).collect())
     }
 
-    /// Moves the top item to another bounded stack.
+    /// Moves the top item to another bounded stack without cloning it.
+    ///
+    /// This is an ownership-transfer API, not a performance guarantee; callers
+    /// must rely on the transfer and error-ordering contract documented in the
+    /// script crate README.
     pub fn move_to(&mut self, destination: &mut Self) -> Result<(), StackError> {
         if self.is_empty() {
             return Err(StackError::Underflow);

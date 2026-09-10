@@ -6,6 +6,9 @@
 use bitcoin_rs_script::{ScriptItem, Stack, StackError};
 use smallvec::SmallVec;
 
+// Contract: crates/script/README.md, “Bounded stack transfer contract”.
+// The 520-byte fixture is deliberately above SmallVec's inline capacity so
+// the contract's ownership/identity guarantee is exercised on heap storage.
 #[test]
 fn transfers_move_heap_backed_bytes_without_cloning() -> Result<(), StackError> {
     let mut source = Stack::new();
@@ -35,6 +38,9 @@ fn transfers_move_heap_backed_bytes_without_cloning() -> Result<(), StackError> 
     Ok(())
 }
 
+// Contract: crates/script/README.md, “Bounded stack transfer contract”.
+// The four lengths cover the documented empty, non-full, and MAX_DEPTH
+// capacity boundaries; underflow must still win when the source is empty.
 #[test]
 fn transfers_preserve_error_precedence_and_capacity() -> Result<(), StackError> {
     for len in [0, 1, Stack::MAX_DEPTH - 1, Stack::MAX_DEPTH] {
