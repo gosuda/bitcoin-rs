@@ -26,7 +26,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use bitcoin_rs_chain::{BlockTree, ChainWork, NodeId, TipSnapshot, accept_headers};
+use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot, accept_headers, compact_is_met_by};
 use bitcoin_rs_primitives::{
     BlockHash, Hash256, Header, Network, OutPoint, TxOut, Txid, deserialize,
 };
@@ -126,6 +126,12 @@ fn reader_rejects_wrong_network_and_genesis() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Regression coverage for the headers-v1 wire contract in
+/// `crates/node/src/checkpoint/headers.rs`: `prefix`/`parse_prefix` define the
+/// magic at bytes 0..8, version at 8..12, and count at 48..56; `checkpoint_size`
+/// and `read_headers` require the encoded length to contain exactly the prefix
+/// plus 80-byte headers. Keep these offsets tied to that authoritative codec
+/// contract rather than treating them as incidental test fixture details.
 #[test]
 fn reader_rejects_bad_prefix_count_and_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let (tree, best_tip_id, applied) = chain_with_applied_height(1, 0)?;
@@ -165,7 +171,7 @@ fn reader_rejects_mutated_linkage_and_invalid_pow_or_nbits()
     let mut bad_pow = bytes.clone();
     let header_offset = headers::HEADER_PREFIX_LEN + 80;
     let mut invalid = header_from_row(&bad_pow[header_offset..header_offset + 80])?;
-    while pow_meets_target(invalid.bits, invalid.compute_hash().0) {
+    while compact_is_met_by(invalid.bits, invalid.compute_hash().0) {
         invalid.nonce = invalid.nonce.checked_add(1).ok_or("nonce exhausted")?;
     }
     bad_pow[header_offset..header_offset + 80].copy_from_slice(&headers::encode_header(&invalid)?);
@@ -1112,41 +1118,12 @@ fn next_header(prev_blockhash: BlockHash, height: u32) -> Header {
 fn mine_header_to_declared_target(
     header: &mut Header,
 ) -> Result<(), headers::HeaderCheckpointError> {
-    while !pow_meets_target(header.bits, header.compute_hash().0) {
+    while !compact_is_met_by(header.bits, header.compute_hash().0) {
         header.nonce = header.nonce.checked_add(1).ok_or_else(|| {
             headers::HeaderCheckpointError::Codec("exhausted test nonce".to_owned())
         })?;
     }
     Ok(())
-}
-
-/// Decodes a compact target and checks whether `hash` meets it, mirroring
-/// the chain crate's private `compact_is_met_by`.
-fn pow_meets_target(bits: u32, hash: Hash256) -> bool {
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mantissa = u64::from(bits & 0x007f_ffff);
-    let negative = mantissa != 0 && bits & 0x0080_0000 != 0;
-    let overflow = mantissa != 0
-        && (exponent > 34
-            || (mantissa > 0xff && exponent > 33)
-            || (mantissa > 0xffff && exponent > 32));
-    if negative || overflow {
-        return false;
-    }
-    let target = if exponent <= 3 {
-        ChainWork::from(mantissa >> (8 * (3 - exponent)))
-    } else {
-        let shift = 8 * (exponent - 3);
-        if shift < 256 {
-            ChainWork::from(mantissa) << shift
-        } else {
-            return false;
-        }
-    };
-    if target == ChainWork::ZERO {
-        return false;
-    }
-    ChainWork::from_le_bytes(hash.to_le_bytes()) <= target
 }
 
 fn header_from_row(row: &[u8]) -> Result<Header, headers::HeaderCheckpointError> {
