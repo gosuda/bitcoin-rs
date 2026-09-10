@@ -9,7 +9,7 @@ Owners:
 - Mempool reconciliation and canonical lifecycle:
   `crates/mempool/src/gateway.rs`, `crates/mempool/src/mutation.rs`
 - Bounded observer delivery and gap accounting:
-  `crates/node/src/zmq_publisher.rs`, `crates/mempool/src/mutation.rs`
+  `crates/rpc/src/zmq.rs`, `crates/mempool/src/mutation.rs`
 - Index wake and consumer reconciliation:
   `crates/index/src/runtime.rs`, `crates/node/src/reconcile.rs`
 

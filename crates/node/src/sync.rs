@@ -63,6 +63,13 @@ pub struct BlockSync {
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
+    /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
+    /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
+    /// no chain transition: the failed `finish` left the gateway generation
+    /// odd, so every further attempt would bounce off `AlreadyActive` and
+    /// churn staged state. Only recreating the sync object (restart path)
+    /// clears it; there is no in-place recovery that re-evens generation.
+    apply_halted: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,16 +181,16 @@ fn settle_window_failure(
     transition: crate::apply::ChainTransition<'_>,
     mut error: crate::apply::WindowApplyError,
 ) -> crate::apply::WindowApplyError {
-    if !matches!(error.source, ApplyError::UtxoCommit(_)) {
-        if let Err(finish_source) = transition.finish() {
-            tracing::error!(
-                original = %error.source,
-                finish = %finish_source,
-                "chain transition could not be settled after a window failure; \
-                 mempool admission stays closed until recovery or restart"
-            );
-            error.disposition = crate::apply::WindowApplyDisposition::Fatal;
-        }
+    if matches!(error.source, ApplyError::UtxoCommit(_)) {
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
+    } else if let Err(finish_source) = transition.finish() {
+        tracing::error!(
+            original = %error.source,
+            finish = %finish_source,
+            "chain transition could not be settled after a window failure; \
+             mempool admission stays closed until recovery or restart"
+        );
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
     }
     error
 }
@@ -257,6 +264,7 @@ impl BlockSync {
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             known_sessions: Mutex::new(HashMap::new()),
+            apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -899,8 +907,32 @@ impl BlockSync {
         (!plan.disconnect.is_empty()).then_some(chain_tip.tip_id)
     }
 
+    /// Records a Fatal window settlement: logs the terminal state and latches
+    /// the halt flag so later ticks keep staging inbound blocks but start no
+    /// further chain transition. Staged blocks stay queued until recreation.
+    fn note_fatal_settlement(&self, stopped: usize, source: &ApplyError) {
+        tracing::error!(
+            applied = stopped,
+            error = %source,
+            "block sync: chain transition could not be settled; \
+             mempool admission is closed and the node will not \
+             retry until recovery or restart"
+        );
+        self.apply_halted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
+        // A latched Fatal settlement left the gateway generation odd: starting
+        // another transition would bounce off `AlreadyActive` and churn staged
+        // state every tick. Staged blocks stay queued until recreation. The
+        // counter keeps the stall observable: the one `error!` in
+        // `note_fatal_settlement` fires once, these ticks stay quiet.
+        if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
+            metrics::counter!("node.sync.apply_halted_ticks").increment(1);
+            return (0, 0);
+        }
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
@@ -968,13 +1000,7 @@ impl BlockSync {
                         failed_hash = Some(blocker.hash);
                     }
                     if error.disposition == crate::apply::WindowApplyDisposition::Fatal {
-                        tracing::error!(
-                            applied = stopped,
-                            error = %error.source,
-                            "block sync: chain transition could not be settled; \
-                             mempool admission is closed and the node will not \
-                             retry until recovery or restart"
-                        );
+                        self.note_fatal_settlement(stopped, &error.source);
                     } else if let Some(blocker) = blocker {
                         tracing::warn!(
                             hash = %blocker.hash,
@@ -6277,6 +6303,36 @@ mod tests {
         Ok(())
     }
 
+    /// A recorded Fatal settlement halts further apply attempts: staged blocks
+    /// stay queued, no new transition starts, and the latched tick reports
+    /// idle instead of churning an `AlreadyActive` refusal every round.
+    #[test]
+    fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+        stage_body(&sync, &main[0]);
+        let staged = sync.block_stager.lock().received_len();
+        assert!(
+            staged > 0,
+            "the staged block must be queued before the halt"
+        );
+        assert!(
+            !sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
+            "a fresh sync object must not start halted"
+        );
+        sync.note_fatal_settlement(0, &crate::state::ApplyError::BlockValueOverflow);
+        assert_eq!(
+            sync.apply_buffered_blocks(None),
+            (0, 0),
+            "a halted sync must not start another transition"
+        );
+        assert_eq!(
+            sync.block_stager.lock().received_len(),
+            staged,
+            "halted ticks must preserve staged blocks for recreation"
+        );
+        Ok(())
+    }
+
     #[test]
     fn utxo_commit_skip_holds_under_moved_generation() -> Result<(), Box<dyn std::error::Error>> {
         let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
@@ -6297,8 +6353,8 @@ mod tests {
 
         assert_eq!(
             error.disposition,
-            crate::apply::WindowApplyDisposition::Operational,
-            "UtxoCommit must not attempt finish, so disposition stays Operational"
+            crate::apply::WindowApplyDisposition::Fatal,
+            "UtxoCommit settlement must be fatal and must not attempt finish"
         );
         assert!(
             matches!(
@@ -7532,9 +7588,9 @@ mod tests {
 
     fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
         PeerInfo {
-            wtxid_relay: false,
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height,
