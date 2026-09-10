@@ -2870,8 +2870,12 @@ mod tests {
         assert!(stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 2);
-        // MPL-04: a known committed prefix must finish its generation, so a
-        // transient pre-UTXO refusal cannot wedge admission and later applies.
+        // MPL-04 generation settlement and validated admission:
+        // docs/contracts/mempool-mutations.md#mpl-04-generation-validated-admission-and-chain-change-fencing
+        // Committed-prefix and body-ownership behavior:
+        // docs/solutions/architecture-patterns/node-reorg-execution-design.md
+        // A known committed prefix must finish its generation, so a transient
+        // pre-UTXO refusal cannot wedge admission and later applies.
         assert!(
             sync.handles.mempool_gateway.stable_generation().is_some(),
             "admission must reopen after the clean connect refusal"
