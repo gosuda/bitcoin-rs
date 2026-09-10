@@ -1,0 +1,113 @@
+name: verify-manual-ban-owner
+on:
+  push:
+    branches: [verify/manual-ban-owner-20260910]
+    paths: [.github/workflows/verify-manual-ban-owner.yml, .github/verify_manual_bans.py]
+permissions:
+  contents: write
+concurrency:
+  group: verify-manual-ban-owner-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 93a340bad78365691c14cad0dca0dcaa85942874
+          path: source
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: source -> target
+      - name: Record source identity and add regressions before changing behavior
+        run: |
+          mkdir -p /tmp/manual-ban-evidence
+          git rev-parse HEAD | tee /tmp/manual-ban-evidence/base.txt
+          rustc --version --verbose | tee /tmp/manual-ban-evidence/toolchain.txt
+          python3 ../harness/.github/verify_manual_bans.py tests
+      - name: Require real pre-fix RPC and P2P failures
+        run: |
+          set +e
+          cargo test --locked -p bitcoin-rs-p2p --lib manual_ban_tests -- --nocapture > /tmp/manual-ban-evidence/red-p2p.txt 2>&1
+          p2p_rc=$?
+          cargo test --locked -p bitcoin-rs-rpc --lib manual_ban_tests -- --nocapture > /tmp/manual-ban-evidence/red-rpc.txt 2>&1
+          rpc_rc=$?
+          set -e
+          cat /tmp/manual-ban-evidence/red-p2p.txt /tmp/manual-ban-evidence/red-rpc.txt
+          test "$p2p_rc" -ne 0
+          test "$rpc_rc" -ne 0
+          grep -q 'test result: FAILED' /tmp/manual-ban-evidence/red-p2p.txt
+          grep -q 'manual ban left a matching lease active' /tmp/manual-ban-evidence/red-p2p.txt
+          grep -q 'test result: FAILED' /tmp/manual-ban-evidence/red-rpc.txt
+          grep -q 'manual ban left a matching lease active' /tmp/manual-ban-evidence/red-rpc.txt
+          grep -q 'unrepresentable expiry became a permanent ban' /tmp/manual-ban-evidence/red-rpc.txt
+      - name: Apply the owner-local correction
+        run: |
+          python3 ../harness/.github/verify_manual_bans.py fix
+          cargo fmt --all
+          python3 - <<'PY'
+          import runpy
+          import subprocess
+          expected = set(runpy.run_path('../harness/.github/verify_manual_bans.py')['HASHES'])
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert actual == expected, ('Unexpected changed paths', sorted(actual ^ expected))
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+      - name: P2P units, live listener bans, subnet and protocol regressions
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-p2p --lib --test listener_ban --test subnet --test core_compat --no-fail-fast 2>&1 | tee /tmp/manual-ban-evidence/p2p.txt
+      - name: RPC production handler regressions
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-rpc --no-default-features --lib handlers::network 2>&1 | tee /tmp/manual-ban-evidence/rpc-network.txt
+          cargo test --locked -p bitcoin-rs-rpc --no-default-features --test handler_smoke 2>&1 | tee /tmp/manual-ban-evidence/rpc-smoke.txt
+      - name: Production-wired ingress and ownership
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e 2>&1 | tee /tmp/manual-ban-evidence/ingress.txt
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture 2>&1 | tee /tmp/manual-ban-evidence/ownership.txt
+      - name: All three strict PR Clippy profiles
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-workspace.txt
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-consensus.txt
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-node.txt
+      - name: Publish only verified source on a new branch
+        run: |
+          test "$(git rev-parse HEAD)" = 93a340bad78365691c14cad0dca0dcaa85942874
+          test -z "$(git ls-remote --heads origin refs/heads/validated/manual-ban-owner-20260910)"
+          git diff --exit-code -- Cargo.lock
+          cargo fmt --all -- --check
+          git diff --check
+          git add -- crates/p2p/src/subnet.rs crates/p2p/src/peer.rs crates/p2p/src/service.rs crates/p2p/src/listener.rs crates/rpc/src/handlers/network.rs docs/contracts/p2p-wire.md
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(p2p): serialize manual bans with connection registration'
+          git diff --exit-code
+          git rev-parse HEAD | tee /tmp/manual-ban-evidence/head.txt
+          git show --stat --oneline HEAD | tee /tmp/manual-ban-evidence/scope.txt
+          git push origin HEAD:refs/heads/validated/manual-ban-owner-20260910
+      - name: Retain execution evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: manual-ban-${{ github.run_id }}
+          path: /tmp/manual-ban-evidence/
+          if-no-files-found: error
+          retention-days: 7
