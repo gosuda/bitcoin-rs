@@ -6,7 +6,8 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin_rs_primitives::{OutPoint, Txid};
+use bitcoin_rs_mempool::{Mempool, MempoolEntry};
+use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
 
 use super::http::{bad, dispatch_error, json_response, query_limit};
 use super::model::{Outspend, TransactionValue};
@@ -59,29 +60,14 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     // at the beginning instead of silently broadening the accepted syntax.
     let last = last.and_then(|text| {
         let txid = Txid::from_str(text).ok()?;
-        (txid.to_string() == text).then_some(txid)
+        (!text.bytes().any(|byte| byte.is_ascii_uppercase())).then_some(txid)
     });
     let transactions = {
         let pool = ctx.mempool.read();
-        // Resolve the cursor in the same snapshot as the entries. Filtering
-        // before cloning avoids retaining transactions before this page.
-        let after = last
-            .and_then(|txid| pool.entry_by_txid(&txid))
-            .map(|entry| (entry.time, entry.txid));
-        let mut ordered = pool
-            .iter_entries()
-            .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key))
-            .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
-            .collect::<Vec<_>>();
+        let mut ordered = snapshot_mempool_page(&pool, last, max_txs);
         drop(pool);
-        // Partition outside the lock, then sort only the requested prefix.
-        // The strict bound also handles empty snapshots and usize::MAX.
-        if max_txs < ordered.len() {
-            ordered.select_nth_unstable_by(max_txs, |left, right| {
-                left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
-            });
-            ordered.truncate(max_txs);
-        }
+        // Only owned page entries reach sorting and projection. No entry
+        // reference or pool guard escapes the snapshot.
         ordered.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
@@ -96,6 +82,74 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
         .map(|transaction| projection.transaction_value(&transaction, None))
         .collect::<Result<Vec<_>, _>>()
         .map_or_else(|r| r, json_response)
+}
+
+/// Selects one page from a single pool read, cloning only the selected payloads.
+///
+/// The scratch vector holds at most min(pool.len(), 2 * limit) borrowed entries.
+/// Each full batch keeps its smallest `limit` keys: discarded keys cannot enter
+/// that prefix after more entries arrive. Repeated full batches discard
+/// `limit` entries; a pool smaller than two pages needs at most one partition.
+/// Total selection work is therefore linear in the pool scan.
+/// Selection happens under the caller's read guard; final sorting does not.
+fn snapshot_mempool_page(
+    pool: &Mempool,
+    last: Option<Txid>,
+    max_txs: usize,
+) -> Vec<(u64, Txid, Arc<Tx>)> {
+    let limit = max_txs.min(pool.len());
+    if limit == 0 {
+        return Vec::new();
+    }
+    let after = last
+        .and_then(|txid| pool.entry_by_txid(&txid))
+        .map(|entry| (entry.time, entry.txid));
+    let mut entries = pool
+        .iter_entries()
+        .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key));
+    // A full-pool request needs no selector or temporary borrowed vector.
+    if limit == pool.len() {
+        return entries
+            .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+            .collect();
+    }
+    // Do not allocate the page scratch at all for an empty cursor suffix.
+    let Some(first) = entries.next() else {
+        return Vec::new();
+    };
+    let batch_len = limit.saturating_mul(2).min(pool.len());
+    let mut selected = Vec::with_capacity(batch_len);
+    selected.push(first);
+    let mut cutoff = None;
+    for entry in entries {
+        if cutoff.is_some_and(|key| (entry.time, entry.txid) >= key) {
+            continue;
+        }
+        selected.push(entry);
+        if selected.len() == batch_len {
+            cutoff = Some(trim_page_entries(&mut selected, limit));
+        }
+    }
+    if selected.len() > limit {
+        let _ = trim_page_entries(&mut selected, limit);
+    }
+    selected
+        .into_iter()
+        .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+        .collect()
+}
+
+/// Keeps the smallest `limit` keys and returns the first excluded key.
+/// Callers establish `0 < limit < entries.len()` before partitioning.
+fn trim_page_entries(entries: &mut Vec<&MempoolEntry>, limit: usize) -> (u64, Txid) {
+    let (_, excluded, _) = entries.select_nth_unstable_by(limit, |left, right| {
+        left.time
+            .cmp(&right.time)
+            .then_with(|| left.txid.cmp(&right.txid))
+    });
+    let cutoff = (excluded.time, excluded.txid);
+    entries.truncate(limit);
+    cutoff
 }
 
 fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
@@ -203,7 +257,7 @@ mod pagination_tests {
     use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
     use serde_json::Value;
 
-    use super::internal_mempool_txs;
+    use super::{internal_mempool_txs, snapshot_mempool_page};
     use crate::context::Context;
 
     fn fixture(times: &[u64]) -> (Context, Vec<(u64, Txid)>) {
@@ -358,5 +412,113 @@ mod pagination_tests {
         assert_eq!(internal_mempool_txs(&ctx, None, "max_txs=1").status, 503);
         assert_eq!(page(&ctx, Some(&cursor), "max_txs=1"), vec![expected[0].1]);
         assert!(page(&ctx, None, "max_txs=0").is_empty());
+    }
+
+    #[test]
+    fn streaming_pages_match_full_sort_across_many_batches() {
+        for times in [
+            (0..1_025).collect::<Vec<u64>>(),
+            (0..1_025).rev().collect(),
+            vec![7; 1_025],
+            (0..1_025).map(|n| (n * 73) % 97).collect(),
+        ] {
+            let (ctx, expected) = fixture(&times);
+            for start in [0_usize, 1, 513, 1_024, 1_025] {
+                let cursor = start.checked_sub(1).map(|index| expected[index].1);
+                for limit in [0, 1, 2, 3, 17, 257, 512, 513, 1_024, 1_025, usize::MAX] {
+                    let mut got = snapshot_mempool_page(&ctx.mempool.read(), cursor, limit);
+                    got.sort_unstable_by_key(|entry| (entry.0, entry.1));
+                    let keys: Vec<_> = got.iter().map(|entry| (entry.0, entry.1)).collect();
+                    let want: Vec<_> = expected.iter().skip(start).take(limit).copied().collect();
+                    assert_eq!(keys, want, "start {start}, limit {limit}");
+                    assert!(got.iter().all(|(_, _, tx)| Arc::strong_count(tx) >= 2));
+                }
+            }
+        }
+    }
+
+    // Exact pre-streaming selector from commit 7571d49, restricted to tests.
+    // The comparison excludes JSON projection and cursor text parsing in both
+    // arms, and includes the read guard, Arc operations, selection, and sort.
+    fn measured_snapshot(
+        ctx: &Context,
+        cursor: Option<Txid>,
+        limit: usize,
+        streaming: bool,
+    ) -> (std::time::Duration, Vec<(u64, Txid, Arc<Tx>)>) {
+        let pool = ctx.mempool.read();
+        let locked_at = std::time::Instant::now();
+        let mut page = if streaming {
+            snapshot_mempool_page(&pool, cursor, limit)
+        } else {
+            let after = cursor
+                .and_then(|txid| pool.entry_by_txid(&txid))
+                .map(|entry| (entry.time, entry.txid));
+            pool.iter_entries()
+                .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key))
+                .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+                .collect::<Vec<_>>()
+        };
+        drop(pool);
+        let held = locked_at.elapsed();
+        if !streaming && limit < page.len() {
+            page.select_nth_unstable_by(limit, |left, right| {
+                left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+            });
+            page.truncate(limit);
+        }
+        page.sort_unstable_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+        });
+        (held, page)
+    }
+
+    #[test]
+    #[ignore = "manual release benchmark; reports samples, not a performance acceptance gate"]
+    fn benchmark_streaming_mempool_pages() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        assert!(!cfg!(debug_assertions), "run this benchmark with --release");
+        for count in [256_usize, 4_096, 65_536] {
+            let times: Vec<_> = (0..count)
+                .map(|n| u64::try_from((n * 73) % 97).expect("small timestamp"))
+                .collect();
+            let (ctx, expected) = fixture(&times);
+            for cursor in [None, Some(expected[count / 2].1)] {
+                for limit in [1, 25, 256, count - 1, usize::MAX] {
+                    let before = measured_snapshot(&ctx, cursor, limit, false).1;
+                    let after = measured_snapshot(&ctx, cursor, limit, true).1;
+                    assert_eq!(before, after);
+                    drop((before, after));
+                    let iterations = (65_536 / count).max(4);
+                    // Warm both arms, then alternate order across seven pairs.
+                    for streaming in [false, true] {
+                        black_box(measured_snapshot(&ctx, cursor, limit, streaming));
+                    }
+                    for sample in 0..7 {
+                        for streaming in [sample % 2 != 0, sample % 2 == 0] {
+                            let mut held_ns = 0_u128;
+                            let started = Instant::now();
+                            for _ in 0..iterations {
+                                let (held, page) = measured_snapshot(
+                                    black_box(&ctx),
+                                    black_box(cursor),
+                                    black_box(limit),
+                                    streaming,
+                                );
+                                held_ns += held.as_nanos();
+                                black_box(page);
+                            }
+                            let elapsed_ns = started.elapsed().as_nanos();
+                            println!(
+                                "page_sample,count={count},cursor={},limit={limit},streaming={streaming},sample={sample},iterations={iterations},elapsed_ns={elapsed_ns},read_guard_ns={held_ns}",
+                                cursor.is_some()
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
