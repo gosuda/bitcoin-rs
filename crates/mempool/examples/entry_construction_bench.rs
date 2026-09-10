@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
 use bitcoin_rs_script::count_tx_legacy;
 
 fn fixture(inputs: usize, script_len: usize, witness_len: Option<usize>) -> Tx {
@@ -17,22 +17,22 @@ fn fixture(inputs: usize, script_len: usize, witness_len: Option<usize>) -> Tx {
         inputs: vec![
             TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: vec![0x51; script_len],
-                sequence: 0xffff_fffd,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(vec![0x51; script_len]),
+                sequence: Sequence::from_consensus(0xffff_fffd),
+                witness: Witness::new(),
             };
             inputs
         ],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51; script_len],
+            value: Amount::from_sat(1_000),
+            script_pubkey: Script::from_bytes(vec![0x51; script_len]),
         }],
-        lock_time: 42,
+        lock_time: LockTime::from_consensus(42),
     };
     if let Some(length) = witness_len {
         // Witness only on the last input also exercises mixed transactions.
         let input = tx.inputs.last_mut().expect("witness fixture input");
-        input.witness = vec![vec![0x55; length]];
+        input.witness = Witness::from_stack(vec![vec![0x55; length]])
     }
     tx
 }

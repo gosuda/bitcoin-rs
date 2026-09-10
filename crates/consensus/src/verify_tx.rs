@@ -853,21 +853,21 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: vec![vec![0xac; usize::try_from(cost)?]],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::from_stack(vec![vec![0xac; usize::try_from(cost)?]]),
             }],
             outputs: vec![TxOut {
-                value: 9_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let prevouts = hashbrown::HashMap::from([(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: [vec![0x00, 0x20], vec![1; 32]].concat(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![1; 32]].concat()),
             },
         )]);
         // The assume-valid path skips script execution, not sigop accounting.
@@ -1595,14 +1595,14 @@ mod tests {
         let redeem_hash = bitcoin::hashes::hash160::Hash::hash(&redeem_script);
         let p2sh_output = TxOut {
             value: Amount::from_sat(50),
-            script_pubkey: [
-                vec![OP_HASH160],
-                push_data(&redeem_hash.to_byte_array()),
-                vec![OP_EQUAL],
-            ]
-            .into()
-            .concat()
-            .into(),
+            script_pubkey: Script::from_bytes(
+                [
+                    vec![OP_HASH160],
+                    push_data(&redeem_hash.to_byte_array()),
+                    vec![OP_EQUAL],
+                ]
+                .concat(),
+            ),
         };
         let second_txs = vec![
             coinbase_transaction_with_script_sig_len(2),

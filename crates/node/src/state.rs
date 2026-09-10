@@ -13,9 +13,7 @@ use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 
-use bitcoin_rs_primitives::{
-    Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,
-};
+use bitcoin_rs_primitives::{Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Tx, Txid, Witness, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize};
 
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
@@ -2776,7 +2774,7 @@ mod tests {
             version: 1,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         for _ in 0..super::INBOUND_TX_CHANNEL_LIMIT {
             sender
@@ -3360,7 +3358,7 @@ mod tests {
         let pruned_txid = pruned_tx.txid();
         let unrelated_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
@@ -4577,16 +4575,16 @@ mod tests {
         script_sig.extend_from_slice(&time.to_le_bytes());
         let coinbase = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig,
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(script_sig),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
         };
         let mut block = Block {
@@ -4595,14 +4593,14 @@ mod tests {
                 prev_blockhash,
                 merkle_root: Hash256::default(),
                 time,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: vec![coinbase],
         };
         block.header.merkle_root = merkle_root(&block.txs)
             .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-        while !pow_met(block.header.bits, block.block_hash().0) {
+        while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
             block.header.nonce = block
                 .header
                 .nonce

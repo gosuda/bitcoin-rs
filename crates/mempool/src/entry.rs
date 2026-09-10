@@ -288,7 +288,7 @@ mod mining_metadata_tests {
 mod wire_metadata_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid};
 
     use super::MempoolEntry;
 
@@ -298,32 +298,32 @@ mod wire_metadata_tests {
             inputs: vec![
                 TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0),
-                    script_sig: vec![0x51],
-                    sequence: 0xffff_fffe,
-                    witness: Vec::new(),
+                    script_sig: Script::from_bytes(vec![0x51]),
+                    sequence: Sequence::from_consensus(0xffff_fffe),
+                    witness: Witness::new(),
                 },
                 TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x22; 32])), 7),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::new(),
                 },
             ],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: 9,
+            lock_time: LockTime::from_consensus(9),
         };
         match mode {
             0 => {}
-            1 => tx.inputs[0].witness = vec![Vec::new()],
-            2..=4 => tx.inputs[1].witness = vec![vec![0xaa; mode - 1]],
+            1 => tx.inputs[0].witness = Witness::from_stack(vec![Vec::new()]),
+            2..=4 => tx.inputs[1].witness = Witness::from_stack(vec![vec![0xaa; mode - 1]]),
             5 => {
-                tx.inputs[0].witness = vec![Vec::new(), vec![0xbb; 253]];
-                tx.inputs[1].witness = vec![Vec::new()];
+                tx.inputs[0].witness = Witness::from_stack(vec![Vec::new(), vec![0xbb; 253]]);
+                tx.inputs[1].witness = Witness::from_stack(vec![Vec::new()])
             }
-            6 => tx.inputs[1].witness = vec![Vec::new(); 253],
+            6 => tx.inputs[1].witness = Witness::from_stack(vec![Vec::new(); 253]),
             _ => panic!("unknown fixture mode"),
         }
         tx

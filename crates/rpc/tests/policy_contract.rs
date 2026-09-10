@@ -24,9 +24,7 @@ use bitcoin_rs_node::{
     state::NodeState,
 };
 
-use bitcoin_rs_primitives::{
-    Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, encode::double_sha256,
-};
+use bitcoin_rs_primitives::{Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256};
 
 use bitcoin_rs_rpc::{
     Handler, RpcError,
@@ -54,16 +52,16 @@ fn op_true_script() -> Vec<u8> {
 fn tx(prevout: OutPoint, output_value: u64, sequence: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Vec::new(),
-            sequence,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(sequence),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(output_value),
+            script_pubkey: Script::from_bytes(p2wpkh_script()),
         }],
     }
 }
@@ -96,8 +94,8 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
     changes.add(UtxoAdd::new(
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
         TxOut {
-            value,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(value),
+            script_pubkey: Script::from_bytes(op_true_script()),
         },
         false,
         1,
@@ -448,15 +446,15 @@ fn testmempoolaccept_reports_a_policy_verdict_per_row() -> Result<(), Box<dyn Er
     let below_min = tx(fund_utxo(&ctx, 0x52, 10_000), 9_999, 0xffff_ffff);
     let nonstandard = Tx {
         outputs: vec![TxOut {
-            value: 9_000,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(9_000),
+            script_pubkey: Script::from_bytes(op_true_script()),
         }],
         ..tx(fund_utxo(&ctx, 0x53, 10_000), 9_000, 0xffff_ffff)
     };
     let dust = Tx {
         outputs: vec![TxOut {
-            value: 100,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(100),
+            script_pubkey: Script::from_bytes(p2wpkh_script()),
         }],
         ..tx(fund_utxo(&ctx, 0x54, 10_000), 100, 0xffff_ffff)
     };
@@ -537,8 +535,8 @@ fn sendrawtransaction_rejects_oversized_and_nonstandard_txs() -> Result<(), Box<
     let mut oversized = tx(fund_utxo(&ctx, 0x55, 10_000), 1_000, 0xffff_ffff);
     oversized.outputs = (0..3_400)
         .map(|_| TxOut {
-            value: 1_000,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(1_000),
+            script_pubkey: Script::from_bytes(p2wpkh_script()),
         })
         .collect();
     let message = reject_message(
@@ -554,8 +552,8 @@ fn sendrawtransaction_rejects_oversized_and_nonstandard_txs() -> Result<(), Box<
 
     let weird = Tx {
         outputs: vec![TxOut {
-            value: 9_000,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(9_000),
+            script_pubkey: Script::from_bytes(op_true_script()),
         }],
         ..tx(fund_utxo(&ctx, 0x56, 10_000), 9_000, 0xffff_ffff)
     };
@@ -978,7 +976,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
         let output_value = tx
             .outputs
             .iter()
-            .fold(0_u64, |sum, o| sum.saturating_add(o.value));
+            .fold(0_u64, |sum, o| sum.saturating_add(o.value.to_sat()));
         input_value.saturating_sub(output_value)
     };
     let candidate = ReplacementCandidate::new(Arc::new(tx.clone()), vsize, fee, 1_000);
@@ -1166,24 +1164,24 @@ fn sendrawtransaction_enforces_ancestor_count_limits_at_admission() -> Result<()
 fn tx_multi_child(funded: &OutPoint, tip: &Tx) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![
             TxIn {
                 previous_output: *funded,
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xffff_ffff),
+                witness: Witness::new(),
             },
             TxIn {
                 previous_output: OutPoint::new(tip.txid(), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xffff_ffff),
+                witness: Witness::new(),
             },
         ],
         outputs: vec![TxOut {
-            value: 90_000,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(90_000),
+            script_pubkey: Script::from_bytes(p2wpkh_script()),
         }],
     }
 }
@@ -1404,8 +1402,8 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
         // P2WPKH here is what produced consensus-verification-failed.
         let root = Tx {
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: op_true_script(),
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(op_true_script()),
             }],
             ..tx(
                 OutPoint {
@@ -1469,19 +1467,19 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
 fn tx_spending(inputs: &[(OutPoint, u32)], output_value: u64) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: inputs
             .iter()
             .map(|(prevout, sequence)| TxIn {
                 previous_output: *prevout,
-                script_sig: Vec::new(),
-                sequence: *sequence,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(*sequence),
+                witness: Witness::new(),
             })
             .collect(),
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(output_value),
+            script_pubkey: Script::from_bytes(p2wpkh_script()),
         }],
     }
 }
@@ -1490,18 +1488,18 @@ fn tx_spending(inputs: &[(OutPoint, u32)], output_value: u64) -> Tx {
 fn tx_outputs(prevout: OutPoint, sequence: u32, values: &[u64]) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Vec::new(),
-            sequence,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(sequence),
+            witness: Witness::new(),
         }],
         outputs: values
             .iter()
             .map(|value| TxOut {
-                value: *value,
-                script_pubkey: p2wpkh_script(),
+                value: Amount::from_sat(*value),
+                script_pubkey: Script::from_bytes(p2wpkh_script()),
             })
             .collect(),
     }
@@ -1512,17 +1510,17 @@ fn tx_outputs(prevout: OutPoint, sequence: u32, values: &[u64]) -> Tx {
 fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
         }],
         outputs: vec![
             TxOut {
-                value: value_each,
-                script_pubkey: p2wpkh_script(),
+                value: Amount::from_sat(value_each),
+                script_pubkey: Script::from_bytes(p2wpkh_script()),
             };
             count
         ],
@@ -1796,15 +1794,15 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class() -> Result<(), 
     let below_min = tx(fund_utxo(&ctx, 0x71, 10_000), 9_999, 0xffff_ffff);
     let nonstandard = Tx {
         outputs: vec![TxOut {
-            value: 9_000,
-            script_pubkey: op_true_script(),
+            value: Amount::from_sat(9_000),
+            script_pubkey: Script::from_bytes(op_true_script()),
         }],
         ..tx(fund_utxo(&ctx, 0x72, 10_000), 9_000, 0xffff_ffff)
     };
     let dust = Tx {
         outputs: vec![TxOut {
-            value: 100,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(100),
+            script_pubkey: Script::from_bytes(p2wpkh_script()),
         }],
         ..tx(fund_utxo(&ctx, 0x73, 10_000), 100, 0xffff_ffff)
     };
@@ -1928,15 +1926,15 @@ fn reorg_seed_coinbase(height: u32) -> Tx {
             previous_output: null_prevout(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::from_bytes([script_push_int(i64::from(height)), script_push_int(0)].concat()),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REORG_SUBSIDY_SATS,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REORG_SUBSIDY_SATS),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     }
 }
 
@@ -1947,21 +1945,21 @@ fn reorg_seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(reorg_seed_coinbase(1).txid(), 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REORG_SUBSIDY_SATS - fee_sats,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REORG_SUBSIDY_SATS - fee_sats),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     }
 }
 
 fn reorg_grind_pow(block: &mut Block) -> Result<(), Box<dyn Error>> {
     loop {
-        if pow_is_met(block.header.bits, &block.header.compute_hash().into()) {
+        if pow_is_met(block.header.bits.to_consensus(), &block.header.compute_hash().into()) {
             return Ok(());
         }
         let Some(next) = block.header.nonce.checked_add(1) else {
@@ -2039,7 +2037,7 @@ fn reorg_mine_and_apply(
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: REORG_SEED_BASE_TIME
                 .saturating_add(REORG_SEED_BLOCK_INTERVAL.saturating_mul(height)),
-            bits: REORG_REGTEST_BITS,
+            bits: CompactTarget::from_consensus(REORG_REGTEST_BITS),
             nonce: 0,
         },
         txs: std::iter::once(reorg_seed_coinbase(height))

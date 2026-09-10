@@ -89,7 +89,7 @@ fn last_push(script: &[u8]) -> Option<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Hash256, TxIn, Txid};
+    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
     use bitcoin_rs_script::script::{opcode, push_data};
 
     use super::*;
@@ -100,16 +100,16 @@ mod tests {
         let script_sig = [vec![opcode::OP_DUP], push_data(&[opcode::OP_CHECKSIG])].concat();
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig,
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(script_sig),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 9_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::new(),
             }],
         };
         let p2sh = [
@@ -124,8 +124,8 @@ mod tests {
                 &[(
                     outpoint,
                     TxOut {
-                        value: 10_000,
-                        script_pubkey: p2sh,
+                        value: Amount::from_sat(10_000),
+                        script_pubkey: Script::from_bytes(p2sh),
                     }
                 )],
                 VerifyFlags::STANDARD,
@@ -159,21 +159,21 @@ mod tests {
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(Txid::default(), 0),
-                    script_sig,
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::from_bytes(script_sig),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::new(),
                 }],
                 outputs: vec![TxOut {
-                    value: 1,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(1),
+                    script_pubkey: Script::new(),
                 }],
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
             };
             let prevouts = [(
                 tx.inputs[0].previous_output,
                 TxOut {
-                    value: 2,
-                    script_pubkey,
+                    value: Amount::from_sat(2),
+                    script_pubkey: Script::from_bytes(script_pubkey),
                 },
             )];
             assert_eq!(
@@ -190,27 +190,27 @@ mod tests {
             inputs: (0..3)
                 .map(|vout| TxIn {
                     previous_output: OutPoint::new(Txid::default(), vout),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: vec![vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG]],
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::from_stack(vec![vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG]]),
                 })
                 .collect(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let prevouts = [
             (
                 tx.inputs[2].previous_output,
                 TxOut {
-                    value: 2,
-                    script_pubkey: [vec![0x00, 0x20], vec![3; 32]].concat(),
+                    value: Amount::from_sat(2),
+                    script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![3; 32]].concat()),
                 },
             ),
             (
                 tx.inputs[0].previous_output,
                 TxOut {
-                    value: 2,
-                    script_pubkey: [vec![0x00, 0x14], vec![4; 20]].concat(),
+                    value: Amount::from_sat(2),
+                    script_pubkey: Script::from_bytes([vec![0x00, 0x14], vec![4; 20]].concat()),
                 },
             ),
         ];
@@ -234,13 +234,13 @@ mod tests {
             inputs: (0..INPUTS)
                 .map(|vout| TxIn {
                     previous_output: OutPoint::new(Txid::default(), vout),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let mut prevouts: Vec<_> = tx
             .inputs
@@ -250,8 +250,8 @@ mod tests {
                 (
                     input.previous_output,
                     TxOut {
-                        value: 2,
-                        script_pubkey: [vec![0x00, 0x14], vec![4; 20]].concat(),
+                        value: Amount::from_sat(2),
+                        script_pubkey: Script::from_bytes([vec![0x00, 0x14], vec![4; 20]].concat()),
                     },
                 )
             })
@@ -293,21 +293,21 @@ mod tests {
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: outpoint,
-                    script_sig,
-                    sequence: u32::MAX,
-                    witness,
+                    script_sig: Script::from_bytes(script_sig),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::from_stack(witness),
                 }],
                 outputs: vec![TxOut {
-                    value: 9_000,
-                    script_pubkey: vec![opcode::OP_CHECKSIG],
+                    value: Amount::from_sat(9_000),
+                    script_pubkey: Script::from_bytes(vec![opcode::OP_CHECKSIG]),
                 }],
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
             };
             let prevouts = [(
                 outpoint,
                 TxOut {
-                    value: 10_000,
-                    script_pubkey,
+                    value: Amount::from_sat(10_000),
+                    script_pubkey: Script::from_bytes(script_pubkey),
                 },
             )];
             assert_eq!(

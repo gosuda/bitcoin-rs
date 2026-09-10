@@ -959,7 +959,7 @@ mod tests {
     }
 
     fn dummy_tx(byte: u8) -> Tx {
-        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut};
+        use bitcoin_rs_primitives::{OutPoint, Script, TxIn, TxOut, Witness};
         Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -1031,7 +1031,7 @@ mod tests {
             None,
         );
         let mut tx = dummy_tx(0x42);
-        tx.inputs[0].witness = vec![vec![0x01]];
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![0x01]]);
         let txid_item =
             Inventory::Transaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
         let witness_txid_item =
@@ -1086,6 +1086,7 @@ mod tests {
 
     #[test]
     fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+            use bitcoin_rs_primitives::Script;
         use std::sync::Arc;
 
         use bitcoin_rs_mempool::{
@@ -1113,8 +1114,8 @@ mod tests {
             );
             let mut tx = dummy_tx(0x51);
             tx.inputs[0].script_sig.clear();
-            tx.inputs[0].witness = vec![vec![0x51]];
-            tx.outputs[0].script_pubkey = vec![0x6a, 4, 1, 2, 3, 4];
+            tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+            tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]);
             let tx = Arc::new(tx);
             let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
             let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());

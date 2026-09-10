@@ -14,7 +14,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::total_sigop_cost;
 use bitcoin_rs_primitives::tx::{Tx, TxIn, TxOut};
-use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Txid, Witness, consensus_bytes};
 
 /// A counting view proving resolve-once: every lookup increments a counter.
 struct CountingView {
@@ -45,9 +45,9 @@ fn outpoint(byte: u8) -> OutPoint {
 fn plain_input(byte: u8) -> TxIn {
     TxIn {
         previous_output: outpoint(byte),
-        script_sig: Vec::new(),
-        sequence: u32::MAX,
-        witness: Vec::new(),
+        script_sig: Script::new(),
+        sequence: Sequence::from_consensus(u32::MAX),
+        witness: Witness::new(),
     }
 }
 
@@ -58,18 +58,18 @@ fn two_input_tx() -> (Tx, CountingView) {
         utxos.insert(
             outpoint(byte),
             TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             },
         );
     }
     let tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![plain_input(1), plain_input(2)],
         outputs: vec![TxOut {
-            value: 100,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(100),
+            script_pubkey: Script::new(),
         }],
     };
     (
@@ -143,7 +143,7 @@ fn prepared_facts_survive_source_record_replacement() {
 #[test]
 fn sigop_cost_owner_counts_from_resolved_prevouts() {
     let (tx, mut view) = two_input_tx();
-    view.utxos.get_mut(&outpoint(1)).expect("coin").value = 60;
+    view.utxos.get_mut(&outpoint(1)).expect("coin").value = Amount::from_sat(60);
     let prevouts: Vec<(OutPoint, TxOut)> = tx
         .inputs
         .iter()

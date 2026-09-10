@@ -9,7 +9,7 @@ use bitcoin_rs_consensus::block_view::BlockView;
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
 };
-use bitcoin_rs_primitives::{Block, BlockHash, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 // SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
@@ -22,8 +22,8 @@ fn commitment_output() -> TxOut {
     let mut script_pubkey = PREFIX.to_vec();
     script_pubkey.extend_from_slice(&ZERO_RESERVED_COMMITMENT);
     TxOut {
-        value: 0,
-        script_pubkey,
+        value: Amount::from_sat(0),
+        script_pubkey: Script::from_bytes(script_pubkey),
     }
 }
 
@@ -32,19 +32,19 @@ fn coinbase(with_witness: bool, with_commitment: bool) -> Tx {
         version: 1,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![1, 1],
-            sequence: u32::MAX,
+            script_sig: Script::from_bytes(vec![1, 1]),
+            sequence: Sequence::from_consensus(u32::MAX),
             witness: if with_witness {
-                vec![vec![0; 32]]
+                Witness::from_stack(vec![vec![0; 32]])
             } else {
-                Vec::new()
+                Witness::new()
             },
         }],
         outputs: vec![TxOut {
-            value: 50,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(50),
+            script_pubkey: Script::new(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     };
     if with_commitment {
         tx.outputs.push(commitment_output());
@@ -60,7 +60,7 @@ fn block(tx: Tx) -> Block {
             prev_blockhash: BlockHash::default(),
             merkle_root,
             time: 0,
-            bits: 0,
+            bits: CompactTarget::from_consensus(0),
             nonce: 0,
         },
         txs: vec![tx],

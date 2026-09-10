@@ -27,9 +27,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot, accept_headers, compact_is_met_by};
-use bitcoin_rs_primitives::{
-    BlockHash, Hash256, Header, Network, OutPoint, TxOut, Txid, deserialize,
-};
+use bitcoin_rs_primitives::{Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, TxOut, Txid, deserialize};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
 use parking_lot::RwLock;
@@ -180,7 +178,7 @@ fn reader_rejects_mutated_linkage_and_invalid_pow_or_nbits()
     let mut bad_nbits = bytes;
     let previous = header_from_row(&bad_nbits[header_offset..header_offset + 80])?;
     let mut nbits_mismatch = Header {
-        bits: 0x207f_fffe,
+        bits: CompactTarget::from_consensus(0x207f_fffe),
         ..previous
     };
     mine_header_to_declared_target(&mut nbits_mismatch)?;
@@ -815,8 +813,8 @@ fn checkpoint_roundtrip_preserves_record_with_440_outputs() -> Result<(), Box<dy
         changes.add(UtxoAdd::new(
             OutPoint::new(record_txid, vout),
             TxOut {
-                value: u64::from(vout) + 1,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(u64::from(vout) + 1),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             },
             false,
             0,
@@ -884,8 +882,8 @@ fn scanned_trailer_restores_independently_scanned_stats() -> Result<(), Box<dyn 
     changes.add(UtxoAdd::new(
         OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 42),
         TxOut {
-            value: 123_456,
-            script_pubkey: vec![0x51, 0xac],
+            value: Amount::from_sat(123_456),
+            script_pubkey: Script::from_bytes(vec![0x51, 0xac]),
         },
         false,
         restored.applied_tip.height,
@@ -1110,7 +1108,7 @@ fn next_header(prev_blockhash: BlockHash, height: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::default(),
         time: 1_296_688_602_u32.saturating_add(height),
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         nonce: 0,
     }
 }
@@ -1135,8 +1133,8 @@ fn populated_utxo() -> Result<UtxoSet, bitcoin_rs_utxo::UtxoError> {
     changes.add(UtxoAdd::new(
         OutPoint::new(Txid(Hash256::from_le_bytes(&[7_u8; 32])), 3),
         TxOut {
-            value: 50_000,
-            script_pubkey: vec![0x51, 0x21],
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![0x51, 0x21]),
         },
         true,
         0,

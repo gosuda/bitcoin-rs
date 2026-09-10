@@ -24,11 +24,11 @@ pub fn prepared_context(
 ) -> PackageTxContext {
     let input_value = prevouts
         .iter()
-        .fold(0_u64, |sum, (_, output)| sum.saturating_add(output.value));
+        .fold(0_u64, |sum, (_, output)| sum.saturating_add(output.value.to_sat()));
     let output_value = tx
         .outputs
         .iter()
-        .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        .fold(0_u64, |sum, output| sum.saturating_add(output.value.to_sat()));
     PackageTxContext {
         fee: input_value.saturating_sub(output_value),
         vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
@@ -41,7 +41,7 @@ pub fn prepared_context(
 mod tests {
     use bitcoin::consensus::deserialize;
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_primitives::{TxIn, Txid, consensus_bytes};
+    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Txid, Witness, consensus_bytes};
     use bitcoin_rs_script::script::{opcode, push_data};
 
     use super::*;
@@ -51,15 +51,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig,
-                sequence: u32::MAX,
-                witness,
+                script_sig: Script::from_bytes(script_sig),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::from_stack(witness),
             }],
             outputs: vec![TxOut {
-                value: 9_000,
-                script_pubkey: output,
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::from_bytes(output),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -80,8 +80,8 @@ mod tests {
         let prevouts = vec![(
             tx.inputs[0].previous_output,
             TxOut {
-                value: 10_000,
-                script_pubkey: prevout_script.clone(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(prevout_script.clone()),
             },
         )];
         let oracle: bitcoin::Transaction = deserialize(&consensus_bytes(tx))
@@ -165,8 +165,8 @@ mod tests {
         let prevouts = [(
             tx.inputs[0].previous_output,
             TxOut {
-                value: 10_000,
-                script_pubkey: p2sh(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(p2sh()),
             },
         )];
         // Core v31.1 CScript::GetSigOpCount(scriptSig) returns zero on

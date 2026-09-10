@@ -13,7 +13,7 @@ use bitcoin::{
     Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut as OracleTxOut, Txid, Witness,
     absolute, transaction,
 };
-use bitcoin_rs_primitives::{Tx, TxOut};
+use bitcoin_rs_primitives::{Script, Tx, TxOut};
 use bitcoin_rs_script::{Interpreter, ScriptError, VerifyFlags};
 
 fn signed_spend() -> (Tx, Vec<TxOut>) {
@@ -72,8 +72,8 @@ fn signed_spend() -> (Tx, Vec<TxOut>) {
     let prevouts = prevouts
         .iter()
         .map(|prevout| TxOut {
-            value: prevout.value.to_sat(),
-            script_pubkey: prevout.script_pubkey.as_bytes().to_vec(),
+            value: bitcoin_rs_primitives::Amount::from_sat(prevout.value.to_sat()),
+            script_pubkey: Script::from_bytes(prevout.script_pubkey.as_bytes().to_vec()),
         })
         .collect();
     (tx, prevouts)
@@ -101,7 +101,7 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     }
 
     let mut altered_prevouts = prevouts.clone();
-    altered_prevouts[1].value += 1;
+    altered_prevouts[1].value = bitcoin_rs_primitives::Amount::from_sat(altered_prevouts[1].value.to_sat() + 1);
     assert!(verify(&tx, &altered_prevouts, 0).is_err());
 
     let mut reordered_prevouts = prevouts.clone();
@@ -123,7 +123,7 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     );
 
     let mut altered_tx = tx;
-    altered_tx.outputs[0].value -= 1;
+    altered_tx.outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(altered_tx.outputs[0].value.to_sat() - 1);
     assert!(verify(&altered_tx, &prevouts, 0).is_err());
 }
 

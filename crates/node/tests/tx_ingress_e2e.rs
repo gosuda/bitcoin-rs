@@ -46,7 +46,7 @@ use bitcoin_rs_p2p::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, InboundTx, Message, Peer, PeerLease, PeerRelaySink,
     TxRelayQueue, spawn_tx_relay_worker,
 };
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -106,8 +106,8 @@ fn fund_utxo_script(
     changes.add(UtxoAdd::new(
         OutPoint::new(parent, 0),
         TxOut {
-            value,
-            script_pubkey,
+            value: Amount::from_sat(value),
+            script_pubkey: Script::from_bytes(script_pubkey),
         },
         false,
         100,
@@ -125,15 +125,15 @@ fn spending_tx(parent: Txid, output_value: u64) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+            value: Amount::from_sat(output_value),
+            script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD]),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     }
 }
 
@@ -705,7 +705,7 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
         .extend_from_slice(bitcoin::hashes::sha256::Hash::hash(&witness_script).as_byte_array());
     fund_utxo_script(&harness.state, parent, 50_000, locking_script)?;
     let mut tx = spending_tx(parent, 40_000);
-    tx.inputs[0].witness = vec![witness_script];
+    tx.inputs[0].witness = Witness::from_stack(vec![witness_script]);
     let txid = tx.txid();
     let wtxid = tx.wtxid();
     assert_ne!(txid.as_bytes(), wtxid.as_bytes());

@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::{Block, CompactTarget};
     use bitcoin_rs_primitives::consensus_bytes;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -550,7 +550,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: nonce,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce,
         }
     }

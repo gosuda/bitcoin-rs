@@ -1029,8 +1029,8 @@ mod tests {
         let shard = Shard::new();
         let txid = Hash256::default();
         let txout = TxOut {
-            value: 7,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(7),
+            script_pubkey: vec![0x51].into(),
         };
         let add = crate::UtxoAdd::new(
             OutPoint::new(bitcoin_rs_primitives::Txid::from(txid), 0),

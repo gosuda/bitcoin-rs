@@ -2164,7 +2164,7 @@ mod tests {
 mod admission_chain_tests {
     use anyhow::Context as _;
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::{Header, TxIn, TxOut};
+    use bitcoin_rs_primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sha2::{Digest as _, Sha256};
 
@@ -2181,15 +2181,15 @@ mod admission_chain_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: vec![vec![0x51]],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::from_stack(vec![vec![0x51]]),
             }],
             outputs: vec![TxOut {
-                value: 9_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -2208,7 +2208,7 @@ mod admission_chain_tests {
                     prev_blockhash: previous_hash,
                     merkle_root: Hash256::default(),
                     time,
-                    bits: 0x207f_ffff,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
                     nonce: time,
                 },
                 NodeStatus::Active,
@@ -2234,8 +2234,8 @@ mod admission_chain_tests {
         changes.add(UtxoAdd::new(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             },
             false,
             0,
@@ -2265,8 +2265,8 @@ mod admission_chain_tests {
         changes.add(UtxoAdd::new(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             },
             false,
             0,
@@ -2335,8 +2335,8 @@ mod admission_chain_tests {
         changes.add(UtxoAdd::new(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             },
             false,
             0,

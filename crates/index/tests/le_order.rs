@@ -12,7 +12,7 @@ mod common;
 use std::sync::Arc;
 
 use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes};
 
 use common::{MemoryStore, put_funding_row, put_spending_row};
 
