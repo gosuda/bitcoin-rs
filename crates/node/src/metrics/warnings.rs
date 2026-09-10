@@ -128,7 +128,8 @@ mod tests {
     }
 
     #[test]
-    fn an_active_warning_does_not_convert_a_replacement_message() {
+    // CONTRACT: docs/contracts/external-api.md#API-06
+fn an_active_warning_does_not_convert_a_replacement_message() {
         let warnings = Warnings::new();
         assert!(warnings.set(WarningKind::ClockOutOfSync, "first"));
         assert!(!warnings.set(WarningKind::ClockOutOfSync, UnexpectedMessage));

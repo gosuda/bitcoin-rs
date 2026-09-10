@@ -1,6 +1,7 @@
 //! Typed measurement identity, interval accounting, and append-only ledgers.
 
 use anyhow::Result;
+use serde::Deserialize as _;
 
 /// A SHA-256 digest carried as 64 lowercase hex characters in evidence.
 ///
@@ -245,7 +246,13 @@ impl Sample {
     /// Nested and concurrent intervals share instants, so their resources
     /// were consumed once and cannot be added; extrema take the maximum.
     pub fn sum(&self, other: &Self) -> Result<Self, EvidenceError> {
-        if self.path != other.path || self.owner != other.owner || self.identity != other.identity {
+        self.check()?;
+        other.check()?;
+        if self.path != other.path
+            || self.owner != other.owner
+            || self.identity != other.identity
+            || self.interval.kind != other.interval.kind
+        {
             return Err(EvidenceError::MismatchedTreatment);
         }
         if self.interval.overlaps(other.interval) {

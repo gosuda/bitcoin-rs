@@ -168,6 +168,7 @@ fn absent_fields_preserve_values_and_explicit_empty_values_win() {
 }
 
 #[test]
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn journal_validation_keeps_each_bound_and_its_error() {
     let defaults = ChainstateJournalConfig::default();
     assert!(defaults.validate().is_ok());
@@ -203,6 +204,7 @@ fn journal_validation_keeps_each_bound_and_its_error() {
 }
 
 #[test]
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn disabled_journal_still_validates_settings() {
     let journal = ChainstateJournalConfig {
         enabled: false,
@@ -248,6 +250,7 @@ mod resolution {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn explicit_fields_override_the_same_layers_network_defaults() -> anyhow::Result<()> {
         let layer = UserConfig {
             network: Some(NetworkSelection::Regtest),
@@ -263,6 +266,7 @@ mod resolution {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn mining_address_is_decoded_against_the_final_network() -> anyhow::Result<()> {
         let earlier = UserConfig {
             mining: MiningOverrides {
@@ -282,6 +286,7 @@ mod resolution {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn only_the_last_set_mining_address_is_decoded() -> anyhow::Result<()> {
         let invalid = UserConfig {
             mining: MiningOverrides {
@@ -302,6 +307,7 @@ mod resolution {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn an_explicit_empty_mining_address_is_not_absent() {
         let layer = UserConfig {
             mining: MiningOverrides {
@@ -313,6 +319,7 @@ mod resolution {
     }
 
     #[test]
+    // CONTRACT: docs/contracts/external-api.md#API-06
     fn cookie_wins_within_a_layer_and_later_basic_auth_uses_defaults() -> anyhow::Result<()> {
         let cookie = UserConfig {
             rpc: RpcOverrides {
