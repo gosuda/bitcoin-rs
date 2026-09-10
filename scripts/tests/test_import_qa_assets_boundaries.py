@@ -63,6 +63,39 @@ class SeedBoundaryTests(unittest.TestCase):
         self.map_p2p()
         self.assertEqual([path.read_bytes() for path in self.output.iterdir()], [b"\0payload"])
 
+    def test_raw_string_delimiters_preserve_live_command_selection(self):
+        # Rust Reference raw-string grammar (matching hash-delimited terminators):
+        # https://doc.rust-lang.org/reference/tokens.html#raw-string-literals
+        # Strings before COMMANDS are fixture data, not inventory or comments.
+        table = ('pub const COMMANDS: &[Command] = &['
+                 'Command { name: "ping" }, Command { name: "verack" }];')
+        self.write_message("verack")
+        for prefix in ("r", "br", "cr"):
+            for count in (0, 1, 2, 3, 255):
+                with self.subTest(prefix=prefix, hashes=count):
+                    hashes = "#" * count
+                    body = '/* // backslash \\'
+                    if count:
+                        body += ' embedded " /* quote'
+                    if count > 1:
+                        body += ' "' + "#" * (count - 1) + ' not the terminator'
+                    literal = prefix + hashes + '"' + body + '"' + hashes
+                    kind = {'r': '&str', 'br': '&[u8]', 'cr': '&core::ffi::CStr'}[prefix]
+                    text = 'const EXAMPLE: ' + kind + ' = ' + literal + ';\n' + table
+                    self.inventory.write_text(text)
+                    self.assertIn(literal, mapper._strip_rust_comments(text))
+                    self.map_p2p()
+                    self.assertEqual([path.read_bytes() for path in self.output.iterdir()],
+                                     [b"\x01"])
+
+    def test_unterminated_raw_literal_is_rejected(self):
+        self.inventory.write_text('const BAD: &str = r##"not terminated;\n'
+                                  'pub const COMMANDS: &[Command] = &['
+                                  'Command { name: "verack" }];')
+        with self.assertRaisesRegex(ValueError, "raw string"):
+            self.map_p2p()
+        self.assertFalse(self.output.exists())
+
     def test_header_only_command_becomes_a_selector_only_seed(self):
         self.inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "verack" }];')
         self.write_message("verack")
