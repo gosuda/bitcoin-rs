@@ -397,7 +397,6 @@ pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
     HEADER_LEN
         .checked_add(payload_len)
         .ok_or(PeerError::PayloadTooLarge(usize::MAX))
-
 }
 
 /// Encode only a message payload.

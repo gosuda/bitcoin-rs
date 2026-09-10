@@ -13,8 +13,6 @@ use crate::inv::{
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
-
-
 /// Maximum headers returned by one `headers` response.
 pub const MAX_HEADERS_RESPONSE: usize = 2_000;
 /// Maximum block locator hashes accepted in one locator-based request.
