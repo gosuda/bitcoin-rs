@@ -1,0 +1,27 @@
+name: Node refactor workspace
+
+on:
+  push:
+    branches: [refactor/node-index-boundaries-742]
+    paths:
+      - .github/workflows/node-refactor-workspace.yml
+      - scripts/node_refactor_workspace.py
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source for the refactor workspace
+        run: git archive --format=tar.gz --output=node-refactor-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-refactor-source
+          path: node-refactor-source.tar.gz
+          retention-days: 1
