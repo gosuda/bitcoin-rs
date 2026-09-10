@@ -21,9 +21,10 @@ end-state evidence roles.
 
 ### `QAC-02`: End-state evidence roles
 
-- G0 pins: the pinned `rust-bitcoin/qa-assets` commit and minimized seed set
-  are recorded in `fuzz/CORPUS_PROVENANCE.md`. The identity is a commit hash
-  and a manifest digest, not a repository tag alone.
+- G0 pins: the pinned `rust-bitcoin/qa-assets` commit and the minimized seed
+  set are recorded in `fuzz/CORPUS_PROVENANCE.md` and mirrored by the
+  reference set. The identity is a commit hash and a manifest digest, not a
+  repository tag alone.
 - G5 replay and parity arms: the QA corpus feeds parser, transaction, block,
   P2P message, and script-evaluation fuzz targets. Invalid and
   nonstandard-but-consensus-valid inputs are counted and classified.
@@ -34,6 +35,8 @@ end-state evidence roles.
 
 - `fuzz/CORPUS_PROVENANCE.md` (existing): records the upstream identity,
   license, per-target mapping, and refresh rule.
+- `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned): G0 pin; rejects
+  a QA corpus with a missing or mismatched upstream commit.
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
   counts and classifies invalid corpora with fixed skip reasons.
 - Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see

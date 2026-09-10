@@ -149,7 +149,9 @@ mod enabled {
             Some(amount),
             &prepared.kernel_tx,
             input_index,
-            Some(flags.kernel_bits()),
+            // Fill implications before policy bits are stripped: CLEANSTACK
+            // still activates WITNESS and P2SH in the native driver and counter.
+            Some(flags.filled().kernel_bits()),
             &prepared.precomputed,
         )
         .map_err(|error| ConsensusError::Script {

@@ -91,7 +91,7 @@ pub enum PersistFault {
     LostSync,
     /// Fail while flushing deferred writes.
     FailFlush,
-    /// Return from flush without syncing deferred writes.
+    /// Lose flush completion and return an error without confirming durability.
     LostFlush,
 }
 
@@ -150,8 +150,11 @@ impl PersistFaultSlot {
 ///
 /// Every batch is atomic across all column families it touches. `write` and
 /// `write_deferred` need not survive a crash; `write_durable`,
-/// `write_durable_if`, and successful `flush` complete durability. Snapshots
-/// are coherent across families.
+/// `write_durable_if`, and successful `flush` complete durability. Atomicity
+/// prevents partial batches, but an error from a durability API is not a
+/// rollback receipt: application may already have completed before the
+/// durability completion failed or was lost. Snapshots are coherent across
+/// families.
 pub trait KvStore: Send + Sync + 'static {
     /// Backend-specific atomic write-batch type.
     type WriteBatch: WriteBatch;
@@ -202,6 +205,19 @@ pub trait KvStore: Send + Sync + 'static {
     }
 
     /// Atomically applies a batch and completes its durability before success.
+    ///
+    /// `Ok(())` is the durability receipt. `Err` is not a rollback receipt:
+    /// the failure may occur before application, or after the whole atomic
+    /// batch became visible while durability completion failed or was lost.
+    /// [`StorageError`] does not classify that phase. A caller must therefore
+    /// not blindly retry a non-idempotent batch after `Err`; it must reconcile
+    /// through the state owner's recovery protocol, or independently prove
+    /// that the batch did not apply before retrying.
+    ///
+    /// The default implementation makes the ambiguous post-application case
+    /// explicit: it applies through [`Self::write_deferred`] and then calls
+    /// [`Self::flush`]. Backend overrides must preserve the same receipt and
+    /// error semantics even when they use one synchronous commit.
     fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
         self.write_deferred(batch)?;
         self.flush()
@@ -210,9 +226,13 @@ pub trait KvStore: Send + Sync + 'static {
     /// Durably commits `batch` iff every condition matches the pre-batch state.
     ///
     /// Conditions and commit form one write boundary. `Ok(true)` means the
-    /// whole batch is durable; `Ok(false)` means no operation applied. Lookup,
-    /// backend, or persistence failures return `Err` rather than a mismatch or
-    /// false durability confirmation.
+    /// whole batch is durable; `Ok(false)` is the only result that proves the
+    /// conditions did not match and no operation applied. Lookup, backend, or
+    /// persistence failures return `Err` rather than a mismatch or false
+    /// durability confirmation. After conditions matched, an `Err` may occur
+    /// after the atomic batch applied but before durability was confirmed, so
+    /// it must not be treated as `Ok(false)` or as permission to blindly retry
+    /// a non-idempotent batch. The state owner must reconcile the outcome.
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
@@ -220,6 +240,13 @@ pub trait KvStore: Send + Sync + 'static {
     ) -> Result<bool, StorageError>;
 
     /// Makes every earlier completed write durable before success.
+    ///
+    /// `Ok(())` is the receipt covering those writes. `Err` provides no such
+    /// receipt, but also does not prove that earlier writes were unapplied or
+    /// non-durable: synchronization can fail or its completion can be lost
+    /// after writes became visible. Callers that track pending durability must
+    /// retain that bookkeeping until a successful receipt or owner-specific
+    /// recovery establishes the durable state.
     fn flush(&self) -> Result<(), StorageError>;
 
     /// Captures a coherent point-in-time view across column families.

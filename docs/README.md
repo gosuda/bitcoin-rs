@@ -7,6 +7,7 @@
 | Build, configure, and run a node | [Getting started](getting-started.md) |
 | Find a normative clause and its tests | [Contract index](contracts/README.md) |
 | Understand project vocabulary | [Concepts](../CONCEPTS.md) |
+| Inspect gate and evidence status | [Constraint register](../CONSTRAINTS.md) |
 | Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
 | Operate recovery or REST | [Recovery summary](chainstate-recovery.md) and [REST guide](rest-interface.md) |
 
@@ -36,6 +37,10 @@ Treat [core-compat.toml](api/core-compat.toml),
 [Solutions](solutions/) are historical context, not current implementation
 promises. The [hot-path contract](contracts/hot-path-attribution.md) owns ledger
 interpretation. `UNMEASURED`, `planned`, and `BLOCKED` are not successful results.
+
+[Formal models](models/) and their configurations remain subject to the
+[constraint register](../CONSTRAINTS.md). A compiled build is not proof of a
+target design, and this index does not duplicate gate verdicts.
 
 The default binary is kernel-free; library defaults are governed separately by
 [validation-default.md](contracts/validation-default.md). The optional

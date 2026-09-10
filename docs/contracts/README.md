@@ -30,12 +30,15 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [muhash-rpc.md](muhash-rpc.md) | `MRPC-01`–`MRPC-03` | MuHash RPC arity and benchmark custody | RPC arity and benchmark-campaign tests |
 | [embedding.md](embedding.md) | `EMB-01`–`EMB-08` | Embedded lifecycle and shared node services | `crates/node/tests/embed.rs`; daemon teardown test |
 | [storage-footprint.md](storage-footprint.md) | `FP-01`–`FP-04` | Logical/physical storage accounting and 1-TB gate | storage/node footprint tests and CLI help |
-| [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-11` | Product cells, overlap accounting, ledger ownership, forbidden probes, dispositions | `g18_hot_path_ledger` |
+| [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-13` | Product cells, overlap accounting, evidence identity, promotion thresholds | `g18_hot_path_ledger`; `overhaul_evidence` |
+| [reference-set.md](reference-set.md) | `REF-01`–`REF-07` | Released Core, kernel, corpus, and formal-tool identities | compatibility manifest and `overhaul_reference_set` |
 
 ## Permanent suite traceability
 
 The overhaul suites map to current contracts, not task numbers:
 
+- `bin/bitcoin-rs/tests/overhaul_process_harness.rs` → `REF-02`, `REF-07`
+- `bin/bitcoin-rs/tests/overhaul_evidence.rs` → `HPA-12`
 - `bin/bitcoin-rs/tests/overhaul_ownership.rs` → `ARCH-01`, `ARCH-02`, `ARCH-08`
 - `crates/consensus/tests/overhaul_parse_parity.rs` → `VAL-02`
 - `crates/consensus/tests/overhaul_prepared_inputs.rs` → `POL-03`, `VAL-02`

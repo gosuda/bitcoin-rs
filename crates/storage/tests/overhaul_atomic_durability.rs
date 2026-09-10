@@ -3,8 +3,9 @@
 //!
 //! A reopened batch must be entirely old or entirely new across all families.
 //! Read failures fail the test; they are not evidence of an empty store.
-//! These injected faults and clean reopens do not substitute for process-death
-//! or power-loss testing of the complete chainstate commit protocol.
+//! Successful durable receipts must also carry earlier completed deferred writes
+//! across reopen. These injected faults and clean reopens do not substitute for
+//! process-death or power-loss testing of the complete chainstate commit protocol.
 
 #![expect(clippy::expect_used, reason = "test assertions")]
 
@@ -73,6 +74,7 @@ fn recovery_checker_rejects_cross_family_mixture() {
 #[derive(Debug)]
 enum Route {
     Write,
+    WriteDeferred,
     WriteDurable,
     WriteDurableIf,
     FlushDeferred,
@@ -87,6 +89,7 @@ impl Route {
     ) -> Result<(), StorageError> {
         match self {
             Self::Write => store.write(batch),
+            Self::WriteDeferred => store.write_deferred(batch),
             Self::WriteDurable => store.write_durable(batch),
             Self::WriteDurableIf => store
                 .write_durable_if(
@@ -106,8 +109,10 @@ impl Route {
             Self::WriteDurable | Self::WriteDurableIf => {
                 matches!(fault, PersistFault::FailSync | PersistFault::LostSync)
             }
-            Self::FlushDeferred => fault == PersistFault::FailFlush,
-            Self::Write => false,
+            Self::FlushDeferred => {
+                matches!(fault, PersistFault::FailFlush | PersistFault::LostFlush)
+            }
+            Self::Write | Self::WriteDeferred => false,
         }
     }
 }
@@ -187,10 +192,12 @@ where
     S: KvStore,
     F: Fn() -> Result<S, StorageError>,
 {
+    assert_later_durable_receipt_covers_deferred(backend, &open, rows);
     let old = expected_state(rows, b"old");
     let proposed = expected_state(rows, b"new");
     for route in [
         Route::Write,
+        Route::WriteDeferred,
         Route::WriteDurable,
         Route::WriteDurableIf,
         Route::FlushDeferred,
@@ -208,10 +215,39 @@ where
             let outcome = {
                 let store = open().expect("reopen to arm");
                 store.arm_persist_fault(fault);
-                route.apply(&store, batch(&store, rows, b"new"), rows[0].0)
+                let outcome = route.apply(&store, batch(&store, rows, b"new"), rows[0].0);
+                let visible = snapshot_all(&store, rows);
+                assert_atomic_recovery(&visible, &old, &proposed, &label);
+                if outcome.is_ok() {
+                    assert_eq!(
+                        visible, proposed,
+                        "{label}: successful write was not visible"
+                    );
+                }
+                if matches!(
+                    fault,
+                    PersistFault::FailApply | PersistFault::LostApply | PersistFault::PartialApply
+                ) {
+                    assert!(outcome.is_err(), "{label}: failed apply reported success");
+                    assert_eq!(visible, old, "{label}: failed apply changed visible rows");
+                }
+                outcome
             };
             let store = open().expect("reopen to inspect");
-            assert_atomic_recovery(&snapshot_all(&store, rows), &old, &proposed, &label);
+            let recovered = snapshot_all(&store, rows);
+            assert_atomic_recovery(&recovered, &old, &proposed, &label);
+            if outcome.is_ok() && !matches!(route, Route::Write | Route::WriteDeferred) {
+                assert_eq!(
+                    recovered, proposed,
+                    "{label}: successful durable write was lost"
+                );
+            }
+            if matches!(
+                fault,
+                PersistFault::FailApply | PersistFault::LostApply | PersistFault::PartialApply
+            ) {
+                assert_eq!(recovered, old, "{label}: aborted apply survived reopen");
+            }
             if route.completion_fault(fault) {
                 assert!(
                     outcome.is_err(),
@@ -219,6 +255,68 @@ where
                 );
             }
         }
+    }
+}
+
+fn assert_later_durable_receipt_covers_deferred<S, F>(
+    backend: &str,
+    open: &F,
+    rows: &[(ColumnFamily, &[u8])],
+) where
+    S: KvStore,
+    F: Fn() -> Result<S, StorageError>,
+{
+    assert!(rows.len() >= 2, "{backend}: receipt test needs two rows");
+    for guarded in [false, true] {
+        let label = if guarded {
+            format!("{backend}/guarded-receipt")
+        } else {
+            format!("{backend}/durable-receipt")
+        };
+        {
+            let store = open().expect("open for deferred receipt seed");
+            store
+                .write_durable(batch(&store, rows, b"old"))
+                .expect("seed deferred receipt state");
+            store
+                .write_deferred(batch(&store, &rows[..1], b"deferred"))
+                .expect("deferred write");
+            if guarded {
+                let committed = store
+                    .write_durable_if(
+                        &[WriteCondition::Equals {
+                            cf: rows[1].0,
+                            key: rows[1].1,
+                            expected: b"old",
+                        }],
+                        batch(&store, &rows[1..], b"receipt"),
+                    )
+                    .expect("guarded durable receipt");
+                assert!(committed, "{label}: guard unexpectedly mismatched");
+            } else {
+                store
+                    .write_durable(batch(&store, &rows[1..], b"receipt"))
+                    .expect("durable receipt");
+            }
+        }
+
+        let store = open().expect("reopen after durable receipt");
+        assert_eq!(
+            store
+                .get(rows[0].0, rows[0].1)
+                .expect("read earlier deferred row")
+                .as_deref(),
+            Some(&b"deferred"[..]),
+            "{label}: earlier deferred write did not survive reopen"
+        );
+        assert_eq!(
+            store
+                .get(rows[1].0, rows[1].1)
+                .expect("read receipt row")
+                .as_deref(),
+            Some(&b"receipt"[..]),
+            "{label}: durable receipt row did not survive reopen"
+        );
     }
 }
 

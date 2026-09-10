@@ -107,6 +107,9 @@ checkpoint or replay a journal as an authority.
   counters and a reconcile signal with bounded memory.
 - `crates/node/tests/overhaul_durable_head.rs` (planned): tests that a new
   durable head is published only after mempool alignment.
+- `bin/bitcoin-rs/tests/gates/g20_formal_models.rs` (planned): checks the
+  `ChainAdmission` TLA+ model, which covers the durable commit, mempool
+  reconciliation, and stable publication ordering.
 - `crates/node/src/apply.rs` existing tests:
   - `a_clean_disconnect_leaves_no_in_flight_marker`;
   - `chain_change_proof_finish_restores_even_generation`;

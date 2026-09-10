@@ -1,4 +1,4 @@
-//! Shared process custody for the public-process product proofs.
+//! Shared verification support for integration tests and gates.
 
 #![expect(
     clippy::expect_used,
@@ -11,3 +11,5 @@
 
 pub(crate) mod dependency_graph;
 pub(crate) mod ownership_scan;
+pub(crate) mod process_node;
+pub(crate) mod reference_set;

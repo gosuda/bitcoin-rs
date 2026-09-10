@@ -150,21 +150,17 @@ pub fn verify_transaction(
 ///
 /// Checks finality, empty inputs/outputs, coinbase scriptSig size, duplicate inputs, null
 /// prevouts, missing prevouts, input/output value balance, and sigop limits. Skips
-/// kernel/script script execution. This is the assume-valid entry.
+/// kernel/script script execution. This is the assume-valid entry: callers
+/// still supply active flags because skipping execution must not disable
+/// activated witness sigop accounting.
 pub fn verify_transaction_non_script(
     tx: &Tx,
     prevouts: &impl UtxoView,
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    verify_transaction_with_locktime_cutoff(
-        tx,
-        prevouts,
-        height,
-        locktime_cutoff,
-        VerifyFlags::NONE,
-        true,
-    )
+    verify_transaction_with_locktime_cutoff(tx, prevouts, height, locktime_cutoff, flags, true)
 }
 
 fn verify_transaction_with_locktime_cutoff(
@@ -204,7 +200,7 @@ fn verify_transaction_with_locktime_cutoff(
         }
     }
 
-    finalize_tx_value_and_sigops(tx, &prep)
+    finalize_tx_value_and_sigops(tx, &prep, flags)
 }
 
 /// Resolved per-transaction state carried from the pre-phase into the script and
@@ -213,6 +209,35 @@ struct TxPrep {
     prevouts: Vec<(OutPoint, TxOut)>,
     input_value: u64,
     output_value: u64,
+}
+
+/// Checks non-coinbase input outpoints for null or repeated references.
+///
+/// This context-free subset of Core's `CheckTransaction` is shared with
+/// mempool admission before missing-input policy can retain an orphan.
+/// It does not resolve coins, execute scripts, or validate the other transaction
+/// fields. The one-null-input coinbase shape is left to the caller's coinbase rules.
+///
+/// # Errors
+///
+/// Returns the first null or duplicate input in transaction order, preserving
+/// the ordinary verifier's existing error precedence.
+///
+/// Reference: <https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_check.cpp>.
+pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
+    if is_coinbase(tx) {
+        return Ok(());
+    }
+    let mut seen = HashSet::new();
+    for (input_index, input) in tx.inputs.iter().enumerate() {
+        if is_null_outpoint(&input.previous_output) {
+            return Err(ConsensusError::NullPrevout { input_index });
+        }
+        if !seen.insert(input.previous_output) {
+            return Err(ConsensusError::DuplicateInput { input_index });
+        }
+    }
+    Ok(())
 }
 
 /// Runs a transaction's non-script pre-checks: finality, empty in/out, total
@@ -250,15 +275,7 @@ fn prepare_tx_checks(
         return Ok(None);
     }
 
-    let mut seen = HashSet::new();
-    for (input_index, input) in tx.inputs.iter().enumerate() {
-        if is_null_outpoint(&input.previous_output) {
-            return Err(ConsensusError::NullPrevout { input_index });
-        }
-        if !seen.insert(input.previous_output) {
-            return Err(ConsensusError::DuplicateInput { input_index });
-        }
-    }
+    verify_transaction_input_outpoints(tx)?;
 
     let mut input_value = 0u64;
     let mut prevouts = Vec::with_capacity(tx.inputs.len());
@@ -280,7 +297,11 @@ fn prepare_tx_checks(
 
 /// Runs a transaction's deferred post-checks: input/output value balance and the
 /// sigop-cost limit, reusing the resolved prevouts.
-fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusError> {
+fn finalize_tx_value_and_sigops(
+    tx: &Tx,
+    prep: &TxPrep,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
     if prep.input_value < prep.output_value {
         return Err(ConsensusError::InputsLessThanOutputs {
             input_value: prep.input_value,
@@ -289,7 +310,7 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
     }
 
     let _ = 0usize;
-    let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts);
+    let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts, flags);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -395,7 +416,7 @@ pub fn verify_block_input_scripts(
     kernel_block: &crate::kernel::KernelBlock,
 ) -> Result<(), ConsensusError> {
     let prepare_started = Instant::now();
-    let unit = prepare_block_script_checks(view, height, locktime_cutoff, kernel_block)?;
+    let unit = prepare_block_script_checks(view, height, locktime_cutoff, flags, kernel_block)?;
     timings.prepare_seconds = prepare_started.elapsed().as_secs_f64();
 
     let parallel_started = Instant::now();
@@ -405,7 +426,6 @@ pub fn verify_block_input_scripts(
     let mut before_serial_scan = || {};
     let verdict = verify_prepared_units_with_hooks(
         core::slice::from_ref(&unit),
-        &[flags],
         &mut set_parallel_seconds,
         &mut before_serial_scan,
     );
@@ -416,9 +436,12 @@ pub fn verify_block_input_scripts(
 ///
 /// Holds borrows into the caller's parse-once [`BlockView`] transactions and
 /// parsed kernel block, so both must outlive every unit built from them.
+/// The unit owns the active flags shared by preparation and script execution;
+/// no later parallel flag list can give its two phases different contexts.
 pub struct BlockScriptChecks<'b> {
     prepared: Vec<PreparedTx<'b>>,
     checks: Vec<InputCheck>,
+    flags: VerifyFlags,
 }
 
 /// Which unit failed, and how.
@@ -448,6 +471,7 @@ pub fn prepare_block_script_checks<'tx, 'checks>(
     view: &mut BlockView<'tx>,
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
     kernel_block: &'checks crate::kernel::KernelBlock,
 ) -> Result<BlockScriptChecks<'checks>, ConsensusError>
 where
@@ -461,13 +485,16 @@ where
         });
     }
     let (prepared, checks) =
-        prepare_block_input_checks(txs, resolved, height, locktime_cutoff, kernel_block);
-    Ok(BlockScriptChecks { prepared, checks })
+        prepare_block_input_checks(txs, resolved, height, locktime_cutoff, flags, kernel_block);
+    Ok(BlockScriptChecks {
+        prepared,
+        checks,
+        flags,
+    })
 }
 
 fn verify_prepared_units_with_hooks<AfterParallel, BeforeSerialScan>(
     units: &[BlockScriptChecks<'_>],
-    flags_per_unit: &[VerifyFlags],
     after_parallel: &mut AfterParallel,
     before_serial_scan: &mut BeforeSerialScan,
 ) -> Result<(), BatchScriptFailure>
@@ -475,17 +502,6 @@ where
     AfterParallel: FnMut(),
     BeforeSerialScan: FnMut(),
 {
-    if units.len() != flags_per_unit.len() {
-        return Err(BatchScriptFailure {
-            unit: 0,
-            error: ConsensusError::Kernel(format!(
-                "batch verify needs one flag set per unit: {} units, {} flag sets",
-                units.len(),
-                flags_per_unit.len()
-            )),
-        });
-    }
-
     // Offsets are precomputed rather than accumulated during the scan. With a
     // running counter, reversing the scan order misaligns every slice instead
     // of simply reporting a different unit, which hides an ordering bug behind
@@ -502,7 +518,7 @@ where
 
     let run = |(unit_index, check): &(usize, &InputCheck)| {
         let unit = &units[*unit_index];
-        check_input(&unit.prepared, check, flags_per_unit[*unit_index])
+        check_input(&unit.prepared, check, unit.flags)
     };
     let flat: Vec<(usize, &InputCheck)> = units
         .iter()
@@ -547,14 +563,11 @@ where
 /// # Errors
 ///
 /// Returns the first [`BatchScriptFailure`] in the supplied unit order, or an
-/// internal layout failure when the unit and flag slices do not correspond.
-pub fn verify_prepared_units(
-    units: &[BlockScriptChecks<'_>],
-    flags_per_unit: &[VerifyFlags],
-) -> Result<(), BatchScriptFailure> {
+/// internal layout failure when retained checks and their results do not correspond.
+pub fn verify_prepared_units(units: &[BlockScriptChecks<'_>]) -> Result<(), BatchScriptFailure> {
     let mut after = || {};
     let mut before = || {};
-    verify_prepared_units_with_hooks(units, flags_per_unit, &mut after, &mut before)
+    verify_prepared_units_with_hooks(units, &mut after, &mut before)
 }
 
 /// Reports an internal prepared-check layout mismatch.
@@ -612,6 +625,7 @@ fn prepare_block_input_checks<'b>(
     resolved: &mut [Vec<Option<TxOut>>],
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
     // Unused by the portable backend, which verifies the view's transactions
     // directly; kept in the signature so both backends share one call shape.
     #[cfg_attr(
@@ -706,7 +720,7 @@ fn prepare_block_input_checks<'b>(
         }
         let checks_len = tx.inputs.len();
 
-        let post_error = finalize_tx_value_and_sigops(tx, &prep).err();
+        let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let stop_after_tx = post_error.is_some();
         prepared.push(PreparedTx {
             #[cfg(not(feature = "kernel"))]
@@ -827,8 +841,11 @@ mod tests {
         }
     }
 
+    // Activation contract: BIP141, "Sigops" (https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops),
+    // as implemented by Bitcoin Core v31.1 in src/validation.cpp:
+    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/validation.cpp
     #[test]
-    fn assume_valid_keeps_prevout_aware_sigop_limit_checks()
+    fn assume_valid_and_prepared_sigop_checks_follow_witness_activation()
     -> Result<(), Box<dyn std::error::Error>> {
         let cost = crate::MAX_BLOCK_SIGOPS_COST + 1;
         let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[9; 32])), 0);
@@ -854,13 +871,45 @@ mod tests {
             },
         )]);
         // The assume-valid path skips script execution, not sigop accounting.
-        // Its internal VerifyFlags::NONE must not disable BIP141 counting.
+        // Active flags remain explicit even though script execution is skipped.
         assert_eq!(
-            super::verify_transaction_non_script(&tx, &prevouts, 0, 0),
+            super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::P2SH),
+            Ok(()),
+        );
+        assert_eq!(
+            super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::MANDATORY),
             Err(ConsensusError::SigopsLimit {
                 cost,
                 max: crate::MAX_BLOCK_SIGOPS_COST
             }),
+        );
+        // Batched preparation binds the same flags used by execution, so its
+        // cached post-error cannot come from a different activation context.
+        let txs = vec![tx];
+        let block = kernel_block_for(&txs);
+        let resolved = vec![vec![prevouts.get(&outpoint).cloned()]];
+        let inactive = super::prepare_block_script_checks(
+            &mut block_view_for(&txs, resolved.clone()),
+            0,
+            0,
+            VerifyFlags::P2SH,
+            &block,
+        )?;
+        assert!(inactive.prepared[0].post_error.is_none());
+        assert!(super::verify_prepared_units(core::slice::from_ref(&inactive)).is_ok());
+        let active = super::prepare_block_script_checks(
+            &mut block_view_for(&txs, resolved),
+            0,
+            0,
+            VerifyFlags::MANDATORY,
+            &block,
+        )?;
+        assert_eq!(
+            active.prepared[0].post_error,
+            Some(ConsensusError::SigopsLimit {
+                cost,
+                max: crate::MAX_BLOCK_SIGOPS_COST,
+            })
         );
         Ok(())
     }
@@ -1280,7 +1329,7 @@ mod tests {
         );
 
         assert_eq!(
-            super::verify_transaction_non_script(&tx, &utxos, 0, 0),
+            super::verify_transaction_non_script(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY),
             Ok(())
         );
         assert!(matches!(
@@ -1408,17 +1457,23 @@ mod tests {
                     vec![Some(op_equal_txout(50))],
                 ],
                 &first_block,
+                VerifyFlags::MANDATORY,
             ),
-            prepared_unit(&good_txs, vec![Vec::new()], &good_block),
+            prepared_unit(
+                &good_txs,
+                vec![Vec::new()],
+                &good_block,
+                VerifyFlags::MANDATORY,
+            ),
             prepared_unit(
                 &last_txs,
                 vec![Vec::new(), vec![Some(op_equal_txout(50))]],
                 &last_block,
+                VerifyFlags::MANDATORY,
             ),
         ];
-        let flags = [VerifyFlags::MANDATORY; 3];
 
-        match super::verify_prepared_units(&units, &flags) {
+        match super::verify_prepared_units(&units) {
             Err(failure) => assert_eq!(
                 failure.unit, 0,
                 "the earliest failing unit must win, got unit {}",
@@ -1452,17 +1507,27 @@ mod tests {
         let bad_block = kernel_block_for(&bad_txs);
 
         let units = [
-            prepared_unit(&clean_txs, clean_resolved.clone(), &clean_block),
-            prepared_unit(&clean_txs, clean_resolved, &clean_block),
+            prepared_unit(
+                &clean_txs,
+                clean_resolved.clone(),
+                &clean_block,
+                VerifyFlags::MANDATORY,
+            ),
+            prepared_unit(
+                &clean_txs,
+                clean_resolved,
+                &clean_block,
+                VerifyFlags::MANDATORY,
+            ),
             prepared_unit(
                 &bad_txs,
                 vec![Vec::new(), vec![Some(op_equal_txout(50))]],
                 &bad_block,
+                VerifyFlags::MANDATORY,
             ),
         ];
-        let flags = [VerifyFlags::MANDATORY; 3];
 
-        match super::verify_prepared_units(&units, &flags) {
+        match super::verify_prepared_units(&units) {
             Err(failure) => assert_eq!(
                 failure.unit, 2,
                 "only the last unit fails, so misaligned offsets would blame another"
@@ -1492,8 +1557,13 @@ mod tests {
             &mut timings,
             &block,
         );
-        let units = [prepared_unit(&txs, resolved, &block)];
-        let batched = super::verify_prepared_units(&units, &[VerifyFlags::MANDATORY]);
+        let units = [prepared_unit(
+            &txs,
+            resolved,
+            &block,
+            VerifyFlags::MANDATORY,
+        )];
+        let batched = super::verify_prepared_units(&units);
 
         match (single, batched) {
             (Err(single_error), Err(failure)) => assert_eq!(
@@ -1547,18 +1617,33 @@ mod tests {
         let second_block = kernel_block_for(&second_txs);
         let second_resolved = vec![Vec::new(), vec![Some(p2sh_output)]];
 
-        let units = [
-            prepared_unit(&first_txs, first_resolved, &first_block),
-            prepared_unit(&second_txs, second_resolved, &second_block),
-        ];
-        assert!(
-            super::verify_prepared_units(&units[1..], &[VerifyFlags::MANDATORY],).is_err(),
-            "the second fixture must require its permissive flag set"
+        let strict = prepared_unit(
+            &second_txs,
+            second_resolved.clone(),
+            &second_block,
+            VerifyFlags::MANDATORY,
         );
         assert!(
-            super::verify_prepared_units(&units, &[VerifyFlags::MANDATORY, VerifyFlags::NONE],)
-                .is_ok(),
-            "each unit must use the flag set at its own index"
+            super::verify_prepared_units(core::slice::from_ref(&strict)).is_err(),
+            "the second fixture must require its permissive flag set"
+        );
+        let units = [
+            prepared_unit(
+                &first_txs,
+                first_resolved,
+                &first_block,
+                VerifyFlags::MANDATORY,
+            ),
+            prepared_unit(
+                &second_txs,
+                second_resolved,
+                &second_block,
+                VerifyFlags::NONE,
+            ),
+        ];
+        assert!(
+            super::verify_prepared_units(&units).is_ok(),
+            "each unit must use its own bound flag set"
         );
     }
 
@@ -1567,9 +1652,10 @@ mod tests {
         txs: &'b [Tx],
         resolved: Vec<Vec<Option<TxOut>>>,
         block: &'b crate::kernel::KernelBlock,
+        flags: VerifyFlags,
     ) -> super::BlockScriptChecks<'b> {
         let mut view = block_view_for(txs, resolved);
-        match super::prepare_block_script_checks(&mut view, 0, 0, block) {
+        match super::prepare_block_script_checks(&mut view, 0, 0, flags, block) {
             Ok(unit) => unit,
             Err(error) => panic!("test fixture prevout matrix is malformed: {error}"),
         }
@@ -2008,6 +2094,7 @@ mod tests {
         let unit = super::BlockScriptChecks {
             prepared,
             checks: Vec::new(),
+            flags: VerifyFlags::MANDATORY,
         };
         let scan_started = Cell::new(false);
         let mut before_serial_scan = || scan_started.set(true);
@@ -2019,7 +2106,6 @@ mod tests {
         };
         let result = super::verify_prepared_units_with_hooks(
             core::slice::from_ref(&unit),
-            &[VerifyFlags::MANDATORY],
             &mut after_parallel,
             &mut before_serial_scan,
         );

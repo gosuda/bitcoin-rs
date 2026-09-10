@@ -9,6 +9,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Same design as ci.yml's concurrency block: one group per run, so `main`
+# pushes never queue against each other and so are never cancelled (a pending
+# run in a shared group would be cancelled by a third push and leave the
+# commit with no CI record). This workflow never sees pull_request events, so
+# there is nothing to cancel-in-progress.
 concurrency:
   group: ci-main-${{ github.workflow }}-${{ github.run_id }}
   cancel-in-progress: false
@@ -17,6 +22,9 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  # Full-node production feature set: all four storage backends plus the
+  # bitcoinkernel script-verification engine (the kernel is built from C++ --
+  # this workflow is the only place that installs its prerequisites).
   FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel"
 
 jobs:
@@ -24,6 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The kernel engine is built from C++ (cmake + libboost-dev); the
+      # full-node feature set includes it, so this lane installs the
+      # prerequisites up front.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
         id: native_deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -31,29 +42,54 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The retired formal/reference fixture harness is intentionally absent.
-      # Keep the retained deep checks independent so one failure does not hide
-      # later diagnostics.
+      - name: Provision pinned Core and Apalache fixtures
+        id: fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      # Keep checks independent and run them before the long binary/formal
+      # suite. No failure is tolerated, but one must not conceal later ones.
+      # Consensus fixture corpus includes the large deterministic vectors.
       - name: Kernel consensus tests including ignored vectors
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo test -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
+        run: cargo test --locked -p bitcoin-rs-consensus --no-fail-fast -- --include-ignored
+      # -p bitcoin-rs propagates all backends and kernel through the binary's
+      # feature table; virtual-workspace --features would not do so.
       - name: Full-node binary Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: |
-          cargo clippy -p bitcoin-rs --all-targets \
+          cargo clippy --locked -p bitcoin-rs --all-targets \
             --no-default-features --features "${FULL_NODE_FEATURES}" \
             -- -D warnings
+      # The binary's all-target pass does not lint dependency test targets.
       - name: Kernel node Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
+        run: cargo clippy --locked -p bitcoin-rs-node --all-targets -- -D warnings
+      # Include consensus's kernel-gated tests and kernel_verify_spike example.
       - name: Kernel consensus Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings
+        run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets -- -D warnings
+      # Run every binary test, including the pinned process and formal gates.
       - name: Full-node binary tests
-        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         run: |
-          cargo test -p bitcoin-rs --no-fail-fast \
+          # Never attribute cached or earlier-profile diagnostics to this run.
+          rm -rf -- target/apalache
+          mkdir -p target/apalache
+          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-node\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > target/apalache/run-context.txt
+          cargo test --locked -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "${FULL_NODE_FEATURES}"
+      - name: Preserve full-node formal evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apalache-full-node-${{ github.run_attempt }}
+          path: |
+            target/apalache/**/run-*.txt
+            target/apalache/**/detailed*.log
+            target/apalache/**/counterexample*
+          if-no-files-found: warn
+          retention-days: 7
 
   bench-smoke:
     runs-on: ubuntu-latest
@@ -61,12 +97,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      # Compile retained benchmark targets. All benches use
+      # --no-default-features (or --features fjall for storage/node/utxo),
+      # so no C++ toolchain is needed -- the kernel feature is never enabled.
+      # Bin package has no bench targets; all benchmarks live in their own
+      # crates.
       - run: |
-          cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
-          cargo bench -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
-          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
-          cargo bench -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
+          cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
+          cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
+          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench chainstate_journal
 
+
+  # The imported qa-assets corpora (fuzz/corpus/, provenance in
+  # fuzz/CORPUS_PROVENANCE.md) only pay off if they are exercised: build every
+  # target and give each 10k executions against its corpus.
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -76,22 +121,34 @@ jobs:
       - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
         with:
           tool: cargo-fuzz
+      # Explicit host triple: some cargo-fuzz versions default to a musl
+      # target that is not installed here, and only the GNU host target is
+      # guaranteed on the runner.
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
       - run: |
           for target in p2p_message block_decode tx_decode script_eval utxo_snapshot; do
             cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -runs=10000
           done
 
+  # Main-only (issue #174): resolves every direct dependency at its oldest
+  # allowed version and proves the workspace still compiles. Mutates
+  # Cargo.lock, so it must never run on PR checkouts -- this workflow only
+  # triggers on `main` pushes and manual dispatch.
   minimal-versions:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # consensus and node have `kernel` in their per-crate defaults, so
+      # `cargo check --workspace --all-targets` compiles the C++ kernel
+      # engine; install its prerequisites.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # dtolnay action installs the newest nightly via rustup in-job.
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo +nightly update -Zdirect-minimal-versions
-      - run: cargo +nightly check --workspace --all-targets
+      - run: cargo +nightly check --locked --workspace --all-targets
 
+  # Main-only (issue #174): the small real feature matrix, not a powerset.
   feature-combinations:
     runs-on: ubuntu-latest
     steps:
@@ -99,9 +156,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-hack
+      # `--each-feature` on these crates exercises the `kernel` feature,
+      # which builds libbitcoinkernel from C++ -- install its prerequisites
+      # so the matrix runs unexcluded (deep lanes own the C++ toolchain).
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      - run: cargo hack check --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
+      - run: cargo hack check --locked --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
 
+  # Full-feature dependency audit: the PR gate's deny job checks the full
+  # graph (all backends + kernel); this lane is a confirmation on `main`.
   deny-full:
     runs-on: ubuntu-latest
     steps:
@@ -110,7 +172,14 @@ jobs:
         with:
           rust-version: "stable"
           arguments: --workspace --no-default-features --features ${{ env.FULL_NODE_FEATURES }}
-
+  # Kernel oracle differential: with `--features kernel`, replay the committed
+  # fixture corpus through libbitcoinkernel AND the Rust path and hard-fail on
+  # verdict disagreement. The parity tests cover:
+  #   - Block-parse parity (kernel_block_parity: 6 committed mainnet blocks)
+  #   - Vector oracle parity (kernel_vector_parity: 121 tx_valid + 84 tx_invalid rows)
+  #   - Non-vacuity proof (corruption must go red)
+  # The test functions are NOT #[ignore]; do not pass --ignored or they
+  # will be skipped.
   kernel-oracle:
     runs-on: ubuntu-latest
     steps:
@@ -118,4 +187,4 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: cargo test -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+      - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture

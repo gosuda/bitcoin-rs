@@ -35,7 +35,7 @@
 //! returns a committed admission. RPC and reorg accepts announce through
 //! [`LocalTxRelayObserver`] on the same queue. These triggers intentionally
 //! retain their separate timing. Local notifications look up the accepted
-//! entry's real wtxid and skip entries removed before observer delivery. The
+//! entry's real wtxid only while that acceptance remains resident. The
 //! gateway reference is weak so its observer cannot retain the gateway.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -172,12 +172,18 @@ impl MempoolObserver for LocalTxRelayObserver {
         let Some(gateway) = self.gateway.upgrade() else {
             return;
         };
-        for change in &envelope.result.changes {
+        for (index, change) in envelope.result.changes.iter().enumerate() {
             if !matches!(change.outcome, MutationOutcome::Accepted) {
                 continue;
             }
             let txid = Txid(change.txid);
-            let wtxid = gateway.read().entry_by_txid(&txid).map(|entry| entry.wtxid);
+            let Some(sequence) = envelope.result.sequence_of(index) else {
+                continue;
+            };
+            let wtxid = gateway
+                .read()
+                .entry_by_txid_at_sequence(&txid, sequence)
+                .map(|entry| entry.wtxid);
             if let Some(wtxid) = wtxid {
                 self.relay.announce(txid, wtxid, None);
             }
@@ -815,6 +821,203 @@ mod tests {
             Hash256::from(last_txid),
             MutationOutcome::Accepted,
         ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    fn relay_identity_tx() -> Arc<bitcoin_rs_primitives::Tx> {
+        use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+        Arc::new(Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(dummy_txid(90), 0),
+                script_sig: Vec::new(),
+                sequence: 0xffff_fffd,
+                witness: vec![vec![1]],
+            }],
+            outputs: vec![TxOut {
+                value: 1_000,
+                script_pubkey: vec![0x6a, 4, 1, 2, 3, 4],
+            }],
+            lock_time: 0,
+        })
+    }
+
+    fn relay_identity_peer() -> AdmissionOrigin {
+        AdmissionOrigin::Peer(bitcoin_rs_mempool::PeerToken {
+            addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
+            connection_id: 7,
+        })
+    }
+
+    fn relay_identity_gateway() -> Arc<MempoolGateway> {
+        use bitcoin_rs_mempool::{CompositeObserver, Mempool, MempoolLimits};
+        Arc::new(MempoolGateway::new(
+            Arc::new(parking_lot::RwLock::new(Mempool::new(
+                MempoolLimits::default(),
+            ))),
+            Some(Arc::new(CompositeObserver::new())),
+        ))
+    }
+
+    struct MutateBeforeLocalRelay {
+        gateway: Weak<MempoolGateway>,
+        next: Mutex<Option<bitcoin_rs_mempool::MempoolEntry>>,
+        clear_first: bool,
+    }
+
+    impl MempoolObserver for MutateBeforeLocalRelay {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            let Some(entry) = self.next.lock().take() else {
+                return;
+            };
+            let gateway = self.gateway.upgrade().expect("fixture gateway lives");
+            if self.clear_first {
+                gateway.clear(AdmissionOrigin::Block);
+            }
+            gateway
+                .insert_entry(relay_identity_peer(), entry)
+                .expect("nested admission");
+            let original = Txid(envelope.result.changes[0].txid);
+            gateway
+                .prioritise(original, 1)
+                .expect("fee overlay does not change admission identity");
+        }
+    }
+
+    fn delayed_relay_fixture(
+        origin: AdmissionOrigin,
+        original: Arc<bitcoin_rs_primitives::Tx>,
+        next: Arc<bitcoin_rs_primitives::Tx>,
+        clear_first: bool,
+    ) -> (Arc<MempoolGateway>, Receiver<RelayRequest>) {
+        use bitcoin_rs_mempool::MempoolEntry;
+        let gateway = relay_identity_gateway();
+        let (relay, rx) = TxRelayQueue::new(8);
+        gateway
+            .attach_observer_leg(
+                "mutate-first",
+                Arc::new(MutateBeforeLocalRelay {
+                    gateway: Arc::downgrade(&gateway),
+                    next: Mutex::new(Some(MempoolEntry::new(next, 100, 10_000, 2, 0))),
+                    clear_first,
+                }),
+            )
+            .expect("fixture observer slot");
+        gateway
+            .attach_observer_leg(
+                "relay",
+                Arc::new(LocalTxRelayObserver::new(relay, Arc::downgrade(&gateway))),
+            )
+            .expect("relay observer slot");
+        gateway
+            .insert_entry(origin, MempoolEntry::new(original, 100, 10_000, 1, 0))
+            .expect("local admission");
+        (gateway, rx)
+    }
+
+    // P2P-01 / MPL-01: callbacks may re-enter the gateway before a later leg.
+    // An old local event must not borrow a new peer admission's identity.
+    #[test]
+    fn delayed_local_relay_does_not_adopt_a_reinserted_body() {
+        for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Reorg] {
+            for alternate_witness in [false, true] {
+                let original = relay_identity_tx();
+                let next = if alternate_witness {
+                    let mut variant = (*original).clone();
+                    variant.inputs[0].witness = vec![vec![2]];
+                    Arc::new(variant)
+                } else {
+                    // Same allocation, not merely equal bytes: Arc identity is
+                    // not an admission identity either.
+                    Arc::clone(&original)
+                };
+                assert_eq!(original.txid(), next.txid());
+                assert_eq!(original.wtxid() != next.wtxid(), alternate_witness);
+                let txid = original.txid();
+                let (gateway, rx) =
+                    delayed_relay_fixture(origin, original, Arc::clone(&next), true);
+                assert_eq!(
+                    gateway.read().entry_by_txid(&txid).map(|entry| entry.wtxid),
+                    Some(next.wtxid())
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "old local event cannot advertise the peer re-admission"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delayed_local_relay_survives_unrelated_mutations() {
+        let original = relay_identity_tx();
+        let mut unrelated = (*original).clone();
+        unrelated.inputs[0].previous_output =
+            bitcoin_rs_primitives::OutPoint::new(dummy_txid(91), 0);
+        let (gateway, rx) = delayed_relay_fixture(
+            AdmissionOrigin::Rpc,
+            Arc::clone(&original),
+            Arc::new(unrelated),
+            false,
+        );
+        assert_eq!(gateway.read().sequence_number(), 2);
+        let request = rx
+            .try_recv()
+            .expect("unrelated mutation does not invalidate the local admission");
+        assert_eq!(
+            (request.txid, request.wtxid, request.source),
+            (original.txid(), original.wtxid(), None)
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn local_replacement_relay_uses_the_accepted_change_sequence() {
+        use bitcoin_rs_mempool::{MempoolEntry, ReplacementCandidate};
+        let gateway = relay_identity_gateway();
+        let (relay, rx) = TxRelayQueue::new(8);
+        gateway
+            .attach_observer_leg(
+                "relay",
+                Arc::new(LocalTxRelayObserver::new(relay, Arc::downgrade(&gateway))),
+            )
+            .expect("observer slot");
+        let original = relay_identity_tx();
+        gateway
+            .insert_entry(
+                relay_identity_peer(),
+                MempoolEntry::new(Arc::clone(&original), 100, 10_000, 1, 0),
+            )
+            .expect("original peer admission");
+        assert!(rx.try_recv().is_err());
+        let mut replacement = (*original).clone();
+        replacement.outputs[0].value = 900;
+        let replacement = Arc::new(replacement);
+        let outcome = gateway
+            .replace_transaction(
+                AdmissionOrigin::Rpc,
+                ReplacementCandidate::new(Arc::clone(&replacement), 100, 11_000, 1_000),
+                2,
+                0,
+                4,
+            )
+            .expect("local replacement");
+        assert_eq!(outcome.mutation().len(), 2);
+        assert!(matches!(
+            outcome.mutation().changes[0].outcome,
+            MutationOutcome::Removed(_)
+        ));
+        assert_eq!(
+            outcome.mutation().changes[1].outcome,
+            MutationOutcome::Accepted
+        );
+        let request = rx
+            .try_recv()
+            .expect("accepted change after removal is announced");
+        assert_eq!(
+            (request.txid, request.wtxid, request.source),
+            (replacement.txid(), replacement.wtxid(), None)
+        );
         assert!(rx.try_recv().is_err());
     }
 }

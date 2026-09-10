@@ -783,7 +783,7 @@ fn package_contexts(
     pool: &bitcoin_rs_mempool::Mempool,
     txs: &[Tx],
 ) -> Vec<MempoolPackageTxContext> {
-    let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
+    let mut package_outputs: HashMap<OutPoint, &TxOut> = HashMap::new();
     let mut contexts = Vec::with_capacity(txs.len());
 
     for tx in txs {
@@ -795,15 +795,8 @@ fn package_contexts(
                 missing_inputs = true;
                 continue;
             }
-            let key = (input.previous_output.txid, input.previous_output.vout);
-            if let Some(value) = package_outputs.get(&key) {
-                prevouts.push((
-                    input.previous_output,
-                    TxOut {
-                        value: *value,
-                        script_pubkey: Vec::new(),
-                    },
-                ));
+            if let Some(&output) = package_outputs.get(&input.previous_output) {
+                prevouts.push((input.previous_output, output.clone()));
                 continue;
             }
             if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
@@ -820,14 +813,12 @@ fn package_contexts(
             missing_inputs = true;
         }
 
-        // Package outputs deliberately retain the existing value-only facts;
-        // completing preview script verification is a separate contract.
         contexts.push(prepared_context(tx, &prevouts, missing_inputs));
 
         let txid = tx.txid();
         for (vout, output) in tx.outputs.iter().enumerate() {
             let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert((txid, vout), output.value);
+            package_outputs.insert(OutPoint::new(txid, vout), output);
         }
     }
 
@@ -1072,6 +1063,101 @@ mod tests {
                 .collect();
         }
         layer.first().copied().unwrap_or_default()
+    }
+
+    /// POL-01 / BIP141: package prevouts retain the scripts used by accounting.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
+    #[test]
+    fn package_prevouts_preserve_sigops_without_mutating_the_pool()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let ctx = Context::new();
+        let pool = ctx.mempool.read();
+        let sequence = pool.sequence_number();
+        let p2sh = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
+        let p2wsh = [vec![0x00, 0x20], vec![3; 32]].concat();
+        let multisig = vec![0x52, 0xae];
+        let cases = [
+            (p2wpkh, Vec::new(), Vec::new(), 1),
+            (p2sh.clone(), vec![2, 0x52, 0xae], Vec::new(), 8),
+            (p2wsh.clone(), Vec::new(), vec![multisig.clone()], 2),
+            (p2sh, [vec![34], p2wsh].concat(), vec![multisig], 2),
+        ];
+        for (script_pubkey, script_sig, witness, input_cost) in cases {
+            let parent = Tx {
+                version: 2,
+                lock_time: 0,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0),
+                    script_sig: Vec::new(),
+                    sequence: u32::MAX,
+                    witness: Vec::new(),
+                }],
+                outputs: vec![
+                    TxOut {
+                        value: 1,
+                        script_pubkey: vec![0x51],
+                    },
+                    TxOut {
+                        value: 9_000,
+                        script_pubkey,
+                    },
+                ],
+            };
+            let child = Tx {
+                version: 2,
+                lock_time: 0,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(parent.txid(), 1),
+                    script_sig,
+                    sequence: u32::MAX,
+                    witness,
+                }],
+                outputs: vec![TxOut {
+                    value: 8_000,
+                    script_pubkey: vec![0xac],
+                }],
+            };
+            // Preparation only: no script execution or successful package
+            // acceptance is claimed. The parent's chain input is absent.
+            let oracle: bitcoin::Transaction =
+                bitcoin::consensus::deserialize(&consensus_bytes(&child))?;
+            let expected_outpoint = oracle.input[0].previous_output;
+            let oracle_output = bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(parent.outputs[1].value),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                    parent.outputs[1].script_pubkey.clone(),
+                ),
+            };
+            assert_eq!(
+                u32::try_from(oracle.total_sigop_cost(|outpoint| {
+                    (*outpoint == expected_outpoint).then(|| oracle_output.clone())
+                }))?,
+                4 + input_cost,
+                "independent rust-bitcoin oracle",
+            );
+            let vsize = child.vsize();
+            let txs = [parent, child];
+            let contexts = super::package_contexts(&ctx, &pool, &txs);
+            assert_eq!(contexts.len(), 2);
+            assert!(contexts[0].missing_inputs);
+            assert!(!contexts[1].missing_inputs);
+            assert_eq!(contexts[1].fee, 1_000);
+            assert_eq!(u64::from(contexts[1].vsize), vsize);
+            // BIP141: the legacy output CHECKSIG adds four to the input cost.
+            assert_eq!(contexts[1].sigop_cost, 4 + input_cost);
+            for vout in [2, u32::MAX] {
+                let mut missing = txs[1].clone();
+                missing.inputs[0].previous_output.vout = vout;
+                let contexts = super::package_contexts(&ctx, &pool, &[txs[0].clone(), missing]);
+                assert!(contexts[1].missing_inputs);
+                assert_eq!(contexts[1].fee, 0);
+                assert_eq!(contexts[1].sigop_cost, 4);
+            }
+            assert_eq!(pool.sequence_number(), sequence);
+            assert!(pool.is_empty());
+        }
+        Ok(())
     }
 
     #[test]

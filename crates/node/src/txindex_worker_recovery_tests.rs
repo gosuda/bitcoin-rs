@@ -184,7 +184,7 @@ impl Harness {
         let index_dir = tempfile::tempdir().expect("index dir");
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
         let store = Arc::new(FjallStore::open(index_dir.path()).expect("fjall open"));
-        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::Mutex::new(
+        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
             bitcoin_rs_index::IndexWriter::open(store, 1).expect("index writer open"),
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());

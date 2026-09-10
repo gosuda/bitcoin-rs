@@ -5,19 +5,20 @@ ledger file is the owner of inventory, overlap groups, and dispositions.
 This page does not record measured seconds.
 
 Owners:
-- Method: this page (`HPA-01`–`HPA-11`)
+- Method: this page (`HPA-01`..`HPA-13`)
 - Inventory and dispositions: `docs/benchmarks/hot-path-ledger.toml`
-- Proof: `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs`
+- Proof: `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs` and
+  `bin/bitcoin-rs/tests/overhaul_evidence.rs`
 
-The 2.0× speed gate and the 36-cell denominator live in issues #33 and
-#45. This contract does not change either.
+The 2.0x speed gate and the 36-cell denominator live in issues #33 and
+#45. This contract does not change the 36-cell count.
 
 ## Clauses
 
 ### `HPA-01`: Frozen 36-cell denominator
 
 - A product cell is one coordinate of the cartesian product frozen by
-  #45: domain × corpus × native architecture × backend.
+  #45: domain x corpus x native architecture x backend.
 - Domains: `offline` (full-validation chainstate construction), `p2p`
   (controlled loopback initial sync), `muhash` (production full-UTXO
   MuHash RPC query).
@@ -30,7 +31,7 @@ The 2.0× speed gate and the 36-cell denominator live in issues #33 and
   cannot replace a cell.
 - For `muhash`, the backend coordinate is how the identical committed
   state was constructed, checkpointed, reopened, and served. The live
-  scan traverses the in-memory `UtxoSet`.
+  scan traverses the in-memory UTXO set.
 
 ### `HPA-02`: Frozen trial protocol
 
@@ -75,6 +76,10 @@ The 2.0× speed gate and the 36-cell denominator live in issues #33 and
 - `docs/benchmarks/hot-path-ledger.toml` is the only inventory of
   measured product hot paths, cost classes, known levers, and forbidden
   probes.
+- Every recorded `Sample.path` must exactly match a declared `paths.id`.
+  G18 rejects empty or undeclared paths in every cell history. The
+  declared inventory may extend the gate's required minimum; validating
+  membership never deduplicates samples or removes empty cells.
 - A row records applicability, custody, wall contribution,
   disable/neutralize delta, overlap, affected cells, and disposition.
 - Shared versus backend-, corpus-, domain-, or architecture-specific
@@ -90,9 +95,9 @@ The 2.0× speed gate and the 36-cell denominator live in issues #33 and
   MuHash stable-view lock, replacing UTXO decode or MuHash arithmetic
   with constants, or suppressing checkpoint/recovery/reopen work.
 - A source-level disable experiment must preserve full validation,
-  durable checkpoint, reopen, body/undo/index readiness, state
-  commitment, and reorg-readiness. Otherwise the row's `disable_delta`
-  stays `blocked_pending_safe_probe` and its disposition stays `blocked`
+  durable root, reopen, body/undo/index readiness, state commitment,
+  and reorg-readiness. Otherwise the row's `disable_delta` stays
+  `blocked_pending_safe_probe` and its disposition stays `blocked`
   (`HPA-07`).
 
 ### `HPA-07`: Disposition enum
@@ -100,18 +105,18 @@ The 2.0× speed gate and the 36-cell denominator live in issues #33 and
 Every repeatable above-noise cost, and every named lever, uses exactly
 one of:
 
-- `optimize` — attributed cost large enough to move a product cell;
-  next step is a product-safe change plus fresh whole-workload
-  remeasurement of every affected cell.
-- `already_bounded` — measured, and either too small to move a cell or
-  already at a measured optimum.
-- `blocked` — a product-safe probe, host, corpus, or comparator is
-  missing; the evidence field names the blocker.
-- `rejected` — a product-safe probe or measurement refuted the lever;
-  the evidence field names the result.
+  - `optimize`: attributed cost large enough to move a product cell.
+    Next step is a product-safe change plus fresh whole-workload
+    remeasurement of every affected cell.
+  - `already_bounded`: measured, and either too small to move a cell or
+    already at a measured optimum.
+  - `blocked`: a product-safe probe, host, corpus, or comparator is
+    missing; the evidence field names the blocker.
+  - `rejected`: a product-safe probe or measurement refuted the lever;
+    the evidence field names the result.
 
 `other`, omission because a larger cost exists, and dismissal because a
-cell already exceeds 2.0× are not dispositions.
+speed gate already exceeds the threshold are not dispositions.
 
 ### `HPA-08`: Residual honesty
 
@@ -143,7 +148,52 @@ denominator. No candidate may rely on weaker consensus, validation,
 durability, recovery, body availability, cache posture, or index
 posture.
 
+### `HPA-12`: Evidence identity per sample
+
+- Every sample in the evidence ledger carries an identity tuple:
+  artifact (binary or library hash), configuration (feature set,
+  backend, network, cache budget), corpus (stop hash, block count,
+  validity class), and durability identity (flush mode, checkpoint
+  policy, `CURRENT_SCHEMA`).
+- A sample missing any of these four fields is inadmissible. It cannot
+  fill a product cell or supply a promotion or regression verdict.
+- Nested and concurrent intervals are never summed. Parallel worker
+  walls and inclusive stage histograms are not addends.
+- All repeated samples and empty or missing cells are retained in the
+  ledger. They are never collapsed or dropped.
+- Local replay or a diagnostic fixture cannot satisfy the live full-tip
+  default-lane gate.
+
+### `HPA-13`: Promotion and regression thresholds
+
+- A product cell promotion requires a measured median win of at least
+  1.05x against the control arm, with at least three alternating
+  candidate/control runs, and each arm within the 5% stability rule.
+- The improvement must exceed the observed host noise. A 5% magnitude
+  threshold alone is not enough.
+- Non-target correctness-equivalent cells guard at less than or equal to
+  3% median and less than or equal to 5% p99 regression, with repeated
+  runs and uncertainty. Average-only concealment is not allowed.
+- Report p50, p95, p99, and max; CPU time; cycles and instructions; cache
+  misses; allocations; bytes copied; RSS; and storage high-water. Do not
+  infer a trustworthy p99 from too few samples. Keep raw data alongside
+  summaries.
+- A microbenchmark and a product benchmark answer different questions.
+  Only the product benchmark can fill a product cell.
+
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs`
-  (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`)
+  (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`), including
+  `declared_sample_paths_preserve_repetitions_and_empty_cells`,
+  `additional_declared_sample_paths_are_allowed`, and
+  `undeclared_sample_paths_are_rejected_in_later_histories` for HPA-05.
+- `bin/bitcoin-rs/tests/overhaul_evidence.rs` (planned): rejects evidence
+  missing binary, corpus, configuration, or durability identity; rejects
+  summing nested or concurrent intervals; retains repeated samples and
+  empty or missing cells.
+
+## Vocabulary
+
+Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
+product cell, noise floor, disposition.

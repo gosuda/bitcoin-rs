@@ -8,6 +8,7 @@ use crate::fsm::step;
 use crate::handshake::feature_messages;
 use crate::inv::{
     inventory_tx_hash, is_within_inventory_bound, request_inventory, request_inventory_filtered,
+    request_transaction_witness,
 };
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
@@ -167,7 +168,14 @@ pub fn dispatch_inbound_full<S>(
                 }),
                 None => request_inventory(items),
             };
-            if let Some(response) = response {
+            if let Some(mut response) = response {
+                if let Message::GetData(items) = &mut response {
+                    let witness = peer.remote_version.as_ref().is_some_and(|version| {
+                        version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64()
+                            != 0
+                    });
+                    request_transaction_witness(items, witness);
+                }
                 send(response)?;
             }
         }
@@ -224,8 +232,9 @@ fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage)
 ///
 /// When `tx_inventory` is `Some`, tx-typed items are served from the
 /// transaction inventory (the node's mempool): a held tx is emitted as a
-/// `tx` message (witness serialization), and a tx the node does not have is
-/// collected into the trailing `notfound`. Block-typed items continue to
+/// `tx` message with the serialization requested by its inventory type
+/// (P2P-01 / BIP144). Unknown transactions enter the trailing `notfound`.
+/// Block-typed items continue to
 /// stream through the chain query behind the headroom gate. BIP339 `WTx`
 /// items are resolved by wtxid; `Transaction`/`WitnessTransaction` items by
 /// txid.
@@ -255,7 +264,12 @@ fn serve_getdata(
         match item {
             Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                 let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-                if let Some(tx) = inv.get_tx(native) {
+                if let Some(mut tx) = inv.get_tx(native) {
+                    if matches!(item, Inventory::Transaction(_)) {
+                        for input in &mut tx.inputs {
+                            input.witness.clear();
+                        }
+                    }
                     send(Message::Tx(tx))?;
                 } else {
                     not_found.push(*item);
@@ -950,6 +964,44 @@ mod tests {
         }
     }
 
+    /// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not hashes.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
+    #[test]
+    fn announced_transactions_request_witness_without_changing_hashes() {
+        let inventory = FakeTxInventory::empty();
+        for witness in [false, true] {
+            for filtered in [false, true] {
+                let mut peer = ready_peer();
+                let mut version = crate::handshake::version_message(1, 0);
+                version.services = if witness {
+                    bitcoin::p2p::ServiceFlags::WITNESS
+                } else {
+                    bitcoin::p2p::ServiceFlags::NETWORK
+                };
+                peer.remote_version = Some(version);
+                let txid = bitcoin::Txid::from_byte_array([1; 32]);
+                let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
+                let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+                let requested = if witness {
+                    Inventory::WitnessTransaction(txid)
+                } else {
+                    Inventory::Transaction(txid)
+                };
+                let view: Option<&dyn TxInventory> = filtered.then_some(&inventory);
+                assert_eq!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+                        None,
+                        view,
+                    ),
+                    vec![Message::GetData(vec![requested, wtxid, block])],
+                );
+            }
+        }
+    }
+
+    /// P2P-01 / BIP144 / BIP339: requested serialization must preserve stored witnesses.
     #[test]
     fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
         use std::sync::Arc;
@@ -967,6 +1019,8 @@ mod tests {
         tx.inputs[0].witness = vec![vec![0x01]];
         let txid_item =
             Inventory::Transaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
+        let witness_txid_item =
+            Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
         let wtxid_item = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()));
         assert_ne!(tx.txid().as_bytes(), tx.wtxid().as_bytes());
         assert!(
@@ -991,22 +1045,28 @@ mod tests {
 
         // BIP339 MSG_WTX resolves the witness hash; txid requests keep their
         // own lookup even on a wtxid-relay connection. Unknowns remain notfound.
+        let mut stripped = tx.clone();
+        for input in &mut stripped.inputs {
+            input.witness.clear();
+        }
         let missing = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xFF; 32]));
         let mut peer = ready_peer();
         peer.wtxid_relay.mark_peer_supported();
         assert_eq!(
             dispatch_collect_full(
                 &mut peer,
-                &Message::GetData(vec![txid_item, wtxid_item, missing]),
+                &Message::GetData(vec![txid_item, witness_txid_item, wtxid_item, missing]),
                 None,
                 Some(&gateway),
             ),
             vec![
+                Message::Tx(stripped),
                 Message::Tx(tx.clone()),
-                Message::Tx(tx),
+                Message::Tx(tx.clone()),
                 Message::NotFound(vec![missing])
             ],
         );
+        assert_eq!(gateway.get_tx_by_wtxid(tx.wtxid()), Some(tx));
     }
 
     #[test]

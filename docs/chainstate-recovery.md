@@ -28,4 +28,4 @@ Authoritative format changes increment `CURRENT_SCHEMA` and require a separately
 
 ## Evidence
 
-`contracts/recovery.md` owns crash outcomes and proof locations. Missing planned process-kill, lost-write, partial-write, reorg, or chainstate tests mean the corresponding target guarantee remains unproven.
+`contracts/recovery.md` owns crash outcomes and proof locations. `CONSTRAINTS.md` owns gate status. Missing planned process-kill, lost-write, partial-write, reorg, or chainstate tests mean the corresponding target guarantee remains unproven.
