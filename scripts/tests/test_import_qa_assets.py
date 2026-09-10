@@ -182,7 +182,7 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
                 stream.truncate(8 * 1024 * 1024)
         limits = {p2p: 24 + BUDGET - 1, script: 1024}
         reads = {}
-        original_open = Path.open
+        original_open = open
         test = self
 
         class GuardedReader:
@@ -206,7 +206,7 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
             stream = original_open(path, mode, *args, **kwargs)
             return GuardedReader(stream, path) if path in limits and mode == "rb" else stream
 
-        with patch.object(Path, "open", guarded_open):
+        with patch.object(mapper, "open", guarded_open, create=True):
             self.run_mapper("map_p2p")
             self.run_mapper("map_script")
         self.assertEqual(reads, limits)
@@ -490,7 +490,7 @@ class PublicationTests(unittest.TestCase):
         with seed.open("wb") as stream:
             stream.truncate(8 * 1024 * 1024)
         destination = self.output / "mapped"
-        real_open = Path.open
+        real_open = open
         requested = []
 
         @contextmanager
@@ -509,7 +509,7 @@ class PublicationTests(unittest.TestCase):
 
                 yield Bounded()
 
-        with patch.object(Path, "open", bounded_open), redirect_stdout(io.StringIO()):
+        with patch.object(mapper, "open", bounded_open, create=True), redirect_stdout(io.StringIO()):
             mapper.map_direct(source, destination, BUDGET, "direct")
         self.assertEqual(requested, [BUDGET])
         self.assertEqual(list(destination.iterdir()), [])
