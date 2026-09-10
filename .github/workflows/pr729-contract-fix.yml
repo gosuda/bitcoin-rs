@@ -22,12 +22,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt
-      - name: Add the current relay contract and tie every regression to it
+      - name: Define admission-qualified local relay in the owning policy and contract
         shell: bash
         run: |
           set -euo pipefail
           test "$(git hash-object crates/p2p/src/tx_relay.rs)" = d611034b02d18a559b59467aa68278f14ea8f0ea
           test "$(git hash-object docs/contracts/mempool-mutations.md)" = d7a4392cd081076c783ec518f2a22eb11f299751
+          test "$(git hash-object docs/policies/p2p-compatibility.md)" = a5164484fe8cc222bf407fa6dd8f66b6b429e83c
           python3 - <<'PY'
           from pathlib import Path
 
@@ -41,6 +42,21 @@ jobs:
           relay = 'crates/p2p/src/tx_relay.rs'
           replace_once(
               relay,
+              '''//! Peer-origin accepts are announced by the ingress caller after the gateway
+//! returns a committed admission. RPC and reorg accepts announce through
+//! [`LocalTxRelayObserver`] on the same queue. These triggers intentionally
+//! retain their separate timing. Local notifications look up the accepted
+//! entry's real wtxid only while that acceptance remains resident. The
+//! gateway reference is weak so its observer cannot retain the gateway.
+''',
+              '''//! Peer-origin versus RPC/reorg relay trigger and admission-identity semantics
+//! are owned by `docs/policies/p2p-compatibility.md` §5. This module owns the
+//! bounded queue/worker mechanics; the observer keeps only a weak gateway
+//! reference so relay cannot retain mempool ownership.
+''',
+          )
+          replace_once(
+              relay,
               '    #[test]\n    fn delayed_local_relay_survives_unrelated_mutations() {',
               '    // MPL-01: unrelated commits do not retire a resident local admission.\n'
               '    #[test]\n    fn delayed_local_relay_survives_unrelated_mutations() {',
@@ -50,6 +66,22 @@ jobs:
               '    #[test]\n    fn local_replacement_relay_uses_the_accepted_change_sequence() {',
               '    // MPL-01: relay keys the Accepted change, not the batch base or removal.\n'
               '    #[test]\n    fn local_replacement_relay_uses_the_accepted_change_sequence() {',
+          )
+
+          policy = 'docs/policies/p2p-compatibility.md'
+          replace_once(
+              policy,
+              '''RPC/reorg mutation observers resolve the retained entry's wtxid and skip
+entries removed before observer delivery. Missing-parent requests use txids,
+''',
+              '''RPC/reorg mutation observers relay only while the exact accepted admission
+remains resident: the accepted change's mempool sequence qualifies the txid/wtxid
+lookup. Removal and re-admission retire the older callback even when the body is
+identical; unrelated mempool mutations and fee prioritisation do not. Identity and
+wtxid are read under one pool guard, released before relay enqueue; an already
+queued best-effort announcement may still be overtaken by a later removal.
+Missing-parent requests use txids,
+''',
           )
 
           contract = 'docs/contracts/mempool-mutations.md'
@@ -78,9 +110,9 @@ jobs:
           PY
           rustfmt --edition 2024 crates/p2p/src/tx_relay.rs
           git diff --check
-          test "$(git diff --name-only | sort)" = $'crates/p2p/src/tx_relay.rs\ndocs/contracts/mempool-mutations.md'
+          test "$(git diff --name-only | sort)" = $'crates/p2p/src/tx_relay.rs\ndocs/contracts/mempool-mutations.md\ndocs/policies/p2p-compatibility.md'
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/p2p/src/tx_relay.rs docs/contracts/mempool-mutations.md
+          git add crates/p2p/src/tx_relay.rs docs/contracts/mempool-mutations.md docs/policies/p2p-compatibility.md
           git commit -m 'docs(p2p): define admission-qualified local relay'
           git push origin HEAD:refs/heads/followup/local-relay-contract
