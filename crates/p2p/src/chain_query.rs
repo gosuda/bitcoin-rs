@@ -9,7 +9,7 @@ use std::sync::Arc;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Header};
 use parking_lot::RwLock;
 
 use crate::dispatch::{ChainQuery, InventoryServing};
@@ -39,18 +39,24 @@ impl ActiveChainQuery {
         self
     }
 
-    fn load_active_block_at_height(&self, current_height: u32, hash: BlockHash) -> Option<Block> {
+    fn load_active_block_bytes(
+        &self,
+        current_height: u32,
+        hash: BlockHash,
+    ) -> Option<bytes::Bytes> {
         let bytes = self
             .block_body_source
             .as_ref()?
             .block_body(current_height, hash)?;
-        let block = Block::consensus_decode(&bytes).ok()?;
-        if block.block_hash() != hash {
+        let header = bytes
+            .get(..80)
+            .and_then(|header| Header::consensus_decode(header).ok())?;
+        if header.compute_hash() != hash {
             return None;
         }
         let tree = self.block_tree.read();
         (tree.active_height_of(tree.tip()?.tip_id, hash.into()) == Some(current_height))
-            .then_some(block)
+            .then(|| bytes::Bytes::from(bytes))
     }
 }
 
@@ -114,7 +120,7 @@ impl ChainQuery for ActiveChainQuery {
         &self,
         items: &[Inventory],
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError> {
         let mut outcome = InventoryServing::default();
         for item in items {
@@ -135,8 +141,8 @@ impl ChainQuery for ActiveChainQuery {
                 outcome.halted = true;
                 return Ok(outcome);
             }
-            if let Some(block) = self.load_active_block_at_height(current_height, hash) {
-                serve(block)?;
+            if let Some(payload) = self.load_active_block_bytes(current_height, hash) {
+                serve(payload)?;
             } else {
                 outcome.not_found.push(*item);
             }
@@ -177,6 +183,7 @@ mod tests {
     use super::*;
     use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
     use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_primitives::Block;
     use bitcoin_rs_primitives::consensus_bytes;
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -222,8 +229,8 @@ mod tests {
         items: &[Inventory],
     ) -> Result<(InventoryServing, Vec<Block>), PeerError> {
         let blocks = RefCell::new(Vec::new());
-        let outcome = query.serve_inventory_blocks(items, &|| true, &mut |block| {
-            blocks.borrow_mut().push(block);
+        let outcome = query.serve_inventory_blocks(items, &|| true, &mut |payload| {
+            blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
             Ok(())
         })?;
         Ok((outcome, blocks.into_inner()))

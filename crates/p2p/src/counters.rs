@@ -5,7 +5,7 @@
 //! operator reads to tell a peer that is feeding the node from one that is
 //! merely connected to it.
 
-use std::io::{IoSlice, Read, Result as IoResult, Write};
+use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -187,6 +187,12 @@ impl CountingStream<std::net::TcpStream> {
 impl<S: Read> Read for CountingStream<S> {
     fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
         let read = self.inner.read(buffer)?;
+        self.counters.record_recv(read);
+        Ok(read)
+    }
+
+    fn read_vectored(&mut self, buffers: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        let read = self.inner.read_vectored(buffers)?;
         self.counters.record_recv(read);
         Ok(read)
     }
@@ -452,6 +458,48 @@ mod tests {
         drop(original);
         drop(clone);
         let _accepted = accepting.join();
+    }
+
+    /// getpeerinfo byte accounting (module header, Core `CNode` parity):
+    /// a vectored header+payload write counts every byte exactly once and
+    /// forwards as one inner `write_vectored` call. The default `Write` impl
+    /// would split the coalescing this wrapper exists to preserve.
+    #[test]
+    fn a_vectored_write_counts_every_slice_in_one_inner_call() {
+        struct RecordingWriter {
+            writes: usize,
+            vectored: usize,
+        }
+        impl Write for RecordingWriter {
+            fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
+                self.writes += 1;
+                Ok(buffer.len())
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.vectored += 1;
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let inner = RecordingWriter {
+            writes: 0,
+            vectored: 0,
+        };
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(inner, Arc::clone(&counters));
+        let header = [0_u8; 24];
+        let payload = [1_u8; 8];
+        let written = stream
+            .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 32);
+        assert_eq!(counters.bytes_sent(), 32);
+        assert_eq!(stream.inner.vectored, 1);
+        assert_eq!(stream.inner.writes, 0);
     }
 
     /// Nothing sent means no timestamp, which is what Core reports as zero.
