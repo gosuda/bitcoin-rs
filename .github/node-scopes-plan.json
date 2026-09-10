@@ -4,7 +4,7 @@
     {
       "label": "apply",
       "branch": "agent/node-apply-owners",
-      "payload_sha": "d6bec0f01a50ed1dd5ff65f2b686279ae6b14b59",
+      "payload_sha": "d6becbecd9a97f7904711078671d27742db387e7",
       "message": "Separate chainstate admission, validation, and commit owners",
       "tests": ["apply::"],
       "ownership": true
@@ -12,17 +12,17 @@
     {
       "label": "sync",
       "branch": "agent/node-sync-owners",
-      "payload_sha": "5c88a9de6fb7ddf3a8085d07c3bb123bd20c0ba7",
-      "repairs": [{"offset": 8510, "old": "J", "new": ""}],
+      "payload_sha": "5c88e4c4c07f3012cff6a80276ec37d3c5d04bac",
+      "repairs": [{"offset": 7156, "old": "J", "new": ""}],
       "message": "Separate sync requests, staging, and chain settlement",
       "tests": ["sync::"]
     },
     {
       "label": "mining",
-      "parts": ["mining-0", "mining-1"],
+      "parts": ["mining85-0", "mining85-1", "mining85-2", "mining85-3", "mining85-4"],
+      "encoding": "base85",
       "branch": "agent/node-mining-owners",
-      "payload_sha": "e9e219cf41014c04fdd591ea6b8bdf5785d9513d",
-      "repairs": [{"offset": 822, "old": "+", "new": ""}],
+      "payload_sha": "4c4ec0d48f1b21bb045c82baae3e2a6d23b0b5af",
       "message": "Separate mining generation, candidates, and submission",
       "tests": ["mining::"]
     }
