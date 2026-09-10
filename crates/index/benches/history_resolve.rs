@@ -4,7 +4,7 @@
 //! production-shaped flat-file fixture.
 //!
 //! Blocks are served from a **real `FlatFileBlockStore`**, the same path
-//! production takes through `FlatFilePruneBodyStore`: open, `fstat`, seek, read.
+//! production takes through `IndexedBlockBodyStore`: open, `fstat`, seek, read.
 //! An earlier revision served them from an in-memory map, which left the syscall
 //! sequence out entirely and reported ratios roughly an order of magnitude too
 //! large — a whole-body read and a 250-byte range read differ by only about 2x
@@ -18,18 +18,23 @@
 // and confined to fixture setup and the timed calls' error arms.
 #![allow(clippy::expect_used)]
 
-use std::hint::black_box;
-use std::sync::Arc;
-
 use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
+
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     deserialize,
 };
-use bitcoin_rs_storage::RocksDbStore;
-use bitcoin_rs_storage::block_file::{BlockFilePosition, FlatFileBlockStore};
+
+use bitcoin_rs_storage::{
+    RocksDbStore,
+    block_file::{BlockFilePosition, FlatFileBlockStore},
+};
+
 use criterion::{Criterion, criterion_group, criterion_main};
+
 use hashbrown::HashMap;
+
+use std::{hint::black_box, sync::Arc};
 
 /// Filler transactions per block for the ~250 KB shape.
 const TXS_PER_BLOCK_250K: usize = 2_200;
@@ -41,7 +46,7 @@ const BASE_HEIGHT: u32 = 0;
 
 /// Block source over a real flat-file store.
 ///
-/// Mirrors `FlatFilePruneBodyStore`: a position lookup, then
+/// Mirrors `IndexedBlockBodyStore`: a position lookup, then
 /// `FlatFileBlockStore::load` for a whole body or `load_range` for a slice. Both
 /// pay the real open/`fstat`/seek/read sequence, so the ratio this harness
 /// reports is one a node can actually see.

@@ -29,3 +29,7 @@ __pycache__/
 # lean-ctx local tooling cache
 .lean-ctx/
 .cargo-tmp/
+
+# Local formal-checker output
+/_apalache-out/
+/graph.yaml

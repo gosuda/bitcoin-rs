@@ -440,11 +440,17 @@ fn check_tuple_content_length(
         if tuple.body_len != Some(0) {
             return Err(fail("204 response must have an empty body".into()));
         }
-        return if declared.is_empty() {
-            Ok(())
-        } else {
-            Err(fail("204 response must not carry Content-Length".into()))
-        };
+        // RFC 9110 §8.6 forbids Content-Length on 204, but libevent-era
+        // Core captures show `Content-Length: 0`. Accept both capture
+        // forms; the node's own omission is pinned by the negative probe.
+        if let Some(value) = declared.first() {
+            if *value != "0" || declared.len() != 1 {
+                return Err(fail(
+                    "204 Content-Length must be absent or exactly \"0\"".into(),
+                ));
+            }
+        }
+        return Ok(());
     }
     let Some(length) = tuple.body_len else {
         return Ok(());

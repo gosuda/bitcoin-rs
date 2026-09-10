@@ -48,6 +48,8 @@ pub mod kernel;
 pub mod rust_path;
 /// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
+/// Shared transaction-level BIP141 sigop accounting.
+mod sigops;
 /// Block rule checks.
 pub mod verify_block;
 /// Transaction rule checks.
@@ -60,6 +62,8 @@ pub use bip9::{
 pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 pub use block_view::BlockView;
 pub use rust_path::{TipState, UtxoView};
+pub use sigops::transaction_sigop_cost;
+pub use sigops::transaction_sigop_cost as total_sigop_cost;
 pub use verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
     verify_merkle_root_with_txids,

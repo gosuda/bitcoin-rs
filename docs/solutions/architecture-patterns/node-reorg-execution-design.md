@@ -34,7 +34,7 @@ state as of this note's date (2026-08-08). Check the code before treating an
 
 Done:
 
-* `ColumnFamily::UndoData` across all four backends, and a versioned undo codec
+* `ColumnFamily::UndoData` across all retained backends, and a versioned undo codec
   bound to the block hash (`crates/utxo/src/undo_codec.rs`).
 * Undo generation in the same pass as the forward UTXO changes. The undo write
   is queued before the block body and UTXO commit. A clean checkpoint makes the
@@ -174,7 +174,7 @@ Done:
 
 | Piece | Notes |
 |---|---|
-| `ColumnFamily::UndoData` | enum, its `ALL` list, and all four backends |
+| `ColumnFamily::UndoData` | enum, its `ALL` list, and all retained backends |
 | Versioned undo codec | first byte a format version; keyed by height **and** block hash, with 10 rejection tests |
 | Undo generation in apply | built in the same pass as `BorrowedBlockChanges`, sharing one set of filters so the two halves cannot drift |
 | Persistence | queued before the block body and UTXO commit; flushed with a clean checkpoint, not per block |
@@ -187,7 +187,7 @@ Done:
 | Durable interlock | a phased in-flight marker in `UndoData`, armed and flushed before the UTXO mutation; startup refuses while it is set. TxIndex is outside this marker. See *Disconnect marker phase* in `CONCEPTS.md` |
 | Chain-transition serialization | `ChainTransition` is the mutation capability: it holds admission, the exclusive transition lock, and mempool generation. `TransitionLock` is the lock token alone, used for read-consistent planning that may abort. One `ChainTransition` covers authoritative replanning completion, all disconnects, and the available contiguous connect prefix. `PruneGuard` wraps `TransitionLock`, reads the applied tip only after acquisition, validates the monotonic prune height against the reorg-safety margin, and remains held through storage, file, and cache deletion. |
 | Branch switching | `switch_to_branch` recomputes the complete ordered `plan_reorg` result under the transition guard and mutates only when it equals the optimistic plan. A shorter branch is eligible when its accumulated work is greater. A permanent connect failure invalidates its subtree and selects the best valid tip. |
-| Body acquisition | Each attempt loads all disconnect bodies and the contiguous connect prefix from bounded staging first, then the fallible `PruneBodyStore`; there is no applied-record body cache. The first missing connect body prevents mutation. A later missing body follows a coherent committed prefix. Each committed connect retires its exact staging and download-window entry; invalid subtree ownership is purged. |
+| Body acquisition | Each attempt loads all disconnect bodies and the contiguous connect prefix from bounded staging first, then the fallible `BlockBodyStore`; there is no applied-record body cache. The first missing connect body prevents mutation. A later missing body follows a coherent committed prefix. Each committed connect retires its exact staging and download-window entry; invalid subtree ownership is purged. |
 | Fatal lifecycle | `Fatal` and `MarkerStuck` close apply admission while the transition lock is held; sync sets the shared process shutdown token |
 | RPC invalidation | `invalidateblock` delegates through `ChainControl`; unknown blocks map to Core not-found, genesis is refused, required bodies are preflighted before header mutation, one transition witness spans invalidation and branch switching, and a successful active-tip rollback emits `pubsequence D` |
 | Whole-chainstate RPC reads | `scantxoutset` shares the chain-transition mutex and reads its UTXO scan plus applied-tip identity under that guard; it cannot publish metadata from the opposite side of a connect or disconnect. |

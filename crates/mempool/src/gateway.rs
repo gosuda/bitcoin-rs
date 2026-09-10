@@ -18,9 +18,10 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{UtxoView, verify_transaction};
+use bitcoin_rs_consensus::{ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_script::script::{is_p2sh, is_witness_program};
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
@@ -65,7 +66,7 @@ pub enum ChainChangeError {
 
 /// Resolved context and exact state tokens for one admission attempt.
 ///
-/// The caller captures `expected_generation` (an even value read from
+/// Shared submission preparation captures `expected_generation` (an even value read from
 /// [`MempoolGateway::stable_generation`]) and `expected_sequence` (read from
 /// the pool under a read guard) **before** resolving UTXO data. The gateway
 /// re-checks both under the write lock so a chain change or mempool mutation
@@ -137,6 +138,93 @@ pub enum AdmitError {
     Consensus,
 }
 
+/// Immutable input facts and a provisional verdict. It carries no pool borrow:
+/// script execution must finish before the writer reservation is acquired.
+pub(crate) struct PreparedAdmission {
+    pub(crate) fact: crate::standardness::TxAcceptanceFact,
+    prevouts: Vec<(OutPoint, TxOut)>,
+    rejection: Option<(AdmitError, RejectScope)>,
+    policy: crate::MempoolPolicySnapshot,
+    limits: crate::MempoolLimits,
+}
+
+impl PreparedAdmission {
+    pub(crate) fn matches_pool(&self, pool: &Mempool) -> bool {
+        self.policy == pool.policy_snapshot() && self.limits == pool.limits
+    }
+
+    fn reject(&mut self, error: AdmitError, scope: RejectScope) {
+        self.fact.allowed = Some(false);
+        self.fact.reject_reason = Some(match error {
+            AdmitError::Policy(reason) => reason,
+            _ => crate::standardness::AcceptanceRejectReason::ScriptVerify,
+        });
+        self.rejection = Some((error, scope));
+    }
+
+    /// Both preview and submission execute precisely this verification over
+    /// the copied input outputs, never over a changing pool or chain reader.
+    pub(crate) fn verify(&mut self, request: &AdmissionRequest) {
+        if self.rejection.is_some() {
+            return;
+        }
+        let default_scope = rejection_scope(&request.tx);
+        let Some(height) = request.height.checked_add(1) else {
+            self.reject(AdmitError::Consensus, default_scope);
+            return;
+        };
+        if request.prevouts.is_empty() {
+            self.reject(AdmitError::Consensus, default_scope);
+            return;
+        }
+        if let Err(error) = verify_transaction(
+            &request.tx,
+            &PrevoutMap(&self.prevouts),
+            height,
+            request.locktime_cutoff,
+            VerifyFlags::STANDARD,
+        ) {
+            // Core's rejection cache must allow a different witness body for
+            // witness-sensitive or possibly witness-stripped script failures.
+            let possibly_stripped = matches!(
+                error,
+                ConsensusError::Script { .. } | ConsensusError::Kernel(_)
+            ) && self.prevouts.iter().any(|(_, output)| {
+                is_witness_program(&output.script_pubkey) || is_p2sh(&output.script_pubkey)
+            });
+            self.reject(
+                AdmitError::Consensus,
+                if possibly_stripped {
+                    RejectScope::Witness
+                } else {
+                    default_scope
+                },
+            );
+            return;
+        }
+        // Core v31.1 BroadcastTransaction and testmempoolaccept apply the
+        // caller's maximum only after a successful admission verdict.
+        if crate::standardness::exceeds_max_feerate(
+            self.fact.base_fee.unwrap_or(0),
+            self.fact.vsize,
+            request.max_feerate_sat_per_kvb,
+        ) {
+            self.reject(
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MaxFeeExceeded),
+                default_scope,
+            );
+        }
+    }
+}
+
+fn rejection_scope(tx: &Tx) -> RejectScope {
+    if tx.has_witness() {
+        RejectScope::Witness
+    } else {
+        RejectScope::Transaction
+    }
+}
+
 /// Interns one [`MempoolGateway`] per pool `Arc` identity.
 ///
 /// This is the crate's one piece of process-global state, and it exists
@@ -149,6 +237,7 @@ pub enum AdmitError {
 /// and `shared` shrinks to run-time composition plus tests.
 use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
+use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
 use crate::rbf::{RbfError, ReplacementCandidate};
 
@@ -296,7 +385,10 @@ struct PublishState {
 /// an absent observer enqueue nothing, allocate nothing, and spawn no
 /// thread.
 pub struct MempoolGateway {
-    pool: Arc<RwLock<Mempool>>,
+    pub(crate) pool: Arc<RwLock<Mempool>>,
+    /// Pool guards precede this lock. Never held during observer calls,
+    /// script verification, or chain/transport access.
+    pub(crate) lifecycle: Mutex<crate::orphan::AdmissionLifecycle>,
     /// The one observer slot, held as the composite so a second subsystem
     /// can attach its own named leg after construction. An absent composite
     /// means nobody is listening and the publish path stays allocation-free.
@@ -352,6 +444,7 @@ impl MempoolGateway {
         });
         Self {
             pool,
+            lifecycle: Mutex::new(crate::orphan::AdmissionLifecycle::default()),
             observer: composite,
             publish: Mutex::new(PublishState {
                 queue: VecDeque::new(),
@@ -574,110 +667,62 @@ impl MempoolGateway {
         })
     }
 
-    /// One atomic admission operation. Takes `pool.write()` once, then checks
-    /// in this order before any policy mutation:
-    ///
-    /// 1. exact chain generation equals the request value and is even,
-    /// 2. current `pool.sequence_number()` equals the request sequence,
-    /// 3. exact transaction identity is already present.
-    ///
-    /// The exact duplicate returns [`AdmitOutcome::AlreadyKnown`] successfully
-    /// and creates no envelope, sequence, or publication. For a new
-    /// transaction, policy is evaluated under the same write guard and the
-    /// established `replace_transaction` path performs the mutation —
-    /// preserving under-lock BIP125 and package-limit revalidation. On
-    /// success, one `MutationResult` whose ordered removals precede exactly
-    /// one accepted change is published via the existing commit/publish seam.
-    /// A replacement the post-insert trim shed after commit publishes its
-    /// committed removals and then rejects with the same
-    /// [`AdmitError::Policy`] the pre-commit refusal produced.
-    ///
-    /// Any mismatch or rejection returns before publish-mutex acquisition and
-    /// before mutation.
+    /// Evaluates policy and copies input outputs under a pool read, then
+    /// verifies scripts without a pool lock. The writer rechecks the captured
+    /// chain generation, pool sequence and policy before any lifecycle change
+    /// or mutation. Exact duplicates retain their idempotent submission result.
+    /// Committed changes use the existing ordered publication seam, including
+    /// removals caused by a transaction shed after insertion.
+    // The public atomic API consumes its prepared request; the private path
+    // borrows it so the shared retry owner can recover the Arc after a mismatch.
     #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
-        // Test-only causal seam: parks the first admission BEFORE acquiring
-        // the write lock so a cross-crate test can mutate the pool and
-        // generation between the caller's capture and the gateway's
-        // re-check, forcing a deterministic transient error. Disarmed, this
-        // is a no-op. One shot: the park consumes the arm.
+        self.admit_transaction_claimed(&request, None)
+    }
+
+    /// A private resident-body claim joins generation/sequence validation.
+    /// Evicted or refreshed retry bodies may not mutate pool or lifecycle.
+    // Keep token checks, mutation, lifecycle finalization and FIFO publication
+    // in one auditable write-lock interval instead of splitting the commit.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn admit_transaction_claimed(
+        &self,
+        request: &AdmissionRequest,
+        claim: Option<&crate::orphan::HeldOrphan>,
+    ) -> Result<AdmitOutcome, AdmitError> {
+        let mut prepared = {
+            let pool = self.pool.read();
+            self.check_admission_state(&pool, request)?;
+            Self::prepare_admission(&pool, request)
+        };
+        prepared.verify(request);
+
+        // Causal seam after outside-lock verification and before the writer
+        // recheck. Failed verdicts also pass this seam: stale failures must
+        // never finalize peer lifecycle state.
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
         let mut pool = self.pool.write();
-
-        // 1. Exact chain generation check (even and matches request).
-        let generation = self.chain_generation.load(Ordering::Acquire);
-        if generation != request.expected_generation || !generation.is_multiple_of(2) {
-            return Err(AdmitError::GenerationChanged);
-        }
-
-        // 2. Exact mempool sequence check.
-        if pool.sequence_number() != request.expected_sequence {
+        self.check_admission_state(&pool, request)?;
+        if !prepared.matches_pool(&pool) {
             return Err(AdmitError::MempoolChanged);
         }
-        // 3. Exact duplicate → AlreadyKnown (no envelope, no sequence, no
-        //    publication).
-        let txid = request.tx.txid();
-        if pool.contains_txid(&txid) {
+        if claim.is_some_and(|claim| !self.lifecycle.lock().orphans.is_current(claim)) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
-        // 4. Policy evaluation under the same write guard. `evaluate_one`
-        //    checks standardness, missing inputs, coinbase, min-relay,
-        //    max-fee, and replacement — but NOT package limits (those are
-        //    enforced by `replace_transaction` below).
-        let policy = pool.policy_snapshot();
-        let mempool_min_fee = crate::eviction::mempool_min_fee_sat_per_kvb(
-            &pool,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
-        let fact = crate::standardness::evaluate_one(
-            &pool,
-            &policy.standardness,
-            &request.tx,
-            request.context,
-            request.max_feerate_sat_per_kvb,
-            mempool_min_fee,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
-        if let Some(reason) = fact.reject_reason {
-            return Err(AdmitError::Policy(reason));
+        let txid = request.tx.txid();
+        if pool.contains_txid(&txid) {
+            self.lifecycle.lock().orphans.remove(txid);
+            return Ok(AdmitOutcome::AlreadyKnown);
         }
-
-        // 4b. Consensus verification (finality, duplicate inputs, overspend,
-        //     sigop limits) plus Core's policy script checks over the
-        //     resolved prevouts layered with the mempool. A non-coinbase
-        //     transaction with no resolved prevouts must be rejected
-        //     outright — policy may not have caught it if the caller set
-        //     missing_inputs=false. Scripts run here under
-        //     `VerifyFlags::STANDARD`, matching Core's `PolicyScriptChecks`
-        //     (`STANDARD_SCRIPT_VERIFY_FLAGS`, validation.cpp): an
-        //     unrelayable transaction must not occupy pool capacity until
-        //     block connection evicts it.
-        if request.prevouts.is_empty() {
-            // Coinbase transactions are never admitted via the gateway.
-            // Empty prevouts on a non-coinbase tx means the caller did not
-            // resolve inputs — reject rather than admit unverified.
-            return Err(AdmitError::Consensus);
+        if let Some((error, scope)) = prepared.rejection {
+            self.record_peer_failure(&pool, request, error, scope);
+            return Err(error);
         }
-        let chain_view = PrevoutMap(&request.prevouts);
-        let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
-        // Finality is evaluated at the height of the next block the
-        // transaction could be mined in (`height + 1`), exactly Core's
-        // `CheckFinalTxAtTip`.
-        // A u32 overflow on the next block height is not a valid chain
-        // state, but failing closed here matches the conservative choice:
-        // nothing is admitted when the finality question is unanswerable.
-        let finality_height = request.height.checked_add(1).ok_or(AdmitError::Consensus)?;
-        if let Err(_err) = verify_transaction(
-            &request.tx,
-            &view,
-            finality_height,
-            request.locktime_cutoff,
-            VerifyFlags::STANDARD,
-        ) {
-            return Err(AdmitError::Consensus);
-        }
+        let fact = prepared.fact;
+        let policy = prepared.policy;
+        let default_reject_scope = rejection_scope(&request.tx);
 
         // 5. Mutate under the same write guard via `replace_transaction`,
         //    which handles BIP125 replacement, package limits, and insert.
@@ -704,13 +749,31 @@ impl MempoolGateway {
                         crate::standardness::AcceptanceRejectReason::Replacement(other),
                     ),
                 }
-            })?;
+            });
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.record_peer_failure(&pool, request, error, default_reject_scope);
+                return Err(error);
+            }
+        };
 
         // 6. Enqueue for publication and elect a drainer if needed. Both
         //    outcome variants carry a committed mutation: a replacement the
         //    trim shed publishes its conflict removals like any other commit.
         let shed = outcome.is_shed();
         let result = outcome.into_mutation();
+        self.update_admission_lifecycle(&pool, &result);
+        if shed {
+            self.record_peer_failure(
+                &pool,
+                request,
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::Replacement(
+                    RbfError::Mempool(crate::pool::MempoolError::Full),
+                )),
+                default_reject_scope,
+            );
+        }
         let mut elected = false;
         if !result.changes.is_empty() && self.observer.is_some() {
             let mut publish = self.publish.lock();
@@ -736,6 +799,102 @@ impl MempoolGateway {
             ));
         }
         Ok(AdmitOutcome::Committed(result))
+    }
+
+    pub(crate) fn check_admission_state(
+        &self,
+        pool: &Mempool,
+        request: &AdmissionRequest,
+    ) -> Result<(), AdmitError> {
+        if self.stable_generation() != Some(request.expected_generation) {
+            return Err(AdmitError::GenerationChanged);
+        }
+        if pool.sequence_number() != request.expected_sequence {
+            return Err(AdmitError::MempoolChanged);
+        }
+        Ok(())
+    }
+
+    /// The shared policy evaluator. Pool-dependent work ends at this boundary;
+    /// the returned job owns every previous output its script checks may read.
+    pub(crate) fn prepare_admission(
+        pool: &Mempool,
+        request: &AdmissionRequest,
+    ) -> PreparedAdmission {
+        let policy = pool.policy_snapshot();
+        let chain = PrevoutMap(&request.prevouts);
+        let view = crate::accept::MempoolUtxoView::new(pool, &chain);
+        // Bound every input-copy and sigop scan by the existing standardness
+        // contract; oversized/nonstandard requests keep their policy verdict.
+        let standard =
+            crate::standardness::is_standard_tx(&request.tx, &policy.standardness).is_ok();
+        let prevouts: Vec<_> = if standard && !pool.contains_txid(&request.tx.txid()) {
+            request
+                .tx
+                .inputs
+                .iter()
+                .filter_map(|input| {
+                    view.lookup(&input.previous_output)
+                        .map(|output| (input.previous_output, output))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Sigops are owner-computed from exactly the layered outputs that
+        // verification will use, including pool parents omitted by the caller.
+        // Caller-supplied accounting never reaches the stored entry. Inputs
+        // missing everywhere contribute nothing here; verification rejects them.
+        let mut context = request.context;
+        if standard {
+            context.sigop_cost = total_sigop_cost(&request.tx, &prevouts, VerifyFlags::STANDARD);
+        }
+        let floor = crate::eviction::mempool_min_fee_sat_per_kvb(
+            pool,
+            policy.incremental_relay_fee_sat_per_kvb,
+        );
+        let fact = crate::standardness::evaluate_one(
+            pool,
+            &policy.standardness,
+            &request.tx,
+            context,
+            None,
+            floor,
+            policy.incremental_relay_fee_sat_per_kvb,
+        );
+        let rejection = fact
+            .reject_reason
+            .map(|reason| (AdmitError::Policy(reason), rejection_scope(&request.tx)));
+        let mut prepared = PreparedAdmission {
+            fact,
+            prevouts,
+            rejection,
+            policy,
+            limits: pool.limits,
+        };
+        // Preserve structural-check precedence and transaction-scoped rejects
+        // before missing-input policy can retain a peer orphan.
+        if !pool.contains_txid(&request.tx.txid()) {
+            if standard
+                && bitcoin_rs_consensus::verify_tx::verify_transaction_input_outpoints(&request.tx)
+                    .is_err()
+            {
+                prepared.reject(AdmitError::Consensus, RejectScope::Transaction);
+            } else if crate::admission::has_invalid_mempool_outpoint(pool, &request.tx) {
+                prepared.reject(
+                    AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MissingInputs),
+                    RejectScope::Transaction,
+                );
+            } else if prepared.rejection.is_none()
+                && context.sigop_cost > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST
+            {
+                prepared.reject(
+                    AdmitError::Policy(crate::standardness::AcceptanceRejectReason::TooManySigops),
+                    rejection_scope(&request.tx),
+                );
+            }
+        }
+        prepared
     }
 
     /// Commits `pool.remove_for_block` and publishes its result.
@@ -802,6 +961,7 @@ impl MempoolGateway {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
             let result = outcome.committed();
+            self.update_admission_lifecycle(&pool, result);
             if !result.changes.is_empty() && self.observer.is_some() {
                 let mut publish = self.publish.lock();
                 publish.queue.push_back(MutationEnvelope {
@@ -817,6 +977,54 @@ impl MempoolGateway {
             self.drain();
         }
         Ok(outcome)
+    }
+
+    /// Finalizes peer-only holding/rejection while the exact admission state
+    /// remains locked. Thus a parent commit or chain reset cannot pass between
+    /// the verdict and registration of its lifecycle consequences.
+    fn record_peer_failure(
+        &self,
+        pool: &Mempool,
+        request: &AdmissionRequest,
+        error: AdmitError,
+        scope: RejectScope,
+    ) {
+        let AdmissionOrigin::Peer(source) = request.origin else {
+            return;
+        };
+        let hold = error
+            == AdmitError::Policy(crate::standardness::AcceptanceRejectReason::MissingInputs)
+            && crate::admission::can_hold_orphan(
+                pool,
+                &request.tx,
+                &pool.policy_snapshot().standardness,
+            );
+        let mut lifecycle = self.lifecycle.lock();
+        if hold {
+            lifecycle
+                .orphans
+                .insert(Arc::clone(&request.tx), source, request.time);
+        } else {
+            lifecycle.reject(&request.tx, scope);
+        }
+    }
+
+    /// Required internal lifecycle work is independent of fallible observers.
+    /// A ready marker authorizes re-preparation only, never admission itself.
+    fn update_admission_lifecycle(&self, pool: &Mempool, result: &MutationResult) {
+        if result.changes.is_empty() {
+            return;
+        }
+        let mut lifecycle = self.lifecycle.lock();
+        for change in &result.changes {
+            if matches!(change.outcome, crate::mutation::MutationOutcome::Accepted) {
+                let txid = Txid::from(change.txid);
+                lifecycle.orphans.remove(txid);
+                if pool.contains_txid(&txid) {
+                    lifecycle.orphans.parent_ready(txid);
+                }
+            }
+        }
     }
 
     /// The same path for pool methods that cannot fail.
@@ -927,13 +1135,9 @@ impl ChainChangeGuard {
     }
 }
 
-/// Test-only causal gate for the publication ordering proof.
-///
-/// Disarmed, [`park_if_armed`] is a no-op and every mutator passes. Armed,
-/// the next mutator parks inside the exact publish-lock acquisition helper
-/// after sequencing, while it still holds the pool write guard. It signals
-/// the test on `parked` and blocks on `release`. One shot: the park consumes
-/// the arm.
+/// Test-only causal gate after admission verification, before writer recheck.
+/// Disarmed it is a no-op. Armed, one matching attempt parks without holding
+/// any pool/lifecycle lock, including when its provisional verdict rejects.
 #[cfg(any(test, feature = "test-seam"))]
 mod ordering_gate {
     use parking_lot::Mutex;
@@ -975,8 +1179,7 @@ mod ordering_gate {
             return;
         };
         let _ = parked_tx.send(());
-        // The parked mutator holds the pool write guard here; a dead test
-        // thread drops the sender and the park dissolves instead of hanging.
+        // A dead test drops the sender, releasing the parked attempt.
         let _ = release_rx.recv();
     }
 }
@@ -2246,6 +2449,40 @@ mod tests {
         assert!(gateway.read().is_empty());
     }
 
+    /// Core v31.1 policy.h limits a standard transaction to 16,000 sigops.
+    /// BIP141 / rust-bitcoin independently establish the weighted P2SH cost.
+    /// The caller's declared zero must not hide these redeem-script sigops.
+    #[test]
+    fn admission_counts_resolved_sigops_before_verification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = gateway_with(None);
+        let mut tx = standard_tx(0x84);
+        let redeem_script = vec![0xae; 201];
+        tx.inputs[0].script_sig = bitcoin_rs_script::script::push_data(&redeem_script);
+        let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
+        request.prevouts[0].1.script_pubkey = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        request.context.sigop_cost = 0;
+        let oracle: bitcoin::Transaction =
+            bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))?;
+        let previous = bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(request.prevouts[0].1.value),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                request.prevouts[0].1.script_pubkey.clone(),
+            ),
+        };
+        let cost = oracle.total_sigop_cost(|_| Some(previous.clone()));
+        assert!(u32::try_from(cost)? > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST);
+        assert_eq!(
+            gateway.admit_transaction(request),
+            Err(AdmitError::Policy(
+                crate::standardness::AcceptanceRejectReason::TooManySigops
+            ))
+        );
+        assert!(gateway.read().is_empty());
+        assert_eq!(gateway.read().sequence_number(), 0);
+        Ok(())
+    }
+
     #[test]
     fn stale_generation_rejects_without_mutation_or_publication() {
         let observer = Arc::new(RecordingObserver::default());
@@ -2846,5 +3083,60 @@ mod tests {
             "duplicate inputs must fail consensus verification: {result:?}"
         );
         assert!(gateway.read().is_empty());
+    }
+
+    #[test]
+    fn input_structure_checks_follow_generation_and_sequence_guards() {
+        let gateway = gateway_with(None);
+        let mut candidate = standard_tx(93);
+        candidate.inputs.push(candidate.inputs[0].clone());
+        candidate.inputs[0].witness = vec![vec![1]];
+        let origin = AdmissionOrigin::Peer(crate::PeerToken {
+            addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+            connection_id: 7,
+        });
+        let request = admit_request(&gateway, &candidate, origin);
+        gateway.chain_generation.store(2, Ordering::Release);
+        assert_eq!(
+            gateway.admit_transaction(request),
+            Err(AdmitError::GenerationChanged)
+        );
+        assert_eq!(gateway.recent_rejects_count(), 0);
+
+        let request = admit_request(&gateway, &candidate, origin);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&tx(94)))
+            .expect("fixture insert");
+        assert_eq!(
+            gateway.admit_transaction(request),
+            Err(AdmitError::MempoolChanged)
+        );
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.read().sequence_number(), 1);
+    }
+
+    #[test]
+    fn input_structure_nonstandard_transactions_keep_policy_precedence() {
+        use crate::standardness::{AcceptanceRejectReason, StandardnessError};
+        for (version, witness_len, reason) in [
+            (0, 1, StandardnessError::Version),
+            (2, 400_001, StandardnessError::Weight),
+        ] {
+            let gateway = gateway_with(None);
+            let mut candidate = standard_tx(95);
+            candidate.version = version;
+            candidate.inputs.push(candidate.inputs[0].clone());
+            candidate.inputs[0].witness = vec![vec![0; witness_len]];
+            let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+            assert_eq!(
+                gateway.admit_transaction(request),
+                Err(AdmitError::Policy(AcceptanceRejectReason::NonStandard(
+                    reason
+                )))
+            );
+            assert!(gateway.read().is_empty());
+            assert_eq!(gateway.read().sequence_number(), 0);
+        }
     }
 }

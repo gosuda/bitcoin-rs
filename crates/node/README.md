@@ -20,6 +20,10 @@ the ZMQ protocol and transport; node constructs its `ZmqPublisher`, attaches the
 mempool observer, and orders publication with committed chain effects. `signal`
 and `shutdown` bridge process signals into graceful shutdown.
 
+For transactions, node supplies the chain view and wires the runtime workers and
+committed-result handoffs. The authoritative cross-crate ownership split is
+[ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
+
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
 See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
 ordering, fallback and reorg behavior, configuration, metrics, and verification.
@@ -40,7 +44,6 @@ runtime crate.
   #213 is the measurement gate for dropping `kernel` from this crate's defaults.
 - `rocksdb`, `fjall`, `redb`: forward the named storage backend to every subsystem
   crate.
-- `mdbx`: forward the mdbx backend to the crates that provide one.
 - `kernel`: route consensus verification through bitcoinkernel
   (`bitcoin-rs-consensus/kernel`).
 - `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;

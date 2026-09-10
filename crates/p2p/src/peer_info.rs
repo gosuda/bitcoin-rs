@@ -14,6 +14,9 @@ pub struct PeerInfo {
     pub addr: SocketAddr,
     /// Protocol version advertised by the remote.
     pub version: u32,
+    /// Whether this connection requested BIP339 witness-id announcements.
+    /// Published with the completed handshake; never inherited by a replacement.
+    pub wtxid_relay: bool,
     /// Service flags advertised by the remote (`ServiceFlags::to_u64`).
     pub services: u64,
     /// User-agent string advertised by the remote.
@@ -67,6 +70,7 @@ impl PeerInfo {
         Self {
             addr,
             version: version.version,
+            wtxid_relay: false,
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,
@@ -96,6 +100,7 @@ impl PeerInfo {
         Self {
             addr,
             version: version.version,
+            wtxid_relay: false,
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,
@@ -178,6 +183,7 @@ mod tests {
         PeerInfo {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333),
             version: 70_016,
+            wtxid_relay: false,
             services,
             user_agent: String::new(),
             start_height: 0,

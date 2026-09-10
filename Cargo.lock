@@ -225,11 +225,12 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin-rs-node",
+ "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
  "clap",
  "mimalloc",
@@ -237,12 +238,13 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "toml 1.1.5+spec-1.1.0",
 ]
 
 [[package]]
 name = "bitcoin-rs-chain"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -263,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-consensus"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -284,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-index"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -306,9 +308,10 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mempool"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
+ "bitcoin",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
@@ -326,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mining"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-chain",
@@ -341,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-node"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -387,11 +390,12 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-p2p"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bytemuck",
@@ -414,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-primitives"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bytemuck",
@@ -429,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-rpc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -464,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-script"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-consensus",
@@ -485,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bytemuck",
@@ -500,7 +504,6 @@ dependencies = [
  "rustix",
  "serde",
  "sha2 0.11.0",
- "signet-libmdbx",
  "tempfile",
  "thiserror",
  "tracing",
@@ -508,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utxo"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitcoin",
  "bitcoin-rs-primitives",
@@ -631,12 +634,6 @@ dependencies = [
  "quote",
  "syn 3.0.5",
 ]
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteorder-lite"
@@ -2574,30 +2571,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "signet-libmdbx"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd334ebaa7603e0ba8c9d701c883b3d264232e539860b6ff751c94aa959f6f0d"
-dependencies = [
- "bitflags 2.13.1",
- "byteorder",
- "parking_lot",
- "signet-mdbx-sys",
- "smallvec",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "signet-mdbx-sys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1edd9fd6e430ce6243327fed2d343da022c4737c158874a632bd00f4cbd1f5f7"
-dependencies = [
- "cc",
 ]
 
 [[package]]

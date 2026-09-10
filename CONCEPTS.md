@@ -54,18 +54,21 @@ removal), and the 8-byte little-endian mempool sequence number assigned to the
 change. A transaction mined in a connected block emits no `R`: the block's `C`
 event covers it, matching Core. Every event concludes with a topic-local
 little-endian `u32` sequence counter frame. Reorg disconnects are emitted
-tip-first before connects on the replacement branch.
+tip-first before connects on the replacement branch. Each socket owns
+`DEFAULT_ZMQ_HWM = 1_000`.
 `bitcoin_rs_rpc::zmq` owns the compatibility payload and transport;
 `ChainFollowers` / `ChainEffects` own emission timing relative to committed
 chain transitions.
 
 ### Post-commit chain effects
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
-ZMQ projections, TxIndex wake, mining generation, and P2P admission. Owned by
-`ChainFollowers` / `ChainEffects`. Dispatched after the tip is published,
-while the chain transition is still held. It cannot fail the authoritative
-transition. Index recovery still uses `ChainEventPublisher` hints (`EVT-02`);
-this is not a second event log.
+ZMQ projections, TxIndex wake, mining generation, and mempool admission-state
+notifications. `ChainFollowers` / `ChainEffects` own dispatch timing after
+the tip is published, while the chain transition is still held. Transaction
+ownership follows [ARCH-05](docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
+Derived work cannot fail the authoritative transition.
+Index recovery still uses `ChainEventPublisher` hints (`EVT-02`); this is not
+a second event log.
 
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
@@ -344,7 +347,7 @@ exclusive union is subtracted from whole-run wall. Owner:
 `docs/benchmarks/hot-path-ledger.toml`.
 
 ### Retained benchmark contract
-Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained, and the historical campaign JSON evidence is retired by #224 (`docs/benchmarks/hot-path-attribution.md`). The retained Criterion targets are the `benches/` directories of the owning crates (currently consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write). Which targets CI compiles is owned by the `bench-smoke` jobs in `.github/workflows/ci.yml` and `main.yml`, not by this glossary.
+Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained, and the historical campaign JSON evidence is retired by #224 (`docs/benchmarks/hot-path-attribution.md`). The retained Criterion targets are the `benches/` directories of the owning crates (currently consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write). Which targets CI compiles is owned by the `bench-smoke` job in `.github/workflows/main.yml`, not by this glossary.
 
 ### C150
 The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
@@ -370,4 +373,4 @@ A throughput change is measured against CPU time as well as wall time, because a
 A parallelism constant tuned while the harness competes with the node for CPU, so the optimum measures the contention. Never tune a parallelism constant against a harness sharing CPU with the node, and never on wall alone.
 
 ### CI lane parity
-A branch is green only against the commands in the workflows, never a local approximation. `.github/workflows/ci.yml` is the only required PR gate: pure-Rust default features, `-D warnings` clippy without the kernel, per-crate `-p` invocations because a virtual workspace drops `--workspace --features`, bench-smoke compilation, `cargo deny`, and the Python comparator tests. `.github/workflows/main.yml` runs on `main` pushes only: the full-node feature set with the C++ kernel, `--include-ignored` for the consensus fixture corpus, and the `kernel-oracle` parity tests, which are not `#[ignore]` and are skipped if `--ignored` is passed. `cargo deny` failures are bug reports, not lint noise.
+A branch is green only against `scripts/ci-pr.sh`, which `.github/workflows/ci.yml` invokes — never a local approximation. The required PR jobs are `fmt`, `deny`, and `rust`: the format check, the full-graph `cargo deny` audit, and one kernel-free compile graph carrying `-D warnings` clippy (per-crate `-p` invocations because a virtual workspace drops `--workspace --features`) and the test profiles, with the pinned Core and Apalache fixtures backing the node and binary profiles. `.github/workflows/main.yml` runs on `main` pushes only: the full-node feature set with the C++ kernel, `--include-ignored` for the consensus fixture corpus, the `kernel-oracle` parity tests (not `#[ignore]`; skipped if `--ignored` is passed), bench-smoke compilation, the Python comparator tests, the MSRV compile, native-script evidence, and the formal solver run. `cargo deny` failures are bug reports, not lint noise.

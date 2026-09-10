@@ -1,7 +1,9 @@
 # Grounded 2026-08-26.
-# Rust toolchain follows the rolling stable channel via rust-toolchain.toml and
-# the explicit +stable invocations below. Cargo.toml/clippy.toml retain the
-# 1.95.0 MSRV compatibility floor.
+# The hooks mirror the kernel-free pull-request gate by invoking
+# scripts/ci-pr.sh, the single owner of those commands; no local hook enables
+# the kernel feature or needs CMake/Boost. Rust follows the rolling stable
+# channel via rust-toolchain.toml; Cargo.toml/clippy.toml retain the 1.95.0
+# MSRV compatibility floor.
 # pre-commit stable: 4.6.2 (2026-08-10), with no LTS or fixed EoS channel:
 # https://pypi.org/pypi/pre-commit/json
 # cargo-husky 1.5.0 (2020-01-21) is rejected as unmaintained:
@@ -12,33 +14,27 @@ fail_fast: true
 repos:
   - repo: local
     hooks:
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo +stable fmt --all -- --check
+      - id: ci-pr-fmt
+        name: PR gate fmt
+        entry: ./scripts/ci-pr.sh fmt
         language: unsupported
         pass_filenames: false
         always_run: true
-      - id: cargo-clippy-full-node
-        name: cargo clippy (full node)
-        entry: cargo +stable clippy -p bitcoin-rs --all-targets --no-default-features --features rocksdb,fjall,redb,mdbx,kernel,zmq -- -D warnings
+      - id: ci-pr-clippy
+        name: PR gate clippy
+        entry: ./scripts/ci-pr.sh clippy
         language: unsupported
         pass_filenames: false
         always_run: true
-      - id: cargo-clippy-node-tests
-        name: cargo clippy (node test targets)
-        entry: cargo +stable clippy -p bitcoin-rs-node --all-targets -- -D warnings
+      - id: ci-pr-test
+        name: PR gate tests
+        entry: ./scripts/ci-pr.sh test
         language: unsupported
         pass_filenames: false
         always_run: true
-      - id: cargo-test-workspace
-        name: cargo test (workspace)
-        entry: cargo +stable test --workspace --no-fail-fast
-        language: unsupported
-        pass_filenames: false
-        always_run: true
-      - id: cargo-test-full-node
-        name: cargo test (full node)
-        entry: cargo +stable test -p bitcoin-rs --no-fail-fast --no-default-features --features rocksdb,fjall,redb,mdbx,kernel,zmq
+      - id: ci-pr-deny
+        name: PR gate deny
+        entry: ./scripts/ci-pr.sh deny
         language: unsupported
         pass_filenames: false
         always_run: true

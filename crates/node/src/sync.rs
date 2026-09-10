@@ -6,22 +6,36 @@
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
 //! [`crate::apply::apply_block`].
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use alloc::{sync::Arc, vec::Vec};
 
-mod stage;
+use bitcoin::{
+    hashes::Hash as _,
+    p2p::message_blockdata::{GetHeadersMessage, Inventory},
+};
+
+use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
+
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
+
+use bitcoin_rs_primitives::{Block, Hash256};
+
+use crate::apply::error::ApplyError;
+
+use crossbeam_channel::Receiver;
+
+use hashbrown::HashMap;
+
+use parking_lot::Mutex;
 
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
-use crate::state::ApplyError;
-use bitcoin::hashes::Hash as _;
-use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-#[cfg(test)]
-pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
-pub use bitcoin_rs_p2p::download_window::SyncBudget;
-pub use bitcoin_rs_p2p::download_window::default_sync_budget;
+
+use smallvec::SmallVec;
+
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
+
 #[allow(unused_imports)]
 use bitcoin_rs_p2p::download_window::{
     BLOCK_STALLING_TIMEOUT, BLOCK_STALLING_TIMEOUT_MAX, DownloadWindow, FanoutCandidate,
@@ -31,12 +45,13 @@ use bitcoin_rs_p2p::download_window::{
     RECEIVED_BLOCK_TIMEOUT, STALLER_COOLDOWN, SyncPeer, SyncPeerSelection, configure_request_mode,
     statically_fanout_eligible,
 };
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
-use bitcoin_rs_primitives::{Block, Hash256};
-use crossbeam_channel::Receiver;
-use hashbrown::HashMap;
-use parking_lot::Mutex;
-use smallvec::SmallVec;
+
+pub use bitcoin_rs_p2p::download_window::{SyncBudget, default_sync_budget};
+
+#[cfg(test)]
+pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
+
+mod stage;
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
@@ -63,6 +78,13 @@ pub struct BlockSync {
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
+    /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
+    /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
+    /// no chain transition: the failed `finish` left the gateway generation
+    /// odd, so every further attempt would bounce off `AlreadyActive` and
+    /// churn staged state. Only recreating the sync object (restart path)
+    /// clears it; there is no in-place recovery that re-evens generation.
+    apply_halted: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -174,16 +196,16 @@ fn settle_window_failure(
     transition: crate::apply::ChainTransition<'_>,
     mut error: crate::apply::WindowApplyError,
 ) -> crate::apply::WindowApplyError {
-    if !matches!(error.source, ApplyError::UtxoCommit(_)) {
-        if let Err(finish_source) = transition.finish() {
-            tracing::error!(
-                original = %error.source,
-                finish = %finish_source,
-                "chain transition could not be settled after a window failure; \
-                 mempool admission stays closed until recovery or restart"
-            );
-            error.disposition = crate::apply::WindowApplyDisposition::Fatal;
-        }
+    if matches!(error.source, ApplyError::UtxoCommit(_)) {
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
+    } else if let Err(finish_source) = transition.finish() {
+        tracing::error!(
+            original = %error.source,
+            finish = %finish_source,
+            "chain transition could not be settled after a window failure; \
+             mempool admission stays closed until recovery or restart"
+        );
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
     }
     error
 }
@@ -257,6 +279,7 @@ impl BlockSync {
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             known_sessions: Mutex::new(HashMap::new()),
+            apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -821,6 +844,10 @@ impl BlockSync {
                     "block sync: chainstate torn by a failed disconnect, shutting down"
                 );
             }
+            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
+                // The reorg owner has closed admission and requested shutdown.
+                tracing::error!(%error, "block sync: reorg generation settlement failed");
+            }
             Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
                 tracing::error!(
                     %error,
@@ -895,8 +922,32 @@ impl BlockSync {
         (!plan.disconnect.is_empty()).then_some(chain_tip.tip_id)
     }
 
+    /// Records a Fatal window settlement: logs the terminal state and latches
+    /// the halt flag so later ticks keep staging inbound blocks but start no
+    /// further chain transition. Staged blocks stay queued until recreation.
+    fn note_fatal_settlement(&self, stopped: usize, source: &ApplyError) {
+        tracing::error!(
+            applied = stopped,
+            error = %source,
+            "block sync: chain transition could not be settled; \
+             mempool admission is closed and the node will not \
+             retry until recovery or restart"
+        );
+        self.apply_halted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
+        // A latched Fatal settlement left the gateway generation odd: starting
+        // another transition would bounce off `AlreadyActive` and churn staged
+        // state every tick. Staged blocks stay queued until recreation. The
+        // counter keeps the stall observable: the one `error!` in
+        // `note_fatal_settlement` fires once, these ticks stay quiet.
+        if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
+            metrics::counter!("node.sync.apply_halted_ticks").increment(1);
+            return (0, 0);
+        }
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
@@ -964,13 +1015,7 @@ impl BlockSync {
                         failed_hash = Some(blocker.hash);
                     }
                     if error.disposition == crate::apply::WindowApplyDisposition::Fatal {
-                        tracing::error!(
-                            applied = stopped,
-                            error = %error.source,
-                            "block sync: chain transition could not be settled; \
-                             mempool admission is closed and the node will not \
-                             retry until recovery or restart"
-                        );
+                        self.note_fatal_settlement(stopped, &error.source);
                     } else if let Some(blocker) = blocker {
                         tracing::warn!(
                             hash = %blocker.hash,
@@ -1787,33 +1832,61 @@ fn metric_count(value: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     use arc_swap::ArcSwapOption;
     // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-    use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-    use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerSource, PeerTable};
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::TipSnapshot;
+    use bitcoin_rs_mempool::Mempool;
+    use bitcoin_rs_mempool::MempoolLimits;
+    use bitcoin_rs_p2p::PeerInfo;
+    use bitcoin_rs_p2p::PeerLease;
+    use bitcoin_rs_p2p::PeerSource;
+    use bitcoin_rs_p2p::PeerTable;
+    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::OutPoint;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::TxOut;
+    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::encode::double_sha256;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
-        consensus_bytes,
-    };
     use bitcoin_rs_script::push_int;
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_utxo::UtxoSet;
     use crossbeam_channel::unbounded;
     use hashbrown::HashMap;
-    use metrics::{
-        Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata,
-        Recorder, SharedString, Unit,
-    };
-    use parking_lot::{Mutex, RwLock};
+    use metrics::Counter;
+    use metrics::CounterFn;
+    use metrics::Gauge;
+    use metrics::GaugeFn;
+    use metrics::Histogram;
+    use metrics::HistogramFn;
+    use metrics::Key;
+    use metrics::KeyName;
+    use metrics::Metadata;
+    use metrics::Recorder;
+    use metrics::SharedString;
+    use metrics::Unit;
+    use parking_lot::Mutex;
+    use parking_lot::RwLock;
 
-    use super::{BlockSync, InboundHeaders, Inventory, Message};
+    use super::BlockSync;
+    use super::InboundHeaders;
+    use super::Inventory;
+    use super::Message;
     use crate::apply::Chainstate;
 
     #[test]
@@ -2633,7 +2706,7 @@ mod tests {
             preloaded_rx.recv().map_err(|_| {
                 std::io::Error::other("branch switch did not pause after preloading began")
             })?;
-            crate::apply::apply_block(&sync.handles, &racing)?;
+            sync.handles.apply_block(&racing)?;
             continue_tx
                 .send(())
                 .map_err(|_| std::io::Error::other("branch switch stopped before replanning"))?;
@@ -2788,13 +2861,24 @@ mod tests {
         assert!(!stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 0);
+        // MPL-04: rejecting the invalid branch must still allow the selected
+        // valid main branch to reconnect through ordinary forward apply.
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(main_hash)
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
+    /// Generation settlement: MPL-04 in docs/contracts/mempool-mutations.md.
+    /// Prefix and body ownership: docs/solutions/architecture-patterns/node-reorg-execution-design.md.
     #[test]
-    fn operational_reorg_failure_preserves_branch_and_ownership()
+    fn operational_reorg_failure_preserves_branch_and_retries_without_restart()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+        let (mut sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
         assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
@@ -2835,7 +2919,30 @@ mod tests {
                 .mark_received(hash, bytes, Instant::now());
         }
 
-        sync.switch_branch_if_outweighed();
+        let outcome = crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            descendant_id,
+            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.retire_applied_reorg_body(hash),
+        );
+        assert!(
+            matches!(
+                &outcome,
+                Err(crate::reorg::ReorgError::ConnectFailed {
+                    disconnected: 1,
+                    connected: 0,
+                    source,
+                    ..
+                }) if matches!(source.as_ref(), crate::ApplyError::BlockBodyPersistence(_))
+            ),
+            "the body-store refusal must follow a committed disconnect, got {outcome:?}"
+        );
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.hash),
+            Some(Hash256::from_le_bytes(genesis.block_hash().as_bytes())),
+            "a refused pre-UTXO connect leaves the fork point as the committed tip"
+        );
 
         {
             let tree = sync.handles.block_tree.read();
@@ -2848,6 +2955,29 @@ mod tests {
         assert!(stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 2);
+        // MPL-04: a known committed prefix must finish its generation, so a
+        // transient pre-UTXO refusal cannot wedge admission and later applies.
+        assert!(
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "admission must reopen after the clean connect refusal"
+        );
+
+        crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            descendant_id,
+            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.retire_applied_reorg_body(hash),
+        )?;
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.hash),
+            Some(descendant_hash),
+            "retrying the same reorg must reach the target without restarting"
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert!(!sync.block_stager.lock().contains(&fork_hash));
+        assert!(!sync.block_stager.lock().contains(&descendant_hash));
+        assert_eq!(sync.download_window.lock().received_len(), 0);
         Ok(())
     }
 
@@ -6162,7 +6292,9 @@ mod tests {
         let error = crate::apply::WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            source: crate::apply::error::ApplyError::UtxoCommit(
+                bitcoin_rs_utxo::UtxoError::CorruptRecord,
+            ),
             disposition: crate::apply::WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         };
@@ -6171,7 +6303,7 @@ mod tests {
 
         assert!(matches!(
             error.source,
-            crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+            crate::apply::error::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
         ));
         assert_eq!(
             sync.handles.mempool_gateway.stable_generation(),
@@ -6192,7 +6324,7 @@ mod tests {
         let error = crate::apply::WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: crate::state::ApplyError::BlockValueOverflow,
+            source: crate::apply::error::ApplyError::BlockValueOverflow,
             disposition: crate::apply::WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         };
@@ -6205,13 +6337,46 @@ mod tests {
             "finish failure must be classified Fatal"
         );
         assert!(
-            matches!(error.source, crate::state::ApplyError::BlockValueOverflow),
+            matches!(
+                error.source,
+                crate::apply::error::ApplyError::BlockValueOverflow
+            ),
             "original source must be preserved, not overwritten by the finish error"
         );
         assert_eq!(
             sync.handles.mempool_gateway.stable_generation(),
             None,
             "generation must stay odd after a failed finish"
+        );
+        Ok(())
+    }
+
+    /// A recorded Fatal settlement halts further apply attempts: staged blocks
+    /// stay queued, no new transition starts, and the latched tick reports
+    /// idle instead of churning an `AlreadyActive` refusal every round.
+    #[test]
+    fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+        stage_body(&sync, &main[0]);
+        let staged = sync.block_stager.lock().received_len();
+        assert!(
+            staged > 0,
+            "the staged block must be queued before the halt"
+        );
+        assert!(
+            !sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
+            "a fresh sync object must not start halted"
+        );
+        sync.note_fatal_settlement(0, &crate::apply::error::ApplyError::BlockValueOverflow);
+        assert_eq!(
+            sync.apply_buffered_blocks(None),
+            (0, 0),
+            "a halted sync must not start another transition"
+        );
+        assert_eq!(
+            sync.block_stager.lock().received_len(),
+            staged,
+            "halted ticks must preserve staged blocks for recreation"
         );
         Ok(())
     }
@@ -6227,7 +6392,9 @@ mod tests {
         let error = crate::apply::WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            source: crate::apply::error::ApplyError::UtxoCommit(
+                bitcoin_rs_utxo::UtxoError::CorruptRecord,
+            ),
             disposition: crate::apply::WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         };
@@ -6236,13 +6403,15 @@ mod tests {
 
         assert_eq!(
             error.disposition,
-            crate::apply::WindowApplyDisposition::Operational,
-            "UtxoCommit must not attempt finish, so disposition stays Operational"
+            crate::apply::WindowApplyDisposition::Fatal,
+            "UtxoCommit settlement must be fatal and must not attempt finish"
         );
         assert!(
             matches!(
                 error.source,
-                crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+                crate::apply::error::ApplyError::UtxoCommit(
+                    bitcoin_rs_utxo::UtxoError::CorruptRecord
+                )
             ),
             "UtxoCommit source must be unchanged"
         );
@@ -7120,7 +7289,7 @@ mod tests {
         }
     }
 
-    impl crate::apply::PruneBodyStore for FailOnceBodyStore {
+    impl bitcoin_rs_storage::block_body::BlockBodyStore for FailOnceBodyStore {
         fn persist_block_body(
             &self,
             height: u32,
@@ -7424,7 +7593,9 @@ mod tests {
                 hashes.push(*last);
             }
             hashes = hashes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let mut buffer = [0_u8; 64];
                     buffer[..32].copy_from_slice(&pair[0]);
@@ -7471,6 +7642,7 @@ mod tests {
         PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height,
@@ -8017,9 +8189,9 @@ mod tests {
         let chain_tip = tree.tip_handle();
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let handles = apply_handles(chain_tip, applied_tip, Arc::new(RwLock::new(tree)));
-        crate::apply::apply_block(&handles, &genesis)?;
+        handles.apply_block(&genesis)?;
         for block in &blocks {
-            crate::apply::apply_block(&handles, block)?;
+            handles.apply_block(block)?;
         }
         let bodies: HashMap<Hash256, (Block, bytes::Bytes)> = blocks
             .iter()
@@ -8158,6 +8330,8 @@ mod tests {
             Some(connected_tip),
             "the successful connected prefix is the final active chain"
         );
+        // MPL-04: the valid connected prefix reopens only after re-admission.
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         let mempool = handles.mempool.read();
         assert_eq!(
             mempool.len(),
@@ -8236,6 +8410,9 @@ mod tests {
             "a fatal disconnect must never reconsider disconnected transactions"
         );
         assert_eq!(handles.mempool.read().sequence_number(), 0);
+        // MPL-04: a stuck marker must keep all later chain changes fenced.
+        assert!(handles.mempool_gateway.stable_generation().is_none());
+        assert!(handles.begin_transition().is_err());
         let spend_in_pool = handles.mempool.read().contains_txid(&spend_txid);
         assert!(
             !spend_in_pool,

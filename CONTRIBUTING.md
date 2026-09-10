@@ -35,77 +35,56 @@ job set.
 ## Pull-request verification
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs for pull requests
-against any base branch, including stacked PRs, and for pushes to `main`.
-Its ordinary lint and test passes exclude the default-kernel library crates
-from the workspace invocation and check them separately without kernel:
+against any base branch, including stacked PRs, and for pushes to `main`. Its
+three jobs are `fmt`, `deny` (parallel, no workspace compile), and `rust` (one
+kernel-free compile graph: clippy, then the test profiles). Every gate command
+lives in [`scripts/ci-pr.sh`](scripts/ci-pr.sh) -- CI, the pre-commit hooks,
+and this guide all invoke that script, so the commands cannot drift:
 
 ```sh
-# Format check
-cargo fmt --all -- --check
-
-# Clippy on all targets, with kernel disabled
-cargo clippy --workspace --all-targets \
-  --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings
-cargo clippy -p bitcoin-rs-consensus \
-  --no-default-features --all-targets -- -D warnings
-cargo clippy -p bitcoin-rs-node \
-  --no-default-features --features fjall,zmq --all-targets -- -D warnings
-
-# Workspace unit and integration tests, with kernel disabled
-cargo test --workspace --no-fail-fast \
-  --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-cargo test -p bitcoin-rs-consensus --no-default-features --no-fail-fast
-cargo test -p bitcoin-rs-node \
-  --no-default-features --features fjall,zmq --no-fail-fast
-
-# Run separately so another package cannot enable RPC's zmq feature
-cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-
-# Binary tests with all storage backends, without kernel
-cargo test -p bitcoin-rs --no-fail-fast \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx"
-
-# Audit the full dependency graph, including the optional kernel
-cargo deny --workspace --no-default-features \
-  --features "rocksdb,fjall,redb,mdbx,kernel" check
+./scripts/ci-pr.sh fmt      # format check
+./scripts/ci-pr.sh clippy   # three kernel-free all-target profiles
+./scripts/ci-pr.sh test     # kernel-free test profiles, smallest first
+./scripts/ci-pr.sh deny     # full dependency graph, metadata only
+./scripts/ci-pr.sh all      # everything above
 ```
 
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
-library defaults and therefore build the C++ kernel. Use the split commands
-above to reproduce the PR lint/test feature selection.
+library defaults and therefore build the C++ kernel. The script passes the
+kernel-free feature selection. The node, binary, and workspace test profiles
+expect the pinned Core and Apalache fixtures:
+`bash scripts/provision-ci-reference-fixtures.sh`.
 
-The PR workflow also runs:
+The [pre-commit configuration](.pre-commit-config.yaml) runs the same script,
+so local hooks are the kernel-free PR gate, not the C++ full-node lane.
 
-- `bench-smoke`: benchmark compilation, including a full-feature binary-package
-  build with kernel. This job installs CMake and Boost; PR CI as a whole is not
-  kernel-free. It also compiles the UTXO benches and the node's
-  `chainstate_journal` benchmark.
-- `comparator-tests`: every `test_*.py` in `tools/benchmark-campaign`, followed
-  by `tools/campaign-corpus/test_corpus.py`, using Python 3.13. These test the
-  comparator and corpus tooling without running a full-chain benchmark.
-
-See the corresponding jobs in `ci.yml` for their complete commands. If you
-use the [pre-commit configuration](.pre-commit-config.yaml), its full-node
-hooks also enable kernel and require its build dependencies.
+Deep lanes -- the kernel C++ surface (full-node tests, bench smoke with the
+witness-activation regression and the SegWit-v0 kernel oracle), the MSRV
+compile, native-script evidence, the comparator corpus, fuzzing, and the
+dependency/feature matrices -- run on `main` only; see the next section and
+the jobs in [`.github/workflows/main.yml`](.github/workflows/main.yml).
 
 ## Deep CI lanes (main workflow)
 
 [`.github/workflows/main.yml`](.github/workflows/main.yml) runs kernel-enabled
-tests, fuzzing, and dependency/feature matrices on pushes to `main` and manual
-dispatch. Pull-request-triggered checks are defined in
+tests, fuzzing, dependency/feature matrices, and the main-only verification
+lanes -- bench smoke (with the witness-activation kernel regression and the
+SegWit-v0 kernel oracle), the MSRV compile, native-script evidence, and the
+comparator corpus -- on pushes to `main` and manual dispatch.
+Pull-request-triggered checks are defined in
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ### Full-node feature set
 
-Compiles all storage engines (`fjall`, `redb`, `rocksdb`, `mdbx`) and the
+Compiles all retained storage engines (`fjall`, `redb`, `rocksdb`) and the
 `libbitcoinkernel` verification oracle (requires `cmake` and `libboost-dev`):
 
 ```sh
 cargo test -p bitcoin-rs --no-fail-fast \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel"
+  --no-default-features --features "rocksdb,fjall,redb,kernel"
 
 cargo clippy -p bitcoin-rs --all-targets \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel" -- -D warnings
+  --no-default-features --features "rocksdb,fjall,redb,kernel" -- -D warnings
 
 cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
 cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings
@@ -141,6 +120,11 @@ cargo bench -p bitcoin-rs-node --no-run \
 
 `--no-run` checks compilation; it produces no performance measurement.
 
+The same `bench-smoke` job also compiles the kernel-enabled binary-package
+benches (`--features rocksdb,fjall,redb,kernel`), runs the witness-activation
+kernel regression, and checks the SegWit-v0 kernel oracle with retained
+diagnostics.
+
 ### Fuzzing
 
 Fuzz targets live under `fuzz/` and run against imported corpora:
@@ -168,9 +152,9 @@ cargo +nightly update -Zdirect-minimal-versions
 cargo +nightly check --workspace --all-targets
 ```
 
-The main workflow also checks individual features with `cargo-hack` and repeats
-the full-feature dependency audit. See its `feature-combinations` and
-`deny-full` jobs for the exact package and feature selection.
+The main workflow also checks individual features with `cargo-hack` (its
+`feature-combinations` job). The full-feature dependency audit runs in the
+`deny` job of `ci.yml` on every push to `main`.
 
 ## Architecture and contribution scope
 
