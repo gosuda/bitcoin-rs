@@ -137,6 +137,14 @@ This is an evidence tool pin. No checker run is claimed by this page.
   test may claim product parity against the kernel tree identity.
 - Known deviations are explicit. No status in the manifest upgrades to
   `supported` while `differential_harness = false`.
+  - `REF-07a`: reply values are compared after successful transport; any
+    difference is behavioral evidence and is not transport success.
+  - `REF-07b`: startup reports and reaps an early child exit, including a
+    successful exit before readiness.
+  - `REF-07c`: readiness and each reference request are deadline-bounded;
+    expiration reports the deadline and reaps startup children.
+  - `REF-07d`: malformed HTTP or JSON replies are transport/protocol errors,
+    not behavioral comparisons.
 
 ## Proven by
 
