@@ -20,23 +20,31 @@ jobs:
         with:
           components: rustfmt,clippy
 
-      - name: Apply focused native sighash patch
+      - name: Apply focused T07 patch
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile .github/agent_native_sighash.py
+          python3 -m py_compile .github/agent_native_sighash.py .github/agent_native_sighash_extra.py
           python3 .github/agent_native_sighash.py
+          python3 .github/agent_native_sighash_extra.py
           cargo fmt --all
           git diff --check
           changed="$(git diff --name-only | sort)"
-          expected="$(printf '%s\n' crates/consensus/src/verify_tx.rs crates/primitives/src/sighash.rs crates/script/src/checker.rs crates/script/src/interpreter.rs | sort)"
+          expected="$(printf '%s\n' \
+            crates/consensus/src/lib.rs \
+            crates/consensus/src/verify_tx.rs \
+            crates/consensus/tests/overhaul_prepared_inputs.rs \
+            crates/mempool/src/gateway.rs \
+            crates/primitives/src/sighash.rs \
+            crates/script/src/checker.rs \
+            crates/script/src/interpreter.rs | sort)"
           test "$changed" = "$expected" || {
             echo "Unexpected changed paths:" >&2
             printf '%s\n' "$changed" >&2
             exit 1
           }
 
-      - name: Verify native cache path
+      - name: Verify native prepared-input path
         shell: bash
         run: |
           set -euo pipefail
@@ -44,15 +52,23 @@ jobs:
           cargo test --locked -p bitcoin-rs-script --test verifier_boundaries
           cargo test --locked -p bitcoin-rs-script --test core_vectors
           cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_prepared_inputs -- --nocapture
-          cargo clippy --locked -p bitcoin-rs-primitives -p bitcoin-rs-script -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+          cargo test --locked -p bitcoin-rs-mempool --lib
+          cargo clippy --locked -p bitcoin-rs-primitives -p bitcoin-rs-script -p bitcoin-rs-consensus -p bitcoin-rs-mempool --all-targets -- -D warnings
 
       - name: Commit verified patch and remove temporary runner
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/workflows/agent-native-sighash.yml .github/agent_native_sighash.py
-          git add crates/primitives/src/sighash.rs crates/script/src/checker.rs crates/script/src/interpreter.rs crates/consensus/src/verify_tx.rs
+          git rm .github/workflows/agent-native-sighash.yml .github/agent_native_sighash.py .github/agent_native_sighash_extra.py
+          git add \
+            crates/consensus/src/lib.rs \
+            crates/consensus/src/verify_tx.rs \
+            crates/consensus/tests/overhaul_prepared_inputs.rs \
+            crates/mempool/src/gateway.rs \
+            crates/primitives/src/sighash.rs \
+            crates/script/src/checker.rs \
+            crates/script/src/interpreter.rs
           git config user.name "metaphorics"
           git config user.email "152830360+metaphorics@users.noreply.github.com"
-          git commit -m "perf(consensus): share native sighash midstates across inputs"
+          git commit -m "perf(consensus): share prepared coins and sighash midstates"
           git push origin "HEAD:${GITHUB_REF_NAME}"
