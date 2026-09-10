@@ -35,6 +35,10 @@ readonly MAX_SEED_BYTES=65536      # keep individual seeds bounded
 # defaults to the musl target.
 HOST_TRIPLE="$(rustc +nightly -vV | sed -n 's/^host: //p')"
 readonly HOST_TRIPLE
+if [[ -z "${HOST_TRIPLE}" ]]; then
+    printf 'Cannot determine the nightly Rust host triple\n' >&2
+    exit 1
+fi
 CARGO_ENV=(env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR RUSTUP_TOOLCHAIN=nightly)
 
 log() { printf '[import-qa-assets] %s\n' "$*"; }
@@ -57,8 +61,10 @@ FREE_REPO_MB="$(available_mb "${REPO_ROOT:?repo root unset}")"
 readonly FREE_TMP_MB FREE_REPO_MB
 readonly NEEDED_MB=$((FOOTPRINT_ASSUME_MB + RESERVE_MB))
 readonly NEEDED_REPO_MB=256
-if [ "${FREE_TMP_MB:?free space unknown}" -lt "${NEEDED_MB}" ] ||
-    [ "${FREE_REPO_MB:?free space unknown}" -lt "${NEEDED_REPO_MB}" ]; then
+# Failure to establish either lower bound is an abort, including malformed
+# or out-of-range readings. A failed -lt comparison must not grant permission.
+if ! [ "${FREE_TMP_MB:?free space unknown}" -ge "${NEEDED_MB}" ] ||
+    ! [ "${FREE_REPO_MB:?free space unknown}" -ge "${NEEDED_REPO_MB}" ]; then
     log "ABORT: free ${FREE_TMP_MB} MiB (tmp) / ${FREE_REPO_MB} MiB (repo) < needed ${NEEDED_MB} / ${NEEDED_REPO_MB} MiB (footprint ${FOOTPRINT_ASSUME_MB} + reserve ${RESERVE_MB})"
     exit 1
 fi
@@ -73,12 +79,14 @@ git init --quiet "${WORKDIR}/qa-assets"
 git -C "${WORKDIR}/qa-assets" remote add origin "${QA_ASSETS_URL}"
 git -C "${WORKDIR}/qa-assets" fetch --depth 1 --quiet origin "${QA_ASSETS_PIN}"
 git -C "${WORKDIR}/qa-assets" checkout --quiet FETCH_HEAD
-readonly UPSTREAM_COMMIT="$(git -C "${WORKDIR}/qa-assets" rev-parse HEAD)"
+UPSTREAM_COMMIT="$(git -C "${WORKDIR}/qa-assets" rev-parse HEAD)"
+readonly UPSTREAM_COMMIT
 [ "${UPSTREAM_COMMIT}" = "${QA_ASSETS_PIN}" ] || {
     log "ABORT: fetched ${UPSTREAM_COMMIT}, expected pin ${QA_ASSETS_PIN}"
     exit 1
 }
-readonly UPSTREAM_SIZE_MB="$(du -sm "${WORKDIR}/qa-assets" | cut -f1)"
+UPSTREAM_SIZE_MB="$(du -sm "${WORKDIR}/qa-assets" | cut -f1)"
+readonly UPSTREAM_SIZE_MB
 log "clone at ${UPSTREAM_COMMIT} (${UPSTREAM_SIZE_MB} MiB actual)"
 
 readonly CORPORA="${WORKDIR}/qa-assets/fuzz_corpora"
@@ -114,7 +122,7 @@ imported = skipped_short = unknown_cmd = 0
 for path in sorted(corpus_dir.iterdir()):
     with path.open("rb") as source:
         blob = source.read(24 + max_bytes - 1)
-    if len(blob) <= 24:
+    if len(blob) < 24:
         skipped_short += 1
         continue
     command = blob[4:16].split(b"\0", 1)[0]
@@ -182,18 +190,33 @@ PYEOF
 # fuzz targets' own input caps) and the skip count is recorded so the mapping
 # stays honest about what it left behind.
 map_direct() {
-    local src="$1" dst="$2" name="$3"
-    mkdir -p "${dst:?}"
-    local count=0 skipped=0
-    while IFS= read -r -d '' file; do
-        if [ "$(stat -c %s -- "${file:?}")" -ge "${MAX_SEED_BYTES}" ]; then
-            skipped=$((skipped + 1))
-            continue
-        fi
-        cp -- "${file:?}" "${dst}/$(basename -- "${file:?}")"
-        count=$((count + 1))
-    done < <(find "${src:?}" -maxdepth 1 -type f -print0 | sort -z)
-    log "${name}: imported=${count} skipped_oversize=${skipped} (>= ${MAX_SEED_BYTES} bytes)"
+    "${CARGO_ENV[@]}" python3 - "$1" "$2" "$3" "${MAX_SEED_BYTES}" <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+src, dst, name, max_bytes = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+# Opening the directory must succeed before an empty import can be reported.
+with os.scandir(src) as entries:
+    files = sorted(entries, key=lambda entry: entry.name)
+dst.mkdir(parents=True, exist_ok=True)
+imported = skipped = 0
+for entry in files:
+    if not entry.is_file(follow_symlinks=False):
+        continue
+    if entry.stat(follow_symlinks=False).st_size >= max_bytes:
+        skipped += 1
+        continue
+    with open(entry.path, "rb") as source:
+        seed = source.read(max_bytes)
+    # Recheck the bytes actually read in case a file grew after stat.
+    if len(seed) >= max_bytes:
+        skipped += 1
+        continue
+    (dst / entry.name).write_bytes(seed)
+    imported += 1
+print(f"[import-qa-assets] {name}: imported={imported} skipped_oversize={skipped} (>= {max_bytes} bytes)")
+PYEOF
 }
 map_p2p
 map_script
@@ -208,7 +231,8 @@ map_direct "${CORPORA}/bitcoin_deserialize_transaction" "${OUT_BASE}/tx_decode" 
 
 # --- 7. Provenance ------------------------------------------------------------
 readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"
-readonly IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly IMPORT_DATE
 cat > "${PROVENANCE}" <<EOF
 # Fuzz corpus provenance
 
