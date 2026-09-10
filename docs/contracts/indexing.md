@@ -1,8 +1,13 @@
 # Indexing contract
 
+**Contract version: 1.1** (2025-02-14)
+
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
 rebuilds.
+
+This version adds the scheduling requirements in `IDX-08`; changes to those
+requirements must update this clause and its executable proof together.
 
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
@@ -13,6 +18,20 @@ Owners:
   status enum.
 
 ## Clauses
+
+### `IDX-08`: Worker wake scheduling
+
+- A wake increments the runtime revision, while wake notifications are
+  coalesced: at most one notification need be queued, and a quiet wait observes
+  the latest revision rather than the number of notifications.
+- A shutdown request takes precedence over a quiet wait or an already-expired
+  batch deadline and returns the stopped result without waiting for a wake.
+- An expired batch deadline returns the deadline result without waiting for a
+  wake. A queued wake interrupts a non-expired wait and returns the woken
+  result without changing the deadline.
+
+These are behavioral requirements, not timing guarantees; test durations are
+only scheduling mechanics.
 
 ### `IDX-01`: Capability configuration and internal enablement
 
@@ -59,7 +78,7 @@ remove another script's output.
 ### `IDX-03`: Query gating and snapshot consistency
 
 - **Ready invariant**: `ready ⇔ cursor == applied_tip on active chain`.
-- `TxIndexQueryEngine::with_snapshot` and `index_info_internal` gate every read:
+- `TxIndexQueryEngine::with_snapshot` and `index_info` gate every read:
   1. The worker runtime must be healthy (neither `failed` nor `shutdown`).
   2. The applied tip loaded before snapshot creation must match the durable
      capability watermark (`IndexWatermark { height, hash }`) for every consumed
@@ -102,6 +121,10 @@ remove another script's output.
   `ConsumerCursor`).
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
+  `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
+  version, and the one recorded predecessor (format 3, spending keys without
+  positions) by resetting only `ScriptHistory` for rebuild (`IDX-04`); every
+  other version is `IndexError::UnsupportedTxIndexFormatVersion`.
 - On node startup, index workers read their persisted watermarks and reconcile
   against `NodeState::active_chain_snapshot()`:
   - If the watermark is an ancestor of the restored tip, the worker connects
@@ -130,7 +153,7 @@ remove another script's output.
     executing a long block-by-block rollback
     (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
 - **Connect walk**:
-  - The worker loads bodies from `PruneBodyStore`, constructs bounded forward
+  - The worker loads bodies from `BlockBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
     watermarks in a single atomic store batch per block or block chunk.
   - Live deletes are anchored by the block's authoritative undo scripts;

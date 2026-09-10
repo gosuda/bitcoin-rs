@@ -21,16 +21,22 @@ use crate::inv::MAX_INV_PER_MSG;
 
 /// Latest protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 70_016;
+
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+
 /// Maximum number of headers accepted in one `headers` message.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
+
 /// Maximum block locator hashes accepted in one locator-based request.
 pub const MAX_LOCATOR_HASHES: usize = 101;
+
 /// Maximum address entries accepted in one `addr` or `addrv2` message.
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
+
 /// Fixed size of a Bitcoin v1 network message header.
 pub(crate) const HEADER_LEN: usize = 24;
+
 const COMMAND_LEN: usize = 12;
 
 /// Bitcoin P2P message payload.
@@ -357,7 +363,30 @@ pub fn read_message<R: Read>(
 /// Admission accounts this exact count and `write_message` returns it for
 /// release, so budget accounting and wire emission charge identical bytes.
 pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
-    Ok(HEADER_LEN + encode_payload(message)?.len())
+    let payload_len = match message {
+        Message::Tx(tx) => tx.total_size(),
+        Message::Block(block) => block.total_size(),
+        Message::Headers(headers) => {
+            let count = u64::try_from(headers.len())
+                .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
+            let count_len = bitcoin_rs_primitives::varint::encode(count).len();
+            let entries_len = headers
+                .len()
+                .checked_mul(81)
+                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?;
+            count_len
+                .checked_add(entries_len)
+                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
+        }
+        other => {
+            let envelope = other.envelope();
+            bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut bitcoin::io::sink())
+                .map_err(encode::Error::from)?
+        }
+    };
+    HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or(PeerError::PayloadTooLarge(usize::MAX))
 }
 
 /// Encode only a message payload.
@@ -767,6 +796,7 @@ mod tests {
     #[test]
     fn wire_len_matches_write_message_for_representative_messages() -> Result<(), PeerError> {
         let messages = vec![
+            super::Message::Tx(bitcoin_rs_primitives::Tx::default()),
             super::Message::Ping(0x1234_5678_9abc_def0),
             super::Message::Verack,
             super::Message::Headers(vec![bitcoin_rs_primitives::Header::default(); 2_000]),

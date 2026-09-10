@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing::debug;
 use zerocopy::IntoBytes;
 
+use crate::reconcile::{SelectedWatermark, selected_watermark as reconcile_selected_watermark};
 use crate::types::{
     HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow,
 };
@@ -2108,28 +2109,10 @@ fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> Result<Option<IndexWatermark>, IndexError> {
-    let mut selected: Option<Option<IndexWatermark>> = None;
-    for capability in [
-        IndexCapability::TxLookup,
-        IndexCapability::ScriptHistory,
-        IndexCapability::ScriptLive,
-    ] {
-        if !capabilities.contains(capability) {
-            continue;
-        }
-        let cursor = watermarks.get(capability);
-        match selected {
-            None => selected = Some(cursor),
-            Some(first) if first == cursor => {}
-            Some(first) => {
-                return Err(IndexError::WatermarkMismatch {
-                    expected: first,
-                    actual: cursor,
-                });
-            }
-        }
+    match reconcile_selected_watermark(watermarks, capabilities) {
+        SelectedWatermark::Valid(watermark) => Ok(watermark),
+        SelectedWatermark::Invalid => Err(IndexError::NonContiguousPrepared { watermark: None }),
     }
-    selected.ok_or(IndexError::NonContiguousPrepared { watermark: None })
 }
 
 fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_identity: bool) {
@@ -2950,15 +2933,8 @@ impl<S: KvStore> IndexWriter<S> {
     /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
     /// [`PreparedBatch`] to bound multi-block writes. This is the same owner
     /// for a single block: tests and benches must not grow a second ingest path.
-    ///
-    /// [`Self::commit_forward`] is the commit point (`IDX-06`): `Ok` means the
-    /// prepared rows and capability watermark are durable together in one store
-    /// batch. A crash before that write leaves the previous watermark and rows;
-    /// a crash after it leaves both. Fence races
-    /// ([`IndexError::StaleIndexState`], [`IndexError::ResetInProgress`]) mean
-    /// discard derived state and retry from the persisted watermark.
-    /// [`IndexError::Storage`] is not retried by the index worker; supervision
-    /// marks it failed (`IDX-07`).
+    /// Delegates to [`Self::commit_forward`]. See `IDX-06` / `IDX-07` in
+    /// `docs/contracts/indexing.md`.
     ///
     /// This path selects [`IndexCapabilities::HISTORICAL`]: it advances
     /// `TxLookup` and `ScriptHistory` only. Callers that maintain `ScriptLive`
@@ -2987,11 +2963,8 @@ impl<S: KvStore> IndexWriter<S> {
     /// Atomically connects a bounded batch and advances the durable watermark.
     ///
     /// Captures its own fence before any store-dependent derivation and keeps
-    /// the consumer cursor untouched. Rows and the selected watermarks land in
-    /// one `write_durable_if` batch; `Ok` is the commit point (`IDX-06`). Fence
-    /// races return [`IndexError::StaleIndexState`] or
-    /// [`IndexError::ResetInProgress`]; the worker re-reads watermarks and
-    /// re-plans. [`IndexError::Storage`] fails the worker (`IDX-07`).
+    /// the consumer cursor untouched. See `IDX-06` / `IDX-07` in
+    /// `docs/contracts/indexing.md`.
     pub fn commit_forward(&mut self, batch: PreparedBatch) -> Result<IndexWatermark, IndexError> {
         let (fence, _) = self.fenced_watermarks()?;
         self.commit_forward_with_cursor(fence, batch, ConsumerCursorUpdate::Keep)
@@ -3165,15 +3138,8 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Atomically rolls back one block with the exact scripts of its spent
     /// coins. This is the anchored variant used when `ScriptLive` is selected.
-    ///
-    /// The fenced store batch is the commit point (`IDX-06`), same as
-    /// [`Self::commit_forward`]: `Ok` means row deletes, the selected
-    /// watermark, and the cursor disposition are durable together. A crash
-    /// before that write leaves the previous tip; a crash after it leaves the
-    /// parent watermark. Fence races ([`IndexError::StaleIndexState`],
-    /// [`IndexError::ResetInProgress`]) mean discard derived state and retry
-    /// from the persisted watermark. [`IndexError::Storage`] is not retried by
-    /// the index worker; supervision marks it failed (`IDX-07`).
+    /// Same fenced batch as [`Self::commit_forward`]. See `IDX-06` / `IDX-07`
+    /// in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,
