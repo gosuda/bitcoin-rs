@@ -19,6 +19,8 @@ start = src.index("/// A coherent, non-torn view of the applied chain tip.")
 end = src.index("/// Errors produced when applying a block to the node state.", start)
 event_body = src[start:end].rstrip() + "\n"
 src = src[:start] + src[end:]
+# The moved implementation was the only user of these imports in state.rs.
+src = src.replace("use std::io::{self, Write as _};\n", "", 1)
 
 event_body = event_body.replace(
     "impl ChainEventPublisher {\n    fn new(",
@@ -62,6 +64,11 @@ replacements = {
     "bitcoin_rs_node::state::ChainEventHint": "bitcoin_rs_node::state::events::ChainEventHint",
     "bitcoin_rs_node::state::ChainSnapshot": "bitcoin_rs_node::state::events::ChainSnapshot",
     "bitcoin_rs_node::state::HintKind": "bitcoin_rs_node::state::events::HintKind",
+      "super::CHAIN_HINT_CHANNEL_LIMIT": "super::events::CHAIN_HINT_CHANNEL_LIMIT",
+      "use crate::state::ChainEventPublisher": "use crate::state::events::ChainEventPublisher",
+      "use crate::state::ChainEventHint": "use crate::state::events::ChainEventHint",
+      "use crate::state::ChainSnapshot": "use crate::state::events::ChainSnapshot",
+      "use crate::state::HintKind": "use crate::state::events::HintKind",
     "use crate::state::{ChainSnapshot, NodeState};": "use crate::state::NodeState;\nuse crate::state::events::ChainSnapshot;",
 }
 for path in ROOT.rglob("*.rs"):
