@@ -405,10 +405,11 @@ fn retagged_new(state: &[FamilyState]) -> Vec<FamilyState> {
         .collect()
 }
 
-/// Outcome honesty per route and fault: a silently lost completion at the
-/// boundary the route completes on reports success, and every fault the
-/// route actually observes surfaces as `Err`. A fault armed at a boundary
-/// the route never crosses stays armed and is not asserted here.
+/// Outcome honesty per route and fault: every fault the route observes at a
+/// boundary it crosses surfaces as `Err` (main's receipt semantics — the
+/// backends consult the fault slot on every armed fault, so an armed
+/// "silent" loss is observed and reported). A fault armed at a boundary the
+/// route never crosses stays armed and is not asserted here.
 fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bool, label: &str) {
     match route {
         Route::Write => {
@@ -423,14 +424,11 @@ fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bo
             }
         }
         Route::WriteDurable | Route::WriteDurableIf => match fault {
-            PersistFault::LostSync => assert!(
-                reported_success,
-                "{label}: durable route reported failure on a silently lost sync"
-            ),
             PersistFault::FailApply
             | PersistFault::LostApply
             | PersistFault::PartialApply
-            | PersistFault::FailSync => assert!(
+            | PersistFault::FailSync
+            | PersistFault::LostSync => assert!(
                 !reported_success,
                 "{label}: durable route reported success despite an observed fault"
             ),
@@ -439,20 +437,17 @@ fn assert_fault_outcome(route: &Route, fault: PersistFault, reported_success: bo
             PersistFault::FailFlush | PersistFault::LostFlush => {}
         },
         Route::FlushDeferred => match fault {
-            PersistFault::LostFlush => assert!(
-                reported_success,
-                "{label}: flush reported failure on a silently lost flush"
+            PersistFault::FailApply
+            | PersistFault::LostApply
+            | PersistFault::PartialApply
+            | PersistFault::FailFlush
+            | PersistFault::LostFlush => assert!(
+                !reported_success,
+                "{label}: deferred+flush route reported success despite an observed fault"
             ),
-            PersistFault::FailApply | PersistFault::PartialApply | PersistFault::FailFlush => {
-                assert!(
-                    !reported_success,
-                    "{label}: deferred+flush route reported success despite an observed fault"
-                );
-            }
-            // `LostApply` is backend-dependent on the deferred route, and
-            // sync-boundary faults stay armed: `write_deferred` defers the
+            // Sync-boundary faults stay armed: `write_deferred` defers the
             // sync to `flush`.
-            PersistFault::LostApply | PersistFault::FailSync | PersistFault::LostSync => {}
+            PersistFault::FailSync | PersistFault::LostSync => {}
         },
     }
 }
