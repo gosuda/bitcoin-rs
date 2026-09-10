@@ -3160,11 +3160,11 @@ impl<S: KvStore> IndexWriter<S> {
     /// [`IndexError::ResetInProgress`]) mean discard derived state and retry
     /// from the persisted watermark. [`IndexError::Storage`] is not retried by
     /// the index worker; supervision marks it failed (`IDX-07`).
-      ///
-      /// A storage error can have an indeterminate outcome at the storage
-      /// boundary, so this method does not retry it. The supervising worker
-      /// owns restart and reconciliation; callers must reload the persisted
-      /// watermark before retrying after a crash or storage failure.
+    ///
+    /// A storage error can have an indeterminate outcome at the storage
+    /// boundary, so this method does not retry it. The supervising worker
+    /// owns restart and reconciliation; callers must reload the persisted
+    /// watermark before retrying after a crash or storage failure.
     /// Same fenced batch as [`Self::commit_forward`]. See `IDX-06` / `IDX-07`
     /// in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(

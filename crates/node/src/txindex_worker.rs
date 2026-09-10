@@ -959,8 +959,6 @@ impl bitcoin_rs_index::SpentCoinScripts for UndoScripts {
     }
 }
 
-
-
 /// Detached publisher for test worker construction; records still sequence.
 #[cfg(test)]
 pub(crate) fn detached_chain_publisher() -> Arc<crate::state::ChainEventPublisher> {
