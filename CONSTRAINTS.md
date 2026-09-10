@@ -11,6 +11,17 @@ Every measurement cell below is `UNMEASURED`. Target values are contracts, not
 results. Unknown is not false; a missing measurement blocks the owning task.
 `BLOCKED` is a workflow state, not a verdict.
 
+## Mempool page-selection contracts (v1)
+
+These contracts own the selector's bounded-work and ownership expectations;
+benchmark results remain subject to CL-19 and CL-20 and must not be inferred
+from the unit tests.
+
+| ID | requirement |
+| --- | --- |
+| SEL-01 | Page selection borrows candidate payloads and clones payloads only for the final returned page. |
+| SEL-02 | A page with limit zero returns immediately without polling the pool iterator. |
+
 ## Formal model tool identity
 
 | Field | Value |
