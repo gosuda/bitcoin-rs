@@ -1,4 +1,4 @@
-"""Add hash-checked rename deletions to the temporary publication driver."""
+"""Add hash-checked rename deletions and exact path enumeration to publication."""
 from pathlib import Path
 
 source = Path('.github/publish-node-owners.py').read_text()
@@ -15,6 +15,7 @@ changes = {
             if path in outputs:
                 raise ValueError('Deletion duplicates an output: ' + path)
             outputs[path] = None""",
+    "git('diff', '--cached', '--name-only')": "git('diff', '--cached', '--no-renames', '--name-only')",
 }
 for old, new in changes.items():
     if source.count(old) != 1:

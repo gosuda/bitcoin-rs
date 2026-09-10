@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/node-owner-publish.yml
       - .github/node-owner-plan.json
+      - .github/prepare-node-publisher.py
 permissions:
   contents: read
 jobs:
