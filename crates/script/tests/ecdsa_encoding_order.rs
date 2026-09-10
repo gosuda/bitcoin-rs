@@ -1,7 +1,14 @@
 //! ECDSA encoding-order regressions against Bitcoin Core.
 //!
-//! Empty signatures are a clean cryptographic failure, but they do not bypass
-//! public-key encoding checks that Core performs before signature verification.
+//! Originally anchored to Core v29.0; rechecked against v31.1 below.
+//! Empty ECDSA signatures are a clean verification failure, but Core still
+//! applies public-key encoding checks before reaching cryptographic verification.
+//!
+//! Reference: bitcoin/bitcoin v31.1, src/script/interpreter.cpp, Git blob
+//! 443714ceedaf6b0cc695316882080f79fb50316e: CheckSignatureEncoding,
+//! CheckPubKeyEncoding, EvalChecksigPreTapscript, and EvalScript's
+//! OP_CHECKMULTISIG loop. Assertions follow that reference's ordering and
+//! distinguish structural key policy from elliptic-curve point validity.
 
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
@@ -179,4 +186,133 @@ fn encoding_error_precedence_matches_core() {
             code: ScriptErrCode::PubkeyType,
         }),
     );
+}
+
+#[test]
+fn empty_signature_key_policy_matrix_preserves_clean_false_and_error_order() {
+    let tx = fixture();
+    let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
+    let public = PublicKey::from_secret_key(SECP256K1, &test_key());
+    let mut hybrid = public.serialize_uncompressed().to_vec();
+    hybrid[0] = 0x06 | (hybrid[64] & 1);
+    let mut invalid_point = vec![0xff; 33];
+    invalid_point[0] = 0x02; // structurally compressed; x is outside the curve field
+    // Columns are STRICTENC shape validity and compressed-key shape validity.
+    let keys = [
+        (Vec::new(), false, false),
+        (vec![0x02; 32], false, false),
+        (vec![0x05; 33], false, false),
+        (public.serialize().to_vec(), true, true),
+        (public.serialize_uncompressed().to_vec(), true, false),
+        (hybrid, false, false),
+        (invalid_point, true, true),
+    ];
+    let policy_bits = [
+        VerifyFlags::STRICTENC,
+        VerifyFlags::WITNESS_PUBKEYTYPE,
+        VerifyFlags::DERSIG,
+        VerifyFlags::LOW_S,
+        VerifyFlags::NULLFAIL,
+    ];
+    let mut checked = 0;
+    for version in [SigVersion::Base, SigVersion::WitnessV0] {
+        for mask in 0_u32..32 {
+            let mut flags = VerifyFlags::NONE;
+            for (bit, flag) in policy_bits.iter().enumerate() {
+                if mask & (1 << bit) != 0 {
+                    flags = flags.union(*flag);
+                }
+            }
+            for (key, strict_shape, compressed) in &keys {
+                let expected = if flags.contains(VerifyFlags::STRICTENC) && !*strict_shape {
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::PubkeyType,
+                    })
+                } else if version == SigVersion::WitnessV0
+                    && flags.contains(VerifyFlags::WITNESS_PUBKEYTYPE)
+                    && !*compressed
+                {
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::WitnessPubkeyType,
+                    })
+                } else {
+                    Ok(false)
+                };
+                let mut checker = TxSignatureChecker::new(&tx, INPUT, VALUE, &prevouts);
+                assert_eq!(
+                    checker.check_ecdsa_signature(&[], key, &[], version, flags),
+                    expected,
+                    "version={version:?}, flags={flags:?}, key={key:02x?}",
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 448);
+}
+
+#[test]
+fn undefined_hashtype_precedes_bad_pubkey_encoding() {
+    let tx = fixture();
+    let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
+    // DER r=1, s=1 is structurally valid and low-S; 0x05 is undefined.
+    let signature = hex("300602010102010105");
+    let flags = VerifyFlags::STRICTENC
+        .union(VerifyFlags::WITNESS_PUBKEYTYPE)
+        .union(VerifyFlags::LOW_S);
+    for version in [SigVersion::Base, SigVersion::WitnessV0] {
+        let mut checker = TxSignatureChecker::new(&tx, INPUT, VALUE, &prevouts);
+        assert_eq!(
+            checker.check_ecdsa_signature(&signature, &[], &[], version, flags),
+            Err(ScriptError::Invalid {
+                code: ScriptErrCode::SigHashtype,
+            }),
+        );
+    }
+}
+
+#[test]
+fn unvisited_keys_and_unexecuted_sigops_do_not_trigger_encoding_checks() {
+    let tx = fixture();
+    let flags = VerifyFlags::MANDATORY
+        .union(VerifyFlags::STRICTENC)
+        .union(VerifyFlags::WITNESS_PUBKEYTYPE)
+        .union(VerifyFlags::NULLFAIL);
+    // Zero-of-one CHECKMULTISIG never visits the empty pubkey. An inactive
+    // CHECKSIG branch must not check either encoding or stack operands.
+    let cases = [
+        (vec![0x00, 0x00, 0x51, 0xae], vec![Vec::new()]),
+        (vec![0x00, 0x63, 0xac, 0x68, 0x51], Vec::new()),
+    ];
+    for (script, arguments) in cases {
+        let prevout = TxOut {
+            value: VALUE,
+            script_pubkey: script.clone(),
+        };
+        let script_sig = vec![0x00; arguments.len()];
+        assert_eq!(
+            Interpreter.execute(&script, &script_sig, &[], flags, &prevout, &tx, INPUT),
+            Ok(true),
+        );
+        let mut program = vec![0x00, 0x20];
+        program.extend_from_slice(&Sha256::digest(&script));
+        let witness_prevout = TxOut {
+            value: VALUE,
+            script_pubkey: program,
+        };
+        let mut witness = arguments;
+        witness.push(script);
+        assert_eq!(
+            Interpreter.execute(
+                &witness_prevout.script_pubkey,
+                &[],
+                &witness,
+                flags,
+                &witness_prevout,
+                &tx,
+                INPUT,
+            ),
+            Ok(true),
+        );
+    }
 }
