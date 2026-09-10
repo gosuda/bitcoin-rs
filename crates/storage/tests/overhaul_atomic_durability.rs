@@ -1,6 +1,9 @@
 //! Atomic-durability proofs for the storage ladder under injected
 //! persistence faults.
 //!
+//! This matrix exercises `docs/contracts/recovery.md` RCV-02 (ordered commit
+//! and recovery fencing) and RCV-03 (prior-or-whole-proposed roots).
+//!
 //! Every fault in [`PersistFault`] is armed at each persistence boundary and
 //! fired against a multi-family batch spanning three column families. After
 //! the faulted call and a reopen, the store as a whole must hold either the
