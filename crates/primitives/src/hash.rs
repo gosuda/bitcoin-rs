@@ -4,6 +4,8 @@ use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// A 256-bit Bitcoin hash stored in consensus little-endian byte order.
 #[derive(
     Copy,
@@ -78,7 +80,6 @@ impl Hash256 {
     /// Formats this hash as conventional big-endian lowercase hexadecimal.
     #[must_use]
     pub fn to_string_be(self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut s = String::with_capacity(64);
         for byte in self.0.iter().rev() {
             s.push(char::from(HEX[usize::from(byte >> 4)]));
@@ -104,10 +105,15 @@ impl Hash256 {
 
 impl fmt::Display for Hash256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0.iter().rev() {
-            write!(f, "{byte:02x}")?;
+        let mut encoded = [0_u8; 64];
+        for (byte, pair) in self.0.iter().rev().zip(encoded.chunks_exact_mut(2)) {
+            pair[0] = HEX[usize::from(byte >> 4)];
+            pair[1] = HEX[usize::from(byte & 0x0f)];
         }
-        Ok(())
+        // Every byte comes from the ASCII table. Keep this conversion checked
+        // rather than adding unsafe code to a presentation-only path.
+        let text = core::str::from_utf8(&encoded).map_err(|_| fmt::Error)?;
+        f.write_str(text)
     }
 }
 
@@ -130,6 +136,8 @@ const fn decode_nibble(byte: u8, offset: usize) -> Result<u8, HashError> {
 
 #[cfg(test)]
 mod tests {
+    use core::fmt::{self, Write as _};
+
     use super::{Hash256, HashError};
 
     #[test]
@@ -150,10 +158,60 @@ mod tests {
             hash.to_string_be(),
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
         );
+        assert_eq!(
+            hash.to_string(),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        );
         // `prefix8()` is an internal convenience helper (used only by the
         // chain tree's hash-table key and a benchmark sharder), not a durable
         // consensus/serialization contract, so it is not pinned here.
         Ok(())
+    }
+
+    #[test]
+    fn display_matches_bytewise_reference() -> fmt::Result {
+        for position in 0..32 {
+            for value in 0..=u8::MAX {
+                let mut bytes = [0_u8; 32];
+                bytes[position] = value;
+                let mut expected = String::with_capacity(64);
+                for byte in bytes.iter().rev() {
+                    write!(&mut expected, "{byte:02x}")?;
+                }
+                let hash = Hash256::from_le_bytes(&bytes);
+                assert_eq!(hash.to_string(), expected);
+                assert_eq!(hash.to_string_be(), expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_preserves_existing_format_options() {
+        let hash = Hash256::from_le_bytes(&[0xab; 32]);
+        let expected = "ab".repeat(32);
+        // The existing Display contract ignores outer width, precision, and
+        // numeric flags; switching to Formatter::pad would change its output.
+        assert_eq!(format!("{hash:>80}"), expected);
+        assert_eq!(format!("{hash:<80}"), expected);
+        assert_eq!(format!("{hash:^80}"), expected);
+        assert_eq!(format!("{hash:.8}"), expected);
+        assert_eq!(format!("{hash:#}"), expected);
+        assert_eq!(format!("{hash:+080}"), expected);
+    }
+
+    #[test]
+    fn display_propagates_writer_errors() {
+        struct Reject;
+
+        impl fmt::Write for Reject {
+            fn write_str(&mut self, _text: &str) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+
+        let hash = Hash256::default();
+        assert!(fmt::write(&mut Reject, format_args!("{hash}")).is_err());
     }
 
     #[test]
