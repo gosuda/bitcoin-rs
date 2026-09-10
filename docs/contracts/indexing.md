@@ -1,8 +1,13 @@
 # Indexing contract
 
+**Contract version: 1.1** (2025-02-14)
+
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
 rebuilds.
+
+This version adds the scheduling requirements in `IDX-08`; changes to those
+requirements must update this clause and its executable proof together.
 
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
@@ -13,6 +18,20 @@ Owners:
   status enum.
 
 ## Clauses
+
+### `IDX-08`: Worker wake scheduling
+
+- A wake increments the runtime revision, while wake notifications are
+  coalesced: at most one notification need be queued, and a quiet wait observes
+  the latest revision rather than the number of notifications.
+- A shutdown request takes precedence over a quiet wait or an already-expired
+  batch deadline and returns the stopped result without waiting for a wake.
+- An expired batch deadline returns the deadline result without waiting for a
+  wake. A queued wake interrupts a non-expired wait and returns the woken
+  result without changing the deadline.
+
+These are behavioral requirements, not timing guarantees; test durations are
+only scheduling mechanics.
 
 ### `IDX-01`: Capability configuration and internal enablement
 
