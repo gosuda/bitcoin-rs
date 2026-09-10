@@ -22,5 +22,11 @@ the page selects the commands for manual copying.
 Source links and the command checkout use one explicit commit. When updating
 that reference, review the workspace, build options, interface contracts, and
 benchmark status together. Do not change the pin alone or turn unexecuted
-commands into a successful-run claim. Keep browser and runtime acceptance
-results in the reviewing PR or CI artifacts, not in this source directory.
+commands into a successful-run claim. Validate the checked-in map and pin with
+`python3 scripts/check_developer_page.py`; CI or a release check should run this
+command and reject stale module cards, layer assignments, or source revisions.
+The page's module cards are a checked-in projection of `Cargo.toml` and the
+architecture contract. Update those owners first, then update the projection
+and run the consistency check before reviewing the HTML. Keep browser and
+runtime acceptance results in the reviewing PR or CI artifacts, not in this
+source directory.
