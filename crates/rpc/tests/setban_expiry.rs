@@ -71,7 +71,10 @@ fn overflow_preserves_existing_entries_and_order() -> Result<(), RpcError> {
 
             assert_invalid_expiry(&handler, target, absolute);
 
-            assert_eq!(handler.context().banned.read().as_slice(), before.as_slice());
+            assert_eq!(
+                handler.context().banned.read().as_slice(),
+                before.as_slice()
+            );
         }
     }
     Ok(())
