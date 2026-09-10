@@ -6,22 +6,36 @@
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
 //! [`crate::apply::apply_block`].
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use alloc::{sync::Arc, vec::Vec};
 
-mod stage;
+use bitcoin::{
+    hashes::Hash as _,
+    p2p::message_blockdata::{GetHeadersMessage, Inventory},
+};
+
+use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
+
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
+
+use bitcoin_rs_primitives::{Block, Hash256};
+
+use crate::apply::error::ApplyError;
+
+use crossbeam_channel::Receiver;
+
+use hashbrown::HashMap;
+
+use parking_lot::Mutex;
 
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
-use crate::state::ApplyError;
-use bitcoin::hashes::Hash as _;
-use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-#[cfg(test)]
-pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
-pub use bitcoin_rs_p2p::download_window::SyncBudget;
-pub use bitcoin_rs_p2p::download_window::default_sync_budget;
+
+use smallvec::SmallVec;
+
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
+
 #[allow(unused_imports)]
 use bitcoin_rs_p2p::download_window::{
     BLOCK_STALLING_TIMEOUT, BLOCK_STALLING_TIMEOUT_MAX, DownloadWindow, FanoutCandidate,
@@ -31,12 +45,13 @@ use bitcoin_rs_p2p::download_window::{
     RECEIVED_BLOCK_TIMEOUT, STALLER_COOLDOWN, SyncPeer, SyncPeerSelection, configure_request_mode,
     statically_fanout_eligible,
 };
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
-use bitcoin_rs_primitives::{Block, Hash256};
-use crossbeam_channel::Receiver;
-use hashbrown::HashMap;
-use parking_lot::Mutex;
-use smallvec::SmallVec;
+
+pub use bitcoin_rs_p2p::download_window::{SyncBudget, default_sync_budget};
+
+#[cfg(test)]
+pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
+
+mod stage;
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
@@ -1817,33 +1832,61 @@ fn metric_count(value: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     use arc_swap::ArcSwapOption;
     // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-    use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-    use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerSource, PeerTable};
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::TipSnapshot;
+    use bitcoin_rs_mempool::Mempool;
+    use bitcoin_rs_mempool::MempoolLimits;
+    use bitcoin_rs_p2p::PeerInfo;
+    use bitcoin_rs_p2p::PeerLease;
+    use bitcoin_rs_p2p::PeerSource;
+    use bitcoin_rs_p2p::PeerTable;
+    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::OutPoint;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::TxOut;
+    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::encode::double_sha256;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
-        consensus_bytes,
-    };
     use bitcoin_rs_script::push_int;
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_utxo::UtxoSet;
     use crossbeam_channel::unbounded;
     use hashbrown::HashMap;
-    use metrics::{
-        Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata,
-        Recorder, SharedString, Unit,
-    };
-    use parking_lot::{Mutex, RwLock};
+    use metrics::Counter;
+    use metrics::CounterFn;
+    use metrics::Gauge;
+    use metrics::GaugeFn;
+    use metrics::Histogram;
+    use metrics::HistogramFn;
+    use metrics::Key;
+    use metrics::KeyName;
+    use metrics::Metadata;
+    use metrics::Recorder;
+    use metrics::SharedString;
+    use metrics::Unit;
+    use parking_lot::Mutex;
+    use parking_lot::RwLock;
 
-    use super::{BlockSync, InboundHeaders, Inventory, Message};
+    use super::BlockSync;
+    use super::InboundHeaders;
+    use super::Inventory;
+    use super::Message;
     use crate::apply::Chainstate;
 
     #[test]
@@ -2663,7 +2706,7 @@ mod tests {
             preloaded_rx.recv().map_err(|_| {
                 std::io::Error::other("branch switch did not pause after preloading began")
             })?;
-            crate::apply::apply_block(&sync.handles, &racing)?;
+            sync.handles.apply_block(&racing)?;
             continue_tx
                 .send(())
                 .map_err(|_| std::io::Error::other("branch switch stopped before replanning"))?;
@@ -6249,7 +6292,9 @@ mod tests {
         let error = crate::apply::WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            source: crate::apply::error::ApplyError::UtxoCommit(
+                bitcoin_rs_utxo::UtxoError::CorruptRecord,
+            ),
             disposition: crate::apply::WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         };
@@ -6258,7 +6303,7 @@ mod tests {
 
         assert!(matches!(
             error.source,
-            crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+            crate::apply::error::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
         ));
         assert_eq!(
             sync.handles.mempool_gateway.stable_generation(),
@@ -6279,7 +6324,7 @@ mod tests {
         let error = crate::apply::WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: crate::state::ApplyError::BlockValueOverflow,
+            source: crate::apply::error::ApplyError::BlockValueOverflow,
             disposition: crate::apply::WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         };
@@ -6292,7 +6337,10 @@ mod tests {
             "finish failure must be classified Fatal"
         );
         assert!(
-            matches!(error.source, crate::state::ApplyError::BlockValueOverflow),
+            matches!(
+                error.source,
+                crate::apply::error::ApplyError::BlockValueOverflow
+            ),
             "original source must be preserved, not overwritten by the finish error"
         );
         assert_eq!(
@@ -6319,7 +6367,7 @@ mod tests {
             !sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
             "a fresh sync object must not start halted"
         );
-        sync.note_fatal_settlement(0, &crate::state::ApplyError::BlockValueOverflow);
+        sync.note_fatal_settlement(0, &crate::apply::error::ApplyError::BlockValueOverflow);
         assert_eq!(
             sync.apply_buffered_blocks(None),
             (0, 0),
@@ -6344,7 +6392,9 @@ mod tests {
         let error = crate::apply::WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
+            source: crate::apply::error::ApplyError::UtxoCommit(
+                bitcoin_rs_utxo::UtxoError::CorruptRecord,
+            ),
             disposition: crate::apply::WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         };
@@ -6359,7 +6409,9 @@ mod tests {
         assert!(
             matches!(
                 error.source,
-                crate::state::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+                crate::apply::error::ApplyError::UtxoCommit(
+                    bitcoin_rs_utxo::UtxoError::CorruptRecord
+                )
             ),
             "UtxoCommit source must be unchanged"
         );
@@ -7237,7 +7289,7 @@ mod tests {
         }
     }
 
-    impl crate::apply::PruneBodyStore for FailOnceBodyStore {
+    impl bitcoin_rs_storage::block_body::BlockBodyStore for FailOnceBodyStore {
         fn persist_block_body(
             &self,
             height: u32,
@@ -8137,9 +8189,9 @@ mod tests {
         let chain_tip = tree.tip_handle();
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let handles = apply_handles(chain_tip, applied_tip, Arc::new(RwLock::new(tree)));
-        crate::apply::apply_block(&handles, &genesis)?;
+        handles.apply_block(&genesis)?;
         for block in &blocks {
-            crate::apply::apply_block(&handles, block)?;
+            handles.apply_block(block)?;
         }
         let bodies: HashMap<Hash256, (Block, bytes::Bytes)> = blocks
             .iter()

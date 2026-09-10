@@ -85,7 +85,7 @@ scripthash — the number of funding rows the resolver walks. A real mainnet
 address can have thousands.
 
 Blocks are served from a **real `FlatFileBlockStore`**, the same path production
-takes through `FlatFilePruneBodyStore`: a position lookup, then `load` for a
+takes through `IndexedBlockBodyStore`: a position lookup, then `load` for a
 whole body or `load_range` for a slice, each paying the real
 open/`fstat`/seek/read sequence.
 

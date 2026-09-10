@@ -5,33 +5,48 @@
 //! wiring (chain / utxo / mempool
 //! / index / p2p / rpc / script_index) parks here as the integration point matures.
 
+use anyhow::{Context as _, Result, bail};
+
 use arc_swap::ArcSwapOption;
+
 use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
+
+use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+
+use bitcoin_rs_primitives::{
+    Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,
+};
+
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
 };
-use core::mem::size_of;
-use crossbeam_channel::{Receiver, Sender};
-use hashbrown::HashMap;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
-use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
-use bitcoin_rs_storage::pruning::{
-    PrunePolicy, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
+use bitcoin_rs_storage::{
+    ColumnFamily, FlatFileBlockStore, KvStore, StorageBackend, WriteBatch,
+    pruning::{PrunePolicy, reclaim_staged_flat_block_files, stage_block_and_undo_prune},
 };
-use bitcoin_rs_storage::{ColumnFamily, FlatFileBlockStore, KvStore, StorageBackend, WriteBatch};
+
 use bitcoin_rs_utxo::UtxoSet;
+
+use core::mem::size_of;
+
+use crate::{ApplyError, NodeConfig};
+
+use crossbeam_channel::{Receiver, Sender};
+
+use hashbrown::HashMap;
+
 use parking_lot::{Mutex, RwLock};
 
-use crate::NodeConfig;
+use std::{
+    io::{self, Write as _},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 // One active generation of outbound requests is enough to keep the drain fed;
 // extra backlog is overload and must fail fast at producers.
@@ -97,7 +112,7 @@ pub enum HintKind {
 /// reconciling a fresh [`ChainSnapshot`] against its own cursor using the
 /// chain itself: ancestry via `BlockTree::active_node_at_height` and
 /// `BlockTree::find_common_ancestor` (crates/chain), bodies via
-/// `PruneBodyStore::load_block_body` (`crate::apply`). The `epoch` field is
+/// `BlockBodyStore::load_block_body` (`crate::apply`). The `epoch` field is
 /// what makes a persisted consumer cursor `(epoch, sequence)` stale on
 /// restart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,7 +246,9 @@ fn load_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
 /// checkpoint wipe or resync can never regress it. A crash before the rename
 /// may leave a temporary file; gaps are fine, but reuse is not.
 fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
-    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _, OpenOptionsSyncExt as _};
+    use cap_fs_ext::FollowSymlinks;
+    use cap_fs_ext::OpenOptionsFollowExt as _;
+    use cap_fs_ext::OpenOptionsSyncExt as _;
 
     let mut lock_options = cap_std::fs::OpenOptions::new();
     lock_options
@@ -288,198 +305,10 @@ fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     Ok(epoch)
 }
 
-/// Errors produced when applying a block to the node state.
-#[derive(Debug, thiserror::Error)]
-pub enum ApplyError {
-    /// Clean shutdown has closed block-apply admission.
-    #[error("block apply rejected because clean shutdown has begun")]
-    Shutdown,
-    /// The block's previous header hash does not match the current tip's hash.
-    #[error("prev hash mismatch: tip {tip}, block prev {prev}")]
-    PrevHashMismatch {
-        /// Current tip header hash, big-endian hex.
-        tip: bitcoin_rs_primitives::Hash256,
-        /// Block's previous header hash, big-endian hex.
-        prev: bitcoin_rs_primitives::Hash256,
-    },
-    /// Height arithmetic overflowed `u32::MAX`.
-    #[error("height overflow at tip {0}")]
-    HeightOverflow(u32),
-    /// Summing a block's input or output values left the satoshi range.
-    #[error("block value total overflows the satoshi range")]
-    BlockValueOverflow,
-    /// A block's non-coinbase outputs exceed the inputs they spend.
-    ///
-    /// Per-transaction verification rejects this first, so reaching it means
-    /// the two disagree; refuse rather than treat the block as fee-free.
-    #[error("block creates more value than it spends")]
-    BlockOutputsExceedInputs,
-    /// The block header hash does not satisfy its declared proof-of-work target.
-    #[error("proof-of-work: header hash {hash} exceeds declared target")]
-    ProofOfWork {
-        /// Block header hash, big-endian display.
-        hash: bitcoin_rs_primitives::Hash256,
-    },
-    /// Declared target exceeds the network's proof-of-work limit.
-    #[error("declared target exceeds network max_target")]
-    TargetAboveLimit,
-    /// Declared `nBits` does not match the parent block's `nBits` at a non-retarget height.
-    #[error(
-        "nBits {actual:08x} does not match parent {expected:08x} at non-retarget height {height}"
-    )]
-    NbitsNonRetargetMismatch {
-        /// This block's `nBits`.
-        actual: u32,
-        /// Parent block's `nBits`.
-        expected: u32,
-        /// Block height.
-        height: u32,
-    },
-    /// Consensus validation rejected the block.
-    #[error("consensus: {0}")]
-    Consensus(#[from] bitcoin_rs_consensus::ConsensusError),
-    /// Block-tree insertion rejected the header.
-    #[error("chain: {0}")]
-    Chain(#[from] bitcoin_rs_chain::ChainError),
-    /// UTXO commit failed during block apply.
-    #[error("utxo commit: {0}")]
-    UtxoCommit(#[from] bitcoin_rs_utxo::UtxoError),
-    /// Persisting the canonical prunable block body failed.
-    #[error("block body persistence: {0}")]
-    BlockBodyPersistence(#[from] bitcoin_rs_storage::StorageError),
-    /// Persisting the UTXO undo record failed.
-    ///
-    /// Fatal for the block: without a recoverable undo record the node could
-    /// not disconnect it, so the block must not be applied.
-    #[error("undo persistence: {0}")]
-    UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
-    /// Journal durability or retention cannot recover within configured bounds.
-    ///
-    /// Refused before this block mutates chainstate; retry is safe after the
-    /// journal flushes or a checkpoint compacts retained segments.
-    #[error("chainstate journal backpressure stopped block apply: {0}")]
-    JournalBackpressure(String),
-    /// A spent output had no resolved prevout, so the undo record would be
-    /// unable to restore it.
-    #[error("undo record cannot restore spent output {txid}:{vout}")]
-    UndoPrevoutMissing {
-        /// Transaction id of the unresolvable spend.
-        txid: bitcoin_rs_primitives::Txid,
-        /// Output index of the unresolvable spend.
-        vout: u32,
-    },
-    /// The undo record for a block being disconnected is absent.
-    ///
-    /// Fatal: without it the UTXO set cannot be restored, and guessing would
-    /// silently corrupt the chainstate.
-    #[error("no undo record for block {hash} at height {height}")]
-    UndoRecordMissing {
-        /// Block whose record is absent.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Height the block was applied at.
-        height: u32,
-    },
-    /// A stored undo record could not be decoded.
-    #[error("undo record for block {hash} is unreadable: {reason}")]
-    UndoRecordUnreadable {
-        /// Block whose record is unreadable.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Why the codec rejected it.
-        reason: String,
-    },
-    /// Reading a stored undo record failed.
-    #[error("undo record read: {0}")]
-    UndoRead(#[source] bitcoin_rs_storage::StorageError),
-    /// The block asked to be disconnected is not the applied tip.
-    ///
-    /// Blocks must be disconnected tip-first. Taking one from the middle would
-    /// restore outputs that its descendants have already spent.
-    #[error("block {hash} is not the applied tip {tip}")]
-    DisconnectNotTip {
-        /// Block the caller asked to disconnect.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Block that is actually applied.
-        tip: bitcoin_rs_primitives::Hash256,
-    },
-    /// The supplied block body does not match its own header.
-    ///
-    /// The header hash commits to the merkle root, not to the transactions the
-    /// caller handed over. A body swapped under a matching header would roll
-    /// the index back over the wrong rows.
-    #[error("block {hash} body does not match its header merkle root")]
-    DisconnectBodyMismatch {
-        /// Block whose body was rejected.
-        hash: bitcoin_rs_primitives::Hash256,
-    },
-    /// Rewinding the block-level coinstats failed.
-    ///
-    /// The per-coin fields ride the UTXO change listener and are already
-    /// reversed by the undo; only height and transaction count are set
-    /// directly, and a refusal here means they do not describe the block being
-    /// disconnected.
-    #[error("coinstats rewind: {0}")]
-    CoinStatsRewind(#[source] bitcoin_rs_utxo::stats::CoinStatsRewindError),
-}
-
-/// The outcome of a refused or failed block disconnect.
-///
-/// Two variants because the caller must act differently, and a single error
-/// type let that distinction live in prose where it can be missed. Every
-/// disconnect failure is one or the other; there is no third case.
-#[derive(Debug, thiserror::Error)]
-pub enum DisconnectError {
-    /// Refused before anything was touched. The chain is exactly as it was.
-    ///
-    /// Safe to report and carry on: no rollback started, so no state is half
-    /// applied. Every check that can produce this runs in the planning step
-    /// precisely so that refusing stays free.
-    #[error("disconnect refused: {0}")]
-    Refused(#[source] Box<ApplyError>),
-    /// Failed after the rollback began. Some state is rolled back and some is
-    /// not, and which is which depends on where it stopped.
-    ///
-    /// Fatal. Do not retry: the UTXO commit fires the set's change listener and
-    /// coinstats is registered as one, so a second pass double-counts even
-    /// where the set itself converges. Stop applying blocks and report the
-    /// block named here, which is why the hash and height are carried rather
-    /// than left for the caller to reconstruct.
-    #[error(
-        "disconnect of block {hash} at height {height} failed after mutation began, chain state is partial: {source}"
-    )]
-    Fatal {
-        /// Block whose disconnect wedged.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Height it was applied at.
-        height: u32,
-        /// What failed.
-        #[source]
-        source: Box<ApplyError>,
-    },
-    /// Rolled back cleanly, but the in-flight marker could not be cleared.
-    ///
-    /// The chain is consistent and no data is lost. What is broken is the
-    /// interlock: the marker still says a disconnect was in flight, so the next
-    /// start refuses until it is cleared. Reported rather than folded into
-    /// success because a caller that heard "done" would restart into a refusal
-    /// it had no warning of.
-    #[error(
-        "disconnect of block {hash} at height {height} completed but the in-flight marker remains set: {source}"
-    )]
-    MarkerStuck {
-        /// Block that was disconnected.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Height it was applied at.
-        height: u32,
-        /// Why the marker could not be cleared.
-        #[source]
-        source: Box<ApplyError>,
-    },
-}
-
 struct NodeStorage {
     backend: StorageBackend,
     undo_store: Arc<dyn crate::apply::UndoStore>,
-    block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+    block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     deferred: Arc<dyn DeferredChainstateServices>,
     #[cfg(test)]
     test_store: Arc<dyn TestStoreAccess>,
@@ -507,7 +336,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
         Ok(NodeStorage {
             backend: self.backend,
             undo_store: Arc::new(crate::apply::KvUndoStore::new(Arc::clone(&store))),
-            block_body_store: Arc::new(crate::apply::FlatFilePruneBodyStore::open(
+            block_body_store: Arc::new(bitcoin_rs_storage::block_body::IndexedBlockBodyStore::new(
                 Arc::clone(&store),
                 self.block_files,
             )),
@@ -550,7 +379,7 @@ impl NodeStorage {
     fn prune_service(
         &self,
         block_files: &Arc<FlatFileBlockStore>,
-        block_body_store: &Arc<dyn crate::apply::PruneBodyStore>,
+        block_body_store: &Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
         authority: crate::apply::PruneAuthority,
@@ -566,7 +395,7 @@ impl NodeStorage {
         )
     }
 
-    fn block_body_store(&self) -> Arc<dyn crate::apply::PruneBodyStore> {
+    fn block_body_store(&self) -> Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore> {
         Arc::clone(&self.block_body_store)
     }
 
@@ -638,7 +467,7 @@ trait DeferredChainstateServices: Send + Sync {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+        block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
         authority: crate::apply::PruneAuthority,
@@ -660,7 +489,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
-        block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+        block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
         authority: crate::apply::PruneAuthority,
@@ -758,11 +587,11 @@ fn build_journal_writer<S: KvStore + 'static>(
 }
 
 struct StoredBlockBodySource {
-    store: Arc<dyn crate::apply::PruneBodyStore>,
+    store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
 }
 
 impl StoredBlockBodySource {
-    fn new(store: Arc<dyn crate::apply::PruneBodyStore>) -> Self {
+    fn new(store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>) -> Self {
         Self { store }
     }
 }
@@ -816,10 +645,7 @@ impl BlockBodySource for StoredBlockBodySource {
             .block_body_metadata(height, hash.0)
             .ok()
             .flatten()
-            .map(|(body_size, tx_count)| BlockBodyMetadata {
-                body_size,
-                tx_count,
-            })
+
     }
 }
 
@@ -1110,7 +936,7 @@ fn load_pruneheight<S: KvStore>(store: &S) -> Result<Option<u32>> {
 pub struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
-    block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+    block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
     authority: crate::apply::PruneAuthority,
@@ -1127,7 +953,7 @@ impl<S: KvStore> NodePruneService<S> {
     pub(crate) fn new(
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
-        block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+        block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
         authority: crate::apply::PruneAuthority,
@@ -1318,7 +1144,7 @@ pub struct NodeState {
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
-    block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+    block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     tx_index_runtime: Option<Arc<crate::txindex_worker::TxIndexRuntime>>,
@@ -2324,12 +2150,6 @@ impl NodeState {
         self.apply_handles.clone()
     }
 
-    /// Clone of the chainstate facade.
-    #[must_use]
-    pub fn apply_handles(&self) -> crate::apply::Chainstate {
-        self.chainstate()
-    }
-
     /// Clone of the derived-consumer set used after committed transitions.
     #[must_use]
     pub fn chain_followers(&self) -> crate::chain_effects::ChainFollowers {
@@ -2373,10 +2193,16 @@ impl Drop for NodeState {
 mod tests {
     use super::*;
     use bitcoin_rs_index::IndexCapabilities;
+    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::OutPoint;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::TxOut;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::encode::double_sha256;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, consensus_bytes,
-    };
     use bitcoin_rs_rpc::context::BlockRecord;
 
     /// IDX-01: scriptindex mode selects `ScriptLive` and/or `ScriptHistory`.
@@ -3161,7 +2987,9 @@ mod tests {
         config_b.p2p.listen.clear();
         config_b.storage.prune_target_mb = 0;
         let state_b = NodeState::open(config_b, None)?;
-        crate::apply::apply_block_with_serialized(&state_b.apply_handles(), &block, serialized)?;
+        state_b
+            .chainstate()
+            .apply_block_with_serialized(&block, serialized)?;
 
         let body_a = state_a
             .block_body_store
@@ -3250,7 +3078,7 @@ mod tests {
                 .block_body_store
                 .persist_block_body(height, hash, b"block-body")?;
             state
-                .apply_handles()
+                .chainstate()
                 .undo_store
                 .persist_undo(height, hash, b"undo-body")?;
             state.blocks.write().push(BlockRecord {
@@ -3310,7 +3138,7 @@ mod tests {
                 .block_body_store
                 .persist_block_body(height, hash, b"block-body")?;
             state
-                .apply_handles()
+                .chainstate()
                 .undo_store
                 .persist_undo(height, hash, b"undo-body")?;
             state.blocks.write().push(BlockRecord {
@@ -3520,7 +3348,7 @@ mod tests {
             &consensus_bytes(&pruned_block),
         )?;
         state
-            .apply_handles()
+            .chainstate()
             .undo_store
             .persist_undo(10, pruned_hash, b"undo-body")?;
         state
@@ -3601,7 +3429,7 @@ mod tests {
             anyhow::bail!("prune service should exist when prune_target_mb > 0");
         };
 
-        let handles = state.apply_handles();
+        let handles = state.chainstate();
         let transition = handles.chain_transition.lock();
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
@@ -3700,7 +3528,7 @@ mod tests {
             loads: AtomicUsize,
         }
 
-        impl crate::apply::PruneBodyStore for BlockingPruneBodyStore {
+        impl bitcoin_rs_storage::block_body::BlockBodyStore for BlockingPruneBodyStore {
             fn load_block_body(
                 &self,
                 _height: u32,
@@ -3746,7 +3574,8 @@ mod tests {
             block_once: AtomicBool::new(true),
             loads: AtomicUsize::new(0),
         });
-        let body_handle: Arc<dyn crate::apply::PruneBodyStore> = body_store.clone();
+        let body_handle: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore> =
+            body_store.clone();
         let blocks = Arc::new(RwLock::new(BlockLog::new()));
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
         blocks.write().push(BlockRecord {
@@ -3763,7 +3592,7 @@ mod tests {
             body_handle,
             Arc::clone(&blocks),
             Arc::new(RwLock::new(HashMap::new())),
-            authority_state.apply_handles().prune_authority(),
+            authority_state.chainstate().prune_authority(),
             Arc::new(AtomicU32::new(11 + CORE_REORG_SAFETY_MARGIN)),
         )?);
 
@@ -4018,10 +3847,7 @@ mod tests {
         config.data_dir = dir.path().join("node");
         config.p2p.listen.clear();
         let state = NodeState::open(config, None)?;
-        assert!(Arc::ptr_eq(
-            &state.shutdown(),
-            &state.apply_handles().shutdown
-        ));
+        assert!(Arc::ptr_eq(&state.shutdown(), &state.chainstate().shutdown));
         Ok(())
     }
 
@@ -4044,10 +3870,10 @@ mod tests {
         let armed_hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xab; 32]);
         let armed_height = 10;
         state
-            .apply_handles()
+            .chainstate()
             .undo_store
             .arm_disconnect(armed_height, armed_hash)?;
-        let marker_before = state.apply_handles().undo_store.load_disconnect_marker()?;
+        let marker_before = state.chainstate().undo_store.load_disconnect_marker()?;
         let current_before = std::fs::read(checkpoint_root.join("CURRENT"))?;
         let mut dirs_before = std::collections::BTreeSet::new();
         for entry in std::fs::read_dir(&checkpoint_root)? {
@@ -4065,7 +3891,7 @@ mod tests {
         assert_eq!(hash, armed_hash);
         assert_eq!(height, armed_height);
 
-        let marker_after = state.apply_handles().undo_store.load_disconnect_marker()?;
+        let marker_after = state.chainstate().undo_store.load_disconnect_marker()?;
         let current_after = std::fs::read(checkpoint_root.join("CURRENT"))?;
         let mut dirs_after = std::collections::BTreeSet::new();
         for entry in std::fs::read_dir(&checkpoint_root)? {
@@ -4089,7 +3915,7 @@ mod tests {
         config.data_dir = data_dir.clone();
         config.p2p.listen.clear();
         let state = NodeState::open(config.clone(), None)?;
-        state.apply_handles().undo_store.arm_disconnect(
+        state.chainstate().undo_store.arm_disconnect(
             10,
             bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xcd; 32]),
         )?;
@@ -4138,14 +3964,14 @@ mod tests {
         state.apply_block(&block_two)?;
 
         crate::reorg::invalidate_block(
-            &state.apply_handles(),
+            &state.chainstate(),
             &state.chain_followers(),
             Hash256::from(block_two.block_hash()),
         )?;
 
         assert!(
             state
-                .apply_handles()
+                .chainstate()
                 .undo_store
                 .load_disconnect_marker()?
                 .is_none()
@@ -4183,7 +4009,7 @@ mod tests {
             crate::checkpoint::CheckpointFailpoint::ManifestWrite,
         );
         let result = crate::reorg::invalidate_block(
-            &state.apply_handles(),
+            &state.chainstate(),
             &state.chain_followers(),
             Hash256::from(block_two.block_hash()),
         );
@@ -4192,7 +4018,7 @@ mod tests {
         };
 
         let marker = state
-            .apply_handles()
+            .chainstate()
             .undo_store
             .load_disconnect_marker()?
             .ok_or_else(|| anyhow::anyhow!("settlement failure cleared the disconnect marker"))?;
@@ -4261,7 +4087,7 @@ mod tests {
             previous_hash = block.block_hash();
         }
 
-        let handles = state.apply_handles();
+        let handles = state.chainstate();
         crate::reorg::switch_to_branch(
             &handles,
             &state.chain_followers(),
@@ -4272,7 +4098,7 @@ mod tests {
 
         assert!(
             state
-                .apply_handles()
+                .chainstate()
                 .undo_store
                 .load_disconnect_marker()?
                 .is_none()

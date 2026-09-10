@@ -1,18 +1,22 @@
 //! RPC composition over the node's authoritative and derived handles.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
+
 use bitcoin_rs_chain::BlockBodySource;
+
 use bitcoin_rs_mining::MiningControl;
-use bitcoin_rs_rpc::RpcServer;
-use bitcoin_rs_rpc::context::{
-    ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
-    MempoolHandles, MiningHandles, NetworkHandles,
+
+use bitcoin_rs_rpc::{
+    RpcServer,
+    context::{
+        ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
+        MempoolHandles, MiningHandles, NetworkHandles,
+    },
 };
 
 use crate::state::NodeState;
+
+use std::{sync::Arc, time::Duration};
 
 const RPC_MAX_CONNECTIONS: usize = 128;
 const RPC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -79,13 +83,13 @@ pub(super) fn bind_rpc(
     })
     .with_esplora_tx_index(state.esplora_tx_index_query())
     .with_block_body_source(block_body_source)
-    .with_chain_transition(Arc::clone(&state.apply_handles().chain_transition));
+    .with_chain_transition(Arc::clone(&state.chainstate().chain_transition));
     if let Some(prune_service) = state.prune_service() {
         context = context.with_prune_service(prune_service);
     }
     context = context
         .with_chain_control(Arc::new(RpcChainControl {
-            handles: state.apply_handles(),
+            handles: state.chainstate(),
             followers: state.chain_followers(),
         }))
         .with_zmq_publisher(state.zmq_publisher())
