@@ -6,6 +6,7 @@
 //! file declares the contract those commits fill in.
 
 use anyhow::{Context as _, Result};
+
 use bitcoin_rs_primitives::{Block, Hash256};
 
 use crate::state::NodeState;
@@ -44,11 +45,19 @@ pub fn import_block(state: &NodeState, block_bytes: &[u8]) -> Result<ImportOutco
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::OutPoint;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::TxOut;
+    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::encode::double_sha256;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    };
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
     use tempfile::tempdir;
 
     const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
@@ -245,8 +254,8 @@ mod tests {
         assert!(
             error.chain().any(|cause| {
                 matches!(
-                    cause.downcast_ref::<crate::state::ApplyError>(),
-                    Some(crate::state::ApplyError::ProofOfWork { .. })
+                    cause.downcast_ref::<crate::apply::error::ApplyError>(),
+                    Some(crate::apply::error::ApplyError::ProofOfWork { .. })
                 )
             }),
             "error chain should contain ProofOfWork rejection: {error:?}"
@@ -292,8 +301,8 @@ mod tests {
         assert!(
             error.chain().any(|cause| {
                 matches!(
-                    cause.downcast_ref::<crate::state::ApplyError>(),
-                    Some(crate::state::ApplyError::TargetAboveLimit)
+                    cause.downcast_ref::<crate::apply::error::ApplyError>(),
+                    Some(crate::apply::error::ApplyError::TargetAboveLimit)
                 )
             }),
             "error chain should contain TargetAboveLimit rejection: {error:?}"
@@ -337,8 +346,8 @@ mod tests {
         assert!(
             error.chain().any(|cause| {
                 matches!(
-                    cause.downcast_ref::<crate::state::ApplyError>(),
-                    Some(crate::state::ApplyError::NbitsNonRetargetMismatch {
+                    cause.downcast_ref::<crate::apply::error::ApplyError>(),
+                    Some(crate::apply::error::ApplyError::NbitsNonRetargetMismatch {
                         actual: 0x207e_ffff,
                         expected: 0x207f_ffff,
                         height: 1,
@@ -520,10 +529,12 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::state::ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip {
-                    bip: "COINBASE_MATURITY",
-                    ..
-                })
+                crate::apply::error::ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::Bip {
+                        bip: "COINBASE_MATURITY",
+                        ..
+                    }
+                )
             ),
             "error should be COINBASE_MATURITY rejection: {error:?}"
         );

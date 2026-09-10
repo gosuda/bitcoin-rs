@@ -29,17 +29,18 @@ bitcoin-rs-node.workspace = true
 bitcoin-rs-storage.workspace = true
 
 [dev-dependencies]
+thiserror.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 tempfile = ">=3.20.0, <4"
 bitcoin.workspace = true
+bitcoin-rs-rpc = { workspace = true }
 
 [features]
 default = ["fjall", "redb", "zmq"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]
 fjall = ["bitcoin-rs-node/fjall"]
 redb = ["bitcoin-rs-node/redb"]
-mdbx = ["bitcoin-rs-node/mdbx"]
 kernel = ["bitcoin-rs-node/kernel"]
 zmq = ["bitcoin-rs-node/zmq"]
 
@@ -54,3 +55,7 @@ path = "tests/gates/g18_hot_path_ledger.rs"
 [[test]]
 name = "g19_validation_default"
 path = "tests/gates/g19_validation_default.rs"
+
+[[test]]
+name = "g20_formal_models"
+path = "tests/gates/g20_formal_models.rs"

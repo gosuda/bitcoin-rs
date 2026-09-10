@@ -224,13 +224,16 @@ impl NetworkActivity {
 /// Length of the upload-target measuring window in seconds
 /// (Core `MAX_UPLOAD_TIMEFRAME`, one day).
 pub const UPLOAD_TIMEFRAME_SECS: u64 = 86_400;
+
 /// Consensus maximum serialized block size, the per-10-minute relay buffer
 /// unit in Core's historical-block serving rule.
 pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
+
 /// Same consensus limit as [`MAX_BLOCK_SERIALIZED_SIZE`] in `usize` form,
 /// for wire-buffer arithmetic. Defined beside the `u64` original so `peer`
 /// is the single authority for both forms.
 pub const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
+
 #[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
 const _: () = assert!(MAX_BLOCK_SERIALIZED_SIZE_USIZE as u64 == MAX_BLOCK_SERIALIZED_SIZE);
 
@@ -1038,9 +1041,11 @@ mod tests {
             crate::PeerInfo {
                 addr,
                 version: 70_016,
+                wtxid_relay: false,
                 services: 0,
                 user_agent: String::from("/test/"),
                 start_height: 0,
+                best_known_height: 0,
                 conn_time: 0,
                 inbound: false,
                 addr_bind: addr,
@@ -1123,8 +1128,10 @@ mod tests {
             crate::PeerInfo {
                 addr: connected,
                 version: 70_016,
+                wtxid_relay: false,
                 services: 9,
                 user_agent: String::from("/test/"),
+                best_known_height: 1,
                 start_height: 1,
                 conn_time: 10,
                 inbound: false,
