@@ -98,10 +98,16 @@ impl Tx {
             .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
     }
 
+    /// Derives BIP141 virtual size from a transaction weight, rounded up.
+    #[must_use]
+    pub const fn vsize_from_weight(weight: u64) -> u64 {
+        weight.div_ceil(4)
+    }
+
     /// BIP141 virtual size: weight divided by four, rounded up.
     #[must_use]
     pub fn vsize(&self) -> u64 {
-        self.weight().div_ceil(4)
+        Self::vsize_from_weight(self.weight())
     }
 }
 

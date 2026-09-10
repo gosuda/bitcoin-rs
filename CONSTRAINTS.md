@@ -138,3 +138,11 @@ probe failure exits with status 7, and an insufficient-space check exits with
 status 1. Every setup failure removes the temporary staging directory and does
 not attempt the clone. `scripts/tests/test_import_qa_assets.py`
 `SetupFailureTests` is the regression suite for this contract.
+
+## Raw zero-input mempool entry contract
+
+`MempoolEntry::new` accepts a raw default transaction for compatibility with
+callers that construct entries before admission. For `Tx::default()` it must
+preserve the metadata values `(size, weight, bip141_vsize) = (10, 40, 10)`,
+use the txid as the wtxid, and produce a zero fee rate. The regression test is
+`crates/mempool/src/entry.rs::raw_empty_entry_keeps_zero_input_behavior`.
