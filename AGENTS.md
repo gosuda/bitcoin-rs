@@ -1,6 +1,4 @@
-# Agent guidelines
-
-Read the relevant source, tests, current contract, and PR discussion before changing settled behavior. Architecture belongs in `CONCEPTS.md` and `docs/contracts/`.
+# AGENTS.md
 
 - Keep one owner per invariant and durable representation. Reuse existing boundaries; do not add parallel state, forwarding wrappers, or speculative APIs.
 - Describe implemented behavior as implemented and target design as target design.
@@ -12,3 +10,4 @@ Read the relevant source, tests, current contract, and PR discussion before chan
 - Tie permanent tests to current contracts and independent references. Missing evidence blocks a claim; it does not prove it.
 - Run the applicable `CONSTRAINTS.md` checks and report results. Do not claim performance or promote defaults without evidence.
 - Keep plans and scratch outside the PR; keep acceptance evidence in the PR or CI artifacts.
+- Check and fix clippy lints before pushing or publishing pull requests.
