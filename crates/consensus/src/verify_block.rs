@@ -10,11 +10,11 @@ mod legacy {
     include!("verify_block_impl.rs");
 }
 
-pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 pub use legacy::{
     BlockRuleContext, block_has_witness, block_merkle_root_matches_txids,
     block_witness_commitment_matches, verify_merkle_root_with_txids,
 };
+pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 
 /// BIP141 maximum block weight in weight units.
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;

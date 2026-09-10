@@ -445,7 +445,9 @@ fn check_tuple_content_length(
         // forms; the node's own omission is pinned by the negative probe.
         if let Some(value) = declared.first() {
             if *value != "0" || declared.len() != 1 {
-                return Err(fail("204 Content-Length must be absent or exactly \"0\"".into()));
+                return Err(fail(
+                    "204 Content-Length must be absent or exactly \"0\"".into(),
+                ));
             }
         }
         return Ok(());

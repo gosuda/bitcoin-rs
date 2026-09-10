@@ -1,8 +1,6 @@
 //! Framed, checksummed chainstate journal records.
 
-use bitcoin_rs_primitives::{
-    ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut,
-};
+use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
 use std::io::{self, Write};
 
 use thiserror::Error;
@@ -110,6 +108,10 @@ pub(crate) enum JournalRecordError {
 }
 
 /// Encodes a journal record with magic, version, length, payload, and CRC32C.
+#[expect(
+    clippy::expect_used,
+    reason = "the writes below target a Vec, which cannot fail"
+)]
 #[must_use]
 pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
     let expected_payload_len = record_payload_len(record);
@@ -123,30 +125,9 @@ pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
     put_u32(&mut framed, 0).expect("Vec write cannot fail");
 
     encode_payload(&mut framed, record).expect("Vec write cannot fail");
-/*
-    for mutation in &record.mutations {
-        match mutation {
-            Mutation::Create { coin } => {
-                framed.push(0);
-                put_coin(&mut framed, coin);
-            }
-            Mutation::Spend { coin } => {
-                framed.push(1);
-                put_coin(&mut framed, coin);
-            }
-            Mutation::Overwrite { old_coin, new_coin } => {
-                framed.push(2);
-                put_coin(&mut framed, old_coin);
-                put_coin(&mut framed, new_coin);
-            }
-        }
-    }
-
-*/
     let payload_len = framed.len() - FRAME_HEADER_LEN;
     debug_assert!(expected_payload_len.is_none_or(|expected| expected == payload_len));
-    framed[MAGIC.len() + 1..FRAME_HEADER_LEN]
-        .copy_from_slice(&u32_len(payload_len).to_le_bytes());
+    framed[MAGIC.len() + 1..FRAME_HEADER_LEN].copy_from_slice(&u32_len(payload_len).to_le_bytes());
     let checksum = crc32c(&framed[FRAME_HEADER_LEN..]);
     put_u32(&mut framed, checksum).expect("Vec write cannot fail");
     framed
@@ -168,8 +149,14 @@ fn encode_payload(writer: &mut impl Write, record: &JournalRecord) -> io::Result
     put_u32(writer, u32_len(record.mutations.len()))?;
     for mutation in &record.mutations {
         match mutation {
-            Mutation::Create { coin } => { writer.write_all(&[0])?; put_coin(writer, coin)?; }
-            Mutation::Spend { coin } => { writer.write_all(&[1])?; put_coin(writer, coin)?; }
+            Mutation::Create { coin } => {
+                writer.write_all(&[0])?;
+                put_coin(writer, coin)?;
+            }
+            Mutation::Spend { coin } => {
+                writer.write_all(&[1])?;
+                put_coin(writer, coin)?;
+            }
             Mutation::Overwrite { old_coin, new_coin } => {
                 writer.write_all(&[2])?;
                 put_coin(writer, old_coin)?;
@@ -180,13 +167,20 @@ fn encode_payload(writer: &mut impl Write, record: &JournalRecord) -> io::Result
     Ok(())
 }
 
-struct CountingWriter { len: usize }
+struct CountingWriter {
+    len: usize,
+}
 impl Write for CountingWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.len = self.len.checked_add(bytes.len()).ok_or(io::ErrorKind::Other.into())?;
+        self.len = self
+            .len
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::Other))?;
         Ok(bytes.len())
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Decodes and validates one complete journal record.
@@ -291,9 +285,15 @@ fn put_coin(out: &mut impl Write, coin: &Coin) -> io::Result<()> {
     out.write_all(&[u8::from(coin.coinbase)])
 }
 
-fn put_u32(out: &mut impl Write, value: u32) -> io::Result<()> { out.write_all(&value.to_le_bytes()) }
-fn put_u64(out: &mut impl Write, value: u64) -> io::Result<()> { out.write_all(&value.to_le_bytes()) }
-fn put_i64(out: &mut impl Write, value: i64) -> io::Result<()> { out.write_all(&value.to_le_bytes()) }
+fn put_u32(out: &mut impl Write, value: u32) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
+}
+fn put_u64(out: &mut impl Write, value: u64) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
+}
+fn put_i64(out: &mut impl Write, value: i64) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
+}
 
 fn u32_len(value: usize) -> u32 {
     debug_assert!(u32::try_from(value).is_ok());

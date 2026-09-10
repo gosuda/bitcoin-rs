@@ -52,7 +52,8 @@ fn measure(
 }
 
 fn main() -> fmt::Result {
-    assert!(!cfg!(debug_assertions), "run this benchmark with --release");
+    let release_build = !cfg!(debug_assertions);
+    assert!(release_build, "run this benchmark with --release");
     let hashes: Vec<_> = (0_u8..=u8::MAX)
         .map(|seed| {
             let mut bytes = [0_u8; 32];

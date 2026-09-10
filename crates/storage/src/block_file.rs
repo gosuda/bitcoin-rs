@@ -223,8 +223,8 @@ impl FlatFileBlockStore {
         // opens or recovers, starts at zero on rollover, and advances by the
         // exact record length after every successful write. Keep that invariant
         // instead of issuing an unconditional seek for every block.
-        let append_result = write_record(&mut writer.file, &header, body)
-            .and_then(|()| writer.file.flush());
+        let append_result =
+            write_record(&mut writer.file, &header, body).and_then(|()| writer.file.flush());
         if let Err(append_error) = append_result {
             writer.rollback_offset = Some(position.offset);
             self.usage_dirty.store(true, Ordering::Release);
@@ -858,7 +858,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        write_record, BLOCK_FILE_MAGIC, BlockFilePosition, FlatFileBlockStore, RECORD_HEADER_LEN_U64,
+        BLOCK_FILE_MAGIC, BlockFilePosition, FlatFileBlockStore, RECORD_HEADER_LEN_U64,
+        write_record,
     };
 
     fn hash(byte: u8) -> [u8; 32] {
@@ -903,6 +904,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "test invariants are checked with expect"
+    )]
     fn write_record_handles_short_interrupted_and_zero_writes() {
         let mut writer = VectoredTestWriter {
             bytes: Vec::new(),

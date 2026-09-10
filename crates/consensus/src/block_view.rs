@@ -4,7 +4,7 @@
 //! the Merkle result so later validation stages do not derive them again.
 
 use bitcoin_rs_primitives::{
-    Hash256, Tx, TxOut, Txid, Wtxid,
+    Tx, TxOut, Txid, Wtxid,
     encode::{double_sha256, finalize_double_sha256},
     layout::{ByteSpan, ParsedBlock, ParsedTransaction},
 };

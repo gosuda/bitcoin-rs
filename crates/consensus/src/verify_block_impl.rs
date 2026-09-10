@@ -325,11 +325,20 @@ pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
     }).map(|output| &output.script_pubkey[6..38])
 }
 
+/// BIP141 witness-commitment check over precomputed witness IDs.
+///
+/// Returns `true` only when the block carries a commitment output, its
+/// coinbase witness holds exactly one 32-byte reserved value, `wtxids`
+/// covers every block transaction, and the witness merkle root built from
+/// them (coinbase leaf all-zero) matches the commitment.
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
     let Some(commitment) = witness_commitment(block) else {
         return false;
     };
     // BIP141: coinbase witness must have exactly one 32-byte element (the reserved value).
+    let Some(coinbase) = block.txs.first() else {
+        return false;
+    };
     let Some(input) = coinbase.inputs.first() else {
         return false;
     };

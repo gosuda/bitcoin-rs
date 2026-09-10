@@ -32,11 +32,11 @@ const INPUT: usize = 1;
 
 fn hex(text: &str) -> Vec<u8> {
     assert!(text.len().is_multiple_of(2));
-    text.as_bytes()
-        .chunks_exact(2)
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
         .map(|pair| {
-            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
-                .expect("hex byte")
+            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16).expect("hex byte")
         })
         .collect()
 }
@@ -105,13 +105,25 @@ fn empty_signature_cannot_bypass_legacy_key_encoding() {
         };
         assert_eq!(
             Interpreter.execute(
-                &script, &script_sig, &[], VerifyFlags::NONE, &prevout, &tx, INPUT,
+                &script,
+                &script_sig,
+                &[],
+                VerifyFlags::NONE,
+                &prevout,
+                &tx,
+                INPUT,
             ),
             Ok(true),
         );
         assert_eq!(
             Interpreter.execute(
-                &script, &script_sig, &[], VerifyFlags::STRICTENC, &prevout, &tx, INPUT,
+                &script,
+                &script_sig,
+                &[],
+                VerifyFlags::STRICTENC,
+                &prevout,
+                &tx,
+                INPUT,
             ),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::PubkeyType,
@@ -123,8 +135,7 @@ fn empty_signature_cannot_bypass_legacy_key_encoding() {
 #[test]
 fn empty_signature_cannot_bypass_witness_compressed_key_policy() {
     let tx = fixture();
-    let uncompressed =
-        PublicKey::from_secret_key(SECP256K1, &test_key()).serialize_uncompressed();
+    let uncompressed = PublicKey::from_secret_key(SECP256K1, &test_key()).serialize_uncompressed();
     for multisig in [false, true] {
         let script = negative_check_script(&uncompressed, multisig);
         let mut program = vec![0x00, 0x20]; // witness v0, 32-byte script hash

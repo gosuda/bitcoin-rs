@@ -104,60 +104,58 @@ pub fn invalidate_block(
     // Keep read-only planning refusals in the same settlement path as the
     // execution outcome; an early `?` must not strand a coherent generation.
     let outcome = (|| {
-        loop {
-            let (root, target) = {
-                let tree = handles.block_tree.read();
-                let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
-                if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
-                    return Err(ReorgError::CannotInvalidateGenesis);
-                }
-                let target = tree
-                    .tip_after_invalidation(root)
-                    .map_err(ReorgError::Plan)?
-                    .ok_or(ReorgError::NoValidTip)?;
-                (root, target)
-            };
-
-            let plan = current_reorg_plan(handles, target)?;
-            let mut no_staged_body = |_| None;
-            let (disconnect_nodes, connect) = match plan.as_ref() {
-                Some(plan) => {
-                    let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
-                    let connect = load_branch_bodies(handles, &plan.connect, &mut no_staged_body)?;
-                    (disconnect_nodes, connect)
-                }
-                None => (Vec::new(), Vec::new()),
-            };
-            if !disconnect_nodes.is_empty() {
-                preflight_disconnect_bodies(handles, &disconnect_nodes, &mut no_staged_body)?;
+        let (_, target) = {
+            let tree = handles.block_tree.read();
+            let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
+            if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
+                return Err(ReorgError::CannotInvalidateGenesis);
             }
+            let target = tree
+                .tip_after_invalidation(root)
+                .map_err(ReorgError::Plan)?
+                .ok_or(ReorgError::NoValidTip)?;
+            (root, target)
+        };
 
-            let (progress, outcome) = execute_streamed_plan(
-                &transition,
-                followers,
+        let plan = current_reorg_plan(handles, target)?;
+        let mut no_staged_body = |_| None;
+        let (disconnect_nodes, connect) = match plan.as_ref() {
+            Some(plan) => {
+                let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
+                let connect = load_branch_bodies(handles, &plan.connect, &mut no_staged_body)?;
+                (disconnect_nodes, connect)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        if !disconnect_nodes.is_empty() {
+            preflight_disconnect_bodies(handles, &disconnect_nodes, &mut no_staged_body)?;
+        }
+
+        let (progress, outcome) = execute_streamed_plan(
+            &transition,
+            followers,
+            &disconnect_nodes,
+            &connect,
+            &mut no_staged_body,
+        );
+        if progress.disconnected == disconnect_nodes.len() {
+            let mut tree = handles.block_tree.write();
+            let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
+            tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
+            let tip = tree.tip().ok_or(ReorgError::NoValidTip)?;
+            handles.chain_tip.store(Some(tip));
+            handles.assume_valid_gate.evaluate(&tree);
+        }
+        if !outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
+            reconsider_disconnected_transactions(
+                handles,
                 &disconnect_nodes,
-                &connect,
+                progress.disconnected,
+                &connect[..progress.connected],
                 &mut no_staged_body,
             );
-            if progress.disconnected == disconnect_nodes.len() {
-                let mut tree = handles.block_tree.write();
-                let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
-                tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
-                let tip = tree.tip().ok_or(ReorgError::NoValidTip)?;
-                handles.chain_tip.store(Some(tip));
-                handles.assume_valid_gate.evaluate(&tree);
-            }
-            if !outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
-                reconsider_disconnected_transactions(
-                    handles,
-                    &disconnect_nodes,
-                    progress.disconnected,
-                    &connect[..progress.connected],
-                    &mut no_staged_body,
-                );
-            }
-            return outcome;
         }
+        outcome
     })();
     settle_reorg_transition(transition, outcome)
 }

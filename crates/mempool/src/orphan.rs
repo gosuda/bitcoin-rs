@@ -412,10 +412,7 @@ mod tests {
         assert!(pool.contains(&successor.txid()));
 
         // MPL-04: retention expires at the DEFAULT_ORPHAN_TIMEOUT_SECS boundary.
-        assert_eq!(
-              pool.maintain(119 + DEFAULT_ORPHAN_TIMEOUT_SECS, &live),
-              1
-          );
+        assert_eq!(pool.maintain(119 + DEFAULT_ORPHAN_TIMEOUT_SECS, &live), 1);
         assert_eq!(pool.len(), 0);
         assert_eq!(pool.total_weight(), 0);
         assert!(pool.by_wtxid.is_empty());

@@ -111,17 +111,15 @@ fn select_mempool_page<'a>(
     let mut cutoff = None;
     for entry in entries {
         let key = (entry.time, entry.txid);
-        if after.is_some_and(|after| key <= after)
-            || cutoff.is_some_and(|cutoff| key >= cutoff)
-        {
+        if after.is_some_and(|after| key <= after) || cutoff.is_some_and(|cutoff| key >= cutoff) {
             continue;
         }
         selected.push(entry);
         // This is len >= 2K without multiplying the caller's usize limit.
         // K > 0 also proves the nth index is strictly below the length.
         if selected.len() / 2 >= max_txs {
-            let (_, excluded, _) = selected
-                .select_nth_unstable_by_key(max_txs, |entry| (entry.time, entry.txid));
+            let (_, excluded, _) =
+                selected.select_nth_unstable_by_key(max_txs, |entry| (entry.time, entry.txid));
             // Txids are unique in a pool snapshot. Everything retained is
             // strictly before this first excluded key; later keys cannot win.
             cutoff = Some((excluded.time, excluded.txid));
@@ -419,8 +417,7 @@ mod pagination_tests {
             }
             for after in [None, Some((ordered[128].time, ordered[128].txid))] {
                 for limit in [0, 1, 2, 3, 25, 127, 128, 129, 256, 257, usize::MAX] {
-                    let mut actual =
-                        select_mempool_page(traversal.iter().copied(), after, limit);
+                    let mut actual = select_mempool_page(traversal.iter().copied(), after, limit);
                     actual.sort_unstable_by_key(|entry| (entry.time, entry.txid));
                     let actual: Vec<_> = actual.iter().map(|entry| entry.txid).collect();
                     let expected: Vec<_> = ordered
@@ -454,13 +451,21 @@ mod pagination_tests {
             .collect();
         let selected = select_mempool_page(
             entries.iter().inspect(|_| {
-                assert!(entries.iter().all(|entry| Arc::strong_count(&entry.tx) == 1));
+                assert!(
+                    entries
+                        .iter()
+                        .all(|entry| Arc::strong_count(&entry.tx) == 1)
+                );
             }),
             None,
             3,
         );
         assert_eq!(selected.len(), 3);
-        assert!(entries.iter().all(|entry| Arc::strong_count(&entry.tx) == 1));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| Arc::strong_count(&entry.tx) == 1)
+        );
         let captured: Vec<_> = selected.iter().map(|entry| Arc::clone(&entry.tx)).collect();
         assert_eq!(
             entries
@@ -470,7 +475,11 @@ mod pagination_tests {
             3
         );
         drop(captured);
-        assert!(entries.iter().all(|entry| Arc::strong_count(&entry.tx) == 1));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| Arc::strong_count(&entry.tx) == 1)
+        );
     }
 
     // Contract: CONSTRAINTS.md, "Mempool page-selection contracts (v1)", SEL-02.

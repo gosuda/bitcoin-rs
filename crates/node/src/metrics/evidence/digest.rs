@@ -1,7 +1,6 @@
 use alloc::string::String;
 
 use anyhow::Result;
-use serde::Deserialize as _;
 
 use super::error::EvidenceError;
 
