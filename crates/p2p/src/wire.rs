@@ -21,16 +21,22 @@ use crate::inv::MAX_INV_PER_MSG;
 
 /// Latest protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 70_016;
+
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+
 /// Maximum number of headers accepted in one `headers` message.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
+
 /// Maximum block locator hashes accepted in one locator-based request.
 pub const MAX_LOCATOR_HASHES: usize = 101;
+
 /// Maximum address entries accepted in one `addr` or `addrv2` message.
 pub const MAX_ADDR_MESSAGE_COUNT: usize = 1_000;
+
 /// Fixed size of a Bitcoin v1 network message header.
 pub(crate) const HEADER_LEN: usize = 24;
+
 const COMMAND_LEN: usize = 12;
 
 /// Bitcoin P2P message payload.
@@ -284,7 +290,9 @@ pub fn write_message<W: Write + ?Sized>(
 
     // Assemble header and payload into one vectored write so each message is
     // emitted with a single syscall instead of five (avoids header/payload
-    // segment splits and per-part syscall overhead on TcpStream).
+    // segment splits and per-part syscall overhead on TcpStream). The writer
+    // must implement `write_vectored`; the default adapter writes only the
+    // first slice, which is why `CountingStream` forwards it.
     let mut slices: &mut [std::io::IoSlice<'_>] = &mut [
         std::io::IoSlice::new(&header),
         std::io::IoSlice::new(&payload),
