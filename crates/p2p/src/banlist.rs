@@ -50,6 +50,12 @@ impl BanList {
     }
 
     /// Load a ban list from a dedicated file.
+    ///
+    /// A missing file means that no bans have been recorded yet and therefore
+    /// returns an empty list. Other I/O failures and malformed rows are
+    /// returned as errors. Rows use the `ip\\tscore\\texpiry-seconds\\treason`
+    /// format; an expiry of zero is permanent, while non-zero values are Unix
+    /// epoch seconds.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, PeerError> {
         let path = path.into();
         let mut file = match File::open(&path) {

@@ -1,4 +1,9 @@
-//! Ban-list loading must distinguish missing files from corrupt or inaccessible data.
+//! Regression coverage for the `BanList::load` contract.
+//!
+//! The unavailable-versus-empty behavior is required by `CONSTRAINTS.md`
+//! section `CL-23` ("Honest failure"). File errors and malformed rows must not
+//! be treated as an empty list. The authoritative file-format and expiry
+//! semantics are documented on [`BanList::load`].
 use std::error::Error;
 use std::net::IpAddr;
 use std::time::{Duration, UNIX_EPOCH};
