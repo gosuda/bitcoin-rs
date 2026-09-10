@@ -24,6 +24,28 @@ end = src.index(end_marker, start)
 body = src[start:end].rstrip() + "\n"
 src = src[:start] + src[end:]
 src = src.replace("mod scratch;\n", "pub(crate) mod body_store;\nmod scratch;\n", 1)
+src = src.replace(
+    "    Block, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid, consensus_bytes,\n    varint,\n",
+    "    Block, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid, consensus_bytes,\n",
+    1,
+)
+src = src.replace(
+    "use bitcoin_rs_storage::{\n    BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, InMemoryUndoStore, KvSnapshot,\n    KvStore, StorageError, WriteBatch, block_file_max_height_key, decode_block_file_max_height,\n    encode_block_file_max_height,\n};\n",
+    "use bitcoin_rs_storage::{InMemoryUndoStore, KvSnapshot, KvStore, WriteBatch};\n",
+    1,
+)
+src = src.replace(
+    "use scratch::{ApplyScratch, ApplyScratchCapacities, SameBlockSpentSet};\n",
+    "use body_store::PruneBodyStore;\nuse scratch::{ApplyScratch, ApplyScratchCapacities, SameBlockSpentSet};\n",
+    1,
+)
+# Tests stay with the apply transaction for now but must address the moved owner
+# directly; no apply-level forwarding constants/functions are introduced.
+src = src.replace("super::decode_block_tx_count", "super::body_store::decode_block_tx_count")
+src = src.replace(
+    "SERIALIZED_BLOCK_HEADER_LEN",
+    "super::body_store::SERIALIZED_BLOCK_HEADER_LEN",
+)
 
 header = '''//! Durable block-body storage and ordered snapshot readers.
 //!
@@ -39,10 +61,15 @@ use bitcoin_rs_storage::{
     encode_block_file_max_height,
 };
 
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+pub(super) const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;
 
 '''
+body = body.replace(
+    "fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {",
+    "pub(super) fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {",
+    1,
+)
 BODY.write_text(header + body)
 APPLY.write_text(src)
 
@@ -68,8 +95,6 @@ for path in (ROOT / "crates/node").rglob("*.rs"):
     if changed != text:
         path.write_text(changed)
 
-# Breaking contract: callers name the body-store owner directly; no apply-level
-# aliases survive this cut.
 legacy_paths = (
     "crate::apply::PruneBodyStore",
     "crate::apply::PruneBodyReader",
