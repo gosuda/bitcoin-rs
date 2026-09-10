@@ -235,6 +235,10 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertIn("TAPROOT", record)
         self.assertIn("FLAGS", record)
 
+        documentation = (self.root / "scripts/import-qa-assets.sh").read_text()
+        self.assertNotIn("selector 0x00", documentation)
+        self.assertNotIn("selector 0x03", documentation)
+
 
 
 if __name__ == "__main__":
