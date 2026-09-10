@@ -1649,16 +1649,13 @@ fn script_tests_kernel_column() {
         counts.executed > 0,
         "harness executed zero script_tests rows — wiring is broken"
     );
-    if !mismatches.is_empty() {
-        println!(
-            "  (kernel: {}/{} rows did not match expected)",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
-    }
+    assert!(
+        mismatches.is_empty(),
+        "kernel script_tests mismatches ({} of {} rows); sample:\n{}",
+        mismatches.len(),
+        counts.executed,
+        mismatches.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+    );
 }
 
 /// Pinned like `NATIVE_SCRIPT_TESTS_FAILURES`: a shrink lowers it with
@@ -1706,16 +1703,13 @@ fn tx_valid_kernel_column() {
     let mismatches = run_tx_vectors_kernel(&rows, &mut counts);
     println!("tx_valid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_valid rows");
-    if !mismatches.is_empty() {
-        println!(
-            "  (kernel: {}/{} rows mismatched)",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
-    }
+    assert!(
+        mismatches.is_empty(),
+        "kernel tx_valid mismatches ({} of {} rows); sample:\n{}",
+        mismatches.len(),
+        counts.executed,
+        mismatches.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+    );
 }
 
 /// A `tx_invalid` mismatch means the evaluator ACCEPTED a transaction Core
@@ -1765,16 +1759,13 @@ fn tx_invalid_kernel_column() {
     let mismatches = run_tx_vectors_kernel(&rows, &mut counts);
     println!("tx_invalid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_invalid rows");
-    if !mismatches.is_empty() {
-        println!(
-            "  (kernel: {}/{} rows mismatched)",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
-    }
+    assert!(
+        mismatches.is_empty(),
+        "kernel tx_invalid mismatches ({} of {} rows); sample:\n{}",
+        mismatches.len(),
+        counts.executed,
+        mismatches.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+    );
 }
 
 #[test]
