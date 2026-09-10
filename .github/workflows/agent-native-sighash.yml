@@ -1,4 +1,4 @@
-name: Agent native sighash integration
+name: Agent native consensus integration
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - agent/166-native-sighash-precompute-ff965
 
 concurrency:
-  group: agent-native-sighash-${{ github.ref }}
+  group: agent-native-consensus-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
 jobs:
   integrate:
     runs-on: ubuntu-slim
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -24,10 +24,12 @@ jobs:
         with:
           components: rustfmt,clippy
 
-      - name: Apply focused T07 patch
+      - name: Apply focused native parity and T07 patches
         shell: bash
         run: |
           set -euo pipefail
+          git apply --check .github/native-kernel-pr1.patch
+          git apply .github/native-kernel-pr1.patch
           python3 -m py_compile .github/agent_native_sighash.py .github/agent_native_sighash_extra.py .github/agent_native_sighash_fix.py
           python3 .github/agent_native_sighash.py
           python3 .github/agent_native_sighash_extra.py
@@ -42,29 +44,42 @@ jobs:
             crates/mempool/src/gateway.rs \
             crates/primitives/src/sighash.rs \
             crates/script/src/checker.rs \
-            crates/script/src/interpreter.rs | sort)"
+            crates/script/src/interpreter.rs \
+            crates/script/tests/segwit_v0_sighash_edges.rs | sort)"
           test "$changed" = "$expected" || {
             echo "Unexpected changed paths:" >&2
             printf '%s\n' "$changed" >&2
             exit 1
           }
 
-      - name: Verify native prepared-input path
+      - name: Verify native consensus path
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p bitcoin-rs-primitives
+          cargo test --locked -p bitcoin-rs-script --test segwit_v0_sighash_edges -- --nocapture
           cargo test --locked -p bitcoin-rs-script --test verifier_boundaries
           cargo test --locked -p bitcoin-rs-script --test core_vectors
           cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_prepared_inputs -- --nocapture
           cargo test --locked -p bitcoin-rs-mempool --lib
           cargo clippy --locked -p bitcoin-rs-primitives -p bitcoin-rs-script -p bitcoin-rs-consensus -p bitcoin-rs-mempool --all-targets -- -D warnings
 
+      - name: Verify optional kernel oracle parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p bitcoin-rs-script --features kernel --test segwit_v0_sighash_edges -- --nocapture
+
       - name: Commit verified patch and remove temporary runner
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/workflows/agent-native-sighash.yml .github/agent_native_sighash.py .github/agent_native_sighash_extra.py .github/agent_native_sighash_fix.py
+          git rm \
+            .github/workflows/agent-native-sighash.yml \
+            .github/agent_native_sighash.py \
+            .github/agent_native_sighash_extra.py \
+            .github/agent_native_sighash_fix.py \
+            .github/native-kernel-pr1.patch
           git add \
             crates/consensus/src/lib.rs \
             crates/consensus/src/verify_tx.rs \
@@ -72,8 +87,9 @@ jobs:
             crates/mempool/src/gateway.rs \
             crates/primitives/src/sighash.rs \
             crates/script/src/checker.rs \
-            crates/script/src/interpreter.rs
+            crates/script/src/interpreter.rs \
+            crates/script/tests/segwit_v0_sighash_edges.rs
           git config user.name "metaphorics"
           git config user.email "152830360+metaphorics@users.noreply.github.com"
-          git commit -m "perf(consensus): share prepared coins and sighash midstates"
+          git commit -m "fix(consensus): harden native sighash parity and preparation"
           git push origin "HEAD:${GITHUB_REF_NAME}"
