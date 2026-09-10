@@ -167,6 +167,7 @@ fn absent_fields_preserve_values_and_explicit_empty_values_win() {
     );
 }
 
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 fn journal_validation_keeps_each_bound_and_its_error() {
     let defaults = ChainstateJournalConfig::default();
@@ -202,6 +203,7 @@ fn journal_validation_keeps_each_bound_and_its_error() {
     }
 }
 
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 fn disabled_journal_still_validates_settings() {
     let journal = ChainstateJournalConfig {
@@ -247,6 +249,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     fn explicit_fields_override_the_same_layers_network_defaults() -> anyhow::Result<()> {
         let layer = UserConfig {
@@ -262,6 +265,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     fn mining_address_is_decoded_against_the_final_network() -> anyhow::Result<()> {
         let earlier = UserConfig {
@@ -281,6 +285,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     fn only_the_last_set_mining_address_is_decoded() -> anyhow::Result<()> {
         let invalid = UserConfig {
@@ -301,6 +306,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     fn an_explicit_empty_mining_address_is_not_absent() {
         let layer = UserConfig {
@@ -312,6 +318,7 @@ mod resolution {
         assert!(resolve(&[&layer]).is_err());
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     fn cookie_wins_within_a_layer_and_later_basic_auth_uses_defaults() -> anyhow::Result<()> {
         let cookie = UserConfig {
