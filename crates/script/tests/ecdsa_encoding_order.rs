@@ -1,4 +1,10 @@
-//! ECDSA encoding-order regressions against Bitcoin Core.
+//! ECDSA encoding-order regressions against Bitcoin Core v29.0.
+//!
+//! Contract: Bitcoin Core tag `v29.0`, `src/script/interpreter.cpp`,
+//! `EvalChecksig` (and `EvalCheckmultisig`) calls `CheckSignatureEncoding`
+//! followed by `CheckPubKeyEncoding` before cryptographic verification. These
+//! assertions are derived from that pinned reference, including the empty
+//! signature and witness public-key policy behavior.
 //!
 //! Empty ECDSA signatures are a clean verification failure, but Core still
 //! applies public-key encoding checks before reaching cryptographic verification.
