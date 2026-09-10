@@ -15,6 +15,7 @@ jobs:
           persist-credentials: false
       - name: Export staged payloads for byte comparison
         run: |
+          git rev-parse HEAD > /tmp/PAYLOAD_HEAD
           tar -czf /tmp/node-payloads.tgz .github/node-scopes
           sha256sum /tmp/node-payloads.tgz > /tmp/SHA256SUMS
       - uses: actions/upload-artifact@v4
@@ -23,4 +24,5 @@ jobs:
           path: |
             /tmp/node-payloads.tgz
             /tmp/SHA256SUMS
+            /tmp/PAYLOAD_HEAD
           retention-days: 7
