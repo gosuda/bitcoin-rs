@@ -15,13 +15,14 @@ trap 'exit 143' TERM
 for height in "${heights[@]}"; do
   bin_path="${out_dir}/${height}.bin"
   txids_path="${out_dir}/${height}.txids.txt"
-  for cache_path in "${bin_path}" "${txids_path}"; do
+  wtxids_path="${out_dir}/${height}.wtxids.txt"
+  for cache_path in "${bin_path}" "${txids_path}" "${wtxids_path}"; do
     if [[ -L "${cache_path}" || ( -e "${cache_path}" && ! -f "${cache_path}" ) ]]; then
       printf 'Not a regular fixture file: %s\n' "${cache_path}" >&2
       exit 1
     fi
   done
-  if [[ -s "${bin_path}" && -s "${txids_path}" ]]; then
+  if [[ -s "${bin_path}" && -s "${txids_path}" && -s "${wtxids_path}" ]]; then
     continue
   fi
 
@@ -60,5 +61,65 @@ if not isinstance(txids, list) or not txids or any(
 print("\n".join(txids))
 ' > "${tmp_dir}/txids.txt"
     mv -- "${tmp_dir}/txids.txt" "${txids_path}"
+  fi
+
+  if [[ ! -s "${wtxids_path}" ]]; then
+    # BIP141 wtxids, derived independently of the Rust codec: the wtxid of a
+    # transaction is the double SHA-256 of its complete serialization, so the
+    # only parsing needed is the transaction boundary walk over the already
+    # fetched raw block.
+    python3 - "${bin_path}" << 'PYEOF' > "${tmp_dir}/wtxids.txt"
+import hashlib
+import sys
+
+data = open(sys.argv[1], "rb").read()
+pos = 80  # header
+
+
+def varint(pos):
+    prefix = data[pos]
+    if prefix < 0xFD:
+        return prefix, pos + 1
+    if prefix == 0xFD:
+        return int.from_bytes(data[pos + 1:pos + 3], "little"), pos + 3
+    if prefix == 0xFE:
+        return int.from_bytes(data[pos + 1:pos + 5], "little"), pos + 5
+    return int.from_bytes(data[pos + 1:pos + 9], "little"), pos + 9
+
+
+count, pos = varint(pos)
+for _ in range(count):
+    start = pos
+    pos += 4  # version
+    marker = data[pos]
+    if marker == 0:
+        pos += 2  # BIP144 marker || flag
+    inputs, pos = varint(pos)
+    for _ in range(inputs):
+        pos += 36
+        script_len, pos = varint(pos)
+        pos += script_len + 4
+    outputs, pos = varint(pos)
+    for _ in range(outputs):
+        pos += 8
+        script_len, pos = varint(pos)
+        pos += script_len
+    if marker == 0:
+        for _ in range(inputs):
+            stack_items, pos = varint(pos)
+            for _ in range(stack_items):
+                item_len, pos = varint(pos)
+                pos += item_len
+    pos += 4  # lock time
+    tx = data[start:pos]
+    digest = hashlib.sha256(hashlib.sha256(tx).digest()).digest()
+    # RPC display order is big-endian; sha256d is little-endian.
+    print(digest[::-1].hex())
+PYEOF
+    if [[ ! -s "${tmp_dir}/wtxids.txt" ]]; then
+      printf 'Empty wtxid derivation for height %s\n' "${height}" >&2
+      exit 1
+    fi
+    mv -- "${tmp_dir}/wtxids.txt" "${wtxids_path}"
   fi
 done

@@ -10,11 +10,9 @@
     reason = "test fixtures: a malformed vector or missing fixture file is an authoring bug, not a runtime path"
 )]
 use std::path::PathBuf;
+use std::str::FromStr as _;
 
-use bitcoin_rs_primitives::{
-    Amount, Block as NativeBlock, DecodeError, LockTime, Script, Sequence, Sighash, SighashCache,
-    Tx as NativeTx, TxOut, Witness, consensus_bytes, deserialize,
-};
+use bitcoin_rs_primitives::{Amount, Block as NativeBlock, DecodeError, LockTime, Script, Sequence, Sighash, SighashCache, Tx as NativeTx, TxOut, Witness, Wtxid, consensus_bytes, deserialize};
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -69,7 +67,7 @@ fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
     Some(seeds)
 }
 
-fn assert_tx_roundtrip(serialized: &[u8], context: &str) {
+fn assert_tx_roundtrip(serialized: &[u8], expected_wtxid: &str, context: &str) {
     let native = deserialize::<NativeTx>(serialized)
         .unwrap_or_else(|error| panic!("{context}: native decode failed: {error}"));
     assert_eq!(consensus_bytes(&native), serialized, "{context}: re-encode");
@@ -78,11 +76,13 @@ fn assert_tx_roundtrip(serialized: &[u8], context: &str) {
         32,
         "{context}: txid width"
     );
-    assert_eq!(
-        native.wtxid().0.as_byte_array().len(),
-        32,
-        "{context}: wtxid width"
-    );
+    // Golden wtxid derived independently of this codec (BIP141: double
+    // SHA-256 of the full serialization; equal to the txid without witness
+    // data). See tests/testdata/<height>.wtxids.txt provenance in
+    // scripts/fetch-golden.sh.
+    let expected = Wtxid::from_str(expected_wtxid)
+        .unwrap_or_else(|error| panic!("{context}: golden wtxid hex: {error}"));
+    assert_eq!(native.wtxid(), expected, "{context}: golden wtxid");
 }
 
 #[test]
@@ -92,8 +92,26 @@ fn fixture_blocks_roundtrip_byte_identically() {
             .unwrap_or_else(|error| panic!("fixture {name}: native decode failed: {error}"));
 
         assert_eq!(consensus_bytes(&native), bytes, "fixture {name}: re-encode");
+        let wtxid_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/testdata")
+            .join(format!("{name}.wtxids.txt"));
+        let expected_wtxids: Vec<String> = std::fs::read_to_string(&wtxid_path)
+            .unwrap_or_else(|error| panic!("fixture {name}: reading {}: {error}", wtxid_path.display()))
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            expected_wtxids.len(),
+            native.txs.len(),
+            "fixture {name}: golden wtxid count"
+        );
         for (index, tx) in native.txs.iter().enumerate() {
-            assert_tx_roundtrip(&consensus_bytes(tx), &format!("fixture {name} tx {index}"));
+            assert_tx_roundtrip(
+                &consensus_bytes(tx),
+                &expected_wtxids[index],
+                &format!("fixture {name} tx {index}"),
+            );
         }
     }
 }
