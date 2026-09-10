@@ -18,7 +18,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{ConsensusError, UtxoView, verify_transaction};
+use bitcoin_rs_consensus::{ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{is_p2sh, is_witness_program};
@@ -687,7 +687,7 @@ impl MempoolGateway {
             &pool,
             policy.incremental_relay_fee_sat_per_kvb,
         );
-        let fact = crate::standardness::evaluate_one(
+        let mut fact = crate::standardness::evaluate_one(
             &pool,
             &policy.standardness,
             &request.tx,
@@ -721,6 +721,25 @@ impl MempoolGateway {
         }
         let chain_view = PrevoutMap(&request.prevouts);
         let view = crate::accept::MempoolUtxoView::new(&pool, &chain_view);
+        // Owner-computed sigop cost over the same layered view verification
+        // uses: a caller-supplied figure never reaches the stored entry, and
+        // an input the pool resolves for verification counts its sigops even
+        // when the request omits that prevout. Inputs missing everywhere
+        // contribute nothing here; verification still rejects them.
+        let mut resolved = Vec::with_capacity(request.tx.inputs.len());
+        for input in &request.tx.inputs {
+            if let Some(txout) = view.lookup(&input.previous_output) {
+                resolved.push((input.previous_output, txout));
+            }
+        }
+        let sigop_cost = total_sigop_cost(&request.tx, &resolved, VerifyFlags::STANDARD);
+        if sigop_cost > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST {
+            let error =
+                AdmitError::Policy(crate::standardness::AcceptanceRejectReason::TooManySigops);
+            self.record_peer_failure(&pool, request, error, default_reject_scope);
+            return Err(error);
+        }
+        fact.sigop_cost = sigop_cost;
         // Finality is evaluated at the height of the next block the
         // transaction could be mined in (`height + 1`), exactly Core's
         // `CheckFinalTxAtTip`.

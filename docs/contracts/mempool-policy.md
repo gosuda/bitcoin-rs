@@ -17,7 +17,10 @@ holds a second admission evaluator.
 ### `POL-01`: Core 31.1 policy pin and versioned `AdmissionPolicy`
 
 - The pinned reference is released Bitcoin Core 31.1. The gateway
-  enforces this pin set:
+  enforces this pin set. Pin values are Core truth and never edited
+  to match implementation progress; rows the implementation has not
+  yet reached are recorded as deviations in
+  `docs/policies/mempool-policy.md` (§3 status column and §5 ledger).
 
   | Pin | Required value |
   |---|---|
@@ -31,7 +34,7 @@ holds a second admission evaluator.
   | Max replacement evictions | 100 |
   | Max fee | 0.1 BTC/kvB |
   | Standard transaction sigops | 16_000 |
-  | TRUC (v3) transactions | supported |
+| TRUC (v3) transactions | supported |
 
 - `crates/mempool/src/policy.rs` resolves one versioned `AdmissionPolicy`
   from `NodeConfig` at startup. The gateway stamps every verdict with the
@@ -46,11 +49,12 @@ holds a second admission evaluator.
 - `MempoolGateway` is the only production admission path. RPC
   `sendrawtransaction` and `testmempoolaccept`, P2P ingress, Esplora
   `POST /tx`, package submissions, and reorg reconsideration all call it.
-- The operation accepts parsed transactions, an
-  `AdmissionMode::{Preview, Commit}` selector, an `AdmissionOrigin`
-  (`Rpc`, `Peer(PeerToken)`, `Esplora`, `Package`, `Reorg`), and request
-  fee limits. It returns per-transaction verdicts plus the context stamp,
-  and committed changes only when a mutation occurred.
+- The operation accepts parsed transactions and request fee limits. An
+  `AdmissionMode::{Preview, Commit}` selector, `Esplora` and `Package`
+  origins, and per-transaction gateway verdicts are T18 work: no mode
+  selector, `Esplora`/`Package` variants, or verdict types exist today
+  (Esplora `POST /tx` dispatches as `Rpc`; previews live in the RPC
+  outlet). Committed changes occur only when a mutation occurred.
 - Peer ingress does not inherit RPC fee limits. Each origin declares its
   own request limits. The node wires narrow chain and coin providers;
   RPC and P2P do not resolve admission contexts themselves.
@@ -119,25 +123,31 @@ holds a second admission evaluator.
 
 ### `POL-06`: Preview purity and finality
 
-- Preview runs the identical pipeline and stops before mutation. It
+- Preview runs the commit pipeline path and stops before mutation. It
   changes no membership, no estimator state, no relay state, no
   admission sequence, and no victims. It returns verdict rows with the
   captured stamp; a stale stamp is visible to the caller. It may
-  populate safe verification caches.
-- Absolute locktime and BIP68 sequence locks evaluate at tip height + 1
-  from retained coin metadata and MTP context. A non-final transaction
-  is typed before fee-floor classification. A disabled sequence
-  contributes no lock. An unconfirmed parent contributes its own state.
+  populate safe verification caches. Preview/commit identical-pipeline
+  parity (including script verification in preview) is T18 work:
+  no `AdmissionMode::Preview` exists and the RPC preview does not run
+  `verify_transaction` (deviation ledger entries 1-2).
+- Absolute locktime evaluates at tip height + 1 from retained coin
+  metadata and MTP context. Relative (BIP68) sequence locks are
+  unchecked at admission and typed `NonBip68Final` has no producer;
+  BIP68 admission is T19 work (deviation ledger entry 3). A disabled
+  sequence contributes no lock once that work lands.
 - `testmempoolaccept` returns preview rows in the frozen Core 31.1
   `TestMempoolAccept` / `MempoolAcceptance` shape with frozen
   reject-reason strings.
 
 ## Proven by
 
-- `crates/mempool/tests/overhaul_admission_owner.rs` (planned): same
-  verdict across RPC, P2P, Esplora, and package shapes; preview
-  nonmutation; stale retry then typed `Busy`; sigop boundary at 16_000
-  and 16_001; owner-computed cost overrides a caller-supplied count.
+- `crates/mempool/tests/admission.rs`: stale-context retry
+  (`stale_policy_verdict_becomes_retryable`), sigop boundary enforcement
+  (`p2sh_sigop_cost_exceeds_standard_limit`,
+  `p2wsh_sigop_cost_exceeds_standard_limit`), and owner-computed cost
+  overriding a caller-supplied count
+  (`caller_sigop_cost_is_ignored_in_stored_entry`).
 - `crates/mempool/tests/overhaul_finality_policy.rs` (planned): policy
   pins, epoch invalidation, CSV boundaries at `tip+1`, fee precedence,
   pressure floor rise, and decay behavior.
