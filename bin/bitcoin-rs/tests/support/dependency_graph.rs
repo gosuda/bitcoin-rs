@@ -145,7 +145,15 @@ impl WorkspaceGraph {
                 if !dep_name.starts_with("bitcoin-rs") {
                     continue;
                 }
-                if dependency["kind"].as_str().unwrap_or("normal") == "normal" {
+                // Normal and build edges both count: a build dependency is
+                // still a dependency edge, and the RPC storage-independence
+                // rule admits no per-kind backdoor. Dev-dependencies stay
+                // excluded (the bench-only fixture exception the RPC manifest
+                // documents).
+                if matches!(
+                    dependency["kind"].as_str().unwrap_or("normal"),
+                    "normal" | "build"
+                ) {
                     edges.push(dep_name);
                 }
             }
