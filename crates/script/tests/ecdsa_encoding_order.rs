@@ -56,6 +56,23 @@ fn p2wpkh_prevout() -> TxOut {
     }
 }
 
+fn verify_witness(
+    tx: &Tx,
+    prevout: &TxOut,
+    witness: &[Vec<u8>],
+    flags: VerifyFlags,
+) -> Result<bool, ScriptError> {
+    Interpreter.execute(
+        &prevout.script_pubkey,
+        &[],
+        witness,
+        flags,
+        prevout,
+        tx,
+        INPUT,
+    )
+}
+
 fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
     assert!(pubkey.len() <= 75);
     let mut script = Vec::new();
@@ -68,7 +85,7 @@ fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
         script.push(0x51); // one key
     }
     script.push(if multisig { 0xae } else { 0xac }); // CHECKMULTISIG / CHECKSIG
-    script.push(0x91); // NOT: clean signature failure succeeds; encoding errors do not.
+    script.push(0x91); // NOT: a clean signature failure succeeds; an encoding error cannot.
     script
 }
 
@@ -88,25 +105,13 @@ fn empty_signature_cannot_bypass_legacy_key_encoding() {
         };
         assert_eq!(
             Interpreter.execute(
-                &script,
-                &script_sig,
-                &[],
-                VerifyFlags::NONE,
-                &prevout,
-                &tx,
-                INPUT,
+                &script, &script_sig, &[], VerifyFlags::NONE, &prevout, &tx, INPUT,
             ),
             Ok(true),
         );
         assert_eq!(
             Interpreter.execute(
-                &script,
-                &script_sig,
-                &[],
-                VerifyFlags::STRICTENC,
-                &prevout,
-                &tx,
-                INPUT,
+                &script, &script_sig, &[], VerifyFlags::STRICTENC, &prevout, &tx, INPUT,
             ),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::PubkeyType,
@@ -134,26 +139,15 @@ fn empty_signature_cannot_bypass_witness_compressed_key_policy() {
         }
         witness.push(script);
         assert_eq!(
-            Interpreter.execute(
-                &prevout.script_pubkey,
-                &[],
-                &witness,
-                VerifyFlags::MANDATORY,
-                &prevout,
-                &tx,
-                INPUT,
-            ),
+            verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
             Ok(true),
         );
         assert_eq!(
-            Interpreter.execute(
-                &prevout.script_pubkey,
-                &[],
+            verify_witness(
+                &tx,
+                &prevout,
                 &witness,
                 VerifyFlags::MANDATORY.union(VerifyFlags::WITNESS_PUBKEYTYPE),
-                &prevout,
-                &tx,
-                INPUT,
             ),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::WitnessPubkeyType,

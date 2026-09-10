@@ -199,13 +199,14 @@ impl<'a> TxSignatureChecker<'a> {
                     .map_err(|e| sighash_to_script_error(&e))?
             }
             SigVersion::WitnessV0 => {
-                let sighash_type = ecdsa_hashtype_from_byte(*hashtype_byte)?;
+                // STRICTENC alone restricts ECDSA hashtypes. BIP143 must
+                // classify, but still commit to, the original signature byte.
                 self.cache
-                    .segwit_v0_signature_hash(
+                    .segwit_v0_signature_hash_raw(
                         self.input_index,
                         script_code,
                         self.amount,
-                        sighash_type,
+                        u32::from(*hashtype_byte),
                     )
                     .map_err(|e| sighash_to_script_error(&e))?
             }
@@ -649,21 +650,6 @@ fn is_compressed_or_uncompressed_pubkey(pubkey: &[u8]) -> bool {
 /// Core's `IsCompressedPubKey`.
 fn is_compressed_pubkey(pubkey: &[u8]) -> bool {
     pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03)
-}
-
-/// Converts a legacy hashtype byte to a [`Sighash`] for segwit v0.
-fn ecdsa_hashtype_from_byte(byte: u8) -> Result<Sighash, ScriptError> {
-    match byte {
-        0x01 => Ok(Sighash::All),
-        0x02 => Ok(Sighash::None),
-        0x03 => Ok(Sighash::Single),
-        0x81 => Ok(Sighash::AllAnyoneCanPay),
-        0x82 => Ok(Sighash::NoneAnyoneCanPay),
-        0x83 => Ok(Sighash::SingleAnyoneCanPay),
-        _ => Err(ScriptError::Invalid {
-            code: ScriptErrCode::SigHashtype,
-        }),
-    }
 }
 
 /// Converts a [`SighashError`] to a [`ScriptError`].
