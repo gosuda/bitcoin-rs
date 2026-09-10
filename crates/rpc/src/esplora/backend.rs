@@ -6,6 +6,7 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
+use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{OutPoint, Txid};
 
 use super::http::{bad, dispatch_error, json_response, query_limit};
@@ -63,25 +64,18 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
     });
     let transactions = {
         let pool = ctx.mempool.read();
-        // Resolve the cursor in the same snapshot as the entries. Filtering
-        // before cloning avoids retaining transactions before this page.
+        // Cursor lookup, selection, and Arc capture share one read guard.
+        // Only the selected page escapes the guard; no second lookup can
+        // observe a removal or replacement between selection and capture.
         let after = last
             .and_then(|txid| pool.entry_by_txid(&txid))
             .map(|entry| (entry.time, entry.txid));
-        let mut ordered = pool
-            .iter_entries()
-            .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key))
+        let mut ordered = select_mempool_page(pool.iter_entries(), after, max_txs)
+            .into_iter()
             .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
             .collect::<Vec<_>>();
         drop(pool);
-        // Partition outside the lock, then sort only the requested prefix.
-        // The strict bound also handles empty snapshots and usize::MAX.
-        if max_txs < ordered.len() {
-            ordered.select_nth_unstable_by(max_txs, |left, right| {
-                left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
-            });
-            ordered.truncate(max_txs);
-        }
+        // Final ordering and transaction projection stay outside the guard.
         ordered.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
@@ -96,6 +90,49 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
         .map(|transaction| projection.transaction_value(&transaction, None))
         .collect::<Result<Vec<_>, _>>()
         .map_or_else(|r| r, json_response)
+}
+
+/// Selects the API-09 page without retaining the entire eligible suffix.
+///
+/// At most 2K borrowed entries are live for a positive limit K. Every full
+/// batch discards K entries in linear time; only the final page is cloned by
+/// the caller. `Vec` capacity grows with observed entries, not an untrusted
+/// requested limit. Selection holds the caller's read guard; it trades that
+/// work for bounded scratch space and avoids `Arc` churn on rejected entries.
+fn select_mempool_page<'a>(
+    entries: impl Iterator<Item = &'a MempoolEntry>,
+    after: Option<(u64, Txid)>,
+    max_txs: usize,
+) -> Vec<&'a MempoolEntry> {
+    let mut selected = Vec::new();
+    if max_txs == 0 {
+        return selected;
+    }
+    let mut cutoff = None;
+    for entry in entries {
+        let key = (entry.time, entry.txid);
+        if after.is_some_and(|after| key <= after)
+            || cutoff.is_some_and(|cutoff| key >= cutoff)
+        {
+            continue;
+        }
+        selected.push(entry);
+        // This is len >= 2K without multiplying the caller's usize limit.
+        // K > 0 also proves the nth index is strictly below the length.
+        if selected.len() / 2 >= max_txs {
+            let (_, excluded, _) = selected
+                .select_nth_unstable_by_key(max_txs, |entry| (entry.time, entry.txid));
+            // Txids are unique in a pool snapshot. Everything retained is
+            // strictly before this first excluded key; later keys cannot win.
+            cutoff = Some((excluded.time, excluded.txid));
+            selected.truncate(max_txs);
+        }
+    }
+    if max_txs < selected.len() {
+        selected.select_nth_unstable_by_key(max_txs, |entry| (entry.time, entry.txid));
+        selected.truncate(max_txs);
+    }
+    selected
 }
 
 fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
@@ -203,7 +240,7 @@ mod pagination_tests {
     use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
     use serde_json::Value;
 
-    use super::internal_mempool_txs;
+    use super::{internal_mempool_txs, select_mempool_page};
     use crate::context::Context;
 
     fn fixture(times: &[u64]) -> (Context, Vec<(u64, Txid)>) {
@@ -358,5 +395,167 @@ mod pagination_tests {
         assert_eq!(internal_mempool_txs(&ctx, None, "max_txs=1").status, 503);
         assert_eq!(page(&ctx, Some(&cursor), "max_txs=1"), vec![expected[0].1]);
         assert!(page(&ctx, None, "max_txs=0").is_empty());
+    }
+
+    // API-09 in docs/contracts/external-api.md owns order and strict cursor
+    // exclusion. Full sorting is the independent selection reference.
+    #[test]
+    fn batched_selection_matches_full_sort_across_flush_boundaries() {
+        let entries: Vec<_> = (0_u32..257)
+            .map(|index| {
+                let tx = Tx {
+                    lock_time: index,
+                    ..Tx::default()
+                };
+                MempoolEntry::new(Arc::new(tx), 100, 1_000, u64::from(index % 7), 0)
+            })
+            .collect();
+        let mut ordered: Vec<_> = entries.iter().collect();
+        ordered.sort_unstable_by_key(|entry| (entry.time, entry.txid));
+        for reverse in [false, true] {
+            let mut traversal = ordered.clone();
+            if reverse {
+                traversal.reverse();
+            }
+            for after in [None, Some((ordered[128].time, ordered[128].txid))] {
+                for limit in [0, 1, 2, 3, 25, 127, 128, 129, 256, 257, usize::MAX] {
+                    let mut actual =
+                        select_mempool_page(traversal.iter().copied(), after, limit);
+                    actual.sort_unstable_by_key(|entry| (entry.time, entry.txid));
+                    let actual: Vec<_> = actual.iter().map(|entry| entry.txid).collect();
+                    let expected: Vec<_> = ordered
+                        .iter()
+                        .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key))
+                        .take(limit)
+                        .map(|entry| entry.txid)
+                        .collect();
+                    assert_eq!(actual, expected, "reverse={reverse}, limit={limit}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_borrows_payloads_and_only_the_final_page_is_cloned() {
+        let entries: Vec<_> = (0_u32..129)
+            .map(|index| {
+                MempoolEntry::new(
+                    Arc::new(Tx {
+                        lock_time: index,
+                        ..Tx::default()
+                    }),
+                    100,
+                    1_000,
+                    u64::from(129 - index),
+                    0,
+                )
+            })
+            .collect();
+        let selected = select_mempool_page(
+            entries.iter().inspect(|_| {
+                assert!(entries.iter().all(|entry| Arc::strong_count(&entry.tx) == 1));
+            }),
+            None,
+            3,
+        );
+        assert_eq!(selected.len(), 3);
+        assert!(entries.iter().all(|entry| Arc::strong_count(&entry.tx) == 1));
+        let captured: Vec<_> = selected.iter().map(|entry| Arc::clone(&entry.tx)).collect();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| Arc::strong_count(&entry.tx) == 2)
+                .count(),
+            3
+        );
+        drop(captured);
+        assert!(entries.iter().all(|entry| Arc::strong_count(&entry.tx) == 1));
+    }
+
+    #[test]
+    fn zero_selection_does_not_poll_the_pool_iterator() {
+        let entries = std::iter::from_fn(|| -> Option<&MempoolEntry> {
+            panic!("zero-sized pages must not traverse entries")
+        });
+        assert!(select_mempool_page(entries, None, 0).is_empty());
+    }
+
+    /// Paired page-selection microbenchmark, not an HTTP or lock benchmark.
+    /// Run with --release --ignored --nocapture; fixture setup is untimed.
+    #[test]
+    #[ignore = "manual paired release benchmark; no timing threshold in unit tests"]
+    fn benchmark_bounded_page_selection() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn snapshot(
+            entries: &[MempoolEntry],
+            after: Option<(u64, Txid)>,
+            limit: usize,
+            bounded: bool,
+        ) -> Vec<(u64, Txid, Arc<Tx>)> {
+            let mut page: Vec<_> = if bounded {
+                select_mempool_page(entries.iter(), after, limit)
+                    .into_iter()
+                    .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+                    .collect()
+            } else {
+                // PR #796 at 9c6a3904: capture the entire suffix, partition,
+                // then sort only the retained page. Keep this baseline local.
+                let mut all: Vec<_> = entries
+                    .iter()
+                    .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key))
+                    .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
+                    .collect();
+                if limit < all.len() {
+                    all.select_nth_unstable_by_key(limit, |entry| (entry.0, entry.1));
+                    all.truncate(limit);
+                }
+                all
+            };
+            page.sort_unstable_by_key(|entry| (entry.0, entry.1));
+            page
+        }
+
+        let entries: Vec<_> = (0_u32..10_000)
+            .map(|index| {
+                MempoolEntry::new(
+                    Arc::new(Tx {
+                        lock_time: index,
+                        ..Tx::default()
+                    }),
+                    100,
+                    1_000,
+                    u64::from(index.wrapping_mul(2_654_435_761) % 10_000),
+                    0,
+                )
+            })
+            .collect();
+        for after in [None, Some((entries[5_000].time, entries[5_000].txid))] {
+            for limit in [1, 25, 1_000, 9_999, usize::MAX] {
+                let expected = snapshot(&entries, after, limit, false);
+                assert_eq!(snapshot(&entries, after, limit, true), expected);
+                drop(expected);
+                for trial in 0..6 {
+                    // Alternate order to reduce one-sided warm-cache bias.
+                    for bounded in [trial % 2 == 0, trial % 2 != 0] {
+                        let start = Instant::now();
+                        for _ in 0..100 {
+                            drop(black_box(snapshot(
+                                black_box(&entries),
+                                after,
+                                limit,
+                                bounded,
+                            )));
+                        }
+                        eprintln!(
+                            "page_selection n={} after={after:?} k={limit} trial={trial} bounded={bounded} iterations=100 elapsed_ns={}",
+                            entries.len(),
+                            start.elapsed().as_nanos()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
