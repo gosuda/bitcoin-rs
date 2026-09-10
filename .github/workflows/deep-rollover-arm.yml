@@ -35,16 +35,16 @@ jobs:
           rustc --version --verbose | tee /tmp/rollover-evidence/toolchain.txt
           git archive HEAD > /tmp/rollover-evidence/base-source.tar
           cargo fmt --all
+          git diff --binary > /tmp/rollover-evidence/formatting.patch
           python3 - <<'PY'
           import subprocess
-          allowed = {'bin/bitcoin-rs/tests/gates/g20_formal_models.rs', 'crates/utxo/src/set/persistent.rs', 'crates/utxo/tests/overhaul_persistent_coins.rs'}
+          allowed = {'bin/bitcoin-rs/tests/gates/g20_formal_models.rs', 'bin/bitcoin-rs/tests/support/ownership_scan.rs', 'crates/utxo/src/set/persistent.rs', 'crates/utxo/tests/overhaul_persistent_coins.rs'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert changed <= allowed, ('Unexpected formatting changes', sorted(changed))
           PY
-          git diff --binary > /tmp/rollover-evidence/formatting.patch
           git diff --check
           if ! git diff --quiet; then
-            git add -- bin/bitcoin-rs/tests/gates/g20_formal_models.rs crates/utxo/src/set/persistent.rs crates/utxo/tests/overhaul_persistent_coins.rs
+            git add -- bin/bitcoin-rs/tests/gates/g20_formal_models.rs bin/bitcoin-rs/tests/support/ownership_scan.rs crates/utxo/src/set/persistent.rs crates/utxo/tests/overhaul_persistent_coins.rs
             git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style: apply current rustfmt to inherited formatting differences'
           fi
           git rev-parse HEAD > /tmp/rollover-evidence/format-head.txt
