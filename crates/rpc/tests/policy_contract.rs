@@ -11,24 +11,36 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use std::error::Error;
 
-use bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb;
 use bitcoin_rs_mempool::{
     AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits, MempoolObserver,
     MutationEnvelope, MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
+    eviction::mempool_min_fee_sat_per_kvb,
 };
-use bitcoin_rs_node::reorg::{ReorgError, invalidate_block};
-use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
-use bitcoin_rs_rpc::context::{
-    ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
-    MempoolHandles, MiningHandles, NetworkHandles,
+
+use bitcoin_rs_node::{
+    Network, NodeConfig,
+    reorg::{ReorgError, invalidate_block},
+    state::NodeState,
 };
-use bitcoin_rs_rpc::{Handler, RpcError};
+
+use bitcoin_rs_primitives::{
+    Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, encode::double_sha256,
+};
+
+use bitcoin_rs_rpc::{
+    Handler, RpcError,
+    context::{
+        ChainControl, ChainControlError, ChainHandles, Context, ContextHandles, IndexHandles,
+        MempoolHandles, MiningHandles, NetworkHandles,
+    },
+};
+
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
+
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
+
+use std::error::Error;
 
 fn p2wpkh_script() -> Vec<u8> {
     // P2WPKH: `OP_0`, push-20, and a fixed 20-byte key hash.
@@ -2083,7 +2095,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             txindex_status: None,
         })
         .with_chain_control(Arc::new(NodeInvalidator {
-            handles: state.apply_handles(),
+            handles: state.chainstate(),
             followers: state.chain_followers(),
         })),
     ))
