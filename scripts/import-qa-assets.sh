@@ -140,6 +140,7 @@ Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the script after major decoder changes to
 refresh.
 EOF
+chmod 0644 -- "${PROVENANCE_TMP}"
 mv -T -- "${PROVENANCE_TMP}" "${PROVENANCE}"
 PROVENANCE_TMP=""
 log "provenance written to ${PROVENANCE}"

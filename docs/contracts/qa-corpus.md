@@ -31,10 +31,37 @@ end-state evidence roles.
 - G6 policy and admission: the `script_eval` and `tx_decode` targets exercise
   standardness and admission edge cases in addition to consensus decoding.
 
+### `QAC-03`: Importer acquisition and provenance publication
+
+After the setup contract in `CONSTRAINTS.md` succeeds, `scripts/import-qa-assets.sh`
+uses fail-closed acquisition and publication semantics:
+
+- the pinned upstream commit check, clone-size measurement, each corpus
+  minimization, and the UTC import timestamp must succeed; a nonzero tool status
+  is not hidden by valid output from that tool;
+- provenance is not replaced until mapping and all four minimization commands
+  have succeeded;
+- a refresh is written to a same-directory staging file, completed successfully,
+  set to repository-document mode `0644`, and then atomically replaces the
+  `fuzz/CORPUS_PROVENANCE.md` directory entry;
+- a failed provenance write, mode change, or replacement preserves the prior
+  destination. A destination symlink is replaced as an entry rather than
+  followed, and a destination directory is not treated as a container;
+- normal exit and `HUP`/`INT`/`TERM` cleanup remove clone/provenance staging.
+  Signal exits use the shell convention `128 + signal`;
+- these guarantees are process-level failure atomicity. They do not claim
+  `fsync`/power-loss durability or one transaction spanning corpus files and
+  provenance.
+
+Injected numeric statuses in regression tests are sentinels used to prove
+nonzero-status propagation; they are not stable public status-code assignments.
+
 ## Proven by
 
 - `fuzz/CORPUS_PROVENANCE.md` (existing): records the upstream identity,
   license, per-target mapping, and refresh rule.
+- `scripts/tests/test_import_qa_assets_provenance.py`: `QAC-03` acquisition,
+  minimization, cleanup, mode, and failure-atomic provenance publication.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned): G0 pin; rejects
   a QA corpus with a missing or mismatched upstream commit.
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;

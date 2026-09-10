@@ -1,19 +1,36 @@
-"""End-to-end failure and provenance-publication tests for the QA corpus importer."""
+"""End-to-end failure and provenance-publication tests for the QA corpus importer.
+
+Contract: docs/contracts/qa-corpus.md#qac-03-importer-acquisition-and-provenance-publication.
+Injected nonzero statuses below are test sentinels proving pass-through; the contract owns
+that failures are propagated, not the sentinel numbers themselves.
+"""
 
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 import unittest
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).resolve().parents[1] / "import-qa-assets.sh"
 MAPPER = SCRIPT.with_name("import_qa_assets.py")
+OWNER_HARNESS = REPO_ROOT / "fuzz/fuzz_targets/script_eval.rs"
+
+GIT_HEAD_STATUS = 29
+SIZE_STATUS = 31
+CMIN_STATUS = 43
+DATE_STATUS = 47
+PROVENANCE_WRITE_STATUS = 51
+PROVENANCE_CHMOD_STATUS = 52
+PROVENANCE_PUBLISH_STATUS = 53
+TERM_STATUS = 128 + 15
 
 
 class ImportFlowTests(unittest.TestCase):
-    """Run the real shell and mapper, replacing only external acquisition/tools."""
+    """Exercise QAC-03 through the real shell and mapper with external tools stubbed."""
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -31,15 +48,7 @@ class ImportFlowTests(unittest.TestCase):
         inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }];\n')
         harness = self.root / "fuzz/fuzz_targets/script_eval.rs"
         harness.parent.mkdir(parents=True)
-        harness.write_text(
-            "const FLAGS: [VerifyFlags; 4] = [\n"
-            "    VerifyFlags::NONE,\n"
-            "    VerifyFlags::MANDATORY,\n"
-            "    VerifyFlags::STANDARD,\n"
-            "    VerifyFlags::TAPROOT,\n"
-            "];\n"
-            "const ELEMENT_LEN_MAX: usize = 1_024;\n"
-        )
+        harness.write_bytes(OWNER_HARNESS.read_bytes())
         self.provenance = self.root / "fuzz/CORPUS_PROVENANCE.md"
         self.provenance.write_text("previous provenance\n")
         self.source = self.root / "upstream"
@@ -57,16 +66,16 @@ class ImportFlowTests(unittest.TestCase):
         self.assertIsNotNone(pin)
         self.pin = pin.group(1)
         stubs = {
-            "git": r'''
-if [[ "$1" == rev-parse ]]; then printf '%s\n' "$TEST_ROOT"; exit; fi
-if [[ "$1" == init ]]; then mkdir -p "${!#}"; exit; fi
+            "git": f'''
+if [[ "$1" == rev-parse ]]; then printf '%s\\n' "$TEST_ROOT"; exit; fi
+if [[ "$1" == init ]]; then mkdir -p "${{!#}}"; exit; fi
 [[ "$1" == -C ]] || exit 99
 case "$3" in
     remote|fetch) ;;
     checkout) cp -a "$SOURCE_FIXTURE/." "$2/" ;;
     rev-parse)
-        printf '%s\n' "$EXPECTED_PIN"
-        [[ "${FAIL_STAGE:-}" != git_head ]] || exit 29
+        printf '%s\\n' "$EXPECTED_PIN"
+        [[ "${{FAIL_STAGE:-}}" != git_head ]] || exit {GIT_HEAD_STATUS}
         ;;
     *) exit 99 ;;
 esac
@@ -74,19 +83,21 @@ esac
             "rustc": "printf 'host: x86_64-unknown-linux-gnu\\n'",
             "df": "printf 'Filesystem Blocks Used Available Capacity Mounted\\n'\n"
                   "printf 'test 100000 0 100000 0%% /\\n'",
-            "du": "printf '1\\tclone\\n'\n[[ \"${FAIL_STAGE:-}\" != du ]] || exit 31",
-            "date": "[[ \"${FAIL_STAGE:-}\" != date ]] || exit 47\n"
+            "du": f"printf '1\\tclone\\n'\n[[ \"${{FAIL_STAGE:-}}\" != du ]] || exit {SIZE_STATUS}",
+            "date": f"[[ \"${{FAIL_STAGE:-}}\" != date ]] || exit {DATE_STATUS}\n"
                     "printf '2000-01-01T00:00:00Z\\n'",
-            "cat": "if [[ \"${FAIL_STAGE:-}\" == term ]]; then kill -TERM \"$PPID\"; exit 0; fi\n"
-                   "if [[ \"${FAIL_STAGE:-}\" == provenance_write ]]; then printf partial; exit 51; fi\n"
+            "cat": f"if [[ \"${{FAIL_STAGE:-}}\" == term ]]; then kill -TERM \"$PPID\"; exit 0; fi\n"
+                   f"if [[ \"${{FAIL_STAGE:-}}\" == provenance_write ]]; then printf partial; exit {PROVENANCE_WRITE_STATUS}; fi\n"
                    "exec /usr/bin/cat \"$@\"",
-            "mv": "[[ \"${FAIL_STAGE:-}\" != provenance_publish ]] || exit 53\n"
+            "chmod": f"[[ \"${{FAIL_STAGE:-}}\" != provenance_chmod ]] || exit {PROVENANCE_CHMOD_STATUS}\n"
+                     "exec /usr/bin/chmod \"$@\"",
+            "mv": f"[[ \"${{FAIL_STAGE:-}}\" != provenance_publish ]] || exit {PROVENANCE_PUBLISH_STATUS}\n"
                   "exec /usr/bin/mv \"$@\"",
-            "cargo": r'''
-[[ "${RUSTUP_TOOLCHAIN:-}" == nightly ]] || exit 98
+            "cargo": f'''
+[[ "${{RUSTUP_TOOLCHAIN:-}}" == nightly ]] || exit 98
 [[ ! -v RUSTC_WRAPPER && ! -v CARGO_BUILD_BUILD_DIR ]] || exit 97
-printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
-[[ "${FAIL_STAGE:-}" != cmin ]] || exit 43
+printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
+[[ "${{FAIL_STAGE:-}}" != cmin ]] || exit {CMIN_STATUS}
 ''',
         }
         for name, body in stubs.items():
@@ -113,6 +124,7 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
                          ["p2p_message", "block_decode", "tx_decode", "script_eval"])
         self.assertIn(self.pin, self.provenance.read_text())
         self.assertIn("2000-01-01T00:00:00Z", self.provenance.read_text())
+        self.assertEqual(stat.S_IMODE(self.provenance.stat().st_mode), 0o644)
         for target in ("block_decode", "tx_decode"):
             self.assertEqual((self.root / "fuzz/corpus" / target / "seed").read_bytes(), b"Q")
 
@@ -126,37 +138,41 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
 
     def test_failed_minimization_preserves_provenance(self):
         result = self.run_import("cmin")
-        self.assertEqual(result.returncode, 43, result.stderr)
+        self.assertEqual(result.returncode, CMIN_STATUS, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(), ["p2p_message"])
 
     def test_failed_commit_probe_is_not_hidden_by_valid_output(self):
         result = self.run_import("git_head")
-        self.assertEqual(result.returncode, 29, result.stderr)
+        self.assertEqual(result.returncode, GIT_HEAD_STATUS, result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_size_probe_stops_before_mapping(self):
         result = self.run_import("du")
-        self.assertEqual(result.returncode, 31, result.stderr)
+        self.assertEqual(result.returncode, SIZE_STATUS, result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertFalse((self.root / "fuzz/corpus").exists())
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_timestamp_preserves_provenance(self):
         result = self.run_import("date")
-        self.assertEqual(result.returncode, 47, result.stderr)
+        self.assertEqual(result.returncode, DATE_STATUS, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
-
 
     def test_failed_provenance_write_preserves_previous_file(self):
         result = self.run_import("provenance_write")
-        self.assertEqual(result.returncode, 51, result.stderr)
+        self.assertEqual(result.returncode, PROVENANCE_WRITE_STATUS, result.stderr)
+        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+
+    def test_failed_provenance_chmod_preserves_previous_file(self):
+        result = self.run_import("provenance_chmod")
+        self.assertEqual(result.returncode, PROVENANCE_CHMOD_STATUS, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_provenance_publish_preserves_previous_file(self):
         result = self.run_import("provenance_publish")
-        self.assertEqual(result.returncode, 53, result.stderr)
+        self.assertEqual(result.returncode, PROVENANCE_PUBLISH_STATUS, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_provenance_symlink_is_replaced_without_following_it(self):
@@ -169,6 +185,7 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         self.assertEqual(outside.read_text(), "unrelated data\n")
         self.assertFalse(self.provenance.is_symlink())
         self.assertIn(self.pin, self.provenance.read_text())
+        self.assertEqual(stat.S_IMODE(self.provenance.stat().st_mode), 0o644)
 
     def test_provenance_directory_is_not_used_as_a_container(self):
         self.provenance.unlink()
@@ -177,12 +194,10 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list(self.provenance.iterdir()), [])
 
-
     def test_termination_cleans_staging_and_preserves_provenance(self):
         result = self.run_import("term")
-        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertEqual(result.returncode, TERM_STATUS, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
-
 
 
 if __name__ == "__main__":
