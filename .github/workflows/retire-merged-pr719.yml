@@ -1,0 +1,21 @@
+name: retire-merged-pr719
+on:
+  push:
+    branches: [verify/retire-merged-pr724-run-20260910]
+    paths: [.github/workflows/retire-merged-pr719.yml]
+permissions: {}
+# Exact PR719 group verified from source db29faa; PR merged as 1ccdd91.
+# This retires only historical PR CI, NOT the diagnostic-bundle run or G20 work.
+concurrency:
+  group: ci-ci-refs/pull/719/merge
+  cancel-in-progress: true
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: |
+          printf '%s\n' \
+            'Retired historical CI 34414278401 for merged tooling PR719.' \
+            'Head db29faa88e9d0586ea50ba081ceb46feb46006e6; merge 1ccdd914b4027fd0f4165e58b433420cc7267395.' \
+            'Cancellation is not a pass. Current-main and live-PR gates are unchanged.'
