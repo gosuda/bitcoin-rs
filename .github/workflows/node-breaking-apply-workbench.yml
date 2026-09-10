@@ -43,7 +43,7 @@ jobs:
       - name: Format
         run: cargo fmt --all
       - name: Clippy
-        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+        run: cargo clippy --no-deps -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: Node tests
         run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast
       - name: Ownership gate
