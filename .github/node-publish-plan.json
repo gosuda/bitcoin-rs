@@ -1,0 +1,1 @@
+{"base":"11a85c814801346a874311438db3a9a977f9cc3b","stages":[{"payload":"state","branch":"agent/node-state-modules-11a85c8","message":"Separate node state composition and lifecycle owners","tests":["state::","storage_backend::tests"]}]}

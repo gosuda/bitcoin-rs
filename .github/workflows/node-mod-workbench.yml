@@ -2,31 +2,41 @@ name: node-mod-workbench
 
 on:
   push:
-    branches:
-      - agent/node-mod-workbench
+    branches: [agent/node-mod-workbench]
+    paths:
+      - .github/node-publish-plan.json
+      - .github/workflows/node-mod-workbench.yml
 
 permissions:
   contents: read
 
 jobs:
-  tools:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt,clippy
-      - name: Export pinned compiler and lint tools
+      - name: Validate exact candidate and publish atomic scope commits
         run: |
-          rustc --version --verbose > /tmp/RUST_VERSION
-          tar --exclude='lib/rustlib/src' --exclude='lib/rustlib/manifest-*' -czf /tmp/rust-tools-195.tgz -C "$(rustc --print sysroot)" bin lib
-          sha256sum /tmp/rust-tools-195.tgz > /tmp/SHA256SUMS
+          cp .github/publish-node.py /tmp/publish-node.py
+          python /tmp/publish-node.py
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: rust-tools-195
-          path: |
-            /tmp/rust-tools-195.tgz
-            /tmp/RUST_VERSION
-            /tmp/SHA256SUMS
-          compression-level: 0
-          retention-days: 1
+          name: node-publication
+          path: /tmp/node-publication.json
+          retention-days: 7
