@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing::debug;
 use zerocopy::IntoBytes;
 
+use crate::reconcile::{SelectedWatermark, selected_watermark as reconcile_selected_watermark};
 use crate::types::{
     HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow,
 };
@@ -154,16 +155,23 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
+
 const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+
 /// Format 3 stores Spending keys without positions. This build still
 /// understands those rows (resolvers fall back to a full block) and upgrades
 /// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
 const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
+
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
+
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
+
 /// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
+
 /// Permanent versioned capability-reset state (`0x00, b'R'`). Absent only
 /// before the first reset; afterwards the key always exists, either as
 /// `Idle = [0xFF, version(u64 LE)]` (9 bytes) or as a claim
@@ -176,17 +184,23 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
 /// across repeated resets.
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
+
 /// Consumer cursor slot (`0x00, b'C'`). Opaque bytes owned by the node-side
 /// reconciliation consumer; data row keys begin with ASCII letters only and
 /// can never collide with the reserved `0x00` prefix.
 const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
+
 const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
+
 const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
     max_rows: 1_000,
     max_bytes: 256 * 1024,
 };
+
 const RESET_IDLE_TAG: u8 = 0xFF;
+
 const RESET_IDLE_LEN: usize = 1 + size_of::<u64>();
+
 const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
 
 /// Decoded durable capability-reset state.
@@ -2108,28 +2122,10 @@ fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> Result<Option<IndexWatermark>, IndexError> {
-    let mut selected: Option<Option<IndexWatermark>> = None;
-    for capability in [
-        IndexCapability::TxLookup,
-        IndexCapability::ScriptHistory,
-        IndexCapability::ScriptLive,
-    ] {
-        if !capabilities.contains(capability) {
-            continue;
-        }
-        let cursor = watermarks.get(capability);
-        match selected {
-            None => selected = Some(cursor),
-            Some(first) if first == cursor => {}
-            Some(first) => {
-                return Err(IndexError::WatermarkMismatch {
-                    expected: first,
-                    actual: cursor,
-                });
-            }
-        }
+    match reconcile_selected_watermark(watermarks, capabilities) {
+        SelectedWatermark::Valid(watermark) => Ok(watermark),
+        SelectedWatermark::Invalid => Err(IndexError::NonContiguousPrepared { watermark: None }),
     }
-    selected.ok_or(IndexError::NonContiguousPrepared { watermark: None })
 }
 
 fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_identity: bool) {
@@ -2950,15 +2946,8 @@ impl<S: KvStore> IndexWriter<S> {
     /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
     /// [`PreparedBatch`] to bound multi-block writes. This is the same owner
     /// for a single block: tests and benches must not grow a second ingest path.
-    ///
-    /// [`Self::commit_forward`] is the commit point (`IDX-06`): `Ok` means the
-    /// prepared rows and capability watermark are durable together in one store
-    /// batch. A crash before that write leaves the previous watermark and rows;
-    /// a crash after it leaves both. Fence races
-    /// ([`IndexError::StaleIndexState`], [`IndexError::ResetInProgress`]) mean
-    /// discard derived state and retry from the persisted watermark.
-    /// [`IndexError::Storage`] is not retried by the index worker; supervision
-    /// marks it failed (`IDX-07`).
+    /// Delegates to [`Self::commit_forward`]. See `IDX-06` / `IDX-07` in
+    /// `docs/contracts/indexing.md`.
     ///
     /// This path selects [`IndexCapabilities::HISTORICAL`]: it advances
     /// `TxLookup` and `ScriptHistory` only. Callers that maintain `ScriptLive`
@@ -2987,11 +2976,8 @@ impl<S: KvStore> IndexWriter<S> {
     /// Atomically connects a bounded batch and advances the durable watermark.
     ///
     /// Captures its own fence before any store-dependent derivation and keeps
-    /// the consumer cursor untouched. Rows and the selected watermarks land in
-    /// one `write_durable_if` batch; `Ok` is the commit point (`IDX-06`). Fence
-    /// races return [`IndexError::StaleIndexState`] or
-    /// [`IndexError::ResetInProgress`]; the worker re-reads watermarks and
-    /// re-plans. [`IndexError::Storage`] fails the worker (`IDX-07`).
+    /// the consumer cursor untouched. See `IDX-06` / `IDX-07` in
+    /// `docs/contracts/indexing.md`.
     pub fn commit_forward(&mut self, batch: PreparedBatch) -> Result<IndexWatermark, IndexError> {
         let (fence, _) = self.fenced_watermarks()?;
         self.commit_forward_with_cursor(fence, batch, ConsumerCursorUpdate::Keep)
@@ -3179,6 +3165,8 @@ impl<S: KvStore> IndexWriter<S> {
       /// boundary, so this method does not retry it. The supervising worker
       /// owns restart and reconciliation; callers must reload the persisted
       /// watermark before retrying after a crash or storage failure.
+    /// Same fenced batch as [`Self::commit_forward`]. See `IDX-06` / `IDX-07`
+    /// in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,
@@ -4103,3 +4091,4 @@ mod tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
     }
 }
+// weave: run 'weave explain crates/index/src/index.rs' for per-hunk detail, 'weave check' to verify your resolution

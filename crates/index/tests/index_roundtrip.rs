@@ -153,6 +153,10 @@ impl KvStore for MemoryStore {
         let guard = self.cfs.read();
         Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
     }
+
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+        // In-memory double: no persistence boundary exists to fault.
+    }
 }
 
 /// One observed store batch, for durability-order assertions (I-A/I-B).
@@ -320,6 +324,10 @@ impl KvStore for CallTrackingStore {
             captured: self.inner.snapshot()?,
             store: self,
         }))
+    }
+
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+        // In-memory double: no persistence boundary exists to fault.
     }
 }
 
@@ -1647,8 +1655,11 @@ impl KvStore for ForeignFenceStore {
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
         self.inner.snapshot()
     }
-}
 
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+        // In-memory double: no persistence boundary exists to fault.
+    }
+}
 #[test]
 fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(ForeignFenceStore {
