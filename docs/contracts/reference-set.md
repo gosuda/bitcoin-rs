@@ -19,8 +19,10 @@ A version label alone is never custody.
   machine-readable authority for reference identity values.
 - `bin/bitcoin-rs/tests/support/reference_set.rs` is the typed parser that
   enforces required identities, complete source commits, digest formats,
-  corpus presence, and product versus kernel-tree separation. The RPC corpus
-  gate compiles this same test support module to validate its capture provenance.
+  corpus presence, product versus kernel-tree separation, and audited
+  fingerprints of each complete source-and-artifact identity tuple. The RPC
+  corpus gate compiles this same test support module to validate its capture
+  provenance.
 - `docs/contracts/reference-set.md` is a readable projection. It does not
   override the manifest values or parser validation on conflict.
 - A version label alone is never custody. A reference must carry source and
@@ -49,6 +51,10 @@ The checked-in RPC captures retain their own `core_source_commit`,
 release through the shared parser. Changing the reference leaves an old
 capture stale and fails its gate; it does not relabel the recorded response.
 The process harness separately hashes the actual executable before launch.
+The parser also fingerprints the complete release tuple using NUL-separated
+UTF-8 fields under the `bitcoin-rs/reference-release/v1` domain. Consequently,
+a different but well-formed source commit or artifact digest is a custody
+mismatch, not a valid new reference.
 
 ### `REF-03`: Core 31.99.0 kernel tree evidence
 
@@ -68,7 +74,9 @@ The published crate's `.cargo_vcs_info.json` identifies the vendor revision.
 Its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/691b006f271c6d19565266541d7397eaf0c64944)
 records the Bitcoin Core revision in `git-subtree-split`. The reference gate
 checks the package digest against `Cargo.lock`; source and package identities
-must be reviewed together on an oracle upgrade. Build options remain owned by
+are additionally covered by one NUL-separated, domain-separated
+`bitcoin-rs/reference-kernel/v1` fingerprint and must be reviewed together on
+an oracle upgrade. Build options remain owned by
 that pinned crate's `build.rs`, including its static `RelWithDebInfo` kernel
 build with wallet, daemon, tests, and IPC disabled.
 
@@ -119,8 +127,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
   floating or unpinned. The 1 TB budget applies only to that pinned default
   lane.
-- Missing identities, malformed commits or digests, and confused product
-  identities are rejected with a typed `ReferenceError` from
+- Missing identities, malformed commits or digests, unbound custody tuples,
+  and confused product identities are rejected with a typed `ReferenceError`
+  from
   `bin/bitcoin-rs/tests/support/reference_set.rs`. The fixture gate rejects
   stale capture provenance, and the process harness rejects missing binaries
   or executable hashes that differ from the selected reference.
@@ -134,9 +143,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
 - `docs/api/core-compat.toml`: the machine-readable reference identity values.
 - `bin/bitcoin-rs/tests/support/reference_set.rs`: typed parsing and custody
   validation for those values.
-- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
-  malformed identities, checks kernel package custody, and pins
-  `corpus_custody()` honesty.
+- `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only,
+  malformed, and well-formed-but-unbound identities, checks kernel package
+  custody, and pins `corpus_custody()` honesty.
 - `crates/rpc/tests/support/fixture.rs`: rejects missing or stale capture
   provenance against the same selected release.
 
