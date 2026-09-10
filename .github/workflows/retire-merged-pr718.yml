@@ -1,0 +1,22 @@
+name: retire-merged-pr718
+on:
+  push:
+    branches: [verify/retire-merged-pr724-run-20260910]
+    paths: [.github/workflows/retire-merged-pr718.yml]
+permissions: {}
+# PR718 contains only retired local-relay validation tooling; the runtime
+# correction has its own merged PR729 and independent validation evidence.
+# Cancel ordinary historical PR CI only, not the relay reproduction workflow.
+concurrency:
+  group: ci-ci-refs/pull/718/merge
+  cancel-in-progress: true
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: |
+          printf '%s\n' \
+            'Retired obsolete ordinary PR718 CI run 34414456854.' \
+            'Source bdac264f7fd532be2b47f2b10fb23b324b0274d5; merged as 0cb4c622a7844c6a21de18acc6188fe3c8ad0c51.' \
+            'Cancellation is not a pass. Main, runtime PR, and proof runs remain unchanged.'
