@@ -64,14 +64,17 @@ mod txindex_worker;
 mod window_overlay;
 pub use apply::{
     ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
+    error::{ApplyError, DisconnectError},
 };
+
 pub use bitcoin_rs_primitives::Network;
-#[cfg(feature = "zmq")]
-pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;
+
 pub use bitcoin_rs_rpc::zmq::{
     NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
 };
+
 pub use chain_effects::{ChainEffects, ChainFollowers};
+
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
     MiningConfig, MiningOverrides, NetworkSelection, NodeConfig, NotificationConfig,
@@ -79,13 +82,21 @@ pub use config::{
     RuntimeInputs, ScriptIndexMode, StorageConfig, StorageOverrides, UserConfig, ValidationConfig,
     ValidationOverrides, resolve,
 };
+
 pub use embed::{Node, NodeError, SyncProgress};
+
 pub use mining::{GenerationKey, MiningCoordinator};
+
 pub use run::run;
-pub use state::{ApplyError, DisconnectError};
+
 pub use storage_footprint::{
     DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES, EVIDENCE_FORMAT, MeasureStorageRequest,
     StorageFootprintEvidence, measure_storage_footprint, storage_footprint_json,
 };
+
 pub use sync::BlockSync;
+
 pub use txindex_worker::TxIndexRuntime;
+
+#[cfg(feature = "zmq")]
+pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

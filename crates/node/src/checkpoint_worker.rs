@@ -35,25 +35,34 @@
 //! plausibly several GB near modern tips). At a 10k-block cadence the pause is
 //! seconds-to-tens-of-seconds — well under 1 % of wall time during IBD.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
-
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::TipSnapshot;
+
+use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_utxo::UtxoSet;
+
+use bitcoin_rs_storage::block_body::BlockBodyStore;
+
+use bitcoin_rs_utxo::{UtxoSet, stats::CoinStatsListener};
+
+use crate::{
+    apply::{ApplyAdmission, UndoStore},
+    checkpoint::{self, CheckpointError, CheckpointWrite},
+    recovery_evidence,
+    state::ChainEventPublisher,
+};
+
 use parking_lot::RwLock;
 
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_utxo::stats::CoinStatsListener;
-
-use crate::apply::{ApplyAdmission, PruneBodyStore, UndoStore};
-use crate::checkpoint::{self, CheckpointError, CheckpointWrite};
-use crate::recovery_evidence;
-use crate::state::ChainEventPublisher;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
 fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), CheckpointError> {
     crate::chainstate_journal::clear_full_revalidation_marker_at(data_dir).map_err(|error| {
@@ -93,7 +102,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) struct CheckpointPublisher {
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
-    pub(crate) block_body_store: Arc<dyn PruneBodyStore>,
+    pub(crate) block_body_store: Arc<dyn BlockBodyStore>,
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) checkpoint_data_dir: cap_std::fs::Dir,
     pub(crate) network: bitcoin_rs_primitives::Network,

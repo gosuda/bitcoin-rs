@@ -17,14 +17,10 @@
 //! A snapshot-gated query engine serves `bitcoin_rs_rpc::context::TxIndexQuery`
 //! and the generic [`ScriptIndexQuery`] without raw index mutex paths.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-
 use arc_swap::ArcSwap;
+
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
+
 use bitcoin_rs_index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexWatermark, IndexWatermarks, IndexWriteFence, NoSpentScripts, PreparedBatch,
@@ -35,31 +31,50 @@ use bitcoin_rs_index::{
     types::{TxPosition, TxPositionValue},
     writer::TxIndexWriter,
 };
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
-use bitcoin_rs_rpc::capabilities::{
-    CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status,
+
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
+
+use bitcoin_rs_rpc::{
+    capabilities::{CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status},
+    context::{
+        BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+        SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
+    },
 };
-use bitcoin_rs_rpc::context::{
-    BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
-    SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
+
+use bitcoin_rs_storage::{
+    PrefixScanLimit,
+    block_body::{BlockBodyReader, BlockBodyStore},
 };
-use bitcoin_rs_storage::PrefixScanLimit;
+
 use compact_str::CompactString;
+
 use crossbeam_channel::{Receiver, Sender};
+
+use heartbeat::Heartbeat;
+
+use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
+
 use parking_lot::{Mutex, RwLock};
+
 use rayon::prelude::*;
 
-use crate::apply::{PruneBodyReader, PruneBodyStore};
+use scheduling::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
 mod heartbeat;
 mod namespace;
 mod query_adapter;
 mod scheduling;
-
-use heartbeat::Heartbeat;
-use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
-use scheduling::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -369,7 +384,7 @@ impl TxIndexWorker {
         writer: Arc<dyn TxIndexWriter>,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
-        body_store: Option<Arc<dyn PruneBodyStore>>,
+        body_store: Option<Arc<dyn BlockBodyStore>>,
         batch_limits: PreparedBatchLimits,
         enabled: IndexCapabilities,
         chain_events: Arc<crate::state::ChainEventPublisher>,
@@ -443,7 +458,7 @@ impl TxIndexWorker {
         generation: Generation,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
-        body_store: Option<Arc<dyn PruneBodyStore>>,
+        body_store: Option<Arc<dyn BlockBodyStore>>,
         block_source: IndexBlockSource,
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<crate::state::ChainEventPublisher>,
@@ -573,7 +588,7 @@ fn run_worker_with_open(
     generation: &Generation,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    body_store: Option<Arc<dyn PruneBodyStore>>,
+    body_store: Option<Arc<dyn BlockBodyStore>>,
     block_source: IndexBlockSource,
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<crate::state::ChainEventPublisher>,
@@ -689,7 +704,7 @@ fn open_and_run(
     generation: &Generation,
     applied_tip: &Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: &Arc<RwLock<BlockTree>>,
-    body_store: &Option<Arc<dyn PruneBodyStore>>,
+    body_store: &Option<Arc<dyn BlockBodyStore>>,
     block_source: &IndexBlockSource,
     body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<crate::state::ChainEventPublisher>,
@@ -961,7 +976,7 @@ struct Worker {
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    body_store: Option<Arc<dyn PruneBodyStore>>,
+    body_store: Option<Arc<dyn BlockBodyStore>>,
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
     chain_events: Arc<crate::state::ChainEventPublisher>,
@@ -1750,7 +1765,7 @@ impl Worker {
     fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],
-        body_reader: &mut Box<dyn PruneBodyReader + '_>,
+        body_reader: &mut Box<dyn BlockBodyReader + '_>,
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
         pending: &mut Option<PendingForward>,
@@ -3186,14 +3201,17 @@ impl ScriptIndexQuery for TxIndexQueryEngine {
 
 #[cfg(all(test, feature = "fjall"))]
 mod body_reader_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::{Network, consensus_bytes};
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_storage::StorageError;
 
     use super::*;
-    use crate::apply::{PruneBodyReader, PruneBodyStore};
+    use bitcoin_rs_storage::block_body::BlockBodyReader;
+    use bitcoin_rs_storage::block_body::BlockBodyStore;
 
     struct SessionBodyStore {
         height: u32,
@@ -3210,7 +3228,7 @@ mod body_reader_tests {
         pending: Option<(u32, Hash256)>,
     }
 
-    impl PruneBodyReader for SessionBodyReader<'_> {
+    impl BlockBodyReader for SessionBodyReader<'_> {
         fn prefetch_positions(&mut self, requests: &[(u32, Hash256)]) -> Result<(), StorageError> {
             let [request] = requests else {
                 return Err(StorageError::InvalidOperation(
@@ -3242,7 +3260,7 @@ mod body_reader_tests {
         }
     }
 
-    impl PruneBodyStore for SessionBodyStore {
+    impl BlockBodyStore for SessionBodyStore {
         fn persist_block_body(
             &self,
             _height: u32,
@@ -3263,7 +3281,7 @@ mod body_reader_tests {
             ))
         }
 
-        fn reader(&self) -> Result<Box<dyn PruneBodyReader + '_>, StorageError> {
+        fn reader(&self) -> Result<Box<dyn BlockBodyReader + '_>, StorageError> {
             self.readers.fetch_add(1, Ordering::AcqRel);
             Ok(Box::new(SessionBodyReader {
                 store: self,
