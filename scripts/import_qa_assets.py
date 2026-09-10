@@ -62,8 +62,30 @@ def _emit(output: Path, seed: bytes) -> None:
     _publish(output, hashlib.sha256(seed).hexdigest()[:32], seed)
 
 
+def _mask_rust_raw_strings(text: str) -> str:
+    """Hide raw-string bodies from regexes that locate Rust declarations."""
+    raw_start = re.compile(r'(?:b|c)?r(#{0,255})"')
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        raw = raw_start.match(text, index)
+        if raw is None:
+            out.append(text[index])
+            index += 1
+            continue
+        hashes = raw.group(1)
+        terminator = '"' + hashes
+        end = text.find(terminator, raw.end())
+        if end < 0:
+            raise ValueError("Unterminated Rust raw string in script_eval contract")
+        literal = text[index:end + len(terminator)]
+        out.append("".join("\n" if char == "\n" else " " for char in literal))
+        index = end + len(terminator)
+    return "".join(out)
+
+
 def _commands(source: Path) -> dict[str, bytes]:
-    text = _strip_rust_comments(source.read_text())
+    text = _mask_rust_raw_strings(_strip_rust_comments(source.read_text()))
     table = re.search(
         r"pub\s+const\s+COMMANDS\s*:\s*&\[Command\]\s*=\s*&\[(.*?)\];",
         text, re.S,
@@ -190,7 +212,7 @@ def _split_flags(body: str) -> list[str]:
 
 
 def _script_contract(harness: Path) -> tuple[int, int, int]:
-    text = _strip_rust_comments(harness.read_text())
+    text = _mask_rust_raw_strings(_strip_rust_comments(harness.read_text()))
     limit = re.search(r"const\s+ELEMENT_LEN_MAX\s*:\s*usize\s*=\s*([0-9_]+)\s*;", text)
     flags = re.search(
         r"const\s+FLAGS\s*:\s*\[VerifyFlags\s*;\s*([0-9_]+)\s*\]\s*=\s*\[(.*?)\]\s*;",
