@@ -34,6 +34,19 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Patch known current-main consensus compile break for validation only
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/consensus/src/verify_block_impl.rs')
+          text = path.read_text()
+          needle = "    // BIP141: coinbase witness must have exactly one 32-byte element (the reserved value).\n    let Some(input) = coinbase.inputs.first() else {\n"
+          replacement = "    // BIP141: coinbase witness must have exactly one 32-byte element (the reserved value).\n    let Some(coinbase) = block.txs.first() else {\n        return false;\n    };\n    let Some(input) = coinbase.inputs.first() else {\n"
+          if needle not in text:
+              raise SystemExit('known consensus compile-break anchor changed')
+          path.write_text(text.replace(needle, replacement, 1))
+          PY
       - name: Apply query ownership cut
         run: python3 scripts/node-breaking-txindex-query.py
       - name: Format
@@ -49,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git checkout "$BASE_SHA" -- Cargo.lock
+          git checkout "$BASE_SHA" -- Cargo.lock crates/consensus/src/verify_block_impl.rs
           rm -f scripts/node-breaking-txindex-query.py .github/workflows/node-breaking-txindex-query-workbench.yml
           git add -A
           if git diff --cached --name-only "$BASE_SHA" | grep -Ev '^(crates/node/|docs/|CONCEPTS.md$)' ; then
