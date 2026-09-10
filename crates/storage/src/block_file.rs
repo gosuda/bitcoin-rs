@@ -904,17 +904,13 @@ mod tests {
     }
 
     #[test]
-    #[expect(
-        clippy::expect_used,
-        reason = "test invariants are checked with expect"
-    )]
-    fn write_record_handles_short_interrupted_and_zero_writes() {
+    fn write_record_handles_short_interrupted_and_zero_writes() -> io::Result<()> {
         let mut writer = VectoredTestWriter {
             bytes: Vec::new(),
             max_write: 1,
             interrupt_once: true,
         };
-        write_record(&mut writer, b"header", b"body").expect("short writes must be retried");
+        write_record(&mut writer, b"header", b"body")?;
         assert_eq!(writer.bytes, b"headerbody");
 
         let mut writer = VectoredTestWriter {
@@ -922,8 +918,11 @@ mod tests {
             max_write: 0,
             interrupt_once: false,
         };
-        let error = write_record(&mut writer, b"header", b"body").expect_err("zero write");
+        let Err(error) = write_record(&mut writer, b"header", b"body") else {
+            return Err(io::Error::other("a zero write must fail"));
+        };
         assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        Ok(())
     }
 
     /// `disk_usage` reports bytes that are there, and stops reporting them when

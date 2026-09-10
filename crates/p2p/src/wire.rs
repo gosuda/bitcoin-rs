@@ -364,7 +364,11 @@ pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
                 .checked_add(entries_len)
                 .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
         }
-        other => encode::serialize(&other.envelope()).len(),
+        other => {
+            let envelope = other.envelope();
+            bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut bitcoin::io::sink())
+                .map_err(encode::Error::from)?
+        }
     };
     HEADER_LEN
         .checked_add(payload_len)

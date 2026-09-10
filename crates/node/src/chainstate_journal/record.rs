@@ -108,12 +108,7 @@ pub(crate) enum JournalRecordError {
 }
 
 /// Encodes a journal record with magic, version, length, payload, and CRC32C.
-#[expect(
-    clippy::expect_used,
-    reason = "the writes below target a Vec, which cannot fail"
-)]
-#[must_use]
-pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
+pub(crate) fn encode_record(record: &JournalRecord) -> io::Result<Vec<u8>> {
     let expected_payload_len = record_payload_len(record);
     let capacity = expected_payload_len
         .and_then(|payload_len| FRAME_HEADER_LEN.checked_add(payload_len))
@@ -122,15 +117,16 @@ pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
     let mut framed = Vec::with_capacity(capacity);
     framed.extend_from_slice(&MAGIC);
     framed.push(VERSION);
-    put_u32(&mut framed, 0).expect("Vec write cannot fail");
+    put_u32(&mut framed, 0)?;
 
-    encode_payload(&mut framed, record).expect("Vec write cannot fail");
+    encode_payload(&mut framed, record)?;
+
     let payload_len = framed.len() - FRAME_HEADER_LEN;
     debug_assert!(expected_payload_len.is_none_or(|expected| expected == payload_len));
     framed[MAGIC.len() + 1..FRAME_HEADER_LEN].copy_from_slice(&u32_len(payload_len).to_le_bytes());
     let checksum = crc32c(&framed[FRAME_HEADER_LEN..]);
-    put_u32(&mut framed, checksum).expect("Vec write cannot fail");
-    framed
+    put_u32(&mut framed, checksum)?;
+    Ok(framed)
 }
 
 fn record_payload_len(record: &JournalRecord) -> Option<usize> {
@@ -175,7 +171,7 @@ impl Write for CountingWriter {
         self.len = self
             .len
             .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::from(io::ErrorKind::Other))?;
+            .ok_or(io::ErrorKind::Other)?;
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -452,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_genesis_and_all_mutation_kinds() {
+    fn round_trips_genesis_and_all_mutation_kinds() -> std::io::Result<()> {
         let genesis = JournalRecord {
             height: 0,
             block_hash: [0; 32],
@@ -463,7 +459,7 @@ mod tests {
             mutations: Vec::new(),
         };
         for record in [genesis, sample()] {
-            assert_eq!(decode_record(&encode_record(&record)), Ok(record));
+            assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
         }
         let meta = sample().block_meta();
         assert_eq!(
@@ -476,11 +472,12 @@ mod tests {
                 coin_stats_height_delta: -1
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn every_single_byte_corruption_is_rejected() {
-        let bytes = encode_record(&sample());
+    fn every_single_byte_corruption_is_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
         for index in 0..bytes.len() {
             let mut corrupted = bytes.clone();
             corrupted[index] ^= 1;
@@ -489,11 +486,12 @@ mod tests {
                 "byte {index} was accepted"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn every_truncated_prefix_is_rejected() {
-        let bytes = encode_record(&sample());
+    fn every_truncated_prefix_is_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
         for length in 0..bytes.len() {
             assert!(
                 decode_record(&bytes[..length]).is_err(),
@@ -501,11 +499,12 @@ mod tests {
             );
         }
         assert!(decode_record(&bytes).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn bad_magic_and_version_are_rejected() {
-        let bytes = encode_record(&sample());
+    fn bad_magic_and_version_are_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
         let mut bad_magic = bytes.clone();
         bad_magic[0] ^= 1;
         assert_eq!(decode_record(&bad_magic), Err(JournalRecordError::BadMagic));
@@ -515,6 +514,7 @@ mod tests {
             decode_record(&bad_version),
             Err(JournalRecordError::BadVersion { .. })
         ));
+        Ok(())
     }
 
     fn arb_coin() -> impl Strategy<Value = Coin> {
@@ -552,7 +552,7 @@ mod tests {
         ) {
             let raw_header = header_bytes(block_hash);
             let record = JournalRecord { height, block_hash, prev_hash, block_tx_count, coin_stats_height_delta, raw_header, mutations };
-            prop_assert_eq!(decode_record(&encode_record(&record)), Ok(record));
+            prop_assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
         }
     }
 }

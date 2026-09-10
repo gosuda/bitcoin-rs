@@ -104,17 +104,15 @@ pub fn invalidate_block(
     // Keep read-only planning refusals in the same settlement path as the
     // execution outcome; an early `?` must not strand a coherent generation.
     let outcome = (|| {
-        let (_, target) = {
+        let target = {
             let tree = handles.block_tree.read();
             let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
             if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
                 return Err(ReorgError::CannotInvalidateGenesis);
             }
-            let target = tree
-                .tip_after_invalidation(root)
+            tree.tip_after_invalidation(root)
                 .map_err(ReorgError::Plan)?
-                .ok_or(ReorgError::NoValidTip)?;
-            (root, target)
+                .ok_or(ReorgError::NoValidTip)?
         };
 
         let plan = current_reorg_plan(handles, target)?;
@@ -138,7 +136,9 @@ pub fn invalidate_block(
             &connect,
             &mut no_staged_body,
         );
-        if progress.disconnected == disconnect_nodes.len() {
+        if progress.disconnected == disconnect_nodes.len()
+              && !outcome.as_ref().is_err_and(ReorgError::requires_recovery)
+          {
             let mut tree = handles.block_tree.write();
             let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
             tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
