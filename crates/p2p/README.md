@@ -19,7 +19,9 @@ and BIP155 addrv2 and BIP339 wtxid-relay state live in `addrv2` and `wtxid`.
 
 `PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`),
 connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`).
-It enforces key invariants across the node:
+A connected TCP stream enters that world only through `CountingStream::from_connected`,
+which owns `TCP_NODELAY` and forwards vectored writes so `wire::write_message` stays
+one `writev` on the socket. It enforces key invariants across the node:
 - **Single connection per address**: Exactly one live session per remote `SocketAddr`.
 - **Atomic predecessor cancellation**: Registering a new lease at an existing address
   atomically cancels and replaces the predecessor.

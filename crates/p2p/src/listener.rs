@@ -13,16 +13,22 @@ use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Maximum backoff for transient accept errors (ECONNABORTED, EMFILE, …).
 /// Bounded so the listener recovers quickly once the pressure clears.
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
+
 const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// Stream read timeout used while polling handshake and message reads.
 const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
+
 type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
+
 type SyncWakeHandle = Option<Sender<()>>;
+
 type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 
 /// Optional node-owned handles layered onto a listener or outbound session.
@@ -707,7 +713,8 @@ fn run_outbound_connection(
     let nonce = generate_nonce(addr);
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::new(stream, counters);
+    let stream = crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)?;
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
@@ -839,7 +846,8 @@ fn run_handshake(
 
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::new(stream, counters);
+    let stream = crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)?;
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
 
@@ -1191,6 +1199,7 @@ fn unix_secs_i64(now: SystemTime) -> i64 {
         i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
     })
 }
+
 fn unix_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

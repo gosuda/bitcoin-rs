@@ -1,7 +1,6 @@
 # P2P wire contract (pointer)
 
-The peer-wire contract is split across two owners. This page assigns
-ownership and cites proof under the
+This page assigns ownership and cites proof under the
 [contracts precedence rule](README.md).
 
 - [`crates/p2p/src/compat.rs`](../../crates/p2p/src/compat.rs) owns the
@@ -54,6 +53,18 @@ ownership and cites proof under the
   capability while header discovery is pending; after that point, the
   accepted tip must be on the active chain at or beyond the requested height.
 
+### `P2P-04`: Connected-socket posture and vectored emission
+
+- **Owner**: `CountingStream::from_connected` (`crates/p2p/src/counters.rs`).
+- Every accepted or dialed P2P `TcpStream` is wrapped by that constructor
+  before handshake bytes move. The constructor disables Nagle (`TCP_NODELAY`).
+- `CountingStream` forwards `write_vectored` so `wire::write_message` emits
+  header plus payload as one syscall. A wrapper that only implemented `write`
+  would split the frame again.
+- Handshake, the connection reader, and the writer-thread clone share one
+  `PeerCounters`. Timeouts stay with the listener: handshake and the message
+  loop use different poll intervals.
+
 ## Live gaps
 
 - **Peer lifecycle boundary**: Moving the remaining P2P scheduling and lifecycle policy out of `crates/node` is tracked under #217 (open).
@@ -91,3 +102,7 @@ ownership and cites proof under the
   `losing_fork_credit_survives_winner_disconnect` (retained branch evidence),
   and `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
   hedge eligibility).
+- `crates/p2p/src/counters.rs` tests `a_vectored_write_counts_every_slice`,
+  `from_connected_disables_nagle`: the counting wrapper forwards one
+  `write_vectored` for header plus payload, and the connected-socket
+  constructor owns `TCP_NODELAY` (P2P-04).
