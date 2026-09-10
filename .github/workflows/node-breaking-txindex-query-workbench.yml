@@ -39,16 +39,17 @@ jobs:
       - name: Format
         run: cargo fmt --all
       - name: Strict node Clippy
-        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: Txindex tests
         run: |
-          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- txindex_worker::
+          cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- txindex_worker::
       - name: Ownership gate
-        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
+        run: cargo test -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
       - name: Publish clean validated commit
         shell: bash
         run: |
           set -euo pipefail
+          git checkout "$BASE_SHA" -- Cargo.lock
           rm -f scripts/node-breaking-txindex-query.py .github/workflows/node-breaking-txindex-query-workbench.yml
           git add -A
           if git diff --cached --name-only "$BASE_SHA" | grep -Ev '^(crates/node/|docs/|CONCEPTS.md$)' ; then
