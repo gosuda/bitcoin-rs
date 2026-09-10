@@ -25,7 +25,6 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
       RUST_BACKTRACE: 1
-      CARGO_TARGET_DIR: ${{ runner.temp }}/node-cleanup-target
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -35,4 +34,6 @@ jobs:
           toolchain: '1.95.0'
           components: rustfmt,clippy
       - name: Validate isolated source changes and publish non-forced branches
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/node-cleanup-target
         run: python3 .github/node-cleanup-publish/publish.py
