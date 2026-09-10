@@ -4091,4 +4091,3 @@ mod tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
     }
 }
-// weave: run 'weave explain crates/index/src/index.rs' for per-hunk detail, 'weave check' to verify your resolution

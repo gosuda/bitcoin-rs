@@ -3405,4 +3405,3 @@ mod integration_tests;
 #[allow(clippy::expect_used, clippy::panic)]
 #[path = "txindex_worker_recovery_tests.rs"]
 mod recovery_tests;
-// weave: run 'weave explain crates/node/src/txindex_worker.rs' for per-hunk detail, 'weave check' to verify your resolution
