@@ -14,7 +14,12 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "import-qa-assets.sh"
-BUDGET = 65536
+_MAX_SEED_BYTES = re.search(r"^readonly MAX_SEED_BYTES=([0-9]+)\s+#", SCRIPT.read_text(), re.M)
+if _MAX_SEED_BYTES is None:
+    raise AssertionError("importer MAX_SEED_BYTES definition is missing or not numeric")
+BUDGET = int(_MAX_SEED_BYTES.group(1))
+if BUDGET <= 0:
+    raise AssertionError("importer MAX_SEED_BYTES must be positive")
 
 
 def mapper_function(name):
@@ -189,6 +194,8 @@ MAX_SEED_BYTES=65536
 
 
 class SetupFailureTests(unittest.TestCase):
+    """Regression coverage for scripts/import-qa-assets.sh setup contract (lines 24-64)."""
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -214,6 +221,9 @@ printf 'test 100 100 0 100%% /\\n' ''',
             path.chmod(0o755)
 
     def check_failure(self, failure, status):
+        """Assert the setup contract in scripts/import-qa-assets.sh:24-64:
+        setup errors preserve their exit status and always clean up staging.
+        """
         env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                    TEST_ROOT=str(self.root), FAIL_SETUP=failure)
         result = subprocess.run(["bash", str(SCRIPT)], env=env, cwd=self.root,
