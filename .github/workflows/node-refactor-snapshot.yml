@@ -15,18 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: a1be979848253ec7d5763375a13b6af1d8e66dfc
+          ref: e7dacf1a56ff67fdfd203459630f2e0e70c01d0b
+          fetch-depth: 0
           persist-credentials: false
-      - name: Archive pinned current main
+      - name: Archive pinned source and published state history
         run: |
-          git rev-parse HEAD > /tmp/HEAD
-          git archive --format=tar.gz HEAD > /tmp/node-source-latest.tgz
-          sha256sum /tmp/node-source-latest.tgz > /tmp/SHA256SUMS
+          git branch snapshot-main e7dacf1a56ff67fdfd203459630f2e0e70c01d0b
+          git branch snapshot-state 7c9b3f9b7eda8b3a258b2e534ba034865dad4650
+          git bundle create /tmp/node-continuation.bundle snapshot-main snapshot-state
+          sha256sum /tmp/node-continuation.bundle > /tmp/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: node-source-latest
+          name: node-continuation
           path: |
-            /tmp/node-source-latest.tgz
-            /tmp/HEAD
+            /tmp/node-continuation.bundle
             /tmp/SHA256SUMS
           retention-days: 1
