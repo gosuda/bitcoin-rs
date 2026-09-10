@@ -1,4 +1,8 @@
 //! Ban-list loading must distinguish missing files from corrupt or inaccessible data.
+//!
+//! Contract: `crates/p2p/README.md#ban-list-persistence-contract` owns the
+//! persisted row format and expiry semantics; `CONSTRAINTS.md` `CL-23` requires
+//! unavailable data not to be treated as empty.
 use std::error::Error;
 use std::net::IpAddr;
 use std::time::{Duration, UNIX_EPOCH};
