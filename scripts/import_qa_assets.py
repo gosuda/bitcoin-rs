@@ -91,6 +91,52 @@ def _frame(selector: int, script_pubkey: bytes, witness: Sequence[bytes]) -> byt
     return b"".join(parts)
 
 
+def _strip_rust_comments(text: str) -> str:
+    """Remove Rust line/nested-block comments without touching string contents."""
+    out: list[str] = []
+    index = block_depth = 0
+    in_string = False
+    while index < len(text):
+        if block_depth:
+            if text.startswith("/*", index):
+                block_depth += 1
+                index += 2
+            elif text.startswith("*/", index):
+                block_depth -= 1
+                index += 2
+            else:
+                out.append("\n" if text[index] == "\n" else " ")
+                index += 1
+            continue
+        if in_string:
+            char = text[index]
+            out.append(char)
+            index += 1
+            if char == "\\" and index < len(text):
+                out.append(text[index])
+                index += 1
+            elif char == '"':
+                in_string = False
+            continue
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            if newline < 0:
+                break
+            out.append("\n")
+            index = newline + 1
+        elif text.startswith("/*", index):
+            block_depth = 1
+            index += 2
+        else:
+            char = text[index]
+            out.append(char)
+            in_string = char == '"'
+            index += 1
+    if block_depth:
+        raise ValueError("Unterminated Rust block comment in script_eval contract")
+    return "".join(out)
+
+
 def _split_flags(body: str) -> list[str]:
     entries: list[str] = []
     start = depth = 0
@@ -118,7 +164,7 @@ def _split_flags(body: str) -> list[str]:
 
 
 def _script_contract(harness: Path) -> tuple[int, int, int]:
-    text = harness.read_text()
+    text = _strip_rust_comments(harness.read_text())
     limit = re.search(r"const\s+ELEMENT_LEN_MAX\s*:\s*usize\s*=\s*([0-9_]+)\s*;", text)
     flags = re.search(
         r"const\s+FLAGS\s*:\s*\[VerifyFlags\s*;\s*([0-9_]+)\s*\]\s*=\s*\[(.*?)\]\s*;",
