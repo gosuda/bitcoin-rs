@@ -77,31 +77,9 @@ jobs:
       - run: ./scripts/ci-pr.sh clippy
       - name: Provision pinned Core and Apalache fixtures
         run: bash scripts/provision-ci-reference-fixtures.sh
-      # Never attribute cached or earlier-profile diagnostics to this run.
-      # The workspace test profile owns the single formal solver execution.
-      - name: Reset formal-solver run context
-        run: |
-          rm -rf -- target/apalache
-          mkdir -p target/apalache
-          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=workspace\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            > target/apalache/run-context.txt
-      # Kernel-free test profiles, smallest first, ending with the workspace
-      # pass that includes the binary's process and formal gates.
+      # Kernel-free test profiles, smallest first. The formal solver run is
+      # main-only (main.yml's unfiltered full-node tests own it).
       - run: ./scripts/ci-pr.sh test
-      # Preserve the single solver run, including failures and timeouts.
-      # Only formal diagnostics are uploaded, never downloaded executables.
-      - name: Preserve workspace formal evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: apalache-workspace-${{ github.run_attempt }}
-          path: |
-            target/apalache/**/run-*.txt
-            target/apalache/**/detailed*.log
-            target/apalache/**/counterexample*
-          if-no-files-found: warn
-          retention-days: 7
       - name: Preserve public process compatibility evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

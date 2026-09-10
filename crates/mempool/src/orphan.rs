@@ -433,8 +433,10 @@ mod tests {
         pool.insert(Arc::clone(&changed), source(1), 119);
 
         let live = HashSet::from([source(1)]);
-        assert_eq!(pool.maintain(120, &live), 0);
-        assert_eq!(pool.maintain(121, &live), 1);
+        // MPL-04: expiry stays anchored at the first arrival (time 0). The
+        // witness refresh at 119 must not buy another timeout window, so the
+        // entry still expires exactly at the timeout boundary.
+        assert_eq!(pool.maintain(120, &live), 1);
         assert!(pool.get_by_wtxid(&changed.wtxid()).is_none());
     }
     #[test]
