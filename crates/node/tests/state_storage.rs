@@ -11,9 +11,6 @@ fn opens_storage_backend() -> Result<()> {
     assert_backend_opens("fjall")?;
     #[cfg(feature = "redb")]
     assert_backend_opens("redb")?;
-    #[cfg(feature = "mdbx")]
-    assert_backend_opens("mdbx")?;
-
     Ok(())
 }
 

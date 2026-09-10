@@ -16,22 +16,25 @@
 # `an_unlisted_method_is_method_not_found`.
 
 [reference]
-# The Bitcoin Core revision every compatibility claim in this file is made
-# against. Not a released Core version: 31.99 is Core's master convention for
-# "after 31.x, before 32.0", so this is a pre-release snapshot and a claim made
-# against it is a claim about master, not about anything an operator can install
-# from a release tarball. Said plainly because a compatibility contract that
-# quietly points at a moving target is worse than none.
+# The development version of the kernel oracle, distinct from the released
+# product identity below. The source and package digests pin this snapshot;
+# 31.99.0 by itself is only Core's development-version convention.
 core_version = "31.99.0"
-# Where that revision comes from, and what makes the pin real: the node links
-# libbitcoinkernel built from this tree, so the pin is load-bearing rather than
-# documentary. `bitcoinkernel` is the safe wrapper; `libbitcoinkernel-sys`
+# Where that revision comes from: the oracle links libbitcoinkernel built
+# from this tree. `bitcoinkernel` is the safe wrapper; `libbitcoinkernel-sys`
 # vendors the Core source under `bitcoin/`, and its `CMakeLists.txt` carries the
 # CLIENT_VERSION above.
 kernel_crate = "bitcoinkernel"
 kernel_crate_version = "0.2.1"
 kernel_sys_crate = "libbitcoinkernel-sys"
 kernel_sys_crate_version = "0.3.0"
+# Published crate custody: `.cargo_vcs_info.json` identifies the wrapper tree.
+# Its subtree squash 691b006f271c6d19565266541d7397eaf0c64944 records this
+# bitcoin/bitcoin source commit in `git-subtree-split`.
+# https://github.com/sedited/rust-bitcoinkernel/commit/691b006f271c6d19565266541d7397eaf0c64944
+kernel_vendor_commit = "4b51ffdddfa82b84a03a1fa76bbfa72a4f0b6ccf"
+kernel_source_commit = "fb0e8612d6f74071af77b3f27d915da69e0a726b"
+kernel_sys_crate_sha256 = "2906bc31f02dff7af9611fe9129c9eae021bd359f9d8e79824026fe1aaf28ab1"
 # Set when a differential harness compares *values* against a running reference
 # (#78 scope item 2). Still false, and deliberately so: the shape comparison in
 # `crates/rpc/src/compat/schema.rs` checks field names, types and optionality
@@ -40,6 +43,67 @@ kernel_sys_crate_version = "0.3.0"
 #
 # No entry may claim `supported` while this is false, and the suite enforces it.
 differential_harness = false
+
+
+# ---------------------------------------------------------------------------
+# Reference identities
+#
+# Two distinct identities live under this table, and they must never be
+# confused:
+#
+#   * `[reference.release]` below is the RELEASED Bitcoin Core product,
+#     installed from a checksum-pinned tarball. It is the product behavior
+#     reference every compatibility claim in this file is ultimately made
+#     against -- the same pinned reference the status vocabulary talks about.
+#   * the scalar keys above (`core_version = "31.99.0"`, the kernel crates)
+#     are the Core development tree this node links for the oracle lane.
+#     Oracle evidence only: not a release, and never a policy pin.
+#
+# A reference carrying only a version label or a digest that does not match is
+# rejected by `bin/bitcoin-rs/tests/support/reference_set.rs`. `docs/contracts/reference-set.md` is a
+# readable projection; on conflict, this file and that parser govern.
+# ---------------------------------------------------------------------------
+
+[reference.release]
+# The released product identity. `version_output` is what the pinned
+# `bitcoind -version` prints, checked verbatim.
+core_version = "31.1"
+git_tag = "v31.1"
+source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
+archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"
+archive_sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08"
+version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"
+
+# Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
+# the corpus archive is exported and is deliberately ABSENT until then: a
+# placeholder digest here would be an invented one, so the loader reports the
+# corpus as custody-blocked instead.
+
+[[reference.corpora]]
+id = "C150"
+stop_height = 150000
+stop_hash = "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b"
+# Exported 2026-09-07 by the pinned bitcoind (digest 986e63b3) into a fresh
+# datadir; see the campaign-corpora contract and products.json for canonical
+# corpus measurements and terminal-state evidence.
+# Canonical manifest identity per CORP-02: the `manifest_sha256` field the
+# exporter embeds inside the manifest, NOT the SHA-256 of the manifest file.
+manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d"
+
+[[reference.corpora]]
+id = "Cmodern"
+stop_height = 709635
+stop_hash = "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f"
+
+# The formal model checker, pinned by archive and jar digest. Evidence tool
+# only; no checker run is claimed anywhere in this file.
+
+[reference.formal_tool]
+name = "apalache-mc"
+version = "0.62.2"
+archive_sha256 = "7cfadf6e8c04c63f05ac907ec9541c66297005c8cb5efb1731f6a838dfc3fad2"
+jar_sha256 = "079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8"
 
 # Status vocabulary, in the order of decreasing confidence:
 #
