@@ -1,0 +1,28 @@
+name: node-apply-workbench
+
+on:
+  push:
+    branches: [agent/node-apply-workbench]
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply modularization
+        run: |
+          python .github/refactor_apply.py
+          cargo fmt --all
+          git diff --check
+      - name: Check node
+        run: cargo check -p bitcoin-rs-node --no-default-features --features fjall,zmq
+      - name: Clippy node
+        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: Apply tests
+        run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib 'apply::' -- --test-threads=1
