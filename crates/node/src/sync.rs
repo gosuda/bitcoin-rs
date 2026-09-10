@@ -6294,8 +6294,8 @@ mod tests {
 
         assert_eq!(
             error.disposition,
-            crate::apply::WindowApplyDisposition::Operational,
-            "UtxoCommit must not attempt finish, so disposition stays Operational"
+            crate::apply::WindowApplyDisposition::Fatal,
+            "UtxoCommit settlement must be fatal and must not attempt finish"
         );
         assert!(
             matches!(
