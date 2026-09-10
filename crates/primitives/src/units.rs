@@ -41,25 +41,10 @@ impl Amount {
         }
     }
 
-    /// Checked subtraction.
-    #[must_use]
-    pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
-        match self.0.checked_sub(rhs.0) {
-            Some(diff) => Some(Self(diff)),
-            None => None,
-        }
-    }
-
     /// Saturating addition.
     #[must_use]
     pub const fn saturating_add(self, rhs: Self) -> Self {
         Self(self.0.saturating_add(rhs.0))
-    }
-
-    /// Saturating subtraction.
-    #[must_use]
-    pub const fn saturating_sub(self, rhs: Self) -> Self {
-        Self(self.0.saturating_sub(rhs.0))
     }
 
     /// Little-endian consensus encoding of the satoshi count.
