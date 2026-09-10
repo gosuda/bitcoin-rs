@@ -292,6 +292,8 @@ mod tests {
 
     /// CONTRACT: P2P-04. Vectored writes count every slice, not only the first.
     ///
+    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
+    ///
     /// `write_message` emits header and payload as two `IoSlice`s. The default
     /// `Write::write_vectored` would take only the header and leave the payload
     /// for a second syscall; this wrapper must not reintroduce that split.
@@ -340,6 +342,8 @@ mod tests {
     }
 
     /// `write_message` through this wrapper still issues one vectored write.
+    ///
+    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     #[test]
     fn write_message_through_the_wrapper_is_one_vectored_write() {
         use bitcoin::p2p::Magic;
@@ -385,6 +389,8 @@ mod tests {
     }
 
     /// `from_connected` is the socket-posture owner: Nagle is off.
+    ///
+    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     #[test]
     fn from_connected_disables_nagle() {
         use std::net::{TcpListener, TcpStream};
