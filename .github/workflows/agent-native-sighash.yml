@@ -24,9 +24,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m py_compile .github/agent_native_sighash.py .github/agent_native_sighash_extra.py
+          python3 -m py_compile .github/agent_native_sighash.py .github/agent_native_sighash_extra.py .github/agent_native_sighash_fix.py
           python3 .github/agent_native_sighash.py
           python3 .github/agent_native_sighash_extra.py
+          python3 .github/agent_native_sighash_fix.py
           cargo fmt --all
           git diff --check
           changed="$(git diff --name-only | sort)"
@@ -59,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/workflows/agent-native-sighash.yml .github/agent_native_sighash.py .github/agent_native_sighash_extra.py
+          git rm .github/workflows/agent-native-sighash.yml .github/agent_native_sighash.py .github/agent_native_sighash_extra.py .github/agent_native_sighash_fix.py
           git add \
             crates/consensus/src/lib.rs \
             crates/consensus/src/verify_tx.rs \
