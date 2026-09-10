@@ -2273,6 +2273,17 @@ mod tests {
         let child_txid = child.txid();
         let child_hex = retry_raw_hex(&child);
 
+        // Admit the parent first: the child's `prepare_and_verify` must pass
+        // in full to reach the park seam after it, so the parent's output has
+        // to be resolvable before the first attempt starts.
+        let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
+        ctx.mempool
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
+            )
+            .expect("parent admitted to the mempool");
+
         // Arm the admission park gate: the first `admit_transaction` on this
         // gateway will block before the write lock, signal `parked`, and wait
         // for `release`.
@@ -2291,10 +2302,11 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("first admission parked at the gateway seam");
 
-        // While the first attempt is parked (before the write lock, holding
-        // no guard), change the chain generation so the first attempt's
-        // captured generation token is stale, and admit the parent so the
-        // mempool sequence bumps and the parent's output is available.
+        // While the first attempt is parked (after its outside verdict,
+        // before the write lock, holding no guard), change the chain
+        // generation so the first attempt's captured generation token is
+        // stale. The sequence is untouched, so the writer recheck must fire
+        // on generation.
         let guard = ctx_clone
             .mempool
             .begin_chain_change()
@@ -2302,15 +2314,6 @@ mod tests {
         guard
             .finish()
             .expect("finish chain change to next even generation");
-
-        let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
-        ctx_clone
-            .mempool
-            .insert_entry(
-                AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
-            )
-            .expect("parent admitted to the mempool");
 
         // Release the park: the first attempt proceeds, sees the stale
         // generation token, and returns `GenerationChanged` — retrying with
