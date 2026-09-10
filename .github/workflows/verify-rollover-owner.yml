@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 7c6a01058ae637990c90c532b295920fd97c7ab6
+          ref: 93a340bad78365691c14cad0dca0dcaa85942874
           fetch-depth: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
@@ -183,7 +183,7 @@ jobs:
           cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/rollover-evidence/clippy-node.txt
       - name: Publish only tested source on a new branch
         run: |
-          test "$(git rev-parse HEAD)" = 7c6a01058ae637990c90c532b295920fd97c7ab6
+          test "$(git rev-parse HEAD)" = 93a340bad78365691c14cad0dca0dcaa85942874
           test -z "$(git ls-remote --heads origin refs/heads/validated/rollover-owner-20260910)"
           git diff --exit-code -- Cargo.lock
           cargo fmt --all -- --check
@@ -194,6 +194,11 @@ jobs:
           git rev-parse HEAD | tee /tmp/rollover-evidence/head.txt
           git show --stat --oneline HEAD | tee /tmp/rollover-evidence/scope.txt
           git push origin HEAD:refs/heads/validated/rollover-owner-20260910
+      - name: Capture the candidate diff even on failure
+        if: always()
+        run: |
+          mkdir -p /tmp/rollover-evidence
+          git diff --binary 93a340bad78365691c14cad0dca0dcaa85942874 > /tmp/rollover-evidence/candidate.patch
       - name: Retain execution evidence, including failures
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
