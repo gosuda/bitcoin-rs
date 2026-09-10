@@ -10,20 +10,22 @@
 
 use std::path::Path;
 
-/// The only type that may call mutating `Mempool` methods from production
-/// code outside the mempool crate.
-pub(crate) const MEMPOOL_GATEWAY_TYPE: &str = "MempoolGateway";
-
-/// Receiver tokens that identify calls already routed through the gateway.
+/// Audited cross-crate gateway mutation expressions.
 ///
-/// `Context.mempool`, `NodeState.mempool_gateway`, and local `gateway`/`mempool`
-/// bindings in tests are expected to name the gateway; the scan treats any other
-/// receiver as a raw `Mempool` call.
-pub(crate) const GATEWAY_RECEIVER_TOKENS: &[&str] = &["mempool", "mempool_gateway", "gateway"];
+/// The scanner has no Rust type information, so a generic local name such as
+/// `gateway` or `mempool` cannot prove ownership. Every exception is therefore
+/// tied to one source file and one complete receiver expression. Adding a new
+/// production gateway mutation requires an explicit review of this list.
+const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
+    (
+        "crates/rpc/src/handlers/mining.rs",
+        "ctx.mempool",
+    ),
+];
 
 /// Mutating methods on `Mempool` that only the mempool owner may call from
 /// production code. `MempoolGateway` deliberately reuses some of these names,
-/// so a match is only a violation when the receiver is **not** a gateway token.
+/// so a match is only permitted at an audited gateway expression above.
 ///
 /// `clear` and `commit_insert` are intentionally omitted: `clear` is too common
 /// across collection types and is caught by `.pool().write(`; `commit_insert` is
@@ -173,13 +175,14 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
             }
         }
 
-        // Mutating method calls: only flag when the receiver is not a known
-        // gateway token. This lets `ctx.mempool.prioritise(...)` (gateway) pass
-        // while `pool.prioritise(...)` (raw `&mut Mempool`) fails.
+        // Mutating method calls are permitted only at audited, qualified
+        // gateway expressions. Receiver names alone are not ownership proof.
         for method in MUTATING_METHODS {
             if let Some(pos) = line.find(method) {
                 result.mutating_calls_found += 1;
-                if !is_mempool_owner && !is_authorized_gateway_call(line, pos, &lines, index) {
+                if !is_mempool_owner
+                    && !is_authorized_gateway_call(&path_str, line, pos, &lines, index)
+                {
                     result.violations.push(format!(
                         "raw mempool mutation `{method}` at {}:{}: {}",
                         path_str,
@@ -194,15 +197,13 @@ fn scan_file(path: &Path, result: &mut WriterScanResult) {
     result.files_scanned += 1;
 }
 
-/// Returns true if the mutating method call at `method_pos` is on a receiver
-/// named `mempool`, `mempool_gateway`, or `gateway` (the permitted gateway
-/// tokens), or if the line already contains a `.write(` guard (which is handled
-/// as a separate raw-write violation).
+/// Returns true only when the call is on a receiver expression explicitly
+/// audited in [`AUTHORIZED_GATEWAY_CALLS`].
 ///
-/// A call may be split across lines (`ctx.mempool
-/// .prioritise(...)`). When the receiver on the current line carries no
-/// identifier, the previous non-empty line supplies it.
+/// A call may be split across lines (`ctx.mempool` then `.prioritise(...)`).
+/// In that shape the previous non-empty line supplies the complete receiver.
 fn is_authorized_gateway_call(
+    path: &str,
     line: &str,
     method_pos: usize,
     lines: &[&str],
@@ -214,31 +215,75 @@ fn is_authorized_gateway_call(
         return false;
     }
 
-    // Find the dot immediately preceding the method name.
     let before = &line[..method_pos];
     let receiver = match before.rfind('.') {
-        Some(dot_pos) => &before[..dot_pos],
-        None => before,
+        Some(dot_pos) => before[..dot_pos].trim(),
+        None => before.trim(),
     };
-    let token = match receiver.rfind(|c: char| !c.is_alphanumeric() && c != '_') {
-        Some(token_start) => receiver[token_start + 1..].trim(),
-        None => receiver.trim(),
+    let receiver = if receiver.is_empty() {
+        lines[..line_index]
+            .iter()
+            .rev()
+            .map(|previous| previous.trim())
+            .find(|previous| !previous.is_empty() && !previous.starts_with("//"))
+            .unwrap_or("")
+    } else {
+        receiver
     };
-    if !token.is_empty() && GATEWAY_RECEIVER_TOKENS.contains(&token) {
-        return true;
+
+    let normalized_path = path.replace('\\', "/");
+    AUTHORIZED_GATEWAY_CALLS.iter().any(|(allowed_path, allowed_receiver)| {
+        normalized_path.ends_with(allowed_path) && receiver == *allowed_receiver
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_authorized_gateway_call;
+
+    const MINING_HANDLER: &str = "/workspace/crates/rpc/src/handlers/mining.rs";
+
+    fn authorized(path: &str, source: &str) -> bool {
+        let lines: Vec<&str> = source.lines().collect();
+        let (line_index, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.contains("prioritise("))
+            .expect("fixture contains prioritise call");
+        let method_pos = line.find("prioritise(").expect("method position");
+        is_authorized_gateway_call(path, line, method_pos, &lines, line_index)
     }
 
-    // Multi-line call: the receiver lives on the previous non-empty line.
-    for previous in lines[..line_index].iter().rev() {
-        let previous = previous.trim();
-        if previous.is_empty() || previous.starts_with("//") {
-            continue;
+    #[test]
+    fn only_the_audited_qualified_gateway_receiver_is_authorized() {
+        assert!(authorized(
+            MINING_HANDLER,
+            "ctx.mempool\n    .prioritise(txid, fee_delta)"
+        ));
+        assert!(authorized(
+            MINING_HANDLER,
+            "ctx.mempool.prioritise(txid, fee_delta)"
+        ));
+
+        for source in [
+            "gateway.prioritise(txid, fee_delta)",
+            "mempool.prioritise(txid, fee_delta)",
+            "other.mempool.prioritise(txid, fee_delta)",
+            "ctx.mempool_gateway.prioritise(txid, fee_delta)",
+        ] {
+            assert!(!authorized(MINING_HANDLER, source), "{source}");
         }
-        let token = previous
-            .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
-            .next()
-            .unwrap_or("");
-        return !token.is_empty() && GATEWAY_RECEIVER_TOKENS.contains(&token);
+        assert!(!authorized(
+            "/workspace/crates/node/src/apply.rs",
+            "ctx.mempool\n    .prioritise(txid, fee_delta)"
+        ));
     }
-    false
+
+    #[test]
+    fn a_raw_write_chain_is_never_authorized() {
+        assert!(!authorized(
+            MINING_HANDLER,
+            "ctx.mempool.write().prioritise(txid, fee_delta)"
+        ));
+    }
 }
