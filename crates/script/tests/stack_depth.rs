@@ -1,4 +1,10 @@
 //! Checked depth arithmetic and mutation boundaries of the public script stack.
+//!
+//! Regression contract: `Stack::{peek_at, remove_at, roll}` use top-relative
+//! depth (`0` is the top); invalid depth returns `StackError::Underflow`, and
+//! mutating operations leave the stack unchanged on that error. This helper
+//! contract supports the Core-vector parity required by
+//! `docs/contracts/validation-default.md` `VAL-02`.
 use bitcoin_rs_script::{ScriptItem, Stack, StackError};
 
 #[test]
