@@ -1,0 +1,58 @@
+name: node-breaking-apply-workbench
+
+on:
+  push:
+    branches: [automation/node-breaking-apply-workbench-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: node-breaking-apply-workbench
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  BASE_SHA: 135d2e54d8d3630a609db6d5cc25045a59c966e1
+  TARGET_BRANCH: refactor/node-break-body-store
+
+jobs:
+  transform-validate-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Apply ownership cut
+        run: python3 scripts/node-breaking-apply.py
+      - name: Format
+        run: cargo fmt --all
+      - name: Clippy
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: Node tests
+        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast
+      - name: Ownership gate
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
+      - name: Publish clean validated commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f scripts/node-breaking-apply.py .github/workflows/node-breaking-apply-workbench.yml
+          git add -A
+          if git diff --cached --name-only | grep -Ev '^(crates/node/|docs/)' ; then
+            echo 'unexpected changed path' >&2
+            exit 1
+          fi
+          tree=$(git write-tree)
+          commit=$(printf '%s\n\n%s\n' \
+            'refactor(node): move block-body persistence behind its owner' \
+            'Break the crate-internal apply paths for prune/body storage. Body persistence, ordered snapshot reads, flat-file positions, ranged reads, metadata, and durability now live under apply::body_store; all node callers migrate to that owner and the old apply-level paths disappear.' \
+            | git commit-tree "$tree" -p "$BASE_SHA")
+          git push origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "published_commit=$commit" >> "$GITHUB_STEP_SUMMARY"
