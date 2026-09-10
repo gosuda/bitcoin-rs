@@ -11,8 +11,8 @@ write('sync/settlement.rs','//! Apply-window settlement and drained-block restor
 for name,a,b,extra in [
  ('core.rs',247,457,'use super::settlement::*;\n'),
  ('headers.rs',458,607,'use super::peers::*;\n'),
- ('blocks.rs',608,1086,'use super::settlement::*;\n'),
- ('expected.rs',1087,1251,''),
+ ('blocks.rs',608,1073,'use super::settlement::*;\n'),
+ ('expected.rs',1075,1250,''),
  ('requests.rs',1252,1693,'use super::peers::*;\n'),
  ('metrics.rs',1694,1811,''),
 ]:
