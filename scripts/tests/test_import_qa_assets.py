@@ -113,8 +113,8 @@ class ShellFlowTests(unittest.TestCase):
         self.stub("rustc", "printf 'host: x86_64-unknown-linux-gnu\\n'")
         self.stub("df", "printf 'Filesystem B U A C M\\nX 1 0 100000 0%% /\\n'")
         self.stub("du", "[[ ${FAIL:-} != du ]] || exit 31; printf '1\\tclone\\n'")
-        self.stub("date", "[[ ${FAIL:-} != date ]] || exit 47; printf '2000-01-01T00:00:00Z\\n'")
-        self.stub("cargo", "[[ ${FAIL:-} != cmin ]] || exit 43; exit 0")
+        self.stub("date", "[[ ${FAIL:-} != date ]] || exit 47; [[ -f ${TEST_ROOT}/cmin.log ]] && [[ $(cat ${TEST_ROOT}/cmin.log) == $'p2p_message\\nblock_decode\\ntx_decode\\nscript_eval' ]] || exit 48; printf '2000-01-01T00:00:00Z\\n'")
+        self.stub("cargo", "[[ ${FAIL:-} != cmin ]] || exit 43; [[ $1 == fuzz && $2 == cmin ]] || exit 99; printf '%s\\n' \"$5\" >> \"${TEST_ROOT}/cmin.log\"")
         self.stub("git", r'''
 if [[ $1 == rev-parse ]]; then printf '%s\n' "$TEST_ROOT"; exit; fi
 if [[ $1 == init ]]; then mkdir -p "${!#}/fuzz_corpora"; exit; fi
@@ -135,6 +135,8 @@ esac''')
     def test_success_replaces_provenance_after_cmin(self):
         result = self.run_import(); self.assertEqual(result.returncode, 0, result.stderr)
         text = self.prov.read_text(); self.assertIn(self.pin, text); self.assertIn("2000-01-01T00:00:00Z", text)
+        self.assertEqual((self.root / "cmin.log").read_text().splitlines(), ["p2p_message", "block_decode", "tx_decode", "script_eval"])
+        self.assertEqual(self.prov.stat().st_mode & 0o777, 0o644)
         self.assertFalse(any(self.prov.parent.glob(".corpus-provenance.*")))
 
     def test_acquisition_failures_preserve_provenance(self):
