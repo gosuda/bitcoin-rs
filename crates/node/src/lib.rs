@@ -29,6 +29,8 @@ pub mod embed;
 pub mod event_loop;
 /// Block import pipeline.
 pub mod import;
+/// Owned startup, rollback, and ordered service shutdown.
+mod lifecycle;
 /// Tracing initialization.
 pub mod logging;
 /// Metrics instrumentation and optional exposition.
