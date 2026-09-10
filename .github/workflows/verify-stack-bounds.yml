@@ -1,0 +1,149 @@
+name: verify-stack-bounds
+on:
+  push:
+    branches: [verify/stack-bounds-20260910]
+    paths: [.github/workflows/verify-stack-bounds.yml]
+permissions:
+  contents: write
+concurrency:
+  group: verify-stack-bounds-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 93a340bad78365691c14cad0dca0dcaa85942874
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Add stack API boundary regressions
+        run: |
+          mkdir -p /tmp/stack-bounds-evidence
+          git rev-parse HEAD | tee /tmp/stack-bounds-evidence/base.txt
+          rustc --version --verbose | tee /tmp/stack-bounds-evidence/toolchain.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          path = Path('crates/script/src/stack.rs')
+          assert subprocess.check_output(['git', 'hash-object', str(path)], text=True).strip() == 'a0fe84890eff766e1f8d4bbffcca1b56ddc57998'
+          path.write_text(path.read_text() + '''
+
+          #[cfg(test)]
+          mod stack_depth_boundaries {
+              use super::{ScriptItem, Stack, StackError};
+
+              #[test]
+              fn empty_stack_rejects_extreme_depths() {
+                  let mut stack = Stack::new();
+                  for depth in [0, 1, usize::MAX - 1, usize::MAX] {
+                      assert_eq!(stack.peek_at(depth), Err(StackError::Underflow));
+                      assert_eq!(stack.remove_at(depth), Err(StackError::Underflow));
+                      assert_eq!(stack.roll(depth), Err(StackError::Underflow));
+                      assert!(stack.is_empty());
+                  }
+              }
+
+              #[test]
+              fn depth_errors_preserve_contents() {
+                  let mut stack = Stack::new();
+                  assert_eq!(stack.push(ScriptItem::Num(11)), Ok(()));
+                  assert_eq!(stack.push(ScriptItem::Num(22)), Ok(()));
+                  let before = stack.clone();
+                  for depth in [2, 3, usize::MAX - 1, usize::MAX] {
+                      assert_eq!(stack.peek_at(depth), Err(StackError::Underflow));
+                      assert_eq!(stack.remove_at(depth), Err(StackError::Underflow));
+                      assert_eq!(stack.roll(depth), Err(StackError::Underflow));
+                      assert_eq!(stack, before);
+                  }
+              }
+
+              #[test]
+              fn valid_depths_address_top_and_bottom() {
+                  let mut stack = Stack::new();
+                  assert_eq!(stack.push(ScriptItem::Num(11)), Ok(()));
+                  assert_eq!(stack.push(ScriptItem::Num(22)), Ok(()));
+                  assert_eq!(stack.peek_at(0), Ok(&ScriptItem::Num(22)));
+                  assert_eq!(stack.peek_at(1), Ok(&ScriptItem::Num(11)));
+                  assert_eq!(stack.roll(1), Ok(()));
+                  assert_eq!(stack.peek_at(0), Ok(&ScriptItem::Num(11)));
+                  assert_eq!(stack.remove_at(1), Ok(ScriptItem::Num(22)));
+                  assert_eq!(stack.pop(), Ok(ScriptItem::Num(11)));
+                  assert!(stack.is_empty());
+              }
+          }
+          ''')
+          PY
+      - name: Require the pre-fix bounds overflow, not a setup failure
+        run: |
+          set +e
+          cargo test --locked -p bitcoin-rs-script --lib stack_depth_boundaries -- --nocapture > /tmp/stack-bounds-evidence/red.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/stack-bounds-evidence/red.txt
+          test "$rc" -ne 0
+          grep -q 'attempt to add with overflow' /tmp/stack-bounds-evidence/red.txt
+          grep -q 'test result: FAILED' /tmp/stack-bounds-evidence/red.txt
+          grep -q 'valid_depths_address_top_and_bottom ... ok' /tmp/stack-bounds-evidence/red.txt
+      - name: Remove unchecked depth arithmetic
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/script/src/stack.rs')
+          text = p.read_text()
+          old = '.checked_sub(depth + 1)'
+          assert text.count(old) == 2
+          p.write_text(text.replace(old, '.checked_sub(depth).and_then(|remaining| remaining.checked_sub(1))'))
+          PY
+          cargo fmt --all
+          python3 - <<'PY'
+          import subprocess
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          assert changed == ['crates/script/src/stack.rs'], ('Unexpected changes', changed)
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Script regressions and independent Core vectors
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-script --lib --test core_vectors --test verifier_boundaries --no-fail-fast 2>&1 | tee /tmp/stack-bounds-evidence/script.txt
+          cargo test --locked -p bitcoin-rs-script --release --lib stack_depth_boundaries 2>&1 | tee /tmp/stack-bounds-evidence/release.txt
+      - name: Native consensus parse-parity regression
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_parse_parity -- --nocapture 2>&1 | tee /tmp/stack-bounds-evidence/parse-parity.txt
+      - name: All three strict PR Clippy profiles
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/stack-bounds-evidence/clippy-workspace.txt
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/stack-bounds-evidence/clippy-consensus.txt
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/stack-bounds-evidence/clippy-node.txt
+      - name: Publish tested source without staging machinery
+        run: |
+          test "$(git rev-parse HEAD)" = 93a340bad78365691c14cad0dca0dcaa85942874
+          test -z "$(git ls-remote --heads origin refs/heads/validated/stack-bounds-20260910)"
+          git diff --exit-code -- Cargo.lock
+          cargo fmt --all -- --check
+          git diff --check
+          git add -- crates/script/src/stack.rs
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(script): reject overflowing stack depths without mutation'
+          git diff --exit-code
+          git rev-parse HEAD | tee /tmp/stack-bounds-evidence/head.txt
+          git show --stat --oneline HEAD | tee /tmp/stack-bounds-evidence/scope.txt
+          git push origin HEAD:refs/heads/validated/stack-bounds-20260910
+      - name: Retain execution evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: stack-bounds-${{ github.run_id }}
+          path: /tmp/stack-bounds-evidence/
+          if-no-files-found: error
+          retention-days: 7
