@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use super::*;
 
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 fn auth_debug_redacts_secrets() {
     let auth = Auth::basic("operator", "s3cret");

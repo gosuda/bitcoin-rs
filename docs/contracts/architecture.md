@@ -139,7 +139,9 @@ Owners:
   generation coordinator keyed by `(applied_tip_hash, mempool_sequence)`,
   watch-only coinbase payout configuration (`MiningConfig::payout_script`), and
   process-level cache budgeting (`dbcache` distribution across chainstate and
-  txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
+  txindex namespaces). Authentication credentials in node configuration debug
+    output must redact passwords and cookie paths as `<redacted>`, while basic
+    authentication usernames remain visible for diagnostics. The `bitcoin-rs` binary owns argv, environment, and
   TOML parsing. Applied-tip mutation is owned by the chainstate facade
   (`ARCH-07`), not by a public field bag of subsystem handles.
 - `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
