@@ -417,30 +417,30 @@ projections, index wake, mining generation, and mempool alignment, owned by
 
 ## Mempool
 
-### AdmissionMode
-`Preview` or `Commit`, the named mode of one admission pipeline. Preview runs
-the identical prepare, resolve, policy, and script path and stops before
-mutation: no membership, estimator, relay state, sequence, or victim change.
-Commit continues to the single writer acquisition. No boolean selector or
-skip-verification override exists.
+### AdmissionMode (planned, T18)
+`Preview` or `Commit`, the named mode of one admission pipeline, is the T18
+target state, not the current API: no `AdmissionMode` selector exists today
+and the gateway runs the commit path only. Preview will run the identical
+prepare, resolve, policy, and script path and stop before mutation: no
+membership, estimator, relay state, sequence, or victim change.
 
-### Admission verdict
-`AdmissionVerdict { stamp: ReadStamp, rows: Vec<TxVerdict>, changes:
-Option<CommittedMutation> }`. `changes` is present only when a mutation
-occurred. A preview describes one context, not a reservation; staleness is
-visible through the stamp.
+### Admission verdict (planned, T18)
+No `AdmissionVerdict`/`TxVerdict` types exist today; per-row preview verdicts
+live in the RPC outlet's acceptance facts. The T18 target returns per-row
+verdicts plus the context stamp from the gateway, with changes present only
+when a mutation occurred.
 
-### Typed Busy
-`AdmitError::Busy`, returned after the gateway's four attempts each found a
-stale chain generation, pool sequence, or policy epoch at recheck. Each attempt
-recaptures fresh facts; stale evidence is never reused. Callers map `Busy` to
-their dialect; a new operation is a fresh start.
+### Typed Busy (planned, T18)
+No `Busy` variant exists today; the retryable transients are
+`AdmitError::GenerationChanged` and `AdmitError::MempoolChanged`. The T18
+target types exhaustion-after-retries as `Busy`; until then callers retry on
+the two transient variants with fresh facts.
 
 ### Admission origin
-`AdmissionOrigin` on the committed record: `Rpc`, `Peer(PeerToken)`,
-`Esplora`, `Package`, `Reorg`, `Load`. Esplora is a distinct origin with its
-own request fee limits, not an RPC alias. Only retained accepted entries become
-relay candidates.
+`AdmissionOrigin` on the committed record: `Rpc`, `Peer(PeerToken)`, `Reorg`,
+`Block`. `Esplora`, `Package`, and `Load` are T18/API-10 target origins, not
+current variants: Esplora `POST /tx` dispatches as `Rpc` today. Only retained
+accepted entries become relay candidates.
 
 ### Sigop cost
 `total_sigop_cost` computed inside the gateway from resolved prevouts (legacy

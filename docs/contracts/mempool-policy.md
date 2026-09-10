@@ -49,11 +49,12 @@ holds a second admission evaluator.
 - `MempoolGateway` is the only production admission path. RPC
   `sendrawtransaction` and `testmempoolaccept`, P2P ingress, Esplora
   `POST /tx`, package submissions, and reorg reconsideration all call it.
-- The operation accepts parsed transactions, an
-  `AdmissionMode::{Preview, Commit}` selector, an `AdmissionOrigin`
-  (`Rpc`, `Peer(PeerToken)`, `Esplora`, `Package`, `Reorg`), and request
-  fee limits. It returns per-transaction verdicts plus the context stamp,
-  and committed changes only when a mutation occurred.
+- The operation accepts parsed transactions and request fee limits. An
+  `AdmissionMode::{Preview, Commit}` selector, `Esplora` and `Package`
+  origins, and per-transaction gateway verdicts are T18 work: no mode
+  selector, `Esplora`/`Package` variants, or verdict types exist today
+  (Esplora `POST /tx` dispatches as `Rpc`; previews live in the RPC
+  outlet). Committed changes occur only when a mutation occurred.
 - Peer ingress does not inherit RPC fee limits. Each origin declares its
   own request limits. The node wires narrow chain and coin providers;
   RPC and P2P do not resolve admission contexts themselves.
