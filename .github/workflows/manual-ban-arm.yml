@@ -1,0 +1,114 @@
+name: manual-ban-arm
+on:
+  push:
+    branches: [verify/manual-ban-arm-20260910]
+    paths:
+      - .github/workflows/manual-ban-arm.yml
+      - .github/audit/prepare_manual_bans.py
+permissions:
+  contents: write
+concurrency:
+  group: manual-ban-arm-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: c84a44eff9e6e2e41e6ac36ba92843b665380645
+          path: source
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: source -> target
+      - name: Record exact source and add failing contract regressions
+        run: |
+          mkdir -p /tmp/manual-ban-evidence
+          git rev-parse HEAD | tee /tmp/manual-ban-evidence/base.txt
+          rustc --version --verbose | tee /tmp/manual-ban-evidence/toolchain.txt
+          python3 ../control/.github/audit/prepare_manual_bans.py tests
+      - name: Require four behavioral failures on the original implementation
+        run: |
+          set +e
+          cargo test --locked -p bitcoin-rs-p2p -p bitcoin-rs-rpc --lib manual_ban --no-fail-fast -- --nocapture > /tmp/manual-ban-evidence/red.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/manual-ban-evidence/red.txt
+          test "$rc" -ne 0
+          grep -q 'test result: FAILED' /tmp/manual-ban-evidence/red.txt
+          grep -q 'manual ban left a matching live lease active' /tmp/manual-ban-evidence/red.txt
+          grep -q 'RPC ban left the first matching lease active' /tmp/manual-ban-evidence/red.txt
+          grep -q 'unrepresentable expiry must fail before ban mutation' /tmp/manual-ban-evidence/red.txt
+          grep -q 'late ban must reject before registration and wire I/O' /tmp/manual-ban-evidence/red.txt
+      - name: Apply the shared owner transition and check exact scope
+        run: |
+          python3 ../control/.github/audit/prepare_manual_bans.py fix
+          cargo fmt --all
+          python3 - <<'PY'
+          import subprocess
+          allowed = {'crates/p2p/src/lib.rs', 'crates/p2p/src/service.rs',
+                     'crates/p2p/src/listener.rs', 'crates/p2p/src/peer.rs',
+                     'crates/rpc/src/handlers/network.rs'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed == allowed, ('Unexpected source or formatting changes', sorted(changed))
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          git diff --binary > /tmp/manual-ban-evidence/candidate.patch
+      - name: P2P owner, listener, and protocol regressions
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-p2p --lib --test listener_ban --test core_compat --no-fail-fast 2>&1 | tee /tmp/manual-ban-evidence/p2p.txt
+      - name: RPC and production ingress regressions
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast 2>&1 | tee /tmp/manual-ban-evidence/rpc.txt
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e 2>&1 | tee /tmp/manual-ban-evidence/ingress.txt
+      - name: All three strict native PR Clippy profiles
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-workspace.txt
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-consensus.txt
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/manual-ban-evidence/clippy-node.txt
+      - name: Ownership and evidence schema gates
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership --test overhaul_evidence --test overhaul_reference_set 2>&1 | tee /tmp/manual-ban-evidence/contracts.txt
+      - name: Publish the tested source only on a new branch
+        run: |
+          test "$(git rev-parse HEAD)" = c84a44eff9e6e2e41e6ac36ba92843b665380645
+          test -z "$(git ls-remote --heads origin refs/heads/validated/manual-ban-arm-20260910)"
+          git diff --exit-code -- Cargo.lock
+          cargo fmt --all -- --check
+          git diff --check
+          git add -- crates/p2p/src/lib.rs crates/p2p/src/service.rs crates/p2p/src/listener.rs crates/p2p/src/peer.rs crates/rpc/src/handlers/network.rs
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(p2p): apply manual bans atomically with session registration'
+          git diff --exit-code
+          git rev-parse HEAD | tee /tmp/manual-ban-evidence/head.txt
+          git show --stat --oneline HEAD | tee /tmp/manual-ban-evidence/scope.txt
+          git push origin HEAD:refs/heads/validated/manual-ban-arm-20260910
+      - name: Preserve deciding output on success and failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: manual-ban-arm-${{ github.run_id }}
+          path: /tmp/manual-ban-evidence/
+          if-no-files-found: error
+          retention-days: 7
