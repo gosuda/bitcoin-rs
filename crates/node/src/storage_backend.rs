@@ -144,6 +144,10 @@ mod tests {
         "open_redb_tx_index_store",
     ];
 
+    // ARCH-03 in docs/contracts/architecture.md makes storage_backend.rs the
+    // sole owner of concrete backend construction. The consumers, test-module
+    // boundaries, and forbidden constructor tokens scanned here are the
+    // executable form of that architecture contract.
     #[test]
     fn runtime_backend_construction_has_one_owner() {
         for (name, source, test_module) in RUNTIME_CONSUMERS {
