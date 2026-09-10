@@ -2,6 +2,17 @@
 
 This page is an operator summary of the target recovery model in [contracts/recovery.md](contracts/recovery.md). It is not a second contract. `crates/chainstate` has not landed in the current workspace, so planned durable-root clauses are not implementation claims until their listed gates exist and pass.
 
+## Current checkpoint implementation
+
+`crates/node/src/checkpoint.rs` owns immutable checkpoint generations and the
+`CURRENT` publication. Its `checkpoint/headers.rs` child owns the canonical
+header codec: prefix and version, best/applied ancestry commitments, and
+consensus-validated header reconstruction. Internal consumers name
+`checkpoint::headers` directly; the former parent-level codec paths are removed.
+The existing codec and publication regressions live in `checkpoint/tests.rs`.
+This separation does not change checkpoint bytes, publication order, recovery
+fallbacks, or the status of the planned durable-root model below.
+
 ## Target model
 
 The authoritative state is one durable root containing full tip identity, a monotonic commit id, coin-state version, and committed body/undo extents. Coin updates and the new root commit atomically; body and undo bytes become durable before the root may reference them.
