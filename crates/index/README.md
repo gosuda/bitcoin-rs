@@ -28,7 +28,6 @@ and generic script-history resolution.
 - `rocksdb`: enables the `RocksDB` backend in `bitcoin-rs-storage`
 - `fjall`: enables the fjall backend in `bitcoin-rs-storage`
 - `redb`: enables the redb backend in `bitcoin-rs-storage`
-- `mdbx`: enables the MDBX backend in `bitcoin-rs-storage`
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

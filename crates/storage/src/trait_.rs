@@ -126,12 +126,7 @@ impl PersistFaultSlot {
     }
 
     #[cfg_attr(
-        not(any(
-            feature = "fjall",
-            feature = "redb",
-            feature = "rocksdb",
-            feature = "mdbx"
-        )),
+        not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
         allow(dead_code)
     )]
     pub(crate) fn take_at(&self, boundary: PersistBoundary) -> Option<PersistFault> {

@@ -58,8 +58,8 @@ required evidence, and measured results.
   native wins the signed-spend and full-replay gates; see the
   [validation-default contract](docs/contracts/validation-default.md).
 - Pure-Rust storage defaults: LSM-tree storage backed by `fjall` by default,
-  with `redb` compiled in, and `rocksdb`/`mdbx` available through optional Cargo
-  features.
+  with `redb` compiled in and `rocksdb` available through an optional Cargo
+  feature.
 - Sharded UTXO cache: a 256-shard in-memory UTXO set (`hashbrown::HashTable` of
   compact records behind `parking_lot::RwLock`) with checkpoint-based crash
   recovery and effective `--dbcache-mb` budget allocation.
@@ -143,7 +143,7 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
   `libbitcoinkernel` types behind `#[cfg(feature = "kernel")]`. Kernel types
   never leak into node state or apply logic.
 - Storage: `crates/storage` provides backend abstraction. The active engine is
-  configured at startup (`fjall`, `redb`, `rocksdb`, or `mdbx`).
+  configured at startup (`fjall`, `redb`, or `rocksdb`).
 - Indexing: `txindex` runs as an independent consumer, advancing its cursor and
   rollback metadata atomically.
 

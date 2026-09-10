@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 /// Storage engine crates. Only `bitcoin-rs-storage` may depend on these.
-pub(crate) const ENGINE_CRATES: [&str; 4] = ["fjall", "redb", "rust-rocksdb", "signet-libmdbx"];
+pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
 /// External ZMQ implementation dependency owned by the surface crate.
 pub(crate) const ZMQ_CRATE: &str = "zmq";
 
 /// Backend feature names whose forwarding above storage is forbidden.
-pub(crate) const BACKEND_FEATURES: [&str; 4] = ["rocksdb", "fjall", "redb", "mdbx"];
+pub(crate) const BACKEND_FEATURES: [&str; 3] = ["rocksdb", "fjall", "redb"];
 
 /// The crate that owns every storage engine dependency.
 pub(crate) const STORAGE_CRATE: &str = "bitcoin-rs-storage";

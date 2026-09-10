@@ -15,8 +15,7 @@ use bitcoin_rs_rpc::context::{
 #[cfg(any(
     not(feature = "rocksdb"),
     not(feature = "fjall"),
-    not(feature = "redb"),
-    not(feature = "mdbx")
+    not(feature = "redb")
 ))]
 use core::fmt;
 use core::mem::size_of;
@@ -490,8 +489,6 @@ enum NodeStorage {
     Fjall(Arc<bitcoin_rs_storage::FjallStore>),
     #[cfg(feature = "redb")]
     Redb(Arc<bitcoin_rs_storage::RedbStore>),
-    #[cfg(feature = "mdbx")]
-    Mdbx(Arc<bitcoin_rs_storage::MdbxStore>),
 }
 
 impl NodeStorage {
@@ -527,19 +524,10 @@ impl NodeStorage {
                 )
                 .map_err(anyhow::Error::new)?,
             ))),
-            #[cfg(feature = "mdbx")]
-            StorageBackend::Mdbx => Ok(Self::Mdbx(Arc::new(
-                bitcoin_rs_storage::MdbxStore::open_with_cache(
-                    &chainstate_dir,
-                    chainstate_cache_bytes,
-                )
-                .map_err(anyhow::Error::new)?,
-            ))),
             #[cfg(any(
                 not(feature = "rocksdb"),
                 not(feature = "fjall"),
-                not(feature = "redb"),
-                not(feature = "mdbx")
+                not(feature = "redb")
             ))]
             other => bail!(
                 "unsupported storage backend: {other} (compiled features = {CompiledStorageFeatures})"
@@ -564,17 +552,7 @@ impl NodeStorage {
                 let _ = store;
                 "redb"
             }
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => {
-                let _ = store;
-                "mdbx"
-            }
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -619,22 +597,7 @@ impl NodeStorage {
                 authority,
                 Arc::clone(durable_tip_height),
             )?)),
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Ok(Arc::new(NodePruneService::new(
-                Arc::clone(store),
-                Arc::clone(block_files),
-                Arc::clone(block_body_store),
-                blocks,
-                transactions,
-                authority,
-                Arc::clone(durable_tip_height),
-            )?)),
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -659,17 +622,7 @@ impl NodeStorage {
                 Arc::clone(store),
                 files,
             )),
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Arc::new(crate::apply::FlatFilePruneBodyStore::open(
-                Arc::clone(store),
-                files,
-            )),
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -687,14 +640,7 @@ impl NodeStorage {
             Self::Fjall(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
             #[cfg(feature = "redb")]
             Self::Redb(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -711,14 +657,7 @@ impl NodeStorage {
             Self::Fjall(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
             #[cfg(feature = "redb")]
             Self::Redb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -739,14 +678,7 @@ impl NodeStorage {
             Self::Fjall(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
             #[cfg(feature = "redb")]
             Self::Redb(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -765,14 +697,7 @@ impl NodeStorage {
             Self::Fjall(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
             #[cfg(feature = "redb")]
             Self::Redb(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
-            #[cfg(feature = "mdbx")]
-            Self::Mdbx(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
-            #[cfg(not(any(
-                feature = "rocksdb",
-                feature = "fjall",
-                feature = "redb",
-                feature = "mdbx"
-            )))]
+            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
             _ => match *self {},
         }
     }
@@ -1319,8 +1244,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
 #[cfg(any(
     not(feature = "rocksdb"),
     not(feature = "fjall"),
-    not(feature = "redb"),
-    not(feature = "mdbx")
+    not(feature = "redb")
 ))]
 const COMPILED_STORAGE_FEATURES: &[&str] = &[
     #[cfg(feature = "rocksdb")]
@@ -1329,23 +1253,19 @@ const COMPILED_STORAGE_FEATURES: &[&str] = &[
     "fjall",
     #[cfg(feature = "redb")]
     "redb",
-    #[cfg(feature = "mdbx")]
-    "mdbx",
 ];
 
 #[cfg(any(
     not(feature = "rocksdb"),
     not(feature = "fjall"),
-    not(feature = "redb"),
-    not(feature = "mdbx")
+    not(feature = "redb")
 ))]
 struct CompiledStorageFeatures;
 
 #[cfg(any(
     not(feature = "rocksdb"),
     not(feature = "fjall"),
-    not(feature = "redb"),
-    not(feature = "mdbx")
+    not(feature = "redb")
 ))]
 impl fmt::Display for CompiledStorageFeatures {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1394,13 +1314,10 @@ fn build_tx_index_open_spec(
         StorageBackend::Fjall => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
         #[cfg(feature = "redb")]
         StorageBackend::Redb => crate::txindex_worker::REDB_BATCH_LIMITS,
-        #[cfg(feature = "mdbx")]
-        StorageBackend::Mdbx => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
         #[cfg(any(
             not(feature = "rocksdb"),
             not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
+            not(feature = "redb")
         ))]
         other => bail!("unsupported storage backend for txindex: {other}"),
     };
@@ -3542,8 +3459,6 @@ mod tests {
             NodeStorage::Fjall(store) => seed(&**store, 10, hash)?,
             #[cfg(feature = "redb")]
             NodeStorage::Redb(store) => seed(&**store, 10, hash)?,
-            #[cfg(feature = "mdbx")]
-            NodeStorage::Mdbx(store) => seed(&**store, 10, hash)?,
         }
         let Some(service) = state.prune_service() else {
             anyhow::bail!("prune service should exist when prune_target_mb > 0");
@@ -3562,8 +3477,6 @@ mod tests {
             NodeStorage::Fjall(store) => metadata_exists(&**store)?,
             #[cfg(feature = "redb")]
             NodeStorage::Redb(store) => metadata_exists(&**store)?,
-            #[cfg(feature = "mdbx")]
-            NodeStorage::Mdbx(store) => metadata_exists(&**store)?,
         };
         assert!(!has_metadata);
         Ok(())
@@ -3642,8 +3555,6 @@ mod tests {
             NodeStorage::Fjall(store) => seed_file_height(&**store, 10)?,
             #[cfg(feature = "redb")]
             NodeStorage::Redb(store) => seed_file_height(&**store, 10)?,
-            #[cfg(feature = "mdbx")]
-            NodeStorage::Mdbx(store) => seed_file_height(&**store, 10)?,
         }
 
         let Some(service) = state.prune_service() else {
@@ -4080,8 +3991,6 @@ mod tests {
             "rocksdb",
             #[cfg(feature = "redb")]
             "redb",
-            #[cfg(feature = "mdbx")]
-            "mdbx",
         ];
 
         for backend in backends {

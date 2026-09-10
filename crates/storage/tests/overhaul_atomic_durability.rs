@@ -130,12 +130,6 @@ fn rocksdb_injected_faults_never_mix_families() {
     });
 }
 
-#[test]
-#[cfg(feature = "mdbx")]
-fn mdbx_injected_faults_never_mix_families() {
-    run_fault_matrix("mdbx", |path| bitcoin_rs_storage::MdbxStore::open(path));
-}
-
 /// The txindex store serves fixed-width physical tables, so its batch uses
 /// one `UtxoMeta` row (arbitrary bytes) plus one 12-byte `TxConfirmed` row; both
 /// families must still recover whole.
@@ -473,14 +467,6 @@ fn redb_condition_mismatch_applies_nothing_and_consumes_no_fault() {
 }
 
 #[test]
-#[cfg(feature = "mdbx")]
-fn mdbx_condition_mismatch_applies_nothing_and_consumes_no_fault() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = bitcoin_rs_storage::MdbxStore::open(dir.path()).expect("open");
-    assert_mismatch_applies_nothing_and_consumes_no_fault(&store);
-}
-
-#[test]
 #[cfg(feature = "rocksdb")]
 fn rocksdb_condition_mismatch_applies_nothing_and_consumes_no_fault() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -544,18 +530,6 @@ fn assert_mismatch_applies_nothing_and_consumes_no_fault<S: KvStore>(store: &S) 
 fn rocksdb_fail_apply_errors_on_plain_write() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = bitcoin_rs_storage::RocksDbStore::open(dir.path()).expect("open");
-    store.arm_persist_fault(PersistFault::FailApply);
-    assert!(
-        store.write(multi_family_batch(&store, b"new")).is_err(),
-        "FailApply must return Err on the plain write route"
-    );
-}
-
-#[test]
-#[cfg(feature = "mdbx")]
-fn mdbx_fail_apply_errors_on_plain_write() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = bitcoin_rs_storage::MdbxStore::open(dir.path()).expect("open");
     store.arm_persist_fault(PersistFault::FailApply);
     assert!(
         store.write(multi_family_batch(&store, b"new")).is_err(),

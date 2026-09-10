@@ -34,7 +34,7 @@ state as of this note's date (2026-08-08). Check the code before treating an
 
 Done:
 
-* `ColumnFamily::UndoData` across all four backends, and a versioned undo codec
+* `ColumnFamily::UndoData` across all retained backends, and a versioned undo codec
   bound to the block hash (`crates/utxo/src/undo_codec.rs`).
 * Undo generation in the same pass as the forward UTXO changes. The undo write
   is queued before the block body and UTXO commit. A clean checkpoint makes the
@@ -174,7 +174,7 @@ Done:
 
 | Piece | Notes |
 |---|---|
-| `ColumnFamily::UndoData` | enum, its `ALL` list, and all four backends |
+| `ColumnFamily::UndoData` | enum, its `ALL` list, and all retained backends |
 | Versioned undo codec | first byte a format version; keyed by height **and** block hash, with 10 rejection tests |
 | Undo generation in apply | built in the same pass as `BorrowedBlockChanges`, sharing one set of filters so the two halves cannot drift |
 | Persistence | queued before the block body and UTXO commit; flushed with a clean checkpoint, not per block |

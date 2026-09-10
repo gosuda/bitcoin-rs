@@ -17,8 +17,8 @@ workspace = true
 # `match self` arms are non-exhaustive and the crate fails to compile.  fjall
 # is the performance-oriented default backend so per-crate `cargo publish` / `cargo check`
 # works out of the box.  CI and local dev build via `bin/bitcoin-rs`, whose
-# default features are `fjall,redb,zmq` (pure-Rust storage; rocksdb, mdbx, and
-# kernel stay selectable but non-default). Full-matrix lanes request the other
+# default features are `fjall,redb,zmq` (pure-Rust storage; rocksdb and kernel
+# stay selectable but non-default). Full-matrix lanes request the other
 # backends explicitly through `bin/bitcoin-rs`'s feature table.
 # Note: `--workspace --features "..."` in a virtual workspace (no root [package])
 # does NOT forward CLI features to library crates; always use -p when features
@@ -56,10 +56,6 @@ redb = [
     "bitcoin-rs-script/redb",
     "bitcoin-rs-storage/redb",
     "bitcoin-rs-utxo/redb",
-]
-mdbx = [
-    "bitcoin-rs-index/mdbx",
-    "bitcoin-rs-storage/mdbx",
 ]
 kernel = ["bitcoin-rs-consensus/kernel"]
 zmq = ["bitcoin-rs-rpc/zmq"]

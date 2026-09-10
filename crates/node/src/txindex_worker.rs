@@ -82,7 +82,7 @@ pub(crate) const ROCKSDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-#[cfg(any(feature = "fjall", feature = "mdbx", test))]
+#[cfg(any(feature = "fjall", test))]
 pub(crate) const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
@@ -889,20 +889,10 @@ fn open_tx_index_on_worker(
             );
             open_tx_index_store_on_worker(store, batch_limits, epoch)
         }
-        #[cfg(feature = "mdbx")]
-        bitcoin_rs_storage::StorageBackend::Mdbx => {
-            let store = Arc::new(
-                bitcoin_rs_storage::MdbxStore::open_with_cache(txindex_dir, cache_bytes).map_err(
-                    |e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e)),
-                )?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
         #[cfg(any(
             not(feature = "rocksdb"),
             not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
+            not(feature = "redb")
         ))]
         other => Err(TxIndexWorkerError::Storage(
             bitcoin_rs_storage::StorageError::Backend(format!(

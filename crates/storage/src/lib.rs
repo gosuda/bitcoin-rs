@@ -15,8 +15,6 @@ pub enum StorageBackend {
     Fjall,
     /// `redb`.
     Redb,
-    /// `MDBX`.
-    Mdbx,
 }
 
 impl StorageBackend {
@@ -27,7 +25,6 @@ impl StorageBackend {
             Self::RocksDb => "rocksdb",
             Self::Fjall => "fjall",
             Self::Redb => "redb",
-            Self::Mdbx => "mdbx",
         }
     }
 
@@ -38,7 +35,6 @@ impl StorageBackend {
             Self::RocksDb => cfg!(feature = "rocksdb"),
             Self::Fjall => cfg!(feature = "fjall"),
             Self::Redb => cfg!(feature = "redb"),
-            Self::Mdbx => cfg!(feature = "mdbx"),
         }
     }
 }
@@ -51,7 +47,6 @@ impl FromStr for StorageBackend {
             "rocksdb" => Ok(Self::RocksDb),
             "fjall" => Ok(Self::Fjall),
             "redb" => Ok(Self::Redb),
-            "mdbx" => Ok(Self::Mdbx),
             _ => Err(format!("unsupported storage backend {value}")),
         }
     }
@@ -82,8 +77,6 @@ pub mod undo;
 
 #[cfg(feature = "fjall")]
 mod fjall_impl;
-#[cfg(feature = "mdbx")]
-mod mdbx_impl;
 #[cfg(feature = "redb")]
 mod redb_impl;
 #[cfg(feature = "rocksdb")]
@@ -110,8 +103,6 @@ pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore
 
 #[cfg(feature = "fjall")]
 pub use fjall_impl::FjallStore;
-#[cfg(feature = "mdbx")]
-pub use mdbx_impl::MdbxStore;
 #[cfg(feature = "redb")]
 pub use redb_impl::{RedbStore, open_redb_tx_index_store, open_redb_tx_index_store_with_cache};
 #[cfg(feature = "rocksdb")]
@@ -121,12 +112,7 @@ pub use rocksdb_impl::RocksDbStore;
 ///
 /// Split the value into 32-bit limbs so the conversion uses only exact
 /// `f64::from(u32)` operations and rounds like a direct `u64` conversion.
-#[cfg(any(
-    feature = "fjall",
-    feature = "mdbx",
-    feature = "redb",
-    feature = "rocksdb"
-))]
+#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 pub(crate) fn metric_f64(value: u64) -> f64 {
     const TWO32: f64 = 4_294_967_296.0;
     let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_le_bytes();
@@ -136,12 +122,7 @@ pub(crate) fn metric_f64(value: u64) -> f64 {
 }
 
 /// Converts a `usize` byte count to an `f64` metric value via `u64`.
-#[cfg(any(
-    feature = "fjall",
-    feature = "mdbx",
-    feature = "redb",
-    feature = "rocksdb"
-))]
+#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 pub(crate) fn metric_f64_from_usize(value: usize) -> f64 {
     metric_f64(u64::try_from(value).unwrap_or(u64::MAX))
 }

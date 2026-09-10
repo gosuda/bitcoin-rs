@@ -22,10 +22,10 @@ env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
-  # Full-node production feature set: all four storage backends plus the
+  # Full-node production feature set: all three storage backends plus the
   # bitcoinkernel script-verification engine (the kernel is built from C++ --
   # this workflow is the only place that installs its prerequisites).
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel"
+  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
 
 jobs:
   full-node:

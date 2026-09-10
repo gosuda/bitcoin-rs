@@ -444,25 +444,6 @@ fn async_index_open_preserves_backend() {
             result.err()
         );
     }
-
-    #[cfg(feature = "mdbx")]
-    {
-        let mdbx_dir = dir.path().join("txindex-mdbx");
-        std::fs::create_dir_all(&mdbx_dir).expect("create mdbx dir");
-        let result = open_tx_index_on_worker(
-            bitcoin_rs_storage::StorageBackend::Mdbx,
-            &mdbx_dir,
-            8 * 1024 * 1024,
-            DEFAULT_BATCH_LIMITS,
-            1,
-            Duration::ZERO,
-        );
-        assert!(
-            result.is_ok(),
-            "mdbx backend open must succeed: {:?}",
-            result.err()
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

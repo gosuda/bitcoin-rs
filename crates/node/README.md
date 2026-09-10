@@ -44,7 +44,6 @@ runtime crate.
   #213 is the measurement gate for dropping `kernel` from this crate's defaults.
 - `rocksdb`, `fjall`, `redb`: forward the named storage backend to every subsystem
   crate.
-- `mdbx`: forward the mdbx backend to the crates that provide one.
 - `kernel`: route consensus verification through bitcoinkernel
   (`bitcoin-rs-consensus/kernel`).
 - `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;
