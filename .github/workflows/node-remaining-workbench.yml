@@ -1,0 +1,54 @@
+name: Node remaining workbench
+on:
+  push:
+    branches: [automation/node-remaining-inspect-20260910]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Inspect Rust module boundaries
+        shell: bash
+        run: |
+          python3 -m venv /tmp/node-inspect-env
+          /tmp/node-inspect-env/bin/pip -q install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+          /tmp/node-inspect-env/bin/python - <<'PY'
+          from pathlib import Path
+          import tree_sitter_rust
+          from tree_sitter import Language, Parser
+          parser = Parser(Language(tree_sitter_rust.language()))
+          print('=== NODE FILE SIZES ===')
+          for p in sorted(Path('crates/node/src').rglob('*.rs'), key=lambda p: p.stat().st_size, reverse=True)[:35]:
+              print(len(p.read_bytes().splitlines()), str(p))
+          for name in ['apply', 'sync', 'state', 'txindex_worker', 'checkpoint', 'run', 'mining', 'recovery_evidence', 'storage_footprint', 'reorg', 'embed', 'import', 'tx_ingress']:
+              p = Path('crates/node/src') / (name + '.rs')
+              b = p.read_bytes()
+              root = parser.parse(b).root_node
+              print('\n=== STRUCTURE', p, 'parse_error=', root.has_error, '===')
+              for n in root.named_children:
+                  if n.type in ['line_comment','block_comment','attribute_item','inner_attribute_item','use_declaration']:
+                      continue
+                  label = n.child_by_field_name('name') or n.child_by_field_name('type')
+                  text = b[label.start_byte:label.end_byte].decode() if label else b[n.start_byte:n.end_byte].decode().splitlines()[0][:120]
+                  print(n.start_point.row+1, n.end_point.row+1, n.type, text)
+                  if n.type == 'impl_item':
+                      body = n.child_by_field_name('body')
+                      for m in body.named_children if body else []:
+                          if m.type != 'function_item':
+                              continue
+                          mn=m.child_by_field_name('name')
+                          print('  ', m.start_point.row+1, m.end_point.row+1, b[mn.start_byte:mn.end_byte].decode())
+          print('\n=== NESTED AGENTS ===')
+          for p in Path('crates/node').rglob('AGENTS.md'):
+              print(p, p.read_text())
+          print('\n=== NODE CONSTRAINT GATES ===')
+          for p in Path('bin/bitcoin-rs/tests/gates').glob('*.rs'):
+              t=p.read_text()
+              if any(s in t for s in ['node/src','ownership','coherent']):
+                  print(p)
+          PY
