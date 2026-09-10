@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bitcoin_rs_primitives::{Block, Hash256, consensus_bytes};
+use bitcoin_rs_primitives::{Block, Hash256};
 use hashbrown::{HashMap, hash_map::Entry};
 
 use bitcoin_rs_p2p::SyncBudget;
@@ -87,7 +87,7 @@ impl BlockStager {
         self.received_blocks_high_water
     }
 
-    /// Highest staged-byte total ever observed this run.
+    /// Highest staged-byte total observed; feeds the high-water gauge.
     pub(super) const fn received_bytes_high_water(&self) -> usize {
         self.received_bytes_high_water
     }
@@ -369,7 +369,7 @@ fn received_deadline(received_at: Instant, timeout: Duration) -> Instant {
 }
 
 fn block_size(block: &Block) -> usize {
-    consensus_bytes(block).len()
+    block.total_size()
 }
 
 #[cfg(test)]
