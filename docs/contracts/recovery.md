@@ -1,5 +1,33 @@
 # Recovery contract
 
+**Contract version: 1 (normative)**
+
+How the node recovers location after a crash, a lost
+write, a reorganization, or an incompatible datadir. `chainstate` is the
+single durable authority. Every other persisted component is derived and
+reconciles to it.
+
+## `JRN-HEAD-01`: Journal head representation
+
+The current journal `head.json` representation is a versioned frame:
+`b"JRNH" | version 1 (one byte) | CRC32C(payload) as little-endian `u32` |
+`payload`. The payload is a JSON object containing exactly the 13 fields of
+`HeadMarker` in `crates/node/src/chainstate_journal/head.rs`; JSON field names
+are the Rust field names and all integer values use the JSON representation.
+The checksum covers only the payload. Readers reject short, unknown-magic,
+unknown-version, checksum-invalid, and invalid-JSON frames. A head file of at
+most 4096 bytes is accepted for parsing; a file larger than 4096 bytes is
+rejected before parsing. Absence of `head.json` is accepted as no journal head.
+
+## `JRN-SEGMENT-01`: Segment filename representation
+
+Writers emit `segment-{generation:010}.log`, where generation is an unsigned
+64-bit decimal number and `010` means a minimum width of ten digits (values
+larger than ten digits are not truncated). Recovery accepts the exact
+`segment-` prefix and `.log` suffix when the interior is 1 through 32 ASCII
+digits and parses it as `u64`; leading zeroes are accepted. Signs, whitespace,
+other characters, overflow, missing digits, and extra suffixes are rejected.
+
 How the node recovers an authoritative chainstate after a crash, a lost
 write, a reorganization, or an incompatible datadir. `chainstate` is the
 single durable authority. Every other persisted component is derived and
