@@ -9,20 +9,28 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
+  state:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          fetch-depth: 0
-      - name: Export exact source snapshot
+          components: rustfmt,clippy
+      - name: Apply state modularization
         run: |
-          git rev-parse HEAD > /tmp/HEAD
-          tar --exclude=.git --exclude=node-mod-workbench.yml -czf /tmp/bitcoin-rs-source.tgz .
+          python .github/refactor_state.py
+          cargo fmt --all
+          git diff --check
+          tar -czf /tmp/state-refactor.tgz crates/node/src/state.rs crates/node/src/state
+      - name: Check node
+        run: cargo check -p bitcoin-rs-node --no-default-features --features fjall,zmq
+      - name: Clippy node
+        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: State tests
+        run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib state:: -- --test-threads=1
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: bitcoin-rs-source
-          path: |
-            /tmp/bitcoin-rs-source.tgz
-            /tmp/HEAD
+          name: state-refactor
+          path: /tmp/state-refactor.tgz
           retention-days: 1
