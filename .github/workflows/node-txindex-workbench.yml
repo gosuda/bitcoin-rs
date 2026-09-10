@@ -1,0 +1,28 @@
+name: node-txindex-workbench
+
+on:
+  push:
+    branches: [agent/node-txindex-workbench]
+
+permissions:
+  contents: read
+
+jobs:
+  txindex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply modularization
+        run: |
+          python .github/refactor_txindex.py
+          cargo fmt --all
+          git diff --check
+      - name: Check node
+        run: cargo check -p bitcoin-rs-node --no-default-features --features fjall,zmq
+      - name: Clippy node
+        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: Txindex tests
+        run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib 'txindex_worker::' -- --test-threads=1
