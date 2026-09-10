@@ -13,7 +13,7 @@
 //! ```text
 //!   layer 0  core       consensus, script, primitives
 //!   layer 1  storage    storage
-//!   layer 2  services   chain, utxo, p2p, mempool, index, mining
+//!   layer 2  services   chain, chainstate, utxo, p2p, mempool, index, mining
 //!   layer 3  surface    rpc
 //!   layer 4  compose    node, bin (bitcoin-rs)
 //! ```
