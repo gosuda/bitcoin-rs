@@ -16,6 +16,7 @@ use bitcoin::p2p::message_network::{Reject, VersionMessage};
 use bitcoin_rs_primitives::{Block, ConsensusDecode, ConsensusEncode, Header, Tx, deserialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use std::io::{self, Write};
 
 use crate::inv::MAX_INV_PER_MSG;
 
@@ -353,16 +354,9 @@ pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
         Message::Tx(tx) => tx.total_size(),
         Message::Block(block) => block.total_size(),
         Message::Headers(headers) => {
-            let count = u64::try_from(headers.len())
-                .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
-            let count_len = bitcoin_rs_primitives::varint::encode(count).len();
-            let entries_len = headers
-                .len()
-                .checked_mul(81)
-                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?;
-            count_len
-                .checked_add(entries_len)
-                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
+            let mut writer = CountingWriter::default();
+            encode_headers(headers, &mut writer)?;
+            writer.len
         }
         other => {
             let envelope = other.envelope();
@@ -380,22 +374,39 @@ pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
     match message {
         Message::Tx(tx) => tx.consensus_encode(&mut payload)?,
         Message::Block(block) => block.consensus_encode(&mut payload)?,
-        Message::Headers(headers) => {
-            let count = u64::try_from(headers.len())
-                .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
-            encode_varint(&mut payload, count);
-            for header in headers {
-                header.consensus_encode(&mut payload)?;
-                payload.push(0);
-            }
-        }
+        Message::Headers(headers) => encode_headers(headers, &mut payload)?,
         other => payload.extend_from_slice(&encode::serialize(&other.envelope())),
     }
     Ok(payload)
 }
 
-fn encode_varint(payload: &mut Vec<u8>, value: u64) {
-    payload.extend_from_slice(&bitcoin_rs_primitives::varint::encode(value));
+#[derive(Default)]
+struct CountingWriter {
+    len: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.len = self.len.checked_add(bytes.len()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::WriteZero, "encoded payload is too large")
+        })?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_headers<W: Write>(headers: &[Header], writer: &mut W) -> Result<(), PeerError> {
+    let count = u64::try_from(headers.len())
+        .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
+    writer.write_all(&bitcoin_rs_primitives::varint::encode(count))?;
+    for header in headers {
+        header.consensus_encode(writer)?;
+        writer.write_all(&[0])?;
+    }
+    Ok(())
 }
 
 fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
