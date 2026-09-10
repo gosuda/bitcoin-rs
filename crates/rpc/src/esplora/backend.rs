@@ -9,7 +9,7 @@ use core::str::FromStr as _;
 use bitcoin_rs_primitives::{OutPoint, Txid};
 
 use super::http::{bad, dispatch_error, json_response, query_limit};
-use super::model::Outspend;
+use super::model::{Outspend, TransactionValue};
 use super::projection::Projection;
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
 use crate::context::Context;
@@ -51,30 +51,42 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
     let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
-    // Ordering needs every entry, the answer needs `max_txs` of them. The pool
-    // payload stays behind its `Arc` until the page is cut, so a one-transaction
-    // request no longer copies the whole mempool under the read lock.
+    if max_txs == 0 {
+        return json_response(Vec::<TransactionValue>::new());
+    }
+    // A cursor previously matched the exact lowercase Display text. Parse
+    // once, but keep malformed, noncanonical, and absent cursors restarting
+    // at the beginning instead of silently broadening the accepted syntax.
+    let last = last.and_then(|text| {
+        let txid = Txid::from_str(text).ok()?;
+        (txid.to_string() == text).then_some(txid)
+    });
     let transactions = {
         let pool = ctx.mempool.read();
+        // Resolve the cursor in the same snapshot as the entries. Filtering
+        // before cloning avoids retaining transactions before this page.
+        let after = last
+            .and_then(|txid| pool.entry_by_txid(&txid))
+            .map(|entry| (entry.time, entry.txid));
         let mut ordered = pool
             .iter_entries()
+            .filter(|entry| after.is_none_or(|key| (entry.time, entry.txid) > key))
             .map(|entry| (entry.time, entry.txid, Arc::clone(&entry.tx)))
             .collect::<Vec<_>>();
         drop(pool);
+        // Partition outside the lock, then sort only the requested prefix.
+        // The strict bound also handles empty snapshots and usize::MAX.
+        if max_txs < ordered.len() {
+            ordered.select_nth_unstable_by(max_txs, |left, right| {
+                left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
+            });
+            ordered.truncate(max_txs);
+        }
         ordered.sort_unstable_by(|left, right| {
             left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1))
         });
-        let start = last
-            .and_then(|last| {
-                ordered
-                    .iter()
-                    .position(|(_, txid, _)| txid.to_string() == last)
-            })
-            .map_or(0, |position| position.saturating_add(1));
         ordered
             .into_iter()
-            .skip(start)
-            .take(max_txs)
             .map(|(_, _, transaction)| transaction)
             .collect::<Vec<_>>()
     };
@@ -180,4 +192,168 @@ fn block_template(handler: &Handler) -> Response {
     handler
         .dispatch("getblocktemplate", &sonic_json!([]))
         .map_or_else(dispatch_error, json_response)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod pagination_tests {
+    use alloc::sync::Arc;
+
+    use bitcoin_rs_mempool::MempoolEntry;
+    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use serde_json::Value;
+
+    use super::internal_mempool_txs;
+    use crate::context::Context;
+
+    fn fixture(times: &[u64]) -> (Context, Vec<(u64, Txid)>) {
+        let ctx = Context::new();
+        let mut expected = Vec::new();
+        for (index, &time) in times.iter().enumerate() {
+            // No-input fixtures isolate the projection/pagination owner;
+            // they do not claim to exercise consensus or admission validity.
+            let tx = Tx {
+                version: 2,
+                inputs: Vec::new(),
+                outputs: vec![TxOut {
+                    value: 1_000,
+                    script_pubkey: vec![0x51],
+                }],
+                lock_time: u32::try_from(index).expect("small fixture index"),
+            };
+            let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, time, 0);
+            expected.push((time, entry.txid));
+            ctx.mempool
+                .pool()
+                .write()
+                .insert_entry(entry)
+                .expect("insert independent fixture entry");
+        }
+        // Independent reference: fully order all admission keys, then slice.
+        expected.sort_unstable();
+        (ctx, expected)
+    }
+
+    fn page(ctx: &Context, cursor: Option<&str>, query: &str) -> Vec<Txid> {
+        let response = internal_mempool_txs(ctx, cursor, query);
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let values: Value = serde_json::from_slice(&response.body).expect("response JSON");
+        values
+            .as_array()
+            .expect("transaction array")
+            .iter()
+            .map(|value| {
+                value["txid"]
+                    .as_str()
+                    .expect("text txid")
+                    .parse()
+                    .expect("valid txid")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bounded_pages_match_full_sort_for_every_cursor() {
+        for times in [
+            Vec::new(),
+            vec![0],
+            vec![u64::MAX],
+            vec![7; 18],
+            vec![8, 0, u64::MAX, 8, 1, 8, 1, 0, 9, 8, 1, 0, 9, 4, 4, 8, 2, 9],
+        ] {
+            let (ctx, expected) = fixture(&times);
+            let cursors = std::iter::once(None)
+                .chain(expected.iter().map(|(_, txid)| Some(txid.to_string())));
+            for (start, cursor) in cursors.enumerate() {
+                for limit in [0, 1, 2, 3, 8, 17, 18, 19, usize::MAX] {
+                    let want: Vec<_> = expected
+                        .iter()
+                        .skip(start)
+                        .take(limit)
+                        .map(|(_, txid)| *txid)
+                        .collect();
+                    assert_eq!(
+                        page(&ctx, cursor.as_deref(), &format!("max_txs={limit}")),
+                        want,
+                        "cursor {cursor:?}, limit {limit}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn noncanonical_and_missing_cursors_keep_restart_behavior() {
+        let (ctx, expected) = fixture(&[4, 1, 4, 2, 4, 3]);
+        let lower = expected[2].1.to_string();
+        let upper = lower.to_ascii_uppercase();
+        assert_ne!(lower, upper, "fixture must exercise alphabetic hex");
+        let unknown = Txid(Hash256::from_le_bytes(&[0xff; 32]));
+        assert!(expected.iter().all(|(_, txid)| *txid != unknown));
+        let want: Vec<_> = expected.iter().take(3).map(|(_, txid)| *txid).collect();
+        for cursor in [
+            String::new(),
+            "00".to_owned(),
+            "g".repeat(64),
+            "é".repeat(32),
+            format!(" {lower}"),
+            format!("0x{lower}"),
+            upper,
+            unknown.to_string(),
+        ] {
+            assert_eq!(page(&ctx, Some(&cursor), "max_txs=3"), want);
+        }
+    }
+
+    #[test]
+    fn absent_invalid_and_duplicate_limits_keep_query_semantics() {
+        let (ctx, expected) = fixture(&[2, 0, 1, 2]);
+        let all: Vec<_> = expected.iter().map(|(_, txid)| *txid).collect();
+        for query in [
+            "",
+            "max_txs=invalid",
+            "max_txs=-1",
+            "max_txs=184467440737095516160",
+            "other=1",
+        ] {
+            assert_eq!(page(&ctx, None, query), all);
+        }
+        assert_eq!(page(&ctx, None, "max_txs=invalid&max_txs=2"), all[..2]);
+        assert_eq!(page(&ctx, None, "max_txs=1&max_txs=2"), all[..1]);
+        assert!(page(&ctx, None, "max_txs=0&max_txs=2").is_empty());
+    }
+
+    #[test]
+    fn unselected_transactions_are_not_projected() {
+        let (ctx, expected) = fixture(&[2, 3]);
+        let tx = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xaa; 32])), 0),
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: Vec::new(),
+            }],
+            outputs: vec![TxOut {
+                value: 1,
+                script_pubkey: vec![0x51],
+            }],
+            lock_time: 99,
+        };
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 0);
+        let cursor = entry.txid.to_string();
+        ctx.mempool
+            .pool()
+            .write()
+            .insert_entry(entry)
+            .expect("insert unresolved-prevout fixture");
+        assert_eq!(internal_mempool_txs(&ctx, None, "max_txs=1").status, 503);
+        assert_eq!(page(&ctx, Some(&cursor), "max_txs=1"), vec![expected[0].1]);
+        assert!(page(&ctx, None, "max_txs=0").is_empty());
+    }
 }
