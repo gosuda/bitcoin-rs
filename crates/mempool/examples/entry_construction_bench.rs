@@ -118,10 +118,7 @@ fn main() {
                     }
                     let elapsed_ns = started.elapsed().as_nanos();
                     println!(
-                        concat!(
-                            "entry_sample,inputs={inputs},witness={},optimized={optimized},",
-                            "sample={sample},iterations={iterations},elapsed_ns={elapsed_ns}",
-                        ),
+                        "entry_sample,inputs={inputs},witness={},optimized={optimized},sample={sample},iterations={iterations},elapsed_ns={elapsed_ns}",
                         witness.is_some(),
                         inputs = inputs,
                         optimized = optimized,

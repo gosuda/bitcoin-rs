@@ -238,7 +238,7 @@ jobs:
       # which builds libbitcoinkernel from C++ -- install its prerequisites
       # so the matrix runs unexcluded (deep lanes own the C++ toolchain).
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      - run: cargo hack check --locked --each-feature --no-dev-deps -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
+      - run: cargo hack check --locked --each-feature -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build
   # on the declared MSRV. A second compile graph, so it runs on `main` only;
