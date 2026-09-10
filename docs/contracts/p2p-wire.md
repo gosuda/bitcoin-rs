@@ -22,6 +22,9 @@ This page assigns ownership and cites proof under the
 - Message framing, envelope decoder, service flags, and network magic follow
   the inventory and the policy document. v1 frames for handshake and inventory
   commands are byte-identical to rust-bitcoin's `RawNetworkMessage`.
+  `getdata` block serving writes stored consensus payload bytes
+  (`Message::BlockPayload`) without a decode/re-encode round trip. The
+  decoder still types inbound `block` as `Message::Block`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 

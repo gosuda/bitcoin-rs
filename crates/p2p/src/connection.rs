@@ -210,11 +210,13 @@ impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {
 
 /// Maximum queued messages for one peer connection.
 pub const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
+
 /// Maximum queued full wire bytes for one peer connection.
 ///
 /// Admission tests usage before adding, so sixteen worst-case block messages
 /// fit: after fifteen, 60,000,360 bytes remain below this 64 MiB high-water.
 pub const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// `usize` form of the consensus maximum serialized block size. The
 /// authoritative `u64` original and this `usize` form are both owned by
 /// `peer` ([`crate::MAX_BLOCK_SERIALIZED_SIZE`] and
@@ -454,15 +456,6 @@ impl PeerLifecycle {
     #[must_use]
     pub(crate) fn lease_source(&self, source: PeerSource) -> Option<PeerLease> {
         self.table.lease_source(source)
-    }
-
-    /// Selects and disconnects a ready address while excluding same-address
-    /// replacement registration from the selection through the removal.
-    pub(crate) fn disconnect_selected_ready(
-        &self,
-        select: impl FnOnce() -> Option<SocketAddr>,
-    ) -> Option<(SocketAddr, PeerSource)> {
-        self.table.disconnect_selected_ready(select)
     }
 
     /// Sends a message only while `source` remains the current connection.

@@ -55,8 +55,10 @@ mod stage;
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
+
 /// Wire protocol version we advertise on outbound `getheaders`.
 const PROTOCOL_VERSION: u32 = 70_016;
+
 /// Time after which an unanswered `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -66,7 +68,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 ///
 /// Owns the production [`DownloadWindow`]. Session identity stays on the
 /// shared [`PeerTable`]; this orchestrator calls identity-checked table
-/// methods and does not schedule through `P2pService::select_download_peers`.
+/// methods. The P2P service does not hold a second window.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     followers: crate::chain_effects::ChainFollowers,
@@ -94,6 +96,7 @@ struct PendingHeaderRequest {
     target_height: u32,
     requested_at: Instant,
 }
+
 #[derive(Clone, Debug)]
 struct ExpectedApplyCache {
     chain_tip_hash: Hash256,

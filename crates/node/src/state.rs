@@ -211,7 +211,9 @@ impl ChainEventPublisher {
 }
 
 const PROCESS_EPOCH_FILE: &str = "process-epoch";
+
 const PROCESS_EPOCH_LOCK_FILE: &str = ".process-epoch.lock";
+
 const PROCESS_EPOCH_TEMP: &str = ".process-epoch.tmp";
 // A u64 in decimal is at most 20 digits; the trailing newline makes 21.
 const PROCESS_EPOCH_MAX_BYTES: u64 = 32;
@@ -1484,7 +1486,6 @@ impl NodeState {
                 outbound_peer_target: P2P_OUTBOUND_QUEUE_LIMIT,
                 outbound_queue_limit: P2P_OUTBOUND_QUEUE_LIMIT,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
-                download_budget: bitcoin_rs_p2p::default_sync_budget(),
             },
             Arc::clone(&shutdown),
         ));
