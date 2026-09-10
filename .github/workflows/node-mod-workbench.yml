@@ -18,6 +18,7 @@ jobs:
           components: rustfmt,clippy
       - name: Apply state modularization
         run: |
+          python .github/node_validation_baseline.py
           python .github/refactor_state.py
           cargo fmt --all
           git diff --check
