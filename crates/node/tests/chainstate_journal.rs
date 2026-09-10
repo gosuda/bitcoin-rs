@@ -1,18 +1,17 @@
 //! End-to-end crash-recovery coverage for the chainstate journal.
 
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-
 use anyhow::Result;
-use bitcoin_rs_node::{
-    Network, NodeConfig,
-    state::{ApplyError, NodeState},
-};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
-};
+
+use bitcoin_rs_node::{Network, NodeConfig, apply::error::ApplyError, state::NodeState};
+
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+
 use sha2::{Digest, Sha256};
+
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 fn stable_utxo_hash(
     view: &bitcoin_rs_utxo::UtxoSetView<'_>,
@@ -82,7 +81,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let tip1 = state.apply_block(&block1)?;
     let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     state.apply_block(&block2)?;
-    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block2)?;
+    state.chainstate().disconnect_block(&block2)?;
     let expected_utxo = state.utxo().with_stable_view(stable_utxo_hash)?;
     let expected_stats = state.coin_stats().snapshot();
     drop(state);
@@ -139,7 +138,7 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     drop(initial);
 
     let state = NodeState::open(config.clone(), None)?;
-    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block1)?;
+    state.chainstate().disconnect_block(&block1)?;
     drop(state);
 
     let resumed = NodeState::open(config.clone(), None)?;
@@ -297,16 +296,16 @@ fn mined_regtest_child(prev_blockhash: BlockHash) -> Result<Block> {
 fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![1, u8::try_from(height)?].into(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: vec![1, u8::try_from(height)?],
+            sequence: u32::MAX,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
+            value: 1,
+            script_pubkey: Vec::new(),
         }],
     };
     let mut block = Block {
@@ -315,7 +314,7 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: Network::Regtest.genesis_block().header.time + height,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: 0x207f_ffff,
             nonce: 0,
         },
         txs: vec![coinbase],
@@ -358,8 +357,7 @@ fn double_sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(first).into()
 }
 
-fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
-    let bits = bits.to_consensus();
+fn pow_met(bits: u32, hash: Hash256) -> bool {
     let exponent = u8::try_from(bits >> 24).unwrap_or(0);
     let mantissa = bits & 0x007f_ffff;
     if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {

@@ -19,6 +19,16 @@ use crate::{
 };
 
 /// Position marker used when no `OP_CODESEPARATOR` executed before the opcodes being signed.
+///
+/// BIP341/BIP342 sentinel only: taproot commits the *position* of the last
+/// executed code separator into the sighash (`0xFFFF_FFFF` when none ran).
+/// The legacy path never uses this constant — it signs the *subscript from*
+/// the last executed separator to the script end instead, and the caller
+/// strips already-executed separator opcodes out of that subscript
+/// (deletion semantics, `remove_codeseparators` at the checker layer).
+/// `SegWit` v0 omits legacy `FindAndDelete`. The caller supplies the
+/// `BIP143` script-code suffix after the last executed `OP_CODESEPARATOR`;
+/// this method hashes that selected suffix verbatim.
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// BIP342 leaf version byte for tapscript leaves.
@@ -195,6 +205,16 @@ impl<'t> SighashCache<'t> {
     /// but the raw value is appended to the hash. The `SIGHASH_SINGLE` bug is reproduced:
     /// when the masked type is SINGLE and `input_index` has no matching output, the
     /// uint256 value 1 is returned.
+    ///
+    /// Legacy-only semantics, deliberately isolated from the other two families
+    /// (T07): `SIGHASH_SINGLE`'s out-of-range uint256-one bug, the
+    /// ANYONECANPAY single-input substitution, the zeroed sibling sequences and
+    /// blanked sibling outputs of NONE/SINGLE, and the code-separator subscript
+    /// deletion performed by the caller before this function, all live here and
+    /// nowhere else. [`Self::segwit_v0_signature_hash`] hashes its script code
+    /// verbatim and zeroes whole fields instead, and
+    /// [`Self::taproot_signature_hash`] commits to field-level aggregates with
+    /// no script-code concept at all — none of the three share a code path.
     pub fn legacy_signature_hash(
         &self,
         input_index: usize,
@@ -262,6 +282,10 @@ impl<'t> SighashCache<'t> {
 
     /// Computes the BIP143 segwit-v0 signature hash (p2wpkh and p2wsh alike: the caller
     /// supplies the witness script / p2wpkh template as `script_code`).
+    ///
+    /// `script_code` is hashed verbatim: BIP143 has no code-separator deletion, no
+    /// SINGLE blanking of individual outputs, and no uint256-one bug — those are
+    /// legacy-only (see [`Self::legacy_signature_hash`]).
     pub fn segwit_v0_signature_hash(
         &mut self,
         input_index: usize,
@@ -269,7 +293,26 @@ impl<'t> SighashCache<'t> {
         value: crate::Amount,
         sighash_type: Sighash,
     ) -> Result<Hash256, SighashError> {
-        let ty = sighash_type.to_ecdsa()?;
+        let raw = sighash_type.to_ecdsa()?.to_u32();
+        self.segwit_v0_signature_hash_raw(input_index, script_code, value, raw)
+    }
+
+    /// Computes the BIP143 digest for a raw ECDSA hash type.
+    ///
+    /// Field selection uses the low five bits and `SIGHASH_ANYONECANPAY`, while all
+    /// 32 bits are serialized into the digest. Undefined ECDSA hash types remain
+    /// valid without `STRICTENC`; enforcing that policy belongs to the script
+    /// checker, not the digest engine. Raw zero is valid here, unlike the typed
+    /// API's taproot-only [`Sighash::Default`]. The caller supplies the selected
+    /// script-code suffix verbatim.
+    pub fn segwit_v0_signature_hash_raw(
+        &mut self,
+        input_index: usize,
+        script_code: &[u8],
+        value: crate::Amount,
+        sighash_type: u32,
+    ) -> Result<Hash256, SighashError> {
+        let ty = EcdsaType::from_consensus(sighash_type);
         let total = self.tx.inputs.len();
         let input = self
             .tx
@@ -302,9 +345,9 @@ impl<'t> SighashCache<'t> {
                     output.consensus_encode(single_writer);
                     finalize_double_sha256(single)
                 }
-                // BIP143 leaves this case undefined; Core rejects the signature while the
-                // rust-bitcoin oracle emits the zero hash. Either way no signature can
-                // verify, so we mirror the oracle's zero hash.
+                // BIP143 uses zero hashOutputs when SINGLE has no matching output. The
+                // complete preimage is still hashed and a signature over that digest can
+                // verify; this is not the legacy SINGLE bug.
                 None => zero,
             }
         } else {
@@ -322,7 +365,7 @@ impl<'t> SighashCache<'t> {
         writer.write_all(&input.sequence.to_le_bytes());
         writer.write_all(outputs_hash.as_byte_array());
         writer.write_all(&self.tx.lock_time.to_le_bytes());
-        writer.write_all(&ty.to_u32().to_le_bytes());
+        writer.write_all(&sighash_type.to_le_bytes());
 
         Ok(finalize_double_sha256(engine))
     }

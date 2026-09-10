@@ -17,35 +17,64 @@
 //! A snapshot-gated query engine serves `bitcoin_rs_rpc::context::TxIndexQuery`
 //! and the generic [`ScriptIndexQuery`] without raw index mutex paths.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use arc_swap::ArcSwap;
 
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
+
 use bitcoin_rs_index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, NoSpentScripts, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptLiveScan, TxIndexScan, TxIndexScanRow,
     TxIndexSnapshot,
+    reconcile::{ReconcileLeg, ReconcilePhase, SelectedWatermark, selected_watermark},
+    recovery::open_writer,
     types::{TxPosition, TxPositionValue},
+    writer::TxIndexWriter,
 };
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
-use bitcoin_rs_rpc::capabilities::{
-    CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status,
+
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
+
+use bitcoin_rs_rpc::{
+    capabilities::{CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status},
+    context::{
+        BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+        SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
+    },
 };
-use bitcoin_rs_rpc::context::{
-    BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
-    SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
+
+use bitcoin_rs_storage::{
+    PrefixScanLimit,
+    block_body::{BlockBodyReader, BlockBodyStore},
 };
-use bitcoin_rs_storage::PrefixScanLimit;
+
 use compact_str::CompactString;
+
 use crossbeam_channel::{Receiver, Sender};
+
+use heartbeat::Heartbeat;
+
+use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
+
 use parking_lot::{Mutex, RwLock};
+
 use rayon::prelude::*;
 
-use crate::apply::{PruneBodyReader, PruneBodyStore};
+use scheduling::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+mod heartbeat;
+mod namespace;
+mod query_adapter;
+mod scheduling;
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -62,19 +91,16 @@ const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
 /// commit bounded.
 const BATCH_BYTE_LIMIT: usize = 256 << 20;
 
-#[cfg(feature = "rocksdb")]
 pub(crate) const ROCKSDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-#[cfg(any(feature = "fjall", feature = "mdbx", test))]
 pub(crate) const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-#[cfg(feature = "redb")]
 pub(crate) const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 16_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
@@ -91,11 +117,16 @@ pub(crate) const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
-/// Maximum number of blocks whose bodies are held in memory and whose
-/// `prepare_block_for` row-build work is fanned out across the rayon pool
-/// in one parallel prepare step. Bounds memory while keeping the CPU-bound
-/// decode/row-build off the single writer thread.
-const PREPARE_CHUNK_BLOCKS: usize = 128;
+/// In-memory parallel-prepare cap owned by this worker. 256 matches the IBD
+/// download window so a filled staging set can prepare in one pass when bodies
+/// are small; catch-up also prepares already-stored bodies, so this is not
+/// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
+const PREPARE_CHUNK_BLOCKS: usize = 256;
+/// Serialized-body budget for one parallel prepare step. Later bodies are not
+/// retained once this bound would be exceeded. Stops a 1 MiB-class window from
+/// holding 256 bodies in RAM while still packing early-chain blocks up to the
+/// count cap.
+const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
@@ -111,109 +142,6 @@ const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 /// open while still surfacing a stuck one. The 30-second heartbeat already
 /// makes a slow open observable to an operator watching logs.
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
-
-/// Reconciliation leg one capability's rows are executing against the
-/// applied tip. Forward is the resting leg: a watermark that names the
-/// applied tip is ready; one below it is catching up.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ReconcileLeg {
-    /// Rows extend the active chain from the durable watermark.
-    #[default]
-    Forward,
-    /// Rows on an abandoned or ahead-of-tip branch are deleted block by
-    /// block from `from_height` down to the common ancestor `to_height`.
-    RollingBack {
-        /// Height of the watermark being rewound.
-        from_height: u32,
-        /// Height of the last block shared with the active chain.
-        to_height: u32,
-    },
-    /// The rows were reset and rebuild from genesis.
-    Rebuilding,
-}
-
-/// Reconciliation legs of every capability the worker owns.
-///
-/// Capabilities carry independent watermarks, so a selective reset can leave
-/// one capability rebuilding while its sibling still rewinds. The worker
-/// publishes each leg change so operators can tell a rewind or rebuild apart
-/// from ordinary forward catch-up, whose progress is the durable watermark
-/// itself.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ReconcilePhase {
-    /// Transaction-lookup leg.
-    pub tx_lookup: ReconcileLeg,
-    /// Script-history leg.
-    pub script_history: ReconcileLeg,
-    /// Compact live-output leg.
-    pub script_live: ReconcileLeg,
-}
-
-impl ReconcilePhase {
-    /// Every capability moving forward.
-    pub const FORWARD: Self = Self {
-        tx_lookup: ReconcileLeg::Forward,
-        script_history: ReconcileLeg::Forward,
-        script_live: ReconcileLeg::Forward,
-    };
-
-    /// Returns the phase with `leg` assigned to every capability in
-    /// `capabilities`.
-    #[must_use]
-    pub const fn with_leg(mut self, capabilities: IndexCapabilities, leg: ReconcileLeg) -> Self {
-        if capabilities.tx_lookup {
-            self.tx_lookup = leg;
-        }
-        if capabilities.script_history {
-            self.script_history = leg;
-        }
-        if capabilities.script_live {
-            self.script_live = leg;
-        }
-        self
-    }
-
-    /// Capabilities whose rows are rebuilding from genesis.
-    #[must_use]
-    pub const fn rebuilding(self) -> IndexCapabilities {
-        IndexCapabilities {
-            tx_lookup: matches!(self.tx_lookup, ReconcileLeg::Rebuilding),
-            script_history: matches!(self.script_history, ReconcileLeg::Rebuilding),
-            script_live: matches!(self.script_live, ReconcileLeg::Rebuilding),
-        }
-    }
-
-    /// Widest rollback in flight: the highest watermark being rewound and
-    /// the lowest common ancestor any capability rewinds to.
-    #[must_use]
-    pub fn rolling_back(self) -> Option<(u32, u32)> {
-        [self.tx_lookup, self.script_history, self.script_live]
-            .into_iter()
-            .filter_map(|leg| match leg {
-                ReconcileLeg::RollingBack {
-                    from_height,
-                    to_height,
-                } => Some((from_height, to_height)),
-                ReconcileLeg::Forward | ReconcileLeg::Rebuilding => None,
-            })
-            .reduce(|(from_a, to_a), (from_b, to_b)| (from_a.max(from_b), to_a.min(to_b)))
-    }
-
-    /// Ends every rollback leg; rebuild legs persist until their rows reach
-    /// the applied tip.
-    #[must_use]
-    fn rollbacks_finished(self) -> Self {
-        let finish = |leg| match leg {
-            ReconcileLeg::RollingBack { .. } => ReconcileLeg::Forward,
-            other => other,
-        };
-        Self {
-            tx_lookup: finish(self.tx_lookup),
-            script_history: finish(self.script_history),
-            script_live: finish(self.script_live),
-        }
-    }
-}
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
 /// `Chainstate`, the worker thread, and the query engine.
@@ -298,15 +226,6 @@ impl TxIndexRuntime {
         self.failure_message.read().clone()
     }
 }
-
-// ---------------------------------------------------------------------------
-// A1: lifecycle snapshot, stable query adapter, namespace registry, heartbeat
-// ---------------------------------------------------------------------------
-
-use hashbrown::HashMap;
-use std::path::{Path, PathBuf};
-
-use arc_swap::ArcSwap;
 
 /// Monotonic publication token. Each worker holds one; a revoked token makes
 /// `rcu` publication a no-op so a late worker cannot publish after abandonment.
@@ -397,180 +316,6 @@ impl TxIndexQueryAdapter {
     }
 }
 
-impl TxIndexQuery for TxIndexQueryAdapter {
-    fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.transaction(txid)
-    }
-
-    fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.outpoint_value(outpoint)
-    }
-
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.transaction_height(txid)
-    }
-
-    fn index_info(&self) -> Result<TxIndexInfo, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.index_info()
-    }
-}
-
-impl ScriptIndexQuery for TxIndexQueryAdapter {
-    fn history_snapshot(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.history_snapshot(scripthash)
-    }
-
-    fn unspent_outputs(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.unspent_outputs(scripthash)
-    }
-
-    fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.spender(outpoint)
-    }
-}
-
-/// Process-global namespace ownership state.
-#[derive(Debug)]
-enum NamespaceEntry {
-    /// An active open owns this namespace.
-    Active(u64),
-    /// An abandoned open poisoned this namespace permanently.
-    Poisoned,
-}
-
-/// Process-global, process-lifetime namespace map. The key is the canonical
-/// data root joined with one validated fixed child component.
-pub(crate) struct NamespaceRegistry {
-    entries: parking_lot::Mutex<HashMap<PathBuf, NamespaceEntry>>,
-}
-
-impl NamespaceRegistry {
-    pub(crate) fn new() -> Self {
-        Self {
-            entries: parking_lot::Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Validates the child component: exactly the fixed name, no separator, not
-    /// `.` or `..`, not absolute. Does not canonicalize the child.
-    fn validate_child(root: &Path, child: &str) -> Result<PathBuf, String> {
-        if child.is_empty() {
-            return Err("namespace child is empty".to_owned());
-        }
-        if child.contains(std::path::MAIN_SEPARATOR) {
-            return Err(format!("namespace child {child} contains a path separator"));
-        }
-        if child == "." || child == ".." {
-            return Err(format!("namespace child {child} is a path traversal"));
-        }
-        if Path::new(child).is_absolute() {
-            return Err(format!("namespace child {child} is absolute"));
-        }
-        Ok(root.join(child))
-    }
-
-    /// Atomically claims `Active(owner)` for the key. Rejects an existing
-    /// `Active` or `Poisoned` entry without touching the store.
-    fn claim(&self, key: PathBuf, owner: u64) -> bool {
-        let mut entries = self.entries.lock();
-        match entries.get(&key) {
-            None => {
-                entries.insert(key, NamespaceEntry::Active(owner));
-                true
-            }
-            Some(NamespaceEntry::Active(_) | NamespaceEntry::Poisoned) => false,
-        }
-    }
-
-    /// Releases `Active(owner)` only if the map still contains the same owner.
-    /// Does nothing if the entry was already changed (e.g. poisoned).
-    fn release(&self, key: &Path, owner: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(NamespaceEntry::Active(current)) = entries.get(key) {
-            if *current == owner {
-                entries.remove(key);
-            }
-        }
-    }
-
-    /// Poisons the namespace only if the entry is `Active(owner)`. Used for
-    /// abandoned opens only.
-    fn poison(&self, key: &Path, owner: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(NamespaceEntry::Active(current)) = entries.get(key) {
-            if *current == owner {
-                entries.insert(key.to_path_buf(), NamespaceEntry::Poisoned);
-            }
-        }
-    }
-
-    /// Returns true if the namespace is poisoned.
-    fn is_poisoned(&self, key: &Path) -> bool {
-        matches!(self.entries.lock().get(key), Some(NamespaceEntry::Poisoned))
-    }
-}
-
-/// One shared process-global namespace registry for all index workers.
-pub(crate) static NAMESPACE_REGISTRY: std::sync::LazyLock<NamespaceRegistry> =
-    std::sync::LazyLock::new(NamespaceRegistry::new);
-
-/// Heartbeat helper: emits a log line every 30 seconds while the worker's
-/// backend open is blocked. Observability only — not a timeout.
-struct Heartbeat {
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl Heartbeat {
-    fn start(capability: &'static str, namespace: String, backend: String) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
-        let start = Instant::now();
-        let handle = thread::Builder::new()
-            .name(format!("bitcoin-rs-{capability}-heartbeat"))
-            .spawn(move || {
-                while !stop_clone.load(Ordering::Acquire) {
-                    let elapsed = start.elapsed();
-                    tracing::info!(
-                        capability,
-                        namespace = %namespace,
-                        backend = %backend,
-                        elapsed_secs = elapsed.as_secs(),
-                        "index store recovery in progress"
-                    );
-                    for _ in 0..300 {
-                        if stop_clone.load(Ordering::Acquire) {
-                            return;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                }
-            })
-            .ok();
-        Self { stop, handle }
-    }
-
-    fn stop_and_join(mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 /// Immutable specification for worker-owned store open. Constructed
 /// synchronously in `NodeState::open`; consumed on the worker thread.
 pub(crate) struct TxIndexOpenSpec {
@@ -578,8 +323,6 @@ pub(crate) struct TxIndexOpenSpec {
     pub(crate) namespace: &'static str,
     pub(crate) storage_backend: bitcoin_rs_storage::StorageBackend,
     pub(crate) cache_bytes: u64,
-    #[allow(dead_code)]
-    pub(crate) batch_limits: PreparedBatchLimits,
     pub(crate) epoch: u64,
     pub(crate) enabled: IndexCapabilities,
     pub(crate) rollback_rebuild_cutover: u32,
@@ -641,7 +384,7 @@ impl TxIndexWorker {
         writer: Arc<dyn TxIndexWriter>,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
-        body_store: Option<Arc<dyn PruneBodyStore>>,
+        body_store: Option<Arc<dyn BlockBodyStore>>,
         batch_limits: PreparedBatchLimits,
         enabled: IndexCapabilities,
         chain_events: Arc<crate::state::ChainEventPublisher>,
@@ -715,7 +458,7 @@ impl TxIndexWorker {
         generation: Generation,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
-        body_store: Option<Arc<dyn PruneBodyStore>>,
+        body_store: Option<Arc<dyn BlockBodyStore>>,
         block_source: IndexBlockSource,
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<crate::state::ChainEventPublisher>,
@@ -824,35 +567,6 @@ pub(crate) struct OpenTxIndex {
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
-/// Opens an `IndexWriter` with legacy/unsupported-format recovery.
-///
-/// Format 3 is upgraded inside [`bitcoin_rs_index::IndexWriter::open`] by
-/// resetting `ScriptHistory` only. This path still full-resets foreign
-/// versions and cursorless legacy tables so they can rebuild.
-pub(crate) fn open_writer<S>(
-    store: &Arc<S>,
-    generation: u64,
-) -> Result<bitcoin_rs_index::IndexWriter<S>, IndexError>
-where
-    S: bitcoin_rs_storage::KvStore,
-{
-    match bitcoin_rs_index::IndexWriter::open(Arc::clone(store), generation) {
-        Ok(writer) => Ok(writer),
-        Err(
-            error @ (IndexError::LegacyCursorlessIndex
-            | IndexError::UnsupportedTxIndexFormatVersion { .. }),
-        ) => {
-            tracing::warn!(
-                %error,
-                "resetting incompatible derived transaction index for rebuild"
-            );
-            bitcoin_rs_index::IndexWriter::reset_index(store.as_ref(), generation)?;
-            bitcoin_rs_index::IndexWriter::open(Arc::clone(store), generation)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 /// Worker-owned open: opens the store, constructs writer/reader/engine,
 /// publishes lifecycle, and runs reconciliation — all behind one
 /// `catch_unwind` boundary that starts before directory creation and includes
@@ -874,7 +588,7 @@ fn run_worker_with_open(
     generation: &Generation,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    body_store: Option<Arc<dyn PruneBodyStore>>,
+    body_store: Option<Arc<dyn BlockBodyStore>>,
     block_source: IndexBlockSource,
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<crate::state::ChainEventPublisher>,
@@ -990,7 +704,7 @@ fn open_and_run(
     generation: &Generation,
     applied_tip: &Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: &Arc<RwLock<BlockTree>>,
-    body_store: &Option<Arc<dyn PruneBodyStore>>,
+    body_store: &Option<Arc<dyn BlockBodyStore>>,
     block_source: &IndexBlockSource,
     body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<crate::state::ChainEventPublisher>,
@@ -1009,7 +723,6 @@ fn open_and_run(
         spec.storage_backend,
         &txindex_dir,
         spec.cache_bytes,
-        spec.batch_limits,
         spec.epoch,
         Duration::ZERO,
         TXINDEX_OPEN_TIMEOUT,
@@ -1055,7 +768,7 @@ fn open_and_run(
         applied_tip: Arc::clone(applied_tip),
         block_tree: Arc::clone(block_tree),
         body_store: body_store.clone(),
-        batch_limits: spec.batch_limits,
+        batch_limits: open.batch_limits,
         enabled: spec.enabled,
         rollback_rebuild_cutover: spec.rollback_rebuild_cutover,
         wake_rx: wake_rx.clone(),
@@ -1083,7 +796,6 @@ fn open_tx_index_with_timeout(
     storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
-    batch_limits: PreparedBatchLimits,
     epoch: u64,
     open_delay: Duration,
     open_timeout: Duration,
@@ -1095,14 +807,7 @@ fn open_tx_index_with_timeout(
     let _join = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
-            let result = open_tx_index_on_worker(
-                backend,
-                &dir,
-                cache_bytes,
-                batch_limits,
-                epoch,
-                open_delay,
-            );
+            let result = open_tx_index_on_worker(backend, &dir, cache_bytes, epoch, open_delay);
             let _ = tx.send(result);
         })
         .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
@@ -1142,69 +847,48 @@ fn open_tx_index_with_timeout(
     }
 }
 
-/// Opens the txindex store on the worker thread, preserving all backend
-/// constructors, cache paths, and batch limits.
+/// Opens the txindex store on the worker thread through the namespace's single
+/// runtime composition owner.
 fn open_tx_index_on_worker(
     storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
-    batch_limits: PreparedBatchLimits,
     epoch: u64,
     open_delay: Duration,
 ) -> Result<OpenTxIndex, TxIndexWorkerError> {
     if !open_delay.is_zero() {
         std::thread::sleep(open_delay);
     }
-    match storage_backend {
-        #[cfg(feature = "rocksdb")]
-        bitcoin_rs_storage::StorageBackend::RocksDb => {
-            let store = Arc::new(
-                bitcoin_rs_storage::RocksDbStore::open_with_cache(txindex_dir, cache_bytes)
-                    .map_err(|e| {
-                        TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e))
-                    })?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(feature = "fjall")]
-        bitcoin_rs_storage::StorageBackend::Fjall => {
-            let store = Arc::new(
-                bitcoin_rs_storage::FjallStore::open_with_cache(txindex_dir, cache_bytes).map_err(
-                    |e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e)),
-                )?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(feature = "redb")]
-        bitcoin_rs_storage::StorageBackend::Redb => {
-            let store = Arc::new(
-                bitcoin_rs_storage::open_redb_tx_index_store_with_cache(txindex_dir, cache_bytes)
-                    .map_err(|e| {
-                    TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e))
-                })?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(feature = "mdbx")]
-        bitcoin_rs_storage::StorageBackend::Mdbx => {
-            let store = Arc::new(
-                bitcoin_rs_storage::MdbxStore::open_with_cache(txindex_dir, cache_bytes).map_err(
-                    |e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e)),
-                )?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(any(
-            not(feature = "rocksdb"),
-            not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
-        ))]
-        other => Err(TxIndexWorkerError::Storage(
-            bitcoin_rs_storage::StorageError::Backend(format!(
-                "unsupported storage backend for txindex: {other}"
-            )),
-        )),
+    crate::storage_backend::open_txindex(
+        storage_backend,
+        txindex_dir,
+        Some(cache_bytes),
+        TxIndexComposer {
+            backend: storage_backend,
+            epoch,
+        },
+    )
+}
+
+struct TxIndexComposer {
+    backend: bitcoin_rs_storage::StorageBackend,
+    epoch: u64,
+}
+
+impl crate::storage_backend::StoreConsumer for TxIndexComposer {
+    type Output = OpenTxIndex;
+    type Error = TxIndexWorkerError;
+
+    fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
+    where
+        S: bitcoin_rs_storage::KvStore,
+    {
+        let batch_limits = match self.backend {
+            bitcoin_rs_storage::StorageBackend::RocksDb => ROCKSDB_BATCH_LIMITS,
+            bitcoin_rs_storage::StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
+            bitcoin_rs_storage::StorageBackend::Redb => REDB_BATCH_LIMITS,
+        };
+        open_tx_index_store_on_worker(store, batch_limits, self.epoch)
     }
 }
 
@@ -1260,315 +944,6 @@ impl bitcoin_rs_index::SpentCoinScripts for UndoScripts {
     }
 }
 
-/// Object-safe `ScriptLive` seed producer used by [`TxIndexWriter`].
-type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
-    + 'a;
-
-/// Erased prepared-index writer used by the worker and stored in `NodeState`.
-pub(crate) trait TxIndexWriter: Send + Sync {
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
-    fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError>;
-    fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        let _ = capabilities;
-        self.prepare_block(height, hash, body)
-    }
-    fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        let _ = spent_scripts;
-        self.prepare_block_for(capabilities, height, hash, body)
-    }
-    fn seed_script_live_stream(
-        &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        let _ = (produce, tip);
-        Err(IndexError::UnsupportedRollback)
-    }
-    fn commit_forward_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        batch: PreparedBatch,
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<IndexWatermark, IndexError>;
-    fn commit_rollback_one_for_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<(), IndexError>;
-    fn commit_rollback_one_for_with_cursor_with_spent_scripts(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError> {
-        let _ = spent_scripts;
-        self.commit_rollback_one_for_with_cursor(fence, capabilities, prev, body, cursor)
-    }
-
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        let _ = capabilities;
-        Err(IndexError::UnsupportedRollback)
-    }
-    fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;
-    fn commit_consumer_cursor(
-        &self,
-        fence: IndexWriteFence,
-        cursor: &[u8],
-    ) -> Result<(), IndexError>;
-}
-
-impl<S> TxIndexWriter for Mutex<IndexWriter<S>>
-where
-    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
-{
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
-        self.lock().fenced_watermarks()
-    }
-
-    fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.lock().prepare_block(height, hash, body)
-    }
-
-    fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.lock()
-            .prepare_block_for(capabilities, height, hash, body)
-    }
-
-    fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        self.lock().prepare_block_with_spent_scripts(
-            capabilities,
-            height,
-            hash,
-            body,
-            spent_scripts,
-        )
-    }
-
-    fn commit_forward_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        batch: PreparedBatch,
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<IndexWatermark, IndexError> {
-        self.lock().commit_forward_with_cursor(fence, batch, cursor)
-    }
-
-    fn seed_script_live_stream(
-        &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        self.lock().seed_script_live_stream(produce, tip)
-    }
-
-    fn commit_rollback_one_for_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<(), IndexError> {
-        self.lock()
-            .commit_rollback_one_for_with_cursor(fence, capabilities, prev, body, cursor)
-    }
-
-    fn commit_rollback_one_for_with_cursor_with_spent_scripts(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError> {
-        self.lock()
-            .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                fence,
-                capabilities,
-                prev,
-                body,
-                cursor,
-                spent_scripts,
-            )
-    }
-
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        self.lock().reset_capabilities(capabilities)
-    }
-
-    fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {
-        self.lock().consumer_cursor()
-    }
-
-    fn commit_consumer_cursor(
-        &self,
-        fence: IndexWriteFence,
-        cursor: &[u8],
-    ) -> Result<(), IndexError> {
-        self.lock().commit_consumer_cursor(fence, cursor)
-    }
-}
-
-/// `RwLock`-backed writer: `prepare_block_for` and `consumer_cursor` take a
-/// shared read lock so the CPU-bound decode/row-build can run concurrently
-/// across the rayon pool, while `commit_*`, `fenced_watermarks`, and
-/// `reset_capabilities` take an exclusive write lock to preserve the
-/// single-writer atomic commit and watermark semantics.
-impl<S> TxIndexWriter for RwLock<IndexWriter<S>>
-where
-    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
-{
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
-        self.write().fenced_watermarks()
-    }
-
-    fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.read().prepare_block(height, hash, body)
-    }
-
-    fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.read()
-            .prepare_block_for(capabilities, height, hash, body)
-    }
-
-    fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        self.read().prepare_block_with_spent_scripts(
-            capabilities,
-            height,
-            hash,
-            body,
-            spent_scripts,
-        )
-    }
-
-    fn commit_forward_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        batch: PreparedBatch,
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<IndexWatermark, IndexError> {
-        self.write()
-            .commit_forward_with_cursor(fence, batch, cursor)
-    }
-
-    fn seed_script_live_stream(
-        &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        self.write().seed_script_live_stream(produce, tip)
-    }
-
-    fn commit_rollback_one_for_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<(), IndexError> {
-        self.write()
-            .commit_rollback_one_for_with_cursor(fence, capabilities, prev, body, cursor)
-    }
-
-    fn commit_rollback_one_for_with_cursor_with_spent_scripts(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError> {
-        self.write()
-            .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                fence,
-                capabilities,
-                prev,
-                body,
-                cursor,
-                spent_scripts,
-            )
-    }
-
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        self.write().reset_capabilities(capabilities)
-    }
-
-    fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {
-        self.read().consumer_cursor()
-    }
-
-    fn commit_consumer_cursor(
-        &self,
-        fence: IndexWriteFence,
-        cursor: &[u8],
-    ) -> Result<(), IndexError> {
-        self.write().commit_consumer_cursor(fence, cursor)
-    }
-}
-
 /// Detached publisher for test worker construction; records still sequence.
 #[cfg(test)]
 pub(crate) fn detached_chain_publisher() -> Arc<crate::state::ChainEventPublisher> {
@@ -1601,7 +976,7 @@ struct Worker {
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    body_store: Option<Arc<dyn PruneBodyStore>>,
+    body_store: Option<Arc<dyn BlockBodyStore>>,
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
     chain_events: Arc<crate::state::ChainEventPublisher>,
@@ -1640,34 +1015,6 @@ impl PendingForward {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum SelectedWatermark {
-    Valid(Option<IndexWatermark>),
-    Invalid,
-}
-
-fn selected_watermark(
-    watermarks: IndexWatermarks,
-    capabilities: IndexCapabilities,
-) -> SelectedWatermark {
-    let selected = [
-        capabilities.tx_lookup.then_some(watermarks.tx_lookup),
-        capabilities
-            .script_history
-            .then_some(watermarks.script_history),
-        capabilities.script_live.then_some(watermarks.script_live),
-    ];
-    let mut selected = selected.into_iter().flatten();
-    let Some(first) = selected.next() else {
-        return SelectedWatermark::Invalid;
-    };
-    if selected.all(|watermark| watermark == first) {
-        SelectedWatermark::Valid(first)
-    } else {
-        SelectedWatermark::Invalid
-    }
-}
-
 fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
     let mut names = Vec::new();
     if capabilities.tx_lookup {
@@ -1680,62 +1027,6 @@ fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<Strin
         names.push("script_live");
     }
     (!names.is_empty()).then(|| names.join(","))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BatchWait {
-    Woken,
-    Deadline,
-    Stopped,
-}
-
-fn wait_for_revision_quiet(
-    runtime: &TxIndexRuntime,
-    wake_rx: &Receiver<()>,
-    quiet_period: Duration,
-    mut seen_revision: u64,
-) -> Option<u64> {
-    loop {
-        if runtime.should_stop() {
-            return None;
-        }
-        match wake_rx.recv_timeout(quiet_period) {
-            Ok(()) => seen_revision = runtime.revision(),
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                let current = runtime.revision();
-                if current == seen_revision {
-                    return Some(current);
-                }
-                seen_revision = current;
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
-        }
-    }
-}
-/// Waits for a wake hint or the pending batch's original deadline.
-fn wait_for_batch_deadline(
-    runtime: &TxIndexRuntime,
-    wake_rx: &Receiver<()>,
-    deadline: Instant,
-) -> BatchWait {
-    if runtime.should_stop() {
-        return BatchWait::Stopped;
-    }
-    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-        return BatchWait::Deadline;
-    };
-    if remaining.is_zero() {
-        return BatchWait::Deadline;
-    }
-    match wake_rx.recv_timeout(remaining) {
-        Ok(()) if runtime.should_stop() => BatchWait::Stopped,
-        Ok(()) => BatchWait::Woken,
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) if runtime.should_stop() => {
-            BatchWait::Stopped
-        }
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
-        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
-    }
 }
 
 /// Identity of one block on the active chain, captured under a short tree lock.
@@ -2439,14 +1730,16 @@ impl Worker {
                 .prefetch_positions(&requests)
                 .map_err(TxIndexWorkerError::Storage)?;
 
-            // Sub-chunk: load bodies serially (preserving the reader's
-            // prefetch state), prepare blocks in parallel across the rayon
-            // pool, then push prepared blocks into the batch in height order.
-            // The single-writer commit and watermark publish remain the only
-            // ordering points (#209 invariants).
-            for sub_chunk in identities.chunks(PREPARE_CHUNK_BLOCKS) {
+            // Sub-chunk: load bodies serially until the count or byte cap
+            // (preserving the reader's prefetch state), prepare blocks in
+            // parallel across the rayon pool, then push prepared blocks into
+            // the batch in height order. The single-writer commit and
+            // watermark publish remain the only ordering points (#209
+            // invariants).
+            let mut remaining = identities;
+            while !remaining.is_empty() {
                 match self.prepare_and_admit_chunk(
-                    sub_chunk,
+                    &mut remaining,
                     &mut body_reader,
                     capabilities,
                     &mut state,
@@ -2462,16 +1755,17 @@ impl Worker {
         self.finish_catch_up(state, chunk_end, target, pending)
     }
 
-    /// Loads bodies serially, prepares blocks in parallel across the rayon pool,
-    /// then admits them into the batch in height order on the single writer
-    /// thread. Returns `Stalled` if a body is missing or shutdown was requested,
-    /// `Progressed` if the batch filled and was committed, or `Continue` to keep
-    /// processing.
+    /// Loads bodies serially until the count or byte cap, prepares that prefix
+    /// in parallel across the rayon pool, then admits them into the batch in
+    /// height order on the single writer thread. Advances `identities` past
+    /// the loaded prefix. Returns `Stalled` if a body is missing or shutdown
+    /// was requested, `Progressed` if the batch filled and was committed, or
+    /// `Continue` to keep processing.
     #[allow(clippy::too_many_lines)]
     fn prepare_and_admit_chunk(
         &self,
-        sub_chunk: &[BlockIdentity],
-        body_reader: &mut Box<dyn PruneBodyReader + '_>,
+        identities: &mut &[BlockIdentity],
+        body_reader: &mut Box<dyn BlockBodyReader + '_>,
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
         pending: &mut Option<PendingForward>,
@@ -2480,15 +1774,26 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        // Load bodies serially through the single reader.
-        let mut bodies = Vec::with_capacity(sub_chunk.len());
-        for identity in sub_chunk {
+        // Load bodies serially through the single reader until either cap.
+        // The first body is always retained so catch-up moves; a later body
+        // that would cross the byte cap is left at the front of `identities`.
+        let mut bodies = Vec::new();
+        let mut loaded_bytes = 0_usize;
+        for identity in *identities {
             if self.runtime.should_stop() {
                 return Ok(ChunkAction::Stalled);
             }
             let hash = Hash256::from_le_bytes(&identity.hash);
             match body_reader.load_block_body(identity.height, hash) {
-                Ok(Some(body)) => bodies.push(body),
+                Ok(Some(body)) => {
+                    if !bodies.is_empty()
+                        && loaded_bytes.saturating_add(body.len()) > PREPARE_CHUNK_BYTES
+                    {
+                        break;
+                    }
+                    loaded_bytes = loaded_bytes.saturating_add(body.len());
+                    bodies.push(body);
+                }
                 Ok(None) => {
                     if !state.batch.is_empty() {
                         let replacement = PendingForward {
@@ -2505,7 +1810,12 @@ impl Worker {
                 }
                 Err(e) => return Err(TxIndexWorkerError::Storage(e)),
             }
+            if bodies.len() >= PREPARE_CHUNK_BLOCKS {
+                break;
+            }
         }
+        let loaded = bodies.len();
+        let sub_chunk = &identities[..loaded];
 
         let anchors = if capabilities.script_live {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
@@ -2536,22 +1846,17 @@ impl Worker {
             .zip(bodies.par_iter())
             .enumerate()
             .map(|(index, (identity, body))| {
-                if let Some(anchors) = anchors.as_ref() {
-                    self.writer.prepare_block_with_spent_scripts(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                        &anchors[index],
-                    )
-                } else {
-                    self.writer.prepare_block_for(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                    )
-                }
+                let spent: &dyn bitcoin_rs_index::SpentCoinScripts = match anchors.as_ref() {
+                    Some(anchors) => &anchors[index],
+                    None => &NoSpentScripts,
+                };
+                self.writer.prepare_block_with_spent_scripts(
+                    capabilities,
+                    identity.height,
+                    identity.hash,
+                    body.as_slice(),
+                    spent,
+                )
             })
             .collect();
         drop(bodies);
@@ -2606,6 +1911,7 @@ impl Worker {
                 };
             }
         }
+        *identities = &identities[loaded..];
         Ok(ChunkAction::Continue)
     }
     fn finish_catch_up(
@@ -2657,22 +1963,22 @@ impl Worker {
             .then(|| self.live_anchor(watermark.height, watermark.hash))
             .transpose()?;
 
+        let spent: &dyn bitcoin_rs_index::SpentCoinScripts =
+            anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
+
         let prev = if watermark.height == 0 {
             None
         } else {
-            let prepared = if let Some(anchor) = anchor.as_ref() {
-                self.writer.prepare_block_with_spent_scripts(
+            let prepared = self
+                .writer
+                .prepare_block_with_spent_scripts(
                     capabilities,
                     watermark.height,
                     watermark.hash,
                     &body,
-                    anchor,
+                    spent,
                 )
-            } else {
-                self.writer
-                    .prepare_block_for(capabilities, watermark.height, watermark.hash, &body)
-            }
-            .map_err(TxIndexWorkerError::Index)?;
+                .map_err(TxIndexWorkerError::Index)?;
             Some(IndexWatermark {
                 height: watermark.height.saturating_sub(1),
                 hash: prepared.parent_hash,
@@ -2688,26 +1994,16 @@ impl Worker {
             .map_or(ConsumerCursorUpdate::Clear, |bytes| {
                 ConsumerCursorUpdate::Set(bytes.as_slice())
             });
-        if let Some(anchor) = anchor.as_ref() {
-            self.writer
-                .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                    fence,
-                    capabilities,
-                    prev,
-                    &body,
-                    cursor,
-                    anchor,
-                )
-        } else {
-            self.writer.commit_rollback_one_for_with_cursor(
+        self.writer
+            .commit_rollback_one_for_with_cursor_with_spent_scripts(
                 fence,
                 capabilities,
                 prev,
                 &body,
                 cursor,
+                spent,
             )
-        }
-        .map_err(TxIndexWorkerError::Index)?;
+            .map_err(TxIndexWorkerError::Index)?;
         Ok(prev)
     }
 
@@ -2844,7 +2140,7 @@ enum TxIndexWorkerError {
     #[error("txindex durable watermark changed while a forward batch was pending")]
     PendingDurableChanged,
     #[error("txindex storage error: {0}")]
-    Storage(#[source] bitcoin_rs_storage::StorageError),
+    Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(
         "txindex store open timed out after {secs}s — the storage engine recovery may be stuck"
     )]
@@ -3905,14 +3201,17 @@ impl ScriptIndexQuery for TxIndexQueryEngine {
 
 #[cfg(all(test, feature = "fjall"))]
 mod body_reader_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::{Network, consensus_bytes};
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_storage::StorageError;
 
     use super::*;
-    use crate::apply::{PruneBodyReader, PruneBodyStore};
+    use bitcoin_rs_storage::block_body::BlockBodyReader;
+    use bitcoin_rs_storage::block_body::BlockBodyStore;
 
     struct SessionBodyStore {
         height: u32,
@@ -3929,7 +3228,7 @@ mod body_reader_tests {
         pending: Option<(u32, Hash256)>,
     }
 
-    impl PruneBodyReader for SessionBodyReader<'_> {
+    impl BlockBodyReader for SessionBodyReader<'_> {
         fn prefetch_positions(&mut self, requests: &[(u32, Hash256)]) -> Result<(), StorageError> {
             let [request] = requests else {
                 return Err(StorageError::InvalidOperation(
@@ -3961,7 +3260,7 @@ mod body_reader_tests {
         }
     }
 
-    impl PruneBodyStore for SessionBodyStore {
+    impl BlockBodyStore for SessionBodyStore {
         fn persist_block_body(
             &self,
             _height: u32,
@@ -3982,7 +3281,7 @@ mod body_reader_tests {
             ))
         }
 
-        fn reader(&self) -> Result<Box<dyn PruneBodyReader + '_>, StorageError> {
+        fn reader(&self) -> Result<Box<dyn BlockBodyReader + '_>, StorageError> {
             self.readers.fetch_add(1, Ordering::AcqRel);
             Ok(Box::new(SessionBodyReader {
                 store: self,
@@ -4016,7 +3315,7 @@ mod body_reader_tests {
         let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
         let data_dir = tempfile::tempdir()?;
         let index_store = Arc::new(bitcoin_rs_storage::FjallStore::open(data_dir.path())?);
-        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::Mutex::new(
+        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
             bitcoin_rs_index::IndexWriter::open(index_store, 1)?,
         ));
         let body_store = Arc::new(SessionBodyStore {

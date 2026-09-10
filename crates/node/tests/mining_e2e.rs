@@ -4,26 +4,34 @@
 //! `submitblock`) exactly like an external miner: the block is assembled from
 //! rendered template JSON fields only, then enters ordinary validation.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{Result, bail};
+
 use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
+
 use bitcoin_rs_mining::MiningControl;
+
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::encode::double_sha256;
+
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    deserialize as native_deserialize, encode::double_sha256,
 };
-use bitcoin_rs_rpc::Handler;
-use bitcoin_rs_rpc::context::{
-    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
-    NetworkHandles,
+
+use bitcoin_rs_rpc::{
+    Handler,
+    context::{
+        ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
+        NetworkHandles,
+    },
 };
+
 use bitcoin_rs_utxo::UtxoSet;
+
 use parking_lot::Mutex;
+
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
+
+use std::{sync::Arc, time::Duration};
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -162,17 +170,15 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
                 previous_output: null_prevout(),
                 // BIP34 height push plus one pad byte: consensus requires a
                 // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-                script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
-                    .concat()
-                    .into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
+                script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+                sequence: 0xffff_ffff,
+                witness: Vec::new(),
             }],
             outputs: vec![TxOut {
-                value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-                script_pubkey: vec![0x51].into(),
+                value: REGTEST_SUBSIDY_SATS,
+                script_pubkey: vec![0x51],
             }],
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
         };
         let mut block = Block {
             header: bitcoin_rs_primitives::Header {
@@ -180,7 +186,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
                 prev_blockhash: bitcoin_rs_primitives::BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
                 time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-                bits: CompactTarget::from_consensus(REGTEST_BITS),
+                bits: REGTEST_BITS,
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -217,8 +223,7 @@ fn grind_pow(block: &mut Block) -> Result<()> {
 
 /// Returns true when the header hash, read as a little-endian integer, meets
 /// the compact bits target (Core `CheckProofOfWork` shape).
-fn pow_is_met(bits: CompactTarget, hash: &Hash256) -> bool {
-    let bits = bits.to_consensus();
+fn pow_is_met(bits: u32, hash: &Hash256) -> bool {
     let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
     let mantissa = bits & 0x00ff_ffff;
     if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {
@@ -304,29 +309,29 @@ fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
             previous_output: null_prevout(),
             // Must mirror the height-1 seed coinbase exactly (txid anchors
             // the mempool spend).
-            script_sig: [script_push_int(1), script_push_int(0)].concat().into(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: [script_push_int(1), script_push_int(0)].concat(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: vec![0x51].into(),
+            value: REGTEST_SUBSIDY_SATS,
+            script_pubkey: vec![0x51],
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     };
     Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - fee_sats),
-            script_pubkey: vec![0x51].into(),
+            value: REGTEST_SUBSIDY_SATS - fee_sats,
+            script_pubkey: vec![0x51],
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     }
 }
 
@@ -344,17 +349,15 @@ fn mine_regtest_block(
             previous_output: null_prevout(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
-                .concat()
-                .into(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
-            script_pubkey: vec![0x51].into(),
+            value: REGTEST_SUBSIDY_SATS,
+            script_pubkey: vec![0x51],
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     };
     let mut block = Block {
         header: bitcoin_rs_primitives::Header {
@@ -362,7 +365,7 @@ fn mine_regtest_block(
             prev_blockhash: bitcoin_rs_primitives::BlockHash::from(prev),
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-            bits: CompactTarget::from_consensus(REGTEST_BITS),
+            bits: REGTEST_BITS,
             nonce: 0,
         },
         txs: std::iter::once(coinbase).chain(txs).collect(),
@@ -382,7 +385,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         state.applied_tip(),
         state.block_tree(),
         state.mempool(),
-        state.apply_handles(),
+        state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
@@ -438,21 +441,21 @@ fn assemble_block(
         inputs: vec![TxIn {
             previous_output: null_prevout(),
             // BIP34: the coinbase scriptSig begins with the serialized height.
-            script_sig: script_push_int(i64::from(height)).into(),
-            sequence: Sequence::MAX,
-            witness: vec![WITNESS_RESERVED.to_vec()].into(),
+            script_sig: script_push_int(i64::from(height)),
+            sequence: 0xffff_ffff,
+            witness: vec![WITNESS_RESERVED.to_vec()],
         }],
         outputs: vec![
             TxOut {
-                value: Amount::from_sat(coinbase_value),
-                script_pubkey: vec![0x51].into(),
+                value: coinbase_value,
+                script_pubkey: vec![0x51],
             },
             TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: commitment_script.into(),
+                value: 0,
+                script_pubkey: commitment_script,
             },
         ],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     };
 
     let mut block_txs = Vec::with_capacity(txs.len() + 1);
@@ -467,7 +470,7 @@ fn assemble_block(
                 .map_err(|err| anyhow::anyhow!("invalid previousblockhash: {err}"))?,
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: curtime,
-            bits: CompactTarget::from_consensus(bits),
+            bits,
             nonce: 0,
         },
         txs: block_txs,
@@ -547,7 +550,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>> {
         bail!("hex string must have even length");
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let hi = hex_nibble(pair[0]).ok_or_else(|| anyhow::anyhow!("invalid hex"))?;
         let lo = hex_nibble(pair[1]).ok_or_else(|| anyhow::anyhow!("invalid hex"))?;
         out.push((hi << 4) | lo);
@@ -595,15 +598,15 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
-            script_pubkey: vec![0x51].into(),
+            value: REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS,
+            script_pubkey: vec![0x51],
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     };
     let child_txid = child.txid();
 
@@ -635,7 +638,7 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
     let mined_hash = Hash256::from(block.block_hash());
 
     bitcoin_rs_node::reorg::invalidate_block(
-        &state.apply_handles(),
+        &state.chainstate(),
         &state.chain_followers(),
         mined_hash,
     )
@@ -706,22 +709,22 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
-            script_pubkey: vec![0x51].into(),
+            value: REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS,
+            script_pubkey: vec![0x51],
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     };
     let child_txid = child.txid();
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
     bitcoin_rs_node::reorg::invalidate_block(
-        &state.apply_handles(),
+        &state.chainstate(),
         &state.chain_followers(),
         mined_hash,
     )
@@ -756,21 +759,21 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence: 0xffff_ffff,
+            witness: Vec::new(),
         }],
         outputs: vec![TxOut {
-            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 1 - 5_000),
-            script_pubkey: vec![0x51].into(),
+            value: REGTEST_SUBSIDY_SATS - 1 - 5_000,
+            script_pubkey: vec![0x51],
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: 0,
     };
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
     bitcoin_rs_node::reorg::invalidate_block(
-        &state.apply_handles(),
+        &state.chainstate(),
         &state.chain_followers(),
         mined_hash,
     )

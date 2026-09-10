@@ -128,7 +128,8 @@ mod tests {
 
     use super::projection::Projection;
     use super::public::{
-        CHAIN_PAGE, address_transaction_summary, block_txs, history, outspend, summary,
+        CHAIN_PAGE, address_transaction_summary, block_txs, fee_rate_sat_per_vbyte, history,
+        outspend, summary,
     };
     use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
     use crate::handlers::Handler;
@@ -573,6 +574,14 @@ mod tests {
             )
             .status,
             503
+        );
+    }
+
+    #[test]
+    fn fee_estimate_conversion_preserves_the_exact_relay_floor() {
+        assert_eq!(
+            fee_rate_sat_per_vbyte(0.000_01).to_bits(),
+            1.0_f64.to_bits()
         );
     }
 

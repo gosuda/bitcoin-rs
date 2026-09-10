@@ -179,6 +179,10 @@ impl KvStore for MemoryStore {
             "memory snapshots unsupported",
         ))
     }
+
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+        // In-memory double: no persistence boundary exists to fault.
+    }
 }
 
 #[derive(Default)]

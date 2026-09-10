@@ -28,9 +28,9 @@ use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence};
 /// ```
 ///
 /// Scripts from the qa-assets corpus are wrapped into this framing by
-/// `scripts/import-qa-assets.sh`; seeds written by that script use selector
-/// `0x00` (NONE) for raw scripts and `0x03` (TAPROOT) for the wrapped P2TR
-/// variant. Keep those indices in step with `FLAGS` below.
+/// `scripts/import-qa-assets.sh`; seeds written by that script use the harness
+/// `FLAGS` entry `NONE` for raw scripts and, for files >= 32 bytes, a P2TR
+/// variant using its `TAPROOT` entry.
 const FLAGS: [VerifyFlags; 6] = [
     VerifyFlags::NONE,
     VerifyFlags::MANDATORY,

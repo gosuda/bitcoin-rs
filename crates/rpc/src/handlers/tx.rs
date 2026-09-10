@@ -1,27 +1,18 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::script_util::{
-    Instruction, count_segwit, count_tx_legacy, instructions, is_p2sh, is_witness_program, opcode,
-    push_data,
-};
+use crate::script_util::{opcode, push_data};
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext as MempoolPackageTxContext,
-    evaluate_package_acceptance_all,
-};
-use bitcoin_rs_mempool::{
-    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MutationResult,
-};
+use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
+use bitcoin_rs_mempool::{AdmissionOrigin, MutationResult, SubmitError, SubmitOutcome};
 use bitcoin_rs_primitives::{
-    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    Block as NativeBlock, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    deserialize as native_deserialize,
 };
-
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
@@ -218,7 +209,7 @@ fn txout_typed(
     typed_to_sonic(&v31::GetTxOut {
         best_block: ctx.best_hash().to_string(),
         confirmations,
-        value: sat_to_btc(output.value.to_sat()),
+        value: sat_to_btc(output.value),
         script_pubkey: convert::script_pub_key_typed(&output.script_pubkey, ctx.chain_network)?,
         coinbase,
     })
@@ -456,99 +447,36 @@ impl AdmissionFailure {
     }
 }
 
-/// Admits one transaction through the R4 generation-revalidated gateway.
+/// Maps the shared mempool submission verdict into the RPC/embedded envelope.
 ///
-/// This is the shared typed admission operation: `sendrawtransaction` and
-/// the embedded `Node::broadcast` both run it. Each attempt reads a fresh
-/// stable generation, captures the exact mempool sequence under a read
-/// guard, resolves UTXO data without the guard, then calls
-/// [`MempoolGateway::admit_transaction`] with both tokens. A chain change
-/// or mempool mutation between capture and commit returns a transient
-/// error and the loop retries with fresh facts.
-///
-/// Membership follows `POL-01` Duplicate submission in
-/// `docs/policies/mempool-policy.md`. The RPC lookup cache is not membership.
-///
-/// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap, matching
-/// `sendrawtransaction`'s `maxfeerate=0` behavior.
-///
-/// # Errors
-///
-/// Returns a structured [`AdmissionFailure`] so each surface can map the
-/// same verdict into its own envelope; nothing is inserted when this fails.
+/// Preparation, bounded retry, policy evaluation, and the authoritative commit
+/// belong to the gateway. RPC only supplies its origin, fee option, current
+/// chain capability, and caller-facing error semantics.
 pub(crate) fn admit_transaction(
     ctx: &Context,
     tx: &Tx,
     max_feerate_sat_per_kvb: Option<u64>,
 ) -> Result<MutationResult, AdmissionFailure> {
-    let txid = tx.txid();
-
-    // Bounded retry: each attempt reads a fresh stable generation, captures
-    // the exact mempool sequence under a read guard, resolves UTXO data
-    // without the guard, then calls admit_transaction with both tokens. A
-    // chain change or mempool mutation between capture and commit returns a
-    // transient error and the loop retries with fresh facts — it never
-    // re-uses a captured even generation.
-    #[allow(clippy::items_after_statements)]
-    const MAX_ADMISSION_RETRIES: usize = 4;
-    for _ in 0..MAX_ADMISSION_RETRIES {
-        let Some(generation) = ctx.mempool.stable_generation() else {
-            continue; // chain change active or failed — retry
-        };
-
-        // Under one gateway read guard: already-in-pool lookup, capture exact
-        // sequence, snapshot policy, resolve mempool-dependent context.
-        let (sequence, _policy, mempool_prevouts) = {
-            let pool = ctx.mempool.read();
-            if pool.contains_txid(&txid) {
-                return Ok(MutationResult::empty());
-            }
-            let sequence = pool.sequence_number();
-            let policy = pool.policy_snapshot();
-            let mempool_prevouts = resolve_mempool_prevouts(&pool, tx);
-            (sequence, policy, mempool_prevouts)
-        };
-
-        // Without a pool guard: resolve UTXO data and combine with the
-        // mempool-dependent prevouts captured above.
-        let (context, prevouts) = resolve_full_context(ctx, tx, &mempool_prevouts);
-        let locktime_cutoff = ctx
-            .median_time_past_for_hash(ctx.applied_hash())
-            .unwrap_or(0);
-
-        let request = AdmissionRequest {
-            tx: Arc::new(tx.clone()),
-            context,
-            prevouts,
-            locktime_cutoff,
-            max_feerate_sat_per_kvb,
-            time: unix_time_secs(),
-            height: ctx.applied_height(),
-            origin: AdmissionOrigin::Rpc,
-            expected_generation: generation,
-            expected_sequence: sequence,
-        };
-
-        match ctx.mempool.admit_transaction(request) {
-            Ok(AdmitOutcome::Committed(result)) => {
-                return Ok(result);
-            }
-            Ok(AdmitOutcome::AlreadyKnown) => {
-                // The exact transaction was added between our read-guard
-                // check and the write-guard commit.
-                return Ok(MutationResult::empty());
-            }
-            Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => continue,
-            Err(AdmitError::Policy(reason)) => {
-                return Err(AdmissionFailure::Policy(reason));
-            }
-            Err(AdmitError::Consensus) => {
-                return Err(AdmissionFailure::Consensus);
-            }
+    match ctx.mempool.submit_transaction(
+        Arc::new(tx.clone()),
+        AdmissionOrigin::Rpc,
+        max_feerate_sat_per_kvb,
+        unix_time_secs(),
+        &ctx.admission_chain(),
+    ) {
+        Ok(SubmitOutcome::Committed(result)) => Ok(result),
+        Ok(SubmitOutcome::AlreadyKnown) => Ok(MutationResult::empty()),
+        Ok(SubmitOutcome::AlreadyConfirmed | SubmitOutcome::Held { .. }) => {
+            // RPC never holds orphans or treats the transaction lookup cache
+            // as a successful submission. Preserve its missing-input refusal.
+            Err(AdmissionFailure::Policy(
+                AcceptanceRejectReason::MissingInputs,
+            ))
         }
+        Err(SubmitError::Policy(reason)) => Err(AdmissionFailure::Policy(reason)),
+        Err(SubmitError::Consensus) => Err(AdmissionFailure::Consensus),
+        Err(SubmitError::RetryExhausted) => Err(AdmissionFailure::RetryExhausted),
     }
-
-    Err(AdmissionFailure::RetryExhausted)
 }
 
 /// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
@@ -592,17 +520,18 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
         txs.push(decode_tx(raw)?);
     }
 
-    let pool = ctx.mempool.read();
-    let policy = pool.policy_snapshot();
-    let contexts = package_contexts(ctx, &pool, &txs);
-    let facts = evaluate_package_acceptance_all(
-        &pool,
-        &policy.standardness,
-        &txs,
-        &contexts,
-        max_feerate,
-        policy.incremental_relay_fee_sat_per_kvb,
-    );
+    let facts = ctx
+        .mempool
+        .preview_transactions(&txs, max_feerate, &ctx.admission_chain())
+        .map_err(|error| match error {
+            SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
+            SubmitError::Consensus => {
+                RpcError::TxRejected("consensus-verification-failed".to_owned())
+            }
+            SubmitError::RetryExhausted => {
+                RpcError::Internal(AdmissionFailure::RETRY_EXHAUSTED.to_owned())
+            }
+        })?;
 
     let mut rows = Vec::with_capacity(facts.results.len());
     for fact in &facts.results {
@@ -694,9 +623,9 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         };
         tx_inputs.push(TxIn {
             previous_output: OutPoint::new(txid, vout),
-            script_sig: Script::new(),
-            sequence: Sequence::from_consensus(sequence),
-            witness: Witness::new(),
+            script_sig: Vec::new(),
+            sequence,
+            witness: Vec::new(),
         });
     }
 
@@ -712,8 +641,8 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             let mut script = vec![opcode::OP_RETURN];
             script.extend_from_slice(&push_data(&data));
             tx_outputs.push(TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: script.into(),
+                value: 0,
+                script_pubkey: script,
             });
             continue;
         }
@@ -723,14 +652,14 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             .require_network(network)
             .map_err(|_| RpcError::InvalidParams("invalid Bitcoin address"))?;
         tx_outputs.push(TxOut {
-            value: Amount::from_sat(parse_btc_amount(value)?),
-            script_pubkey: address.script_pubkey().as_bytes().to_vec().into(),
+            value: parse_btc_amount(value)?,
+            script_pubkey: address.script_pubkey().as_bytes().to_vec(),
         });
     }
 
     let tx = Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(locktime),
+        lock_time: locktime,
         inputs: tx_inputs,
         outputs: tx_outputs,
     };
@@ -846,216 +775,6 @@ fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
     }
 }
 
-/// Resolves mempool-dependent prevouts for a single tx under a read guard.
-/// Returns `(txid, vout, value, script_pubkey)` tuples for inputs whose
-/// prevout is a mempool parent transaction.
-fn resolve_mempool_prevouts(
-    pool: &bitcoin_rs_mempool::Mempool,
-    tx: &Tx,
-) -> HashMap<OutPoint, TxOut> {
-    let mut prevouts = HashMap::new();
-    for input in &tx.inputs {
-        if input.previous_output == OutPoint::default() {
-            continue;
-        }
-        if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-            && let Ok(vout) = usize::try_from(input.previous_output.vout)
-            && let Some(output) = parent.outputs.get(vout)
-        {
-            prevouts.insert(input.previous_output, output.clone());
-        }
-    }
-    prevouts
-}
-
-/// Combines mempool-dependent prevouts (captured under a read guard) with
-/// UTXO-set prevouts (resolved without a pool guard) to build the full
-/// per-transaction context. Inputs found in neither source are marked
-/// missing.
-fn resolve_full_context(
-    ctx: &Context,
-    tx: &Tx,
-    mempool_prevouts: &HashMap<OutPoint, TxOut>,
-) -> (MempoolPackageTxContext, Vec<(OutPoint, TxOut)>) {
-    let mut missing_inputs = false;
-    let mut input_value = 0_u64;
-    let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
-
-    for input in &tx.inputs {
-        if input.previous_output == OutPoint::default() {
-            missing_inputs = true;
-            continue;
-        }
-        if let Some(output) = mempool_prevouts.get(&input.previous_output) {
-            input_value = input_value.saturating_add(output.value.to_sat());
-            prevouts.push((input.previous_output, output.clone()));
-            continue;
-        }
-        if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-            input_value = input_value.saturating_add(live.txout.value.to_sat());
-            prevouts.push((input.previous_output, live.txout.clone()));
-            continue;
-        }
-        missing_inputs = true;
-    }
-
-    let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
-        sum.saturating_add(output.value.to_sat())
-    });
-    let fee = input_value.saturating_sub(output_value);
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
-
-    (
-        MempoolPackageTxContext {
-            fee,
-            vsize,
-            sigop_cost,
-            missing_inputs,
-        },
-        prevouts,
-    )
-}
-
-fn package_contexts(
-    ctx: &Context,
-    pool: &bitcoin_rs_mempool::Mempool,
-    txs: &[Tx],
-) -> Vec<MempoolPackageTxContext> {
-    let mut package_outputs: HashMap<(Txid, u32), u64> = HashMap::new();
-    let mut contexts = Vec::with_capacity(txs.len());
-
-    for tx in txs {
-        let mut missing_inputs = false;
-        let mut input_value = 0_u64;
-        let mut prevouts: Vec<(OutPoint, TxOut)> = Vec::new();
-
-        for input in &tx.inputs {
-            if input.previous_output == OutPoint::default() {
-                missing_inputs = true;
-                continue;
-            }
-            let key = (input.previous_output.txid, input.previous_output.vout);
-            if let Some(value) = package_outputs.get(&key) {
-                input_value = input_value.saturating_add(*value);
-                prevouts.push((
-                    input.previous_output,
-                    TxOut {
-                        value: Amount::from_sat(*value),
-                        script_pubkey: Script::new(),
-                    },
-                ));
-                continue;
-            }
-            if let Some(parent) = pool.transaction_by_txid(&input.previous_output.txid)
-                && let Ok(vout) = usize::try_from(input.previous_output.vout)
-                && let Some(output) = parent.outputs.get(vout)
-            {
-                input_value = input_value.saturating_add(output.value.to_sat());
-                prevouts.push((input.previous_output, output.clone()));
-                continue;
-            }
-            if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-                input_value = input_value.saturating_add(live.txout.value.to_sat());
-                prevouts.push((input.previous_output, live.txout.clone()));
-                continue;
-            }
-            missing_inputs = true;
-        }
-
-        let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
-            sum.saturating_add(output.value.to_sat())
-        });
-        let fee = input_value.saturating_sub(output_value);
-        let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-        let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
-
-        contexts.push(MempoolPackageTxContext {
-            fee,
-            vsize,
-            sigop_cost,
-            missing_inputs,
-        });
-
-        let txid = tx.txid();
-        for (vout, output) in tx.outputs.iter().enumerate() {
-            let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert((txid, vout), output.value.to_sat());
-        }
-    }
-
-    contexts
-}
-
-/// Computes the total sigop cost for a transaction given resolved prevouts.
-///
-/// Mirrors the consensus `total_sigop_cost` using public script-crate counters:
-/// legacy sigops × 4, plus P2SH redeem-script accurate sigops × 4, plus
-/// segwit witness-program sigops.
-fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u64 {
-    let mut cost = u64::from(count_tx_legacy(tx)).saturating_mul(4);
-    for input in &tx.inputs {
-        let prevout = prevouts
-            .iter()
-            .find(|(op, _)| *op == input.previous_output)
-            .map(|(_, txout)| txout);
-        let Some(prevout) = prevout else {
-            continue;
-        };
-        let redeem_script = last_push(&input.script_sig);
-        if is_p2sh(&prevout.script_pubkey) {
-            if let Some(redeem) = redeem_script {
-                cost = cost.saturating_add(u64::from(count_accurate(redeem)).saturating_mul(4));
-            }
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem_script.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(u64::from(count_segwit(program, &input.witness)));
-        }
-    }
-    cost
-}
-
-/// Returns the last data push from a script, or `None`.
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
-}
-
-/// Counts sigops accurately (multisig uses the preceding pushnum value).
-fn count_accurate(script: &[u8]) -> u32 {
-    let mut count = 0_u32;
-    let mut pushed_number = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(op)) => match op {
-                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
-                    count = count.saturating_add(1);
-                    pushed_number = None;
-                }
-                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
-                    count = count.saturating_add(u32::from(pushed_number.unwrap_or(20)));
-                    pushed_number = None;
-                }
-                other => pushed_number = opcode::decode_pushnum(other),
-            },
-            Ok(Instruction::PushBytes(_)) => pushed_number = None,
-            Err(_) => break,
-        }
-    }
-    count
-}
-
 pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "psbt is required")?;
     let extract = optional_bool(params, 1, true)?;
@@ -1133,7 +852,7 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, RpcError> {
 
     let chunk_count = bytes.len() / 4;
     let mut out = Vec::with_capacity(chunk_count * 3);
-    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+    for (index, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let last = index + 1 == chunk_count;
         let pad2 = chunk[2] == b'=';
         let pad3 = chunk[3] == b'=';
@@ -1224,8 +943,8 @@ mod tests {
         AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park,
     };
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
+        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+        encode::double_sha256,
     };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -1245,16 +964,16 @@ mod tests {
     fn fixture_genesis() -> Block {
         let coinbase = Tx {
             version: 1,
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x51; 4].into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
+                script_sig: vec![0x51; 4],
+                sequence: u32::MAX,
+                witness: Vec::new(),
             }],
             outputs: vec![TxOut {
-                value: Amount::from_sat(50),
-                script_pubkey: vec![0x51].into(),
+                value: 50,
+                script_pubkey: vec![0x51],
             }],
         };
         let mut block = Block {
@@ -1263,7 +982,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: CompactTarget::from_consensus(0),
+                bits: 0,
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -1660,7 +1379,7 @@ mod tests {
     fn distinct_block(marker: u8) -> Block {
         let mut block = fixture_genesis();
         if let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) {
-            input.script_sig = vec![marker; 4].into();
+            input.script_sig = vec![marker; 4];
         }
         block.header.merkle_root = merkle_root_for(&block.txs);
         block
@@ -1674,16 +1393,16 @@ mod tests {
         // MerkleBlock seam, whose decoder rejects input-less transactions.
         let extra = Tx {
             version: 2,
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: Vec::new(),
             }],
             outputs: vec![TxOut {
-                value: Amount::from_sat(1_000 + u64::from(marker)),
-                script_pubkey: vec![0x51].into(),
+                value: 1_000 + u64::from(marker),
+                script_pubkey: vec![0x51],
             }],
         };
         block.txs.push(extra);
@@ -2213,8 +1932,8 @@ mod tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
             TxOut {
-                value: Amount::from_sat(value),
-                script_pubkey: retry_spendable_script().into(),
+                value,
+                script_pubkey: retry_spendable_script(),
             },
             false,
             1,
@@ -2229,16 +1948,16 @@ mod tests {
     fn retry_tx(prevout: OutPoint, output_value: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
             inputs: vec![TxIn {
                 previous_output: prevout,
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: vec![vec![0x51]].into(),
+                script_sig: Vec::new(),
+                sequence: 0xffff_ffff,
+                witness: vec![vec![0x51]],
             }],
             outputs: vec![TxOut {
-                value: Amount::from_sat(output_value),
-                script_pubkey: retry_spendable_script().into(),
+                value: output_value,
+                script_pubkey: retry_spendable_script(),
             }],
         }
     }
@@ -2272,6 +1991,7 @@ mod tests {
         let child_txid = child.txid();
         let child_hex = retry_raw_hex(&child);
 
+        // Provisional refusals reach this seam too, so retry must rebuild missing inputs.
         // Arm the admission park gate: the first `admit_transaction` on this
         // gateway will block before the write lock, signal `parked`, and wait
         // for `release`.
@@ -2372,11 +2092,11 @@ mod gettxout_via_utxo_tests {
         let ctx = Arc::new(Context::new());
         let tx = Tx {
             version: 2,
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: vec![0x51].into(),
+                value: 50_000,
+                script_pubkey: vec![0x51],
             }],
         };
         let txid = ctx.add_transaction(tx);
@@ -2397,8 +2117,7 @@ mod acceptance_tests {
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
     use bitcoin_rs_primitives::{
-        Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
-        TxOut, Txid, Witness, consensus_bytes,
+        BlockHash, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -2421,8 +2140,8 @@ mod acceptance_tests {
         changes.add(UtxoAdd::new(
             internal_outpoint(tag),
             TxOut {
-                value: Amount::from_sat(value),
-                script_pubkey: vec![0x51].into(),
+                value,
+                script_pubkey: vec![0x51],
             },
             false,
             7,
@@ -2435,15 +2154,15 @@ mod acceptance_tests {
     fn spending_tx(tag: u8, output_value: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
             inputs: vec![TxIn {
                 previous_output: spent_outpoint(tag),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
+                script_sig: Vec::new(),
+                sequence: 0xffff_ffff,
+                witness: Vec::new(),
             }],
             outputs: vec![TxOut {
-                value: Amount::from_sat(output_value),
+                value: output_value,
                 script_pubkey: {
                     let mut out = Vec::with_capacity(25);
                     out.push(0x76); // OP_DUP
@@ -2453,8 +2172,7 @@ mod acceptance_tests {
                     out.push(0x88); // OP_EQUALVERIFY
                     out.push(0xac); // OP_CHECKSIG
                     out
-                }
-                .into(),
+                },
             }],
         }
     }
@@ -2596,24 +2314,24 @@ mod acceptance_tests {
         let prev = spent_outpoint(1);
         let tx = Tx {
             version: 2,
-            lock_time: LockTime::ZERO,
+            lock_time: 0,
             inputs: vec![
                 TxIn {
                     previous_output: prev,
-                    script_sig: Script::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
+                    script_sig: Vec::new(),
+                    sequence: 0xffff_ffff,
+                    witness: Vec::new(),
                 },
                 TxIn {
                     previous_output: prev,
-                    script_sig: Script::new(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
+                    script_sig: Vec::new(),
+                    sequence: 0xffff_ffff,
+                    witness: Vec::new(),
                 },
             ],
             outputs: vec![TxOut {
-                value: Amount::from_sat(90_000),
-                script_pubkey: vec![0x51].into(),
+                value: 90_000,
+                script_pubkey: vec![0x51],
             }],
         };
 
@@ -2661,7 +2379,7 @@ mod acceptance_tests {
         seed_utxo(&ctx, 1, 100_000);
 
         let mut original = spending_tx(1, 90_000);
-        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+        original.inputs[0].sequence = 0xFFFF_FFFD;
         let original_hex = hex_of(&original);
         let original_txid = original.txid();
         let params = json!([original_hex]);
@@ -2834,7 +2552,7 @@ mod acceptance_tests {
                     prev_blockhash: BlockHash::from(prev_hash),
                     merkle_root: Hash256::default(),
                     time: BASE + STEP * height,
-                    bits: CompactTarget::from_consensus(0x207f_ffff),
+                    bits: 0x207f_ffff,
                     nonce: 0,
                 };
                 let id = tree
@@ -2897,8 +2615,8 @@ mod acceptance_tests {
 
         seed_utxo(&ctx, 1, 100_000);
         let mut tx = spending_tx(1, 90_000);
-        tx.lock_time = LockTime::from_consensus(lock_time);
-        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // non-final
+        tx.lock_time = lock_time;
+        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
 
         let result = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
         assert!(
@@ -2921,8 +2639,6 @@ mod acceptance_tests {
 #[cfg(test)]
 mod combinepsbt_tests {
     use alloc::sync::Arc;
-
-    use sonic_rs::JsonValueTrait as _;
 
     use super::*;
 
@@ -2962,10 +2678,8 @@ mod combinepsbt_tests {
 mod finalizepsbt_tests {
     use alloc::sync::Arc;
 
-    use bitcoin::hashes::Hash as _;
     use bitcoin::sighash::SighashCache;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
-    use sonic_rs::JsonValueTrait as _;
 
     use super::*;
 

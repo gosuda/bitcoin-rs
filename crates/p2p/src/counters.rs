@@ -5,7 +5,7 @@
 //! operator reads to tell a peer that is feeding the node from one that is
 //! merely connected to it.
 
-use std::io::{Read, Result as IoResult, Write};
+use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -115,6 +115,32 @@ impl<S> CountingStream<S> {
 }
 
 impl CountingStream<std::net::TcpStream> {
+    /// Takes a connected TCP stream and applies the P2P-04 socket contract.
+    ///
+    /// Disables Nagle so pipelined control messages (`inv`, `getdata`, `ping`)
+    /// are not held for a delayed ACK. Handshake and the message loop still
+    /// set their own read/write timeouts: those intervals differ by phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error `TcpStream::set_nodelay` returned.
+    pub fn from_connected(
+        stream: std::net::TcpStream,
+        counters: Arc<PeerCounters>,
+    ) -> IoResult<Self> {
+        stream.set_nodelay(true)?;
+        Ok(Self::new(stream, counters))
+    }
+
+    /// Whether Nagle's algorithm is disabled on this socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error `TcpStream::nodelay` returned.
+    pub fn nodelay(&self) -> IoResult<bool> {
+        self.inner.nodelay()
+    }
+
     /// Clones the socket, keeping the same counters.
     ///
     /// The writer thread takes a clone; both halves of the connection must
@@ -164,11 +190,27 @@ impl<S: Read> Read for CountingStream<S> {
         self.counters.record_recv(read);
         Ok(read)
     }
+
+    fn read_vectored(&mut self, buffers: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        let read = self.inner.read_vectored(buffers)?;
+        self.counters.record_recv(read);
+        Ok(read)
+    }
 }
 
 impl<S: Write> Write for CountingStream<S> {
     fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
         let written = self.inner.write(buffer)?;
+        self.counters.record_sent(written);
+        Ok(written)
+    }
+
+    /// Production `write_message` emits the 24-byte header and payload as
+    /// one `write_vectored` call. The default `Write` adapter would write
+    /// only the first slice, splitting that into two syscalls and counting
+    /// only the header if the caller treated the return as a full write.
+    fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+        let written = self.inner.write_vectored(buffers)?;
         self.counters.record_sent(written);
         Ok(written)
     }
@@ -248,6 +290,133 @@ mod tests {
         assert_eq!(counters.last_recv(), 0, "an empty read is not activity");
     }
 
+    /// CONTRACT: P2P-04. Vectored writes count every slice, not only the first.
+    ///
+    /// `write_message` emits header and payload as two `IoSlice`s. The default
+    /// `Write::write_vectored` would take only the header and leave the payload
+    /// for a second syscall; this wrapper must not reintroduce that split.
+    #[test]
+    fn a_vectored_write_counts_every_slice() {
+        struct VectoredSink {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for VectoredSink {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                panic!("write_vectored must not fall back to write");
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.calls += 1;
+                let mut written = 0;
+                for buffer in buffers {
+                    self.bytes.extend_from_slice(buffer);
+                    written += buffer.len();
+                }
+                Ok(written)
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            VectoredSink {
+                calls: 0,
+                bytes: Vec::new(),
+            },
+            Arc::clone(&counters),
+        );
+        let header = [1_u8, 2, 3, 4];
+        let payload = [5_u8, 6, 7];
+        let written = stream
+            .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 7);
+        assert_eq!(counters.bytes_sent(), 7);
+        assert_eq!(stream.inner.calls, 1);
+        assert_eq!(stream.inner.bytes, [1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    /// `write_message` through this wrapper still issues one vectored write.
+    #[test]
+    fn write_message_through_the_wrapper_is_one_vectored_write() {
+        use bitcoin::p2p::Magic;
+
+        use crate::wire::{Message, write_message};
+
+        struct VectoredSink {
+            calls: usize,
+            writes: usize,
+        }
+        impl Write for VectoredSink {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                self.writes += 1;
+                panic!("write_message must not fall back to write");
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.calls += 1;
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            VectoredSink {
+                calls: 0,
+                writes: 0,
+            },
+            Arc::clone(&counters),
+        );
+        let written = write_message(&mut stream, Magic::BITCOIN, &Message::Ping(42))
+            .unwrap_or_else(|error| panic!("write_message failed: {error}"));
+
+        assert_eq!(
+            u64::try_from(written).unwrap_or_else(|_| panic!("framed ping fits in u64")),
+            counters.bytes_sent()
+        );
+        assert_eq!(stream.inner.calls, 1);
+        assert_eq!(stream.inner.writes, 0);
+        assert!(written > 24, "framed ping is header plus 8-byte payload");
+    }
+
+    /// `from_connected` is the socket-posture owner: Nagle is off.
+    #[test]
+    fn from_connected_disables_nagle() {
+        use std::net::{TcpListener, TcpStream};
+
+        let listener =
+            TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| panic!("bind failed: {error}"));
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("local_addr failed: {error}"));
+        let accepting = std::thread::spawn(move || listener.accept());
+        let client =
+            TcpStream::connect(addr).unwrap_or_else(|error| panic!("connect failed: {error}"));
+        assert!(
+            !client
+                .nodelay()
+                .unwrap_or_else(|error| panic!("nodelay query failed: {error}")),
+            "a raw TcpStream starts with Nagle enabled"
+        );
+
+        let wrapped = CountingStream::from_connected(client, Arc::new(PeerCounters::default()))
+            .unwrap_or_else(|error| panic!("from_connected failed: {error}"));
+        assert!(
+            wrapped
+                .nodelay()
+                .unwrap_or_else(|error| panic!("wrapped nodelay query failed: {error}")),
+            "from_connected owns TCP_NODELAY"
+        );
+
+        drop(wrapped);
+        let _accepted = accepting.join();
+    }
+
     /// A cloned socket counts into the same place as the original.
     ///
     /// The writer thread owns a clone, so if the clone carried its own counters
@@ -291,6 +460,48 @@ mod tests {
         let _accepted = accepting.join();
     }
 
+    /// getpeerinfo byte accounting (module header, Core `CNode` parity):
+    /// a vectored header+payload write counts every byte exactly once and
+    /// forwards as one inner `write_vectored` call. The default `Write` impl
+    /// would split the coalescing this wrapper exists to preserve.
+    #[test]
+    fn a_vectored_write_counts_every_slice_in_one_inner_call() {
+        struct RecordingWriter {
+            writes: usize,
+            vectored: usize,
+        }
+        impl Write for RecordingWriter {
+            fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
+                self.writes += 1;
+                Ok(buffer.len())
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.vectored += 1;
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let inner = RecordingWriter {
+            writes: 0,
+            vectored: 0,
+        };
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(inner, Arc::clone(&counters));
+        let header = [0_u8; 24];
+        let payload = [1_u8; 8];
+        let written = stream
+            .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 32);
+        assert_eq!(counters.bytes_sent(), 32);
+        assert_eq!(stream.inner.vectored, 1);
+        assert_eq!(stream.inner.writes, 0);
+    }
+
     /// Nothing sent means no timestamp, which is what Core reports as zero.
     #[test]
     fn an_untouched_connection_reports_no_activity() {
@@ -298,5 +509,125 @@ mod tests {
         assert_eq!(counters.bytes_sent(), 0);
         assert_eq!(counters.last_send(), 0);
         assert_eq!(counters.last_recv(), 0);
+    }
+
+    /// Default `Write::write_vectored` writes only the first non-empty slice.
+    /// Production `write_message` emits header + payload through that method,
+    /// so the wrapper must forward both slices and count every byte taken.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn a_vectored_write_counts_every_slice_the_socket_took() {
+        struct VectoredWriter;
+        impl Write for VectoredWriter {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_vectored must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(VectoredWriter, Arc::clone(&counters));
+        let written = stream
+            .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 10);
+        assert_eq!(counters.bytes_sent(), 10);
+    }
+
+    /// A short vectored write still counts only the bytes the inner writer
+    /// accepted, matching the scalar `write` contract.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn a_short_vectored_write_counts_what_the_socket_took() {
+        struct ShortVectoredWriter;
+        impl Write for ShortVectoredWriter {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_vectored must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                Ok(buffers
+                    .iter()
+                    .map(|buffer| buffer.len())
+                    .sum::<usize>()
+                    .min(3))
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(ShortVectoredWriter, Arc::clone(&counters));
+        let written = stream
+            .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 3);
+        assert_eq!(counters.bytes_sent(), 3);
+    }
+
+    /// `write_message` must reach the inner `write_vectored` through this
+    /// wrapper. Falling back to `write` would split header and payload into
+    /// two syscalls and under-count if the first slice were taken as the whole
+    /// message.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`. Syscall shape is the
+    /// named invariant; elapsed time is `crates/p2p/benches/write_message.rs`.
+    #[test]
+    fn write_message_through_counting_stream_stays_vectored() {
+        struct FailOnUnvectored {
+            calls: Arc<AtomicU64>,
+        }
+        impl Write for FailOnUnvectored {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_message must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut stream = CountingStream::new(
+            FailOnUnvectored {
+                calls: Arc::clone(&calls),
+            },
+            Arc::clone(&counters),
+        );
+        let written = crate::wire::write_message(
+            &mut stream,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(42),
+        )
+        .unwrap_or_else(|error| panic!("write_message failed: {error}"));
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "header and payload in one writev"
+        );
+        assert_eq!(
+            counters.bytes_sent(),
+            u64::try_from(written).unwrap_or(u64::MAX)
+        );
     }
 }

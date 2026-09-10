@@ -519,11 +519,15 @@ fn fee_estimates(handler: &Handler) -> Response {
             .dispatch("estimatesmartfee", &sonic_json!([target]))
             .ok()
             .and_then(|v| v.get("feerate").and_then(sonic_rs::JsonValueTrait::as_f64))
-            .map(|v| v * 100_000_000.0 / 1000.0)
+            .map(fee_rate_sat_per_vbyte)
             .unwrap_or(1.0);
         values.insert(target.to_string(), json!(fee));
     }
     json_response(values)
+}
+
+pub(super) fn fee_rate_sat_per_vbyte(btc_per_kvb: f64) -> f64 {
+    btc_per_kvb * 100_000.0
 }
 pub(super) fn summary(ctx: &Context, text: &str, address: Option<&str>) -> Response {
     parse_script(text).map_or_else(|r| r, |h| summary_for(ctx, h, address))

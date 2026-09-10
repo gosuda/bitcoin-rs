@@ -2,7 +2,7 @@
 //!
 //! Replaces the `bitcoin::Script`/`Transaction::total_sigop_cost` counters the
 //! workspace used before the native-primitives migration. Counting semantics
-//! mirror Core and rust-bitcoin exactly: `OP_CHECKSIG`/`OP_CHECKSIGVERIFY`
+//! follow Core: `OP_CHECKSIG`/`OP_CHECKSIGVERIFY`
 //! cost 1, `OP_CHECKMULTISIG`/`OP_CHECKMULTISIGVERIFY` cost 20 under legacy
 //! counting or the preceding small-integer push value under accurate counting,
 //! data pushes are skipped, and a malformed push ends the count (Core's
@@ -15,6 +15,12 @@ use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p
 /// Counts legacy sigops in a script (Core's `GetSigOpCount(false)`).
 pub fn count_legacy(script: &[u8]) -> u32 {
     count_script(script, false)
+}
+
+/// Counts script sigops with the BIP16/BIP141 accurate multisig rule.
+/// Only an immediately preceding `OP_1` through `OP_16` supplies the key count.
+pub fn count_accurate(script: &[u8]) -> u32 {
+    count_script(script, true)
 }
 
 /// Counts segwit-v0 sigops for a witness program and witness stack.
@@ -31,7 +37,7 @@ pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
     }
     witness
         .last()
-        .map_or(0, |witness_script| count_script(witness_script, true))
+        .map_or(0, |witness_script| count_accurate(witness_script))
 }
 
 /// Counts taproot sigops under BIP342's per-input budget model.
@@ -73,12 +79,14 @@ fn count_script(script: &[u8], accurate: bool) -> u32 {
             Ok(Instruction::Op(op)) => match op {
                 opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
                     count = count.saturating_add(1);
+                    pushnum_cache = None;
                 }
                 opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
                     match (accurate, pushnum_cache) {
                         (true, Some(keys)) => count = count.saturating_add(u32::from(keys)),
                         _ => count = count.saturating_add(20),
                     }
+                    pushnum_cache = None;
                 }
                 other => pushnum_cache = opcode::decode_pushnum(other),
             },
@@ -141,6 +149,42 @@ mod tests {
         let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
         assert_eq!(count_segwit(&p2wpkh, &[]), 1);
         assert_eq!(count_segwit(&[opcode::OP_DUP], &[]), 0);
+    }
+
+    /// Core v31.1 `CScript::GetSigOpCount` updates `lastOpcode` for every opcode.
+    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp>
+    #[test]
+    fn accurate_multisig_requires_an_immediately_preceding_pushnum() {
+        // Core advances lastOpcode after EVERY opcode. rust-bitcoin 0.32's
+        // count_sigops retains the old OP_N across sigop opcodes, so it is not
+        // an oracle for these cases. These expected costs are direct Core
+        // vectors: one CHECKSIG plus the default 20, or two plus 20.
+        for (script, expected) in [
+            (
+                vec![pushnum(2), opcode::OP_CHECKSIG, opcode::OP_CHECKMULTISIG],
+                21,
+            ),
+            (
+                vec![
+                    pushnum(2),
+                    opcode::OP_CHECKMULTISIG,
+                    opcode::OP_CHECKMULTISIG,
+                ],
+                22,
+            ),
+            (
+                vec![
+                    pushnum(2),
+                    opcode::OP_CHECKSIGVERIFY,
+                    opcode::OP_CHECKMULTISIGVERIFY,
+                ],
+                21,
+            ),
+        ] {
+            assert_eq!(super::count_accurate(&script), expected);
+            let p2wsh = [vec![0x00, 0x20], vec![7; 32]].concat();
+            assert_eq!(count_segwit(&p2wsh, &[script]), expected);
+        }
     }
 
     #[test]

@@ -6,19 +6,20 @@
 //! Without it the node follows the chain forward and cannot leave a branch that
 //! loses, which is the difference between a chain follower and a full node.
 
-use std::sync::Arc;
-
 use alloc::vec::Vec;
 
 use bitcoin_rs_chain::{NodeId, ReorgPlan, current_unix_seconds, plan_reorg};
-use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
-use bitcoin_rs_primitives::{Block, DecodeError, Hash256, Tx, Txid};
+use bitcoin_rs_mempool::AdmissionOrigin;
+use bitcoin_rs_primitives::{Block, DecodeError, Hash256, Txid};
 use bitcoin_rs_storage::StorageError;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 
 use crate::apply::{ChainTransition, Chainstate};
 use crate::chain_effects::ChainFollowers;
 use crate::{ApplyError, DisconnectError};
+
+#[cfg(test)]
+mod tests;
 
 /// Settles a rolled-back disconnect marker once the reorg owner has released
 /// its chain-transition proof.
@@ -34,6 +35,39 @@ fn settle_disconnect_debt(handles: &Chainstate) -> core::result::Result<(), Reor
         Ok(false) => Ok(()),
         Err(error) => Err(ReorgError::CheckpointSettlement(anyhow::Error::new(error))),
     }
+}
+
+/// Completes a coherent reorg attempt before publishing its disconnect debt.
+/// Potentially torn state retains the odd generation and never checkpoints.
+fn settle_reorg_transition(
+    transition: ChainTransition<'_>,
+    outcome: core::result::Result<(), ReorgError>,
+) -> core::result::Result<(), ReorgError> {
+    if outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
+        return outcome;
+    }
+    let handles = transition.chainstate();
+    if let Err(source) = transition.finish() {
+        handles.admission.close_permanently();
+        handles
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        tracing::error!(
+            original = ?outcome,
+            finish = %source,
+            "reorg generation could not be settled; admission remains closed"
+        );
+        return Err(ReorgError::TransitionSettlement {
+            source: Box::new(source),
+            original: outcome.err().map(Box::new),
+        });
+    }
+    if let Err(settlement) = settle_disconnect_debt(handles) {
+        tracing::error!(%settlement, "reorg checkpoint debt remains unsettled");
+        outcome?;
+        return Err(settlement);
+    }
+    outcome
 }
 
 /// Maximum number of disconnect-side block bodies held in memory at once
@@ -67,18 +101,18 @@ pub fn invalidate_block(
     let transition = handles
         .begin_transition()
         .map_err(|source| ReorgError::Unavailable(Box::new(source)))?;
-    loop {
-        let (root, target) = {
+    // Keep read-only planning refusals in the same settlement path as the
+    // execution outcome; an early `?` must not strand a coherent generation.
+    let outcome = (|| {
+        let target = {
             let tree = handles.block_tree.read();
             let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
             if tree.node(root).map_err(ReorgError::Plan)?.height == 0 {
                 return Err(ReorgError::CannotInvalidateGenesis);
             }
-            let target = tree
-                .tip_after_invalidation(root)
+            tree.tip_after_invalidation(root)
                 .map_err(ReorgError::Plan)?
-                .ok_or(ReorgError::NoValidTip)?;
-            (root, target)
+                .ok_or(ReorgError::NoValidTip)?
         };
 
         let plan = current_reorg_plan(handles, target)?;
@@ -95,24 +129,6 @@ pub fn invalidate_block(
             preflight_disconnect_bodies(handles, &disconnect_nodes, &mut no_staged_body)?;
         }
 
-        let published_target = {
-            let mut tree = handles.block_tree.write();
-            let current_root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
-            let current_target = tree
-                .tip_after_invalidation(current_root)
-                .map_err(ReorgError::Plan)?
-                .ok_or(ReorgError::NoValidTip)?;
-            if current_root != root || current_target != target {
-                continue;
-            }
-            tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
-            let tip = tree.tip().ok_or(ReorgError::NoValidTip)?;
-            handles.chain_tip.store(Some(tip.clone()));
-            handles.assume_valid_gate.evaluate(&tree);
-            tip.tip_id
-        };
-        debug_assert_eq!(published_target, target);
-
         let (progress, outcome) = execute_streamed_plan(
             &transition,
             followers,
@@ -120,50 +136,34 @@ pub fn invalidate_block(
             &connect,
             &mut no_staged_body,
         );
-        match &outcome {
-            // A fatal disconnect marker left the chainstate torn: abort
-            // without reconsidering anything.
-            Err(ReorgError::Fatal(_)) => {}
-            // Nonfatal: the final active chain is the successful connected
-            // prefix. Reconsider exactly the disconnected transactions that
-            // remain off-chain, once, while the transition is still held.
-            Ok(()) => {
-                reconsider_disconnected_transactions(
-                    handles,
-                    &disconnect_nodes,
-                    progress.disconnected,
-                    &connect[..progress.connected],
-                    &mut no_staged_body,
-                );
-            }
-            Err(_) => reconsider_disconnected_transactions(
+        if progress.disconnected == disconnect_nodes.len()
+            && !outcome.as_ref().is_err_and(ReorgError::requires_recovery)
+        {
+            let mut tree = handles.block_tree.write();
+            let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
+            tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
+            let tip = tree.tip().ok_or(ReorgError::NoValidTip)?;
+            handles.chain_tip.store(Some(tip));
+            handles.assume_valid_gate.evaluate(&tree);
+        }
+        if !outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
+            reconsider_disconnected_transactions(
                 handles,
                 &disconnect_nodes,
                 progress.disconnected,
                 &connect[..progress.connected],
                 &mut no_staged_body,
-            ),
+            );
         }
-        if matches!(&outcome, Ok(())) {
-            let _ = transition.finish();
-        } else {
-            drop(transition);
-        }
-        let settle_debt = !matches!(&outcome, Err(ReorgError::Fatal(_)));
-        if settle_debt {
-            if let Err(settlement) = settle_disconnect_debt(handles) {
-                outcome?;
-                return Err(settlement);
-            }
-        }
-        return outcome;
-    }
+        outcome
+    })();
+    settle_reorg_transition(transition, outcome)
 }
 
 /// Why a branch switch stopped, and what the chain looks like now.
 ///
-/// Four outcomes rather than one error type, because the caller must act
-/// differently for each and the difference is exactly how much damage there is.
+/// Typed outcomes preserve whether the reached state is coherent or requires
+/// recovery, along with the committed prefix and original failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ReorgError {
     /// The requested block hash is unknown.
@@ -286,11 +286,14 @@ pub enum ReorgError {
     },
     /// A connect failed after some of the new branch was applied.
     ///
-    /// The chain is consistent at a prefix of the target branch: every block
-    /// before this one committed fully. The switch is abandoned rather than
-    /// rolled back — undoing the prefix means disconnecting blocks that just
+    /// Every block before this one committed fully. A refusal before the UTXO
+    /// commit leaves a consistent prefix of the target branch; a
+    /// [`ApplyError::UtxoCommit`] failure may leave partial coin changes and
+    /// requires recovery with admission closed. The switch is abandoned
+    /// rather than rolled back — undoing the prefix means disconnecting blocks that just
     /// applied, which can fail Fatal and turn a recoverable stop into an
-    /// unrecoverable one. A later switch can move the chain from here.
+    /// unrecoverable one. A later switch can continue from a coherent prefix;
+    /// a failed UTXO commit must first recover its authoritative state.
     ///
     /// When `source` is permanently invalid (`PoW`, `nBits`, or consensus),
     /// the failed block's subtree is invalidated while the chain transition is
@@ -323,6 +326,16 @@ pub enum ReorgError {
     /// refuses rather than serving it.
     #[error("reorg left the chainstate inconsistent: {0}")]
     Fatal(#[source] Box<DisconnectError>),
+    /// The chain walk concluded, but its stable generation could not be
+    /// published. Admission is permanently closed and shutdown is requested.
+    #[error("reorg generation could not be settled: {source}")]
+    TransitionSettlement {
+        /// Why the reserved even generation could not be published.
+        #[source]
+        source: Box<ApplyError>,
+        /// Execution failure retained when settlement followed a refusal.
+        original: Option<Box<Self>>,
+    },
     /// A nonfatal reorg completed, but the rolled-back state could not be
     /// checkpointed. The chain is coherent at the reached tip and the
     /// disconnect marker remains `RolledBack`; a restart will refuse the data
@@ -331,12 +344,39 @@ pub enum ReorgError {
     CheckpointSettlement(#[source] anyhow::Error),
 }
 
+impl ReorgError {
+    /// Whether the execution outcome forbids stable publication and derived
+    /// work. Keep this decision with the original typed cause, not a second
+    /// disposition that can drift from it.
+    fn requires_recovery(&self) -> bool {
+        match self {
+            Self::Fatal(_) | Self::TransitionSettlement { .. } => true,
+            Self::ConnectFailed { source, .. } => {
+                matches!(source.as_ref(), ApplyError::UtxoCommit(_))
+            }
+            Self::UnknownBlock(_)
+            | Self::CannotInvalidateGenesis
+            | Self::NoValidTip
+            | Self::Plan(_)
+            | Self::MissingBody { .. }
+            | Self::BodyStore { .. }
+            | Self::BodyDecode { .. }
+            | Self::BodyHashMismatch { .. }
+            | Self::BodyBytesMismatch { .. }
+            | Self::Unavailable(_)
+            | Self::Refused { .. }
+            | Self::DisconnectBodyLost { .. }
+            | Self::CheckpointSettlement(_) => false,
+        }
+    }
+}
+
 /// Switches the applied chain to `target`.
 ///
 /// Disconnects back to the common ancestor, then applies the target branch
 /// forward. Both walks take the plan's order: `disconnect` runs from the old
 /// tip downward, `connect` from the ancestor's child upward. `connected_body`
-/// runs once per committed new-branch block after the transition guard releases.
+/// runs once per committed new-branch block while the transition is still held.
 ///
 /// # Errors
 ///
@@ -388,8 +428,8 @@ where
         // G5: start the guard after fallible read-only planning and before the
         // first chain mutation. A replan above drops the lock without
         // beginning a generation, so the gateway stays even and the loop
-        // retries. An error during execution leaves the generation odd by
-        // design — admission stays closed.
+        // retries. Execution settles coherent prefixes explicitly; possibly
+        // torn state retains the odd generation until recovery.
         let transition = handles
             .begin_transition_locked(lock)
             .map_err(|_| ReorgError::Unavailable(Box::new(ApplyError::Shutdown)))?;
@@ -400,37 +440,21 @@ where
             &connect,
             &mut staged_body,
         );
-        match &outcome {
-            // A fatal disconnect marker left the chainstate torn: abort
-            // without reconsidering anything.
-            Err(ReorgError::Fatal(_)) => {}
-            // Every other outcome leaves the final active chain known: the
-            // successful connected prefix. Reconsider exactly the
-            // disconnected transactions that remain off-chain, exactly once,
-            // while the chain transition is still held.
-            _ => reconsider_disconnected_transactions(
+        if !outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
+            // Reconsider only against a coherent committed prefix, before
+            // reopening admission at the reserved even generation.
+            reconsider_disconnected_transactions(
                 handles,
                 &disconnect_nodes,
                 progress.disconnected,
                 &connect[..progress.connected],
                 &mut staged_body,
-            ),
+            );
         }
         for body in &connect[..progress.connected] {
             connected_body(body.hash);
         }
-        if matches!(&outcome, Ok(())) {
-            let _ = transition.finish();
-        } else {
-            drop(transition);
-        }
-        if !matches!(&outcome, Err(ReorgError::Fatal(_))) {
-            if let Err(settlement) = settle_disconnect_debt(handles) {
-                outcome?;
-                return Err(settlement);
-            }
-        }
-        outcome?;
+        settle_reorg_transition(transition, outcome)?;
         if let Some((hash, height)) = missing_connect {
             return Err(ReorgError::MissingBody { hash, height });
         }
@@ -583,7 +607,7 @@ where
 /// disconnect order, and block order within a block, which consensus keeps
 /// topological — so a transaction's inputs are decided before the
 /// transaction spending them is offered. Coinbase transactions are skipped
-/// by structure (`is_coinbase`), never by position: a disconnected coinbase
+/// by the mempool candidate preparer, never by position: a disconnected coinbase
 /// must never re-enter the mempool.
 ///
 /// Pricing reads the post-disconnect UTXO set plus the outputs of
@@ -618,72 +642,21 @@ fn reconsider_disconnected_transactions<F>(
         .iter()
         .flat_map(|body| body.block.txs.iter().map(bitcoin_rs_primitives::Tx::txid))
         .collect();
-    let mut offered: HashMap<Txid, Vec<u64>> = HashMap::new();
-    let mut entries = Vec::new();
+    let mut candidates = bitcoin_rs_mempool::reconsider::DisconnectedCandidates::new(time, height);
     for (hash, block_height) in disconnect_nodes[..disconnected_count].iter().rev() {
         let Ok(body) = load_branch_body(handles, *hash, *block_height, staged_body) else {
             continue;
         };
         for tx in &body.block.txs {
-            if is_coinbase(tx) || still_on_chain.contains(&tx.txid()) {
+            if still_on_chain.contains(&tx.txid()) {
                 continue;
             }
-            let Some((entry, output_values)) =
-                reconsider_entry(&handles.utxo, tx, time, height, &offered)
-            else {
-                continue;
-            };
-            offered.insert(tx.txid(), output_values);
-            entries.push(entry);
+            candidates.offer(tx, |outpoint| handles.utxo.get(outpoint));
         }
     }
     let _ = handles
         .mempool_gateway
-        .reconsider_disconnected(AdmissionOrigin::Reorg, entries);
-}
-
-/// Core's `IsCoinBase`: a single input spending the null prevout.
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
-}
-
-/// Prices `tx` for re-admission, or returns `None` when an input is neither a
-/// restored confirmed coin nor an output of an earlier candidate in the same
-/// batch.
-fn reconsider_entry(
-    utxo: &bitcoin_rs_utxo::UtxoSet,
-    tx: &Tx,
-    time: u64,
-    height: u32,
-    offered: &HashMap<Txid, Vec<u64>>,
-) -> Option<(MempoolEntry, Vec<u64>)> {
-    let mut input_total = 0_u64;
-    for input in &tx.inputs {
-        let outpoint = input.previous_output;
-        if let Some(output) = utxo.get(&outpoint) {
-            input_total = input_total.saturating_add(output.value.to_sat());
-            continue;
-        }
-        let values = offered.get(&input.previous_output.txid)?;
-        let value = values
-            .get(usize::try_from(input.previous_output.vout).ok()?)
-            .copied()?;
-        input_total = input_total.saturating_add(value);
-    }
-    let output_values: Vec<u64> = tx
-        .outputs
-        .iter()
-        .map(|output| output.value.to_sat())
-        .collect();
-    let output_total = output_values
-        .iter()
-        .fold(0_u64, |total, value| total.saturating_add(*value));
-    let fee = input_total.saturating_sub(output_total);
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    Some((
-        MempoolEntry::new(Arc::new(tx.clone()), vsize, fee, time, height),
-        output_values,
-    ))
+        .reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());
 }
 
 fn current_reorg_plan(
