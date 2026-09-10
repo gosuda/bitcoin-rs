@@ -13,10 +13,7 @@ use crate::{IndexError, IndexWriter};
 /// Format 3 is upgraded inside [`IndexWriter::open`] by
 /// resetting `ScriptHistory` only. This path still full-resets foreign
 /// versions and cursorless legacy tables so they can rebuild.
-pub fn open_writer<S>(
-    store: &Arc<S>,
-    generation: u64,
-) -> Result<IndexWriter<S>, IndexError>
+pub fn open_writer<S>(store: &Arc<S>, generation: u64) -> Result<IndexWriter<S>, IndexError>
 where
     S: bitcoin_rs_storage::KvStore,
 {

@@ -99,8 +99,8 @@ pub(crate) fn assert_oracle(bytes: &[u8], facts: &BlockFacts) {
     for (span, tx) in facts.transaction_spans().iter().zip(&oracle.txdata) {
         let start = usize::try_from(span.start())
             .unwrap_or_else(|error| panic!("fixture span start: {error}"));
-        let end = usize::try_from(span.end())
-            .unwrap_or_else(|error| panic!("fixture span end: {error}"));
+        let end =
+            usize::try_from(span.end()).unwrap_or_else(|error| panic!("fixture span end: {error}"));
         assert_eq!(&bytes[start..end], bitcoin::consensus::serialize(tx));
     }
 }
