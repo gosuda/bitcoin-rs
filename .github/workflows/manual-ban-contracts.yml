@@ -1,0 +1,167 @@
+name: manual-ban-contracts
+on:
+  push:
+    branches: [verify/manual-ban-contracts-20260910]
+    paths: [.github/workflows/manual-ban-contracts.yml, .github/prepare_manual_bans.py]
+permissions:
+  contents: write
+concurrency:
+  group: manual-ban-contracts-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        candidate: [expiry, ban]
+    defaults:
+      run:
+        working-directory: source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 76baf086b861057f5700da34c4ad0d4f5aab5966
+          path: source
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: source
+          cache-on-failure: true
+      - name: Record source and isolate inherited formatting
+        run: |
+          mkdir -p /tmp/ban-evidence
+          git rev-parse HEAD | tee /tmp/ban-evidence/base.txt
+          rustc --version --verbose | tee /tmp/ban-evidence/toolchain.txt
+          test "$(git hash-object ../tooling/.github/prepare_manual_bans.py)" = 2a88a17fb39f9c194d6bb69af2179d4b13f5587c
+          cargo fmt --all
+          python3 - <<'PY'
+          import subprocess
+          allowed = {'bin/bitcoin-rs/tests/gates/g20_formal_models.rs', 'crates/utxo/src/set/persistent.rs', 'crates/utxo/tests/overhaul_persistent_coins.rs'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed <= allowed, ('Unexpected formatting edits', sorted(changed))
+          PY
+          git diff --binary > /tmp/ban-evidence/formatting.patch
+          git diff --check
+          if ! git diff --quiet; then
+            git add -- bin/bitcoin-rs/tests/gates/g20_formal_models.rs crates/utxo/src/set/persistent.rs crates/utxo/tests/overhaul_persistent_coins.rs
+            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style: apply inherited rustfmt corrections'
+          fi
+          git rev-parse HEAD > /tmp/ban-evidence/format-head.txt
+          cargo fmt --all -- --check
+          git diff --exit-code
+      - name: Add regressions to the unchanged implementation
+        run: python3 ../tooling/.github/prepare_manual_bans.py ${{ matrix.candidate }}-tests
+      - name: Reproduce rejection and revocation failures
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, subprocess
+          cases = [('bitcoin-rs-rpc', 'expiry_tests', 'unrepresentable expiry must fail before ban mutation')] if os.environ['CANDIDATE'] == 'expiry' else [
+              ('bitcoin-rs-p2p', 'manual_ban_tests', 'manual ban left a matching lease active'),
+              ('bitcoin-rs-rpc', 'manual_ban_tests', 'RPC ban left the first matching lease active'),
+          ]
+          for package, test_filter, failure in cases:
+              result = subprocess.run(['cargo', 'test', '--locked', '-p', package, '--lib', test_filter, '--', '--nocapture'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              Path('/tmp/ban-evidence/red-' + package + '.txt').write_text(result.stdout)
+              print(result.stdout, flush=True)
+              assert result.returncode != 0 and 'test result: FAILED' in result.stdout and failure in result.stdout, 'No behavioral reproduction: ' + package
+              if package == 'bitcoin-rs-p2p':
+                  assert 'late ban must reject before registration and wire I/O' in result.stdout, 'Late-registration failure was not reproduced'
+          PY
+      - name: Apply the owner-local repair
+        id: fix
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          python3 ../tooling/.github/prepare_manual_bans.py "$CANDIDATE-fix"
+          cargo fmt --all
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, subprocess
+          allowed = {'crates/rpc/src/handlers/network.rs'}
+          if os.environ['CANDIDATE'] == 'ban':
+              allowed |= {'crates/p2p/src/lib.rs', 'crates/p2p/src/service.rs', 'crates/p2p/src/listener.rs', 'crates/p2p/src/peer.rs'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed == allowed, ('Unexpected source changes', sorted(changed))
+          Path('/tmp/ban-evidence/paths.txt').write_text('\n'.join(sorted(allowed)) + '\n')
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          git diff --binary > /tmp/ban-evidence/candidate.patch
+          git diff --numstat > /tmp/ban-evidence/scope.txt
+      - name: Native P2P regressions and real socket ban tests
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-p2p --lib --test listener_ban --test core_compat --no-fail-fast 2>&1 | tee /tmp/ban-evidence/p2p.txt
+      - name: RPC regressions through handler dispatch
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-rpc --lib --test handler_smoke --no-fail-fast 2>&1 | tee /tmp/ban-evidence/rpc.txt
+      - name: Node real socket transaction ingress
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test tx_ingress_e2e 2>&1 | tee /tmp/ban-evidence/ingress.txt
+      - name: Workspace strict Clippy
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/ban-evidence/clippy-workspace.txt
+      - name: Native consensus strict Clippy
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/ban-evidence/clippy-consensus.txt
+      - name: Native node strict Clippy
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/ban-evidence/clippy-node.txt
+      - name: Ownership and reference schema gates
+        if: ${{ !cancelled() && steps.fix.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership --test overhaul_evidence --test overhaul_reference_set 2>&1 | tee /tmp/ban-evidence/contracts.txt
+      - name: Publish the validated implementation only
+        env:
+          CANDIDATE: ${{ matrix.candidate }}
+        run: |
+          branch="validated/manual-$CANDIDATE-arm-20260910"
+          test -z "$(git ls-remote --heads origin "refs/heads/$branch")"
+          cargo fmt --all -- --check
+          git diff --check
+          git diff --exit-code -- Cargo.lock
+          while IFS= read -r path; do git add -- "$path"; done < /tmp/ban-evidence/paths.txt
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "fix: enforce manual ban $CANDIDATE contract"
+          git diff --exit-code
+          git rev-parse HEAD > /tmp/ban-evidence/head.txt
+          git ls-tree -r HEAD > /tmp/ban-evidence/tree.txt
+          git archive HEAD > /tmp/ban-evidence/source.tar
+          git push origin "HEAD:refs/heads/$branch"
+      - name: Preserve diagnostics and candidate changes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: manual-${{ matrix.candidate }}-${{ github.run_id }}
+          path: /tmp/ban-evidence/
+          if-no-files-found: error
+          retention-days: 7
