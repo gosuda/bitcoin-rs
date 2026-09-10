@@ -43,15 +43,16 @@ jobs:
       - name: Format
         run: cargo fmt --all
       - name: Clippy
-        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: Node tests
-        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast
+        run: cargo test -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast
       - name: Ownership gate
-        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
+        run: cargo test -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
       - name: Publish clean validated commit
         shell: bash
         run: |
           set -euo pipefail
+          git checkout "$BASE_SHA" -- Cargo.lock
           rm -f scripts/node-breaking-apply.py .github/workflows/node-breaking-apply-workbench.yml
           git add -A
           if git diff --cached --name-only "$BASE_SHA" | grep -Ev '^(crates/node/|docs/)' ; then
