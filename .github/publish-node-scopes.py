@@ -20,6 +20,22 @@ def blob(data):
     return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
 
 
+def read_payload(stage):
+    parts = stage.get('parts', [stage['label']])
+    extension = '.txt' if stage.get('encoding') == 'base85' else '.b64'
+    encoded = b''.join(Path('.github/node-scopes', name + extension).read_bytes().strip() for name in parts)
+    for repair in sorted(stage.get('repairs', []), key=lambda r: r['offset'], reverse=True):
+        offset = repair['offset']
+        old, new = repair['old'].encode(), repair['new'].encode()
+        if encoded[offset:offset + len(old)] != old:
+            raise ValueError('Unexpected transport bytes')
+        encoded = encoded[:offset] + new + encoded[offset + len(old):]
+    if blob(encoded + b'\n') != stage['payload_sha']:
+        raise ValueError('Payload transport hash mismatch: ' + stage['label'])
+    compressed = base64.b85decode(encoded) if stage.get('encoding') == 'base85' else base64.b64decode(encoded)
+    return json.loads(zlib.decompress(compressed))
+
+
 def checked_path(path):
     p = PurePosixPath(path)
     allowed = path.startswith('crates/node/') or path in {
@@ -35,9 +51,7 @@ def checked_path(path):
 
 
 plan = json.loads(Path('.github/node-scopes-plan.json').read_text())
-payloads = {s['label']: json.loads(zlib.decompress(base64.b64decode(
-    Path('.github/node-scopes', s['label'] + '.b64').read_bytes(), validate=False
-))) for s in plan['stages']}
+payloads = {s['label']: read_payload(s) for s in plan['stages']}
 run('git', 'checkout', '--detach', plan['base'])
 if git('status', '--porcelain').strip():
     raise RuntimeError('Expected a clean base checkout')
@@ -115,7 +129,6 @@ for stage in plan['stages']:
     refs.append(head + ':refs/heads/' + branch)
     report['stages'].append({'label': stage['label'], 'branch': branch, 'parent': parent, 'head': head, 'tree': payload['tree'], 'paths': changed, 'tests': stage['tests']})
     Path('/tmp/node-scopes-report.json').write_text(json.dumps(report, indent=2))
-# No branch is published before all scopes in this batch pass. No force updates.
 run('git', 'push', '--atomic', 'origin', *refs)
 report['published'] = True
 Path('/tmp/node-scopes-report.json').write_text(json.dumps(report, indent=2))
