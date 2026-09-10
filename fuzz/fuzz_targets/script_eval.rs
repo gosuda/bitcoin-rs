@@ -30,7 +30,11 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// `scripts/import-qa-assets.sh`; seeds written by that script use selector
 /// `0x00` (NONE) for raw scripts and `0x03` (TAPROOT) for the wrapped P2TR
 /// variant. Keep those indices in step with `FLAGS` below.
+// These selectors are an external source-level contract parsed by
+// `scripts/import_qa_assets.py`, rather than referenced by Rust code.
+#[allow(dead_code)]
 const QA_RAW_SELECTOR: usize = 0;
+#[allow(dead_code)]
 const QA_P2TR_SELECTOR: usize = 3;
 
 const FLAGS: [VerifyFlags; 6] = [
