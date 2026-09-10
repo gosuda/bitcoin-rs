@@ -1,0 +1,26 @@
+name: node-payload-check
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths: [.github/workflows/node-payload-check.yml]
+permissions:
+  contents: read
+jobs:
+  payloads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export staged payloads for byte comparison
+        run: |
+          tar -czf /tmp/node-payloads.tgz .github/node-scopes
+          sha256sum /tmp/node-payloads.tgz > /tmp/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-payloads
+          path: |
+            /tmp/node-payloads.tgz
+            /tmp/SHA256SUMS
+          retention-days: 7
