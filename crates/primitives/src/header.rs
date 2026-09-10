@@ -1,7 +1,7 @@
 //! Native block header type and header hash computation.
 
 use crate::{
-    BlockHash, Hash256,
+    BlockHash, CompactTarget, Hash256,
     encode::{DecodeError, deserialize, double_sha256},
 };
 
@@ -17,7 +17,7 @@ pub struct Header {
     /// Unix epoch seconds.
     pub time: u32,
     /// Compact proof-of-work target.
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Proof-of-work nonce.
     pub nonce: u32,
 }
@@ -34,7 +34,7 @@ impl Header {
         out[4..36].copy_from_slice(self.prev_blockhash.as_bytes());
         out[36..68].copy_from_slice(self.merkle_root.as_byte_array());
         out[68..72].copy_from_slice(&self.time.to_le_bytes());
-        out[72..76].copy_from_slice(&self.bits.to_le_bytes());
+        out[72..76].copy_from_slice(&self.bits.to_consensus().to_le_bytes());
         out[76..80].copy_from_slice(&self.nonce.to_le_bytes());
         out
     }
@@ -59,7 +59,7 @@ impl Header {
             prev_blockhash: BlockHash(Hash256::from_le_bytes(&prev)),
             merkle_root: Hash256::from_le_bytes(&merkle),
             time: u32::from_le_bytes(time),
-            bits: u32::from_le_bytes(bits),
+            bits: CompactTarget::from_consensus(u32::from_le_bytes(bits)),
             nonce: u32::from_le_bytes(nonce),
         }
     }
@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(header.version, 1);
         assert_eq!(header.time, 1_231_006_505);
         assert_eq!(header.nonce, 2_083_236_893);
-        assert_eq!(header.bits, 0x1d00_ffff);
+        assert_eq!(header.bits.to_consensus(), 0x1d00_ffff);
         assert_eq!(
             header.compute_hash(),
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"

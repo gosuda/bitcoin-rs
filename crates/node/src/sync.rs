@@ -1611,8 +1611,8 @@ mod tests {
     use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerSource, PeerTable};
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
-        consensus_bytes,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
+        Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
     };
     use bitcoin_rs_script::push_int;
     use bitcoin_rs_storage::StorageError;
@@ -1894,7 +1894,7 @@ mod tests {
         };
 
         let mut high_work = test_header(genesis.compute_hash(), 101);
-        high_work.bits = 0x2000_ffff;
+        high_work.bits = CompactTarget::from_consensus(0x2000_ffff);
         high_work.nonce = 0;
         while !pow_met(high_work.bits, Hash256::from(high_work.compute_hash())) {
             high_work.nonce = high_work.nonce.wrapping_add(1);
@@ -1965,7 +1965,7 @@ mod tests {
         let mut fork = Vec::new();
         for height in 1..=3_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = push_int(2).into();
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent = sync.handles.block_tree.write().insert_node(
                 Some(fork_parent),
@@ -2109,7 +2109,7 @@ mod tests {
         let mut fork = Vec::new();
         for height in 1..=3_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = push_int(2).into();
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent = sync.handles.block_tree.write().insert_node(
                 Some(fork_parent),
@@ -2128,7 +2128,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(main[1].block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing main branch tip"))?;
         let mut racing_coinbase = coinbase_transaction(3);
-        racing_coinbase.outputs[0].script_pubkey = push_int(3);
+        racing_coinbase.outputs[0].script_pubkey = push_int(3).into();
         let racing = mined_block_with_prev_hash(main[1].block_hash(), 3, vec![racing_coinbase]);
         stage_body(&sync, &racing);
         sync.handles.block_tree.write().insert_node(
@@ -2204,7 +2204,7 @@ mod tests {
         let mut fork = Vec::new();
         for height in 1..=2_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = push_int(2).into();
             let mut block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent = sync.handles.block_tree.write().insert_node(
                 Some(fork_parent),
@@ -2213,7 +2213,7 @@ mod tests {
             )?;
             fork_prev = block.block_hash();
             if height == 2 {
-                block.txs[0].outputs[0].value = 2;
+                block.txs[0].outputs[0].value = Amount::from_sat(2);
             }
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(&block).len();
@@ -2339,7 +2339,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing genesis node"))?;
         let mut fork_coinbase = coinbase_transaction(1);
-        fork_coinbase.outputs[0].script_pubkey = push_int(2);
+        fork_coinbase.outputs[0].script_pubkey = push_int(2).into();
         let fork = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![fork_coinbase]);
         let fork_id = sync.handles.block_tree.write().insert_node(
             Some(genesis_id),
@@ -2400,7 +2400,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing genesis node"))?;
         let mut target_coinbase = coinbase_transaction(1);
-        target_coinbase.outputs[0].script_pubkey = push_int(2);
+        target_coinbase.outputs[0].script_pubkey = push_int(2).into();
         let target = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![target_coinbase]);
         let target_id = sync.handles.block_tree.write().insert_node(
             Some(genesis_id),
@@ -2408,7 +2408,7 @@ mod tests {
             NodeStatus::HeaderValid,
         )?;
         let mut wrong_coinbase = coinbase_transaction(1);
-        wrong_coinbase.outputs[0].script_pubkey = push_int(3);
+        wrong_coinbase.outputs[0].script_pubkey = push_int(3).into();
         let wrong = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![wrong_coinbase]);
         let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
         let wrong_hash = Hash256::from_le_bytes(wrong.block_hash().as_bytes());
@@ -2471,7 +2471,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing genesis node"))?;
         let mut target_coinbase = coinbase_transaction(1);
-        target_coinbase.outputs[0].script_pubkey = push_int(2);
+        target_coinbase.outputs[0].script_pubkey = push_int(2).into();
         let target = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![target_coinbase]);
         let target_id = sync.handles.block_tree.write().insert_node(
             Some(genesis_id),
@@ -2479,7 +2479,7 @@ mod tests {
             NodeStatus::HeaderValid,
         )?;
         let mut wrong_coinbase = coinbase_transaction(1);
-        wrong_coinbase.outputs[0].script_pubkey = push_int(3);
+        wrong_coinbase.outputs[0].script_pubkey = push_int(3).into();
         let wrong = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![wrong_coinbase]);
         let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
         let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
@@ -6551,7 +6551,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&merkle),
             time: GENESIS_TIME.saturating_add(height),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: height,
         };
         // Mine rather than hope: the fixture previously relied on nonce=height
@@ -6565,7 +6565,7 @@ mod tests {
 
     fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
         let mut header = test_header(prev_blockhash, height);
-        header.bits = 0x207f_fffe;
+        header.bits = CompactTarget::from_consensus(0x207f_fffe);
         for nonce in 0..=u32::MAX {
             header.nonce = nonce;
             if pow_met(header.bits, Hash256::from(header.compute_hash())) {
@@ -6593,7 +6593,8 @@ mod tests {
     /// Regtest-easy compact-target `PoW` check over the hash as a 256-bit
     /// little-endian integer (mirrors `chain::pow::compact_is_met_by` for the
     /// >3-exponent, 3-byte-mantissa forms these fixtures mine).
-    fn pow_met(bits: u32, hash: Hash256) -> bool {
+    fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
+        let bits = bits.to_consensus();
         let exponent = bits >> 24;
         let mantissa = bits & 0x007f_ffff;
         if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
@@ -6705,15 +6706,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig,
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: script_sig.into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -6725,15 +6726,15 @@ mod tests {
                     Txid(Hash256::from_le_bytes(&[seed; 32])),
                     u32::from(seed),
                 ),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -6748,7 +6749,7 @@ mod tests {
                 prev_blockhash,
                 merkle_root: Hash256::default(),
                 time: GENESIS_TIME.saturating_add(height),
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: txdata,
@@ -7304,7 +7305,7 @@ mod tests {
         for height in 1..=depth {
             let mut coinbase = coinbase_transaction(height);
             if height == 1 {
-                coinbase.outputs[0].value = subsidy;
+                coinbase.outputs[0].value = Amount::from_sat(subsidy);
             }
             let mut txs = vec![coinbase];
             if height == depth {
@@ -7313,15 +7314,15 @@ mod tests {
                     version: 2,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(first_txid, 0),
-                        script_sig: push_int(1),
-                        sequence: 0xffff_ffff,
-                        witness: Vec::new(),
+                        script_sig: push_int(1).into(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
                     }],
                     outputs: vec![TxOut {
-                        value: subsidy - 100_000,
-                        script_pubkey: Vec::new(),
+                        value: Amount::from_sat(subsidy - 100_000),
+                        script_pubkey: Script::new(),
                     }],
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                 });
             }
             let block = mined_block_with_prev_hash(prev_hash, height, txs);
@@ -7361,7 +7362,7 @@ mod tests {
         // The value change alters the txid, so the staged body contradicts the
         // header's merkle root: a permanent consensus failure.
         let mut bad_body = bad.clone();
-        bad_body.txs[0].outputs[0].value = 2;
+        bad_body.txs[0].outputs[0].value = Amount::from_sat(2);
         let descendant =
             mined_block_with_prev_hash(bad.block_hash(), 3, vec![coinbase_transaction(3)]);
         {
@@ -7421,7 +7422,7 @@ mod tests {
             let mut coinbase = coinbase_transaction(height);
             // Distinguish the branch: same-height coinbases on both chains
             // must not carry identical txids, or the fork headers collide.
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = push_int(2).into();
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent =
                 tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -7431,7 +7432,7 @@ mod tests {
         let fork_target = fork_parent;
         drop(tree);
         let mut corrupt = fork_blocks[fork_blocks.len() - 1].clone();
-        corrupt.txs[0].outputs[0].value = 2;
+        corrupt.txs[0].outputs[0].value = Amount::from_sat(2);
         let last = fork_blocks.len() - 1;
         fork_blocks[last] = corrupt;
         for block in &fork_blocks {
@@ -7518,7 +7519,7 @@ mod tests {
         let mut fork_blocks = Vec::new();
         for height in 51..=52_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = push_int(2).into();
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent =
                 tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -7577,7 +7578,7 @@ mod tests {
         let mut fork_blocks = Vec::new();
         for height in 51..=52_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = push_int(2).into();
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent =
                 tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -7602,7 +7603,7 @@ mod tests {
         // permanent consensus failure (MerkleRoot), which the classifier
         // marks as permanent and invalidates the subtree.
         let mut corrupt = fork_blocks[0].clone();
-        corrupt.txs[0].outputs[0].value = 2;
+        corrupt.txs[0].outputs[0].value = Amount::from_sat(2);
         fork_blocks[0] = corrupt;
         for block in &fork_blocks {
             bodies.insert(

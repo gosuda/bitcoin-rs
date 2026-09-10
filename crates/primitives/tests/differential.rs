@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 
 use bitcoin_rs_primitives::{
-    Block as NativeBlock, DecodeError, Sighash, SighashCache, Tx as NativeTx, TxOut,
-    consensus_bytes, deserialize,
+    Amount, Block as NativeBlock, DecodeError, LockTime, Script, Sequence, Sighash, SighashCache,
+    Tx as NativeTx, TxOut, Witness, consensus_bytes, deserialize,
 };
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -181,12 +181,12 @@ fn malformed_input_returns_typed_errors_without_panicking() {
         version: 1,
         inputs: vec![bitcoin_rs_primitives::TxIn {
             previous_output: bitcoin_rs_primitives::OutPoint::default(),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: Vec::new(),
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
     let mut trailing = consensus_bytes(&tx);
     trailing.push(0xff);
@@ -326,21 +326,26 @@ fn sighash_cache_matches_one_shot_helpers_across_fixtures() {
                 .iter()
                 .enumerate()
                 .map(|(index, _)| TxOut {
-                    value: 1_000_u64
-                        + u64::try_from(index)
-                            .unwrap_or_else(|error| panic!("prevout index overflow: {error}")),
+                    value: Amount::from_sat(
+                        1_000_u64
+                            + u64::try_from(index)
+                                .unwrap_or_else(|error| panic!("prevout index overflow: {error}")),
+                    ),
                     script_pubkey: {
                         let mut bytes = vec![0x51, 0x20];
                         bytes.extend_from_slice(&[0x42_u8; 32]);
-                        bytes
+                        bytes.into()
                     },
                 })
                 .collect();
             for (input_index, native_input) in native_tx.inputs.iter().enumerate() {
                 let script_code = native_input.script_sig.clone();
-                let value = 1_000_u64
-                    + u64::try_from(input_index)
-                        .unwrap_or_else(|error| panic!("{context}: input index overflow: {error}"));
+                let value = Amount::from_sat(
+                    1_000_u64
+                        + u64::try_from(input_index).unwrap_or_else(|error| {
+                            panic!("{context}: input index overflow: {error}")
+                        }),
+                );
                 for ty in ecdsa_types {
                     let cached = cache
                         .legacy_signature_hash(input_index, &script_code, u32::from(ty.to_u8()))

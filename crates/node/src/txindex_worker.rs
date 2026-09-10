@@ -1247,7 +1247,7 @@ impl UndoScripts {
         for add in batch.restores() {
             scripts.insert(
                 (add.outpoint.txid.0.to_le_bytes(), add.outpoint.vout),
-                add.txout.script_pubkey.clone(),
+                add.txout.script_pubkey.as_bytes().to_vec(),
             );
         }
         Ok(Self { scripts })
@@ -3315,7 +3315,7 @@ impl TxIndexQueryEngine {
         };
         let vout = usize::try_from(outpoint.vout)
             .map_err(|_| TxQueryError::Storage("outpoint vout overflow".into()))?;
-        Ok(tx.outputs.get(vout).map(|o| o.value))
+        Ok(tx.outputs.get(vout).map(|o| o.value.to_sat()))
     }
 
     fn scan_funding_rows(
@@ -3380,7 +3380,7 @@ impl TxIndexQueryEngine {
             }
             let vout = u32::try_from(vout_idx)
                 .map_err(|_| TxQueryError::Storage("vout overflow".into()))?;
-            outputs.push((txid, vout, output.value, height));
+            outputs.push((txid, vout, output.value.to_sat(), height));
         }
         Ok(outputs.len() != before)
     }
@@ -3565,7 +3565,7 @@ impl TxIndexQueryEngine {
                 records.push(ScriptIndexRecord {
                     txid: outpoint.txid,
                     height: entry.height,
-                    value: entry.txout.value,
+                    value: entry.txout.value.to_sat(),
                     vout: outpoint.vout,
                 });
             }

@@ -225,7 +225,7 @@ impl<'t> SighashCache<'t> {
             write_compact(writer, compact_len(total));
             for (n, txin) in self.tx.inputs.iter().enumerate() {
                 let sequence = if n != input_index && (ty.is_single() || ty.is_none()) {
-                    0
+                    crate::Sequence::ZERO
                 } else {
                     txin.sequence
                 };
@@ -266,7 +266,7 @@ impl<'t> SighashCache<'t> {
         &mut self,
         input_index: usize,
         script_code: &[u8],
-        value: u64,
+        value: crate::Amount,
         sighash_type: Sighash,
     ) -> Result<Hash256, SighashError> {
         let ty = sighash_type.to_ecdsa()?;
@@ -524,7 +524,7 @@ impl Sighash {
         tx: &Tx,
         input_idx: usize,
         script_code: &[u8],
-        value: u64,
+        value: crate::Amount,
         sighash_type: Self,
     ) -> Result<Hash256, SighashError> {
         SighashCache::new(tx).segwit_v0_signature_hash(input_idx, script_code, value, sighash_type)
@@ -639,7 +639,7 @@ fn encode_legacy_input(
     writer: &mut Sha256Sink<'_>,
     input: &crate::TxIn,
     script: &[u8],
-    sequence: u32,
+    sequence: crate::Sequence,
 ) {
     input.previous_output.consensus_encode(writer);
     write_script(writer, script);
@@ -692,9 +692,6 @@ mod tests {
     };
     use crate::{Hash256, OutPoint, Tx, Txid};
 
-    /// BIP125 opt-in sequence (`ENABLE_RBF_NO_LOCKTIME`).
-    const RBF_SEQUENCE: u32 = 0xffff_fffd;
-
     fn pin(hex: &str) -> Hash256 {
         Hash256::from_str_be(hex).expect("pinned hash hex")
     }
@@ -702,22 +699,25 @@ mod tests {
     fn synthetic_tx(output_count: usize) -> Tx {
         let input = crate::TxIn {
             previous_output: OutPoint::new(Txid(Hash256::default()), 0xffff_ffff),
-            script_sig: Vec::new(),
-            sequence: RBF_SEQUENCE,
-            witness: Vec::new(),
+            script_sig: crate::Script::new(),
+            // BIP125 opt-in sequence (`ENABLE_RBF_NO_LOCKTIME`).
+            sequence: crate::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: crate::Witness::new(),
         };
         let mut outputs = Vec::new();
         for value in 0..output_count {
             outputs.push(crate::TxOut {
-                value: 1_000 + u64::try_from(value).unwrap_or_else(|_| unreachable!("small count")),
-                script_pubkey: Vec::new(),
+                value: crate::Amount::from_sat(
+                    1_000 + u64::try_from(value).unwrap_or_else(|_| unreachable!("small count")),
+                ),
+                script_pubkey: crate::Script::new(),
             });
         }
         Tx {
             version: 2,
             inputs: vec![input],
             outputs,
-            lock_time: 0,
+            lock_time: crate::LockTime::ZERO,
         }
     }
 
@@ -764,7 +764,13 @@ mod tests {
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8, 0x51];
         assert_eq!(
-            Sighash::compute_bip143(&tx, 0, &script, 50_000, Sighash::Single),
+            Sighash::compute_bip143(
+                &tx,
+                0,
+                &script,
+                crate::Amount::from_sat(50_000),
+                Sighash::Single
+            ),
             Ok(pin(
                 "c9bb107a16a13d1a8ad4ebc540978164a7d92b4a26d388d26fa8eed79e10ebec"
             ))
@@ -775,8 +781,8 @@ mod tests {
     fn bip341_key_path_and_bip342_script_path_pins() {
         let tx = synthetic_tx(2);
         let prevouts = vec![crate::TxOut {
-            value: 50_000,
-            script_pubkey: Vec::new(),
+            value: crate::Amount::from_sat(50_000),
+            script_pubkey: crate::Script::new(),
         }];
         assert_eq!(
             Sighash::compute_bip341(&tx, 0, &prevouts, Sighash::AllAnyoneCanPay, None, None),
@@ -816,7 +822,13 @@ mod tests {
         let tx = synthetic_tx(1);
 
         assert_eq!(
-            Sighash::compute_bip143(&tx, 0, &[], 50_000, Sighash::Default),
+            Sighash::compute_bip143(
+                &tx,
+                0,
+                &[],
+                crate::Amount::from_sat(50_000),
+                Sighash::Default
+            ),
             Err(SighashError::DefaultOnlyTaproot)
         );
     }
@@ -825,8 +837,8 @@ mod tests {
     fn taproot_sighash_reports_invalid_annex() {
         let tx = synthetic_tx(1);
         let prevouts = vec![crate::TxOut {
-            value: 50_000,
-            script_pubkey: Vec::new(),
+            value: crate::Amount::from_sat(50_000),
+            script_pubkey: crate::Script::new(),
         }];
 
         assert!(matches!(

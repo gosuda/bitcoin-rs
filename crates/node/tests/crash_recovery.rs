@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 use sha2::{Digest, Sha256};
 
 const CHILD_ENV: &str = "BITCOIN_RS_CRASH_TEST_CHILD";
@@ -198,16 +201,16 @@ fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Re
 fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![1, u8::try_from(height)?],
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: vec![1, u8::try_from(height)?].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(1),
+            script_pubkey: Script::new(),
         }],
     };
     let mut block = Block {
@@ -216,7 +219,7 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: Network::Regtest.genesis_block().header.time + height,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase],
@@ -259,7 +262,8 @@ fn double_sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(first).into()
 }
 
-fn pow_met(bits: u32, hash: Hash256) -> bool {
+fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
+    let bits = bits.to_consensus();
     let exponent = u8::try_from(bits >> 24).unwrap_or(0);
     let mantissa = bits & 0x007f_ffff;
     if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {

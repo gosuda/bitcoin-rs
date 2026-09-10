@@ -661,7 +661,7 @@ fn reconsider_entry(
     for input in &tx.inputs {
         let outpoint = input.previous_output;
         if let Some(output) = utxo.get(&outpoint) {
-            input_total = input_total.saturating_add(output.value);
+            input_total = input_total.saturating_add(output.value.to_sat());
             continue;
         }
         let values = offered.get(&input.previous_output.txid)?;
@@ -670,7 +670,11 @@ fn reconsider_entry(
             .copied()?;
         input_total = input_total.saturating_add(value);
     }
-    let output_values: Vec<u64> = tx.outputs.iter().map(|output| output.value).collect();
+    let output_values: Vec<u64> = tx
+        .outputs
+        .iter()
+        .map(|output| output.value.to_sat())
+        .collect();
     let output_total = output_values
         .iter()
         .fold(0_u64, |total, value| total.saturating_add(*value));

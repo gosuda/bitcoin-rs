@@ -93,7 +93,9 @@ fn count_script(script: &[u8], accurate: bool) -> u32 {
 mod tests {
     use bitcoin::ScriptBuf as OracleScriptBuf;
 
-    use bitcoin_rs_primitives::{Block, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Block, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
 
     const fn pushnum(n: u8) -> u8 {
         opcode::OP_PUSHNUM_1 + (n - 1)
@@ -149,15 +151,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig,
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: script_sig.into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey,
+                value: Amount::SAT,
+                script_pubkey: script_pubkey.into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         assert_eq!(count_tx_legacy(&tx), 1 + 20);
 
