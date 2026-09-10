@@ -1,0 +1,68 @@
+name: node-state-refresh
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths: [.github/workflows/node-state-refresh.yml]
+permissions:
+  contents: read
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 3
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/node-state-owners
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt,clippy
+      - name: Preserve current main and resolve the checkpoint owner move
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7c9b3f9b7eda8b3a258b2e534ba034865dad4650
+          git config user.name 'Node Refactor'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git merge --no-commit --no-ff e7dacf1a56ff67fdfd203459630f2e0e70c01d0b; then
+            test "$(git diff --name-only --diff-filter=U)" = crates/node/src/state.rs
+            git checkout --ours crates/node/src/state.rs
+            git add crates/node/src/state.rs
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          for p in Path('crates/node/src/state').rglob('*.rs'):
+              s = p.read_text()
+              p.write_text(s.replace('crate::checkpoint::HeaderCheckpointConfig', 'crate::checkpoint::headers::HeaderCheckpointConfig'))
+          PY
+          git add crates/node/src/state
+          test "$(git write-tree)" = f79702ebbd8a71792820d13ab2d49b96f56a70f0
+          rustfmt --edition 2024 --check crates/node/src/state.rs crates/node/src/storage_backend.rs
+          git diff --cached --check
+      - name: Clippy and state ownership contracts
+        run: |
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib state:: -- --test-threads=1
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib storage_backend::tests
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
+      - name: Publish the tested merge without rewriting history
+        run: |
+          test "$(git write-tree)" = f79702ebbd8a71792820d13ab2d49b96f56a70f0
+          git diff --exit-code
+          git commit -m 'Integrate current main checkpoint codec and validation fixes'
+          git push --atomic origin HEAD:refs/heads/agent/node-state-owners
+          git rev-parse HEAD > /tmp/state-refresh-head
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: state-refresh
+          path: /tmp/state-refresh-head
+          retention-days: 7
