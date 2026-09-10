@@ -329,6 +329,7 @@ log() { printf '[import-qa-assets] %s\\n' "$*"; }
         self.assertEqual((self.output / "empty").read_bytes(), b"")
         self.assertIn("imported=2 skipped_oversize=2", result.stdout)
 
+    # Contract: docs/contracts/qa-corpus.md QAC-01, import-scope bullet.
     def test_nested_directories_and_symlinks_are_not_imported(self):
         nested = self.source / "nested"
         nested.mkdir()
@@ -403,8 +404,8 @@ init) mkdir -p "$3"; cp -R "$UPSTREAM/." "$3/" ;;
 esac""",
             "rustc": "printf 'host: x86_64-unknown-linux-gnu\\n'",
             "df": "printf 'Filesystem 1048576-blocks Used Available Capacity Mounted\\ntest 9999 0 9999 0%% /\\n'",
-            "du": '[[ "$FAIL_FLOW" != size ]] || exit 42\nexec /usr/bin/du "$@"',
-            "date": '[[ "$FAIL_FLOW" != date ]] || exit 43\nexec /usr/bin/date "$@"',
+            "du": '[[ "$FAIL_FLOW" != size ]] || exit 42\nprintf "1\\t%s\\n" "$2"',
+            "date": '[[ "$FAIL_FLOW" != date ]] || exit 43\nprintf "2025-01-02T03:04:05Z\\n"',
             "cargo": r"""printf '%s\n' "$*" >> "$MINIMIZE_LOG"
 [[ "$FAIL_FLOW" != minimize || "${!#}" != tx_decode ]] || exit 37
 if [[ "$FAIL_FLOW" == terminate ]]; then kill -TERM "$PPID"; fi""",
