@@ -9,48 +9,24 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
+  tools:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 11a85c814801346a874311438db3a9a977f9cc3b
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt,clippy
-      - name: Export exact source and offline public dependencies
-        run: |
-          git rev-parse HEAD > /tmp/HEAD
-          git archive --format=tar.gz HEAD > /tmp/node-source.tgz
-          cargo fetch --locked --target x86_64-unknown-linux-gnu
-          tar -czf /tmp/cargo-registry.tgz -C "$CARGO_HOME" registry
-      - name: Export compiler, formatter, and lint tools
+      - name: Export pinned compiler and lint tools
         run: |
           rustc --version --verbose > /tmp/RUST_VERSION
-          tar --exclude='lib/rustlib/src' --exclude='lib/rustlib/manifest-*' -czf /tmp/rust-tools.tgz -C "$(rustc --print sysroot)" bin lib
-          sha256sum /tmp/node-source.tgz /tmp/cargo-registry.tgz /tmp/rust-tools.tgz > /tmp/SHA256SUMS
-          du -h /tmp/*tgz
+          tar --exclude='lib/rustlib/src' --exclude='lib/rustlib/manifest-*' -czf /tmp/rust-tools-195.tgz -C "$(rustc --print sysroot)" bin lib
+          sha256sum /tmp/rust-tools-195.tgz > /tmp/SHA256SUMS
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: node-source-current
+          name: rust-tools-195
           path: |
-            /tmp/node-source.tgz
-            /tmp/HEAD
+            /tmp/rust-tools-195.tgz
             /tmp/RUST_VERSION
             /tmp/SHA256SUMS
-          retention-days: 1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: rust-tools-offline
-          path: /tmp/rust-tools.tgz
-          compression-level: 0
-          retention-days: 1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cargo-registry-offline
-          path: /tmp/cargo-registry.tgz
           compression-level: 0
           retention-days: 1
