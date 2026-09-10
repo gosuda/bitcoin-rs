@@ -69,11 +69,11 @@ struct HeaderRecord {
 /// Routes one REST request.
 ///
 /// REST is deliberately distinct from unknown routes: a disabled gateway and
-/// a genuinely unknown path return 404, while malformed header parameters
-/// return 400. The enforcer uses 404 on `/rest/*` to diagnose a disabled
-/// gateway, so an unknown but well-formed block hash returns an empty 200
-/// response instead of a misleading 404. Header query parameters other than
-/// `count` are ignored, matching Core's cache-buster-friendly behavior.
+/// a genuinely unknown path return 404, while malformed parameters return 400.
+/// Unknown transactions and block bodies return 404; `/rest/headers` instead
+/// returns an empty successful body when its well-formed start hash is not on
+/// the applied chain. Header query parameters other than `count` are ignored,
+/// matching Core's cache-buster-friendly behavior.
 #[must_use]
 pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Response {
     if !enabled {

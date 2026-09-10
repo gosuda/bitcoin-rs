@@ -36,14 +36,21 @@ recorded Core reference used by the RPC fixture replay gate.
   `RpcError::MethodNotFound`. PSBT combination/finalization and descriptor
   utilities remain supported as they operate without private keys.
 
-### `API-04`: Read consistency and query budgeting
+### `API-04`: Route-local read consistency and query budgeting
 
-- Multi-record queries across chainstate use optimistic tip fencing or
-  active-tip verification against `BlockTree`. If a reorg occurs during
-  assembly, queries return `503 Service Unavailable` rather than inconsistent
-  data.
-- Statistical and script index queries are bounded by `QueryBudget` to prevent
-  memory exhaustion.
+- There is no current request-wide `ReadStamp` guarantee covering every RPC
+  and REST route. Each multi-record handler owns its actual locking, snapshot,
+  and retry semantics; a generic reorg-triggered HTTP 503 must not be inferred.
+- `/rest/headers` verifies one applied-tip snapshot against `BlockTree` while
+  holding the tree read lock. `/rest/getutxos` currently composes applied-tip,
+  mempool, and UTXO reads without post-read generation revalidation; it is not
+  a request-atomic mixed-state snapshot.
+- HTTP 503 is used only by routes with an explicit unavailable/capacity path,
+  such as the bounded full-block REST render budget. Unknown `/rest/tx` and
+  `/rest/block*` identities follow their route-specific 404 behavior.
+- Statistical and script-index query paths that use `QueryBudget` remain
+  bounded by that owner; this clause does not extend that budget to unrelated
+  REST handlers.
 
 ### `API-05`: Solo-mining generate path
 
