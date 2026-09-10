@@ -1,0 +1,39 @@
+name: node-scopes-publish
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths:
+      - .github/workflows/node-scopes-publish.yml
+      - .github/node-scopes-plan.json
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt,clippy
+      - name: Check exact source trees and publish new branches atomically
+        run: |
+          cp .github/publish-node-scopes.py /tmp/publish-node-scopes.py
+          python /tmp/publish-node-scopes.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-scopes-report
+          path: /tmp/node-scopes-report.json
+          retention-days: 7
