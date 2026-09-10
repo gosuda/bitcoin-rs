@@ -1,0 +1,30 @@
+{
+  "base": "cfc3a9d8cb1234eacc758c77ae51da5ab329f2e4",
+  "stages": [
+    {
+      "label": "apply",
+      "branch": "agent/node-apply-owners",
+      "payload_sha": "d6bec0f01a50ed1dd5ff65f2b686279ae6b14b59",
+      "message": "Separate chainstate admission, validation, and commit owners",
+      "tests": ["apply::"],
+      "ownership": true
+    },
+    {
+      "label": "sync",
+      "branch": "agent/node-sync-owners",
+      "payload_sha": "5c88a9de6fb7ddf3a8085d07c3bb123bd20c0ba7",
+      "repairs": [{"offset": 8510, "old": "J", "new": ""}],
+      "message": "Separate sync requests, staging, and chain settlement",
+      "tests": ["sync::"]
+    },
+    {
+      "label": "mining",
+      "parts": ["mining-0", "mining-1"],
+      "branch": "agent/node-mining-owners",
+      "payload_sha": "e9e219cf41014c04fdd591ea6b8bdf5785d9513d",
+      "repairs": [{"offset": 822, "old": "+", "new": ""}],
+      "message": "Separate mining generation, candidates, and submission",
+      "tests": ["mining::"]
+    }
+  ]
+}
