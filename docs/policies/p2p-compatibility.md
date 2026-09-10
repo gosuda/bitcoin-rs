@@ -36,6 +36,7 @@ Re-pinning to a newer Core version requires all of:
 
 An outbound bitcoin-rs connection sends, in order: `version`, `wtxidrelay` (BIP339), `sendaddrv2` (BIP155), `sendheaders` (BIP130). An inbound connection receives `version` and answers with the same four messages, then `verack` completes readiness (`crates/p2p/src/handshake.rs`, `dispatch.rs`).
 
+
 The `version` message pins:
 
 | Field | Value | Core 31.1 comparison |

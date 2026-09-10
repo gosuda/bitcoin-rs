@@ -17,6 +17,13 @@ reopen proofs, or backend selection.
 
 ## Clauses
 
+### `CORP-00`: Writer lifecycle
+
+Campaign writers poison themselves after a failed append; truncation does not
+make absorbed, uncommitted bytes safe to reuse. A resumed tail must complete
+its verification gate before it is accepted, and each destination must have a
+distinct output path. Corpus-writer tests cite this clause.
+
 ### `CORP-01`: Two product corpora
 
 Every product-domain cell uses exactly one of two mainnet cumulative archives:

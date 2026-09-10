@@ -172,6 +172,10 @@ pub struct PackageAcceptanceFacts {
     pub results: Vec<TxAcceptanceFact>,
 }
 
+/// Per-transaction relay sigop limit: one fifth of the block limit,
+/// matching Core's `MAX_STANDARD_TX_SIGOPS_COST`.
+pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
+
 /// Policy rejection reason for dry-run package acceptance.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AcceptanceRejectReason {
@@ -199,6 +203,9 @@ pub enum AcceptanceRejectReason {
     /// Transaction exceeds ancestor or descendant package limits.
     #[error(transparent)]
     PackageLimit(#[from] PolicyError),
+    /// Transaction sigop cost exceeds the per-transaction relay limit.
+    #[error("too-many-sigops")]
+    TooManySigops,
     /// Next-block BIP68 relative sequence locks are unmet.
     #[error("non-BIP68-final")]
     NonBip68Final,
