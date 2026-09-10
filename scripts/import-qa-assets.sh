@@ -11,8 +11,8 @@
 #   tx_decode     <- bitcoin_deserialize_transaction (raw consensus bytes, direct)
 #   script_eval   <- bitcoin_deserialize_script + bitcoin_script_bytes_to_asm_fmt
 #                    (raw script bytes, wrapped into the script_eval framing:
-#                    selector 0x00 = NONE, and for files >= 32 bytes a P2TR
-#                    variant with selector 0x03 = TAPROOT)
+#                    the harness FLAGS entry NONE, and for files >= 32 bytes
+#                    a P2TR variant using its TAPROOT entry)
 #
 # Disk discipline (repo AGENTS.md): the worst-case footprint of the clone is
 # declared below (shallow clone ~= corpus size, assumed <= 2 GiB); free space
@@ -42,7 +42,16 @@ log() { printf '[import-qa-assets] %s\n' "$*"; }
 # --- 1. Disk discipline: declare footprint, verify free space ---------------
 # The clone lands under TMPDIR and the minimized corpora under fuzz/corpus/;
 # both filesystems must cover their share of footprint + reserve.
-available_mb() { df -Pm "$1" | awk 'NR == 2 { print $4 }'; }
+available_mb() {
+    local available
+    available="$(df -Pm "$1" | awk 'NR == 2 { print $4 }')" || return
+    # A failed numeric comparison is not proof that there is enough space.
+    if [[ ! "${available}" =~ ^[0-9]+$ ]] || ! [ "${available}" -ge 0 ] 2>/dev/null; then
+        log "ABORT: invalid available-space result for $1" >&2
+        return 1
+    fi
+    printf '%s\n' "${available}"
+}
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-assets.XXXXXX")"
 readonly WORKDIR
@@ -134,7 +143,7 @@ Seeds under fuzz/corpus/ were imported from
 | p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload bounded so the selector plus payload fits ${MAX_SEED_BYTES} bytes (harness rebuilds magic/length/checksum) |
 | block_decode | fuzz_corpora/bitcoin_deserialize_block | direct copy (raw consensus bytes) |
 | tx_decode | fuzz_corpora/bitcoin_deserialize_transaction | direct copy (raw consensus bytes) |
-| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes bounded by the harness ELEMENT_LEN_MAX and seed budget, then wrapped into the script_eval framing (selector 0x00 = NONE); files >= 32 bytes also emit a P2TR key-path variant (selector 0x03 = TAPROOT) |
+| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes bounded by the harness ELEMENT_LEN_MAX and seed budget, then wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the script after major decoder changes to
