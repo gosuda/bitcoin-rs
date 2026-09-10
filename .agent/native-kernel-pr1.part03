@@ -1,0 +1,14 @@
++                    .segwit_v0_signature_hash(INPUT, &script, VALUE, mode)
++                    .expect("named mode")
++                    .as_byte_array(),
++                &reference_bip143(&oracle, INPUT, &script, VALUE, raw),
++            );
++        }
++        for input in [INPUT, tx.inputs.len()] {
++            assert_eq!(
++                cache.segwit_v0_signature_hash(input, &script, VALUE, Sighash::Default),
++                Err(SighashError::DefaultOnlyTaproot),
++            );
++        }
++    }
++}
