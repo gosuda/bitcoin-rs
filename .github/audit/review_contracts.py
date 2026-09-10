@@ -92,8 +92,8 @@ def correction(number, source, test):
                 '    /// Load a ban list from a dedicated file.\n'
                 '    /// Blank lines are ignored. Records contain tab-separated IP, score,\n'
                 '    /// UNIX expiry seconds, and an optional reason. Zero expiry means no deadline.\n'
-                '    /// Only [`ErrorKind::NotFound`] produces an empty list. Other I/O errors\n'
-                '    /// propagate, and malformed or unrepresentable expiries return\n'
+                '    /// An opening [`ErrorKind::NotFound`] starts an empty list. Other I/O\n'
+                '    /// errors propagate. Malformed or unrepresentable expiries return\n'
                 '    /// [`PeerError::InvalidBanEntry`]. Loading never rewrites the file.\n')
         replace(test,
                 '//! Ban-list loading must distinguish missing files from corrupt or inaccessible data.\n',
@@ -172,6 +172,7 @@ def validate(number, case):
     subprocess.run(['git', 'diff', '--exit-code'], check=True)
     assert output('git', 'rev-parse', 'HEAD') == candidate
     assert all(code == 0 for name, code in results.items() if name != 'workspace-fmt'), results
+    assert results['workspace-fmt'] == (1 if inherited else 0), results
     # A known, recorded baseline formatting failure does not become a pass.
     # Keep the PR draft; these branches carry only tested scope-local corrections.
     with urllib.request.urlopen(
