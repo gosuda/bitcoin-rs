@@ -105,18 +105,27 @@ state (`crates/mempool/src/orphan.rs`).
   transactions or checkpoint possibly torn state. A failed `finish` is a
   fatal invariant failure: retain the execution cause, close apply admission
   and request shutdown rather than report success or retry the chain walk.
-- `submit_transaction` owns common preparation and bounded retry for RPC
-  and peer submissions in mempool. `admit_transaction` remains their
-  atomic admission operation:
-  capture `expected_generation` (an even value from `stable_generation`)
-  and `expected_sequence` (from a pool read guard), release the pool guard,
-  resolve chain facts, then call `admit_transaction` with both tokens. Chain
-  lookups and external callbacks never run under the admission-state lock.
-  The gateway takes the write lock once and checks, in order: (1) exact
-  chain generation equals the request and is even, (2) current pool sequence
-  equals the request, (3) exact transaction identity. A mismatch returns a
-  transient error (`GenerationChanged` or `MempoolChanged`) and mempool retries
-  with fresh facts — it never re-uses a captured even generation.
+- `submit_transaction` owns common preparation and four bounded attempts for
+  RPC and peer submissions. `preview_transactions` uses the same policy and
+  script evaluator, with the same retry bound. Each attempt captures an even
+  chain generation and pool sequence before reading chain facts. Preparation
+  copies the input outputs under a pool read, then executes scripts without
+  any pool or lifecycle lock. The commit writer validates the exact generation
+  and sequence, the enforced policy snapshot and all `MempoolLimits`, then the
+  resident orphan claim and duplicate identity, before using that verdict.
+  Policy values are compared directly because limits can change without a
+  membership sequence change; there is no second policy owner or shadow counter.
+  Stale approvals and stale rejections both retry with newly resolved facts.
+- Preview rechecks generation, sequence and policy before returning all rows.
+  It changes no membership, mutation sequence, fee-estimator history, orphan
+  or reject state, or observer output. It preserves the documented independent
+  row package behavior and earlier-offered output lookup; it is not atomic
+  package admission. RPC supplies maximum fee and renders the returned facts.
+  The maximum applies only after an admission-valid script result, matching
+  Core v31.1's `BroadcastTransaction` and `testmempoolaccept` ordering.
+- RPC duplicate submission remains an idempotent success, while preview
+  reports `AlreadyInMempool`. Only submission may finalize peer orphan/reject
+  state. The writer validates every captured token before either transition.
 - Chain facts come through `AdmissionChain` as provisional inputs for a
   submission attempt. The shared borrowed `ChainAdmissionView` in
   `crates/rpc/src/context.rs` reads the existing UTXO and block-tree handles,
@@ -140,8 +149,11 @@ state (`crates/mempool/src/orphan.rs`).
   count and aggregate BIP141 transaction weight, using `DEFAULT_ORPHAN_QUOTA`
   and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`. Insertions, witness
   refreshes, and removals update the resident weight; FIFO eviction restores
-  both bounds. Witness refresh preserves FIFO position; expiry is not
-  implemented. These private defaults and indexes have one owner; RPC
+  both bounds. Witness refresh preserves FIFO position and the first-seen
+  timestamp. The ingress poll applies the mempool-owned two-minute expiry and
+  removes bodies whose exact delivering connection token is no longer live;
+  a same-address reconnect cannot inherit the old allocation. These private
+  defaults and indexes have one owner; RPC
   missing-input rejections do not populate peer orphan state. An out-of-range output index
   on a resident mempool parent is rejected under the same token and retry-claim
   checks, rather than retained as an orphan awaiting an impossible parent.
@@ -256,6 +268,9 @@ state (`crates/mempool/src/orphan.rs`).
   `zero_quota_retains_no_body_or_index`,
   `witness_refresh_keeps_fifo_position_and_source_identity`,
   `readiness_is_deduplicated_and_removed_with_eviction`,
+  `maintenance_expires_old_bodies_and_cleans_every_index`,
+  `maintenance_uses_exact_connection_identity`,
+  `witness_refresh_does_not_extend_expiry`,
   `rejects_are_bounded_and_chain_reset_clears_both_indexes`,
   `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`,
   `rejecting_another_witness_preserves_the_resident_body_and_ready_work`,
@@ -269,6 +284,8 @@ state (`crates/mempool/src/orphan.rs`).
 - `crates/node/src/chain_effects.rs` (inline tests):
   `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
   `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`.
+- `crates/node/src/tx_ingress.rs` (inline tests):
+  `retry_poll_evicts_an_orphan_after_its_connection_is_gone`.
 - `crates/rpc/src/zmq.rs`:
   `admission_publishes_one_a_frame_with_core_payload_bytes`,
   `policy_eviction_publishes_r_frames_in_commit_order`,

@@ -1,7 +1,14 @@
-//! ECDSA encoding-order regressions against Bitcoin Core.
+//! ECDSA encoding-order regressions against Bitcoin Core v31.1.
 //!
-//! Empty signatures are a clean cryptographic failure, but they do not bypass
-//! public-key encoding checks that Core performs before signature verification.
+//! Empty ECDSA signatures are a clean verification failure, but Core still
+//! applies public-key encoding checks before reaching cryptographic verification.
+//!
+//! Contract: Bitcoin Core v31.1, commit
+//! `9be056a8a72b624dae9623b2f7bded92c2a21c91`, `src/script/interpreter.cpp`
+//! (blob `443714ceedaf6b0cc695316882080f79fb50316e`): `CheckSignatureEncoding`,
+//! `CheckPubKeyEncoding`, `EvalChecksigPreTapscript`, and `OP_CHECKMULTISIG`.
+//! The zero-signature multisig case also pins the latter's lazy key checks:
+//! keys are checked only while a signature is being matched, not up front.
 
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
@@ -178,5 +185,103 @@ fn encoding_error_precedence_matches_core() {
         Err(ScriptError::Invalid {
             code: ScriptErrCode::PubkeyType,
         }),
+    );
+}
+
+#[test]
+fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
+    let tx = fixture();
+    let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
+    let mut checker = TxSignatureChecker::new(&tx, INPUT, VALUE, &prevouts);
+    let public = PublicKey::from_secret_key(SECP256K1, &test_key());
+    // The last entry is deliberately off-curve but correctly encoded. Empty
+    // signatures must not require cryptographic parsing of an unused key.
+    let mut off_curve = vec![0xff; 33];
+    off_curve[0] = 0x02;
+    let keys = [
+        (Vec::new(), false, false),
+        (vec![0x05; 33], false, false),
+        (vec![0x02; 32], false, false),
+        (vec![0x02; 65], false, false),
+        (public.serialize().to_vec(), true, true),
+        (public.serialize_uncompressed().to_vec(), true, false),
+        (off_curve, true, true),
+    ];
+    let policies = [
+        VerifyFlags::DERSIG,
+        VerifyFlags::LOW_S,
+        VerifyFlags::STRICTENC,
+        VerifyFlags::WITNESS_PUBKEYTYPE,
+        VerifyFlags::NULLFAIL,
+        VerifyFlags::NULLDUMMY,
+    ];
+    for mask in 0..(1_u32 << policies.len()) {
+        let mut flags = VerifyFlags::NONE;
+        for (index, policy) in policies.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                flags = flags.union(*policy);
+            }
+        }
+        for version in [SigVersion::Base, SigVersion::WitnessV0] {
+            for (key, strict_valid, compressed) in &keys {
+                let expected = if flags.contains(VerifyFlags::STRICTENC) && !strict_valid {
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::PubkeyType,
+                    })
+                } else if version == SigVersion::WitnessV0
+                    && flags.contains(VerifyFlags::WITNESS_PUBKEYTYPE)
+                    && !compressed
+                {
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::WitnessPubkeyType,
+                    })
+                } else {
+                    Ok(false)
+                };
+                assert_eq!(
+                    checker.check_ecdsa_signature(&[], key, &[], version, flags),
+                    expected,
+                    "mask={mask:#x}, version={version:?}, key={key:?}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_signature_multisig_does_not_validate_unexamined_keys() {
+    let tx = fixture();
+    // 0-of-1 with an empty (invalidly encoded) key; only the dummy is consumed.
+    // Hoisting key checks into a pre-scan would incorrectly reject this script.
+    let script = vec![0x00, 0x00, 0x51, 0xae];
+    let flags = VerifyFlags::MANDATORY
+        .union(VerifyFlags::STRICTENC)
+        .union(VerifyFlags::WITNESS_PUBKEYTYPE)
+        .union(VerifyFlags::NULLFAIL);
+    let legacy_prevout = TxOut {
+        value: VALUE,
+        script_pubkey: script.clone(),
+    };
+    assert_eq!(
+        Interpreter.execute(&script, &[0x00], &[], flags, &legacy_prevout, &tx, INPUT),
+        Ok(true),
+    );
+    let mut program = vec![0x00, 0x20];
+    program.extend_from_slice(&Sha256::digest(&script));
+    let witness_prevout = TxOut {
+        value: VALUE,
+        script_pubkey: program,
+    };
+    assert_eq!(
+        Interpreter.execute(
+            &witness_prevout.script_pubkey,
+            &[],
+            &[Vec::new(), script],
+            flags,
+            &witness_prevout,
+            &tx,
+            INPUT,
+        ),
+        Ok(true),
     );
 }

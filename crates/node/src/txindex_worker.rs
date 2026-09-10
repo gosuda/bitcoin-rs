@@ -27,10 +27,13 @@ use arc_swap::ArcSwap;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, NoSpentScripts, PreparedBatch,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, NoSpentScripts, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptLiveScan, TxIndexScan, TxIndexScanRow,
     TxIndexSnapshot,
+    reconcile::{ReconcileLeg, ReconcilePhase, SelectedWatermark, selected_watermark},
+    recovery::open_writer,
     types::{TxPosition, TxPositionValue},
+    writer::TxIndexWriter,
 };
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::{Block, BlockHash, OutPoint, Tx, Txid, deserialize};
@@ -127,109 +130,6 @@ const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 /// open while still surfacing a stuck one. The 30-second heartbeat already
 /// makes a slow open observable to an operator watching logs.
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
-
-/// Reconciliation leg one capability's rows are executing against the
-/// applied tip. Forward is the resting leg: a watermark that names the
-/// applied tip is ready; one below it is catching up.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ReconcileLeg {
-    /// Rows extend the active chain from the durable watermark.
-    #[default]
-    Forward,
-    /// Rows on an abandoned or ahead-of-tip branch are deleted block by
-    /// block from `from_height` down to the common ancestor `to_height`.
-    RollingBack {
-        /// Height of the watermark being rewound.
-        from_height: u32,
-        /// Height of the last block shared with the active chain.
-        to_height: u32,
-    },
-    /// The rows were reset and rebuild from genesis.
-    Rebuilding,
-}
-
-/// Reconciliation legs of every capability the worker owns.
-///
-/// Capabilities carry independent watermarks, so a selective reset can leave
-/// one capability rebuilding while its sibling still rewinds. The worker
-/// publishes each leg change so operators can tell a rewind or rebuild apart
-/// from ordinary forward catch-up, whose progress is the durable watermark
-/// itself.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ReconcilePhase {
-    /// Transaction-lookup leg.
-    pub tx_lookup: ReconcileLeg,
-    /// Script-history leg.
-    pub script_history: ReconcileLeg,
-    /// Compact live-output leg.
-    pub script_live: ReconcileLeg,
-}
-
-impl ReconcilePhase {
-    /// Every capability moving forward.
-    pub const FORWARD: Self = Self {
-        tx_lookup: ReconcileLeg::Forward,
-        script_history: ReconcileLeg::Forward,
-        script_live: ReconcileLeg::Forward,
-    };
-
-    /// Returns the phase with `leg` assigned to every capability in
-    /// `capabilities`.
-    #[must_use]
-    pub const fn with_leg(mut self, capabilities: IndexCapabilities, leg: ReconcileLeg) -> Self {
-        if capabilities.tx_lookup {
-            self.tx_lookup = leg;
-        }
-        if capabilities.script_history {
-            self.script_history = leg;
-        }
-        if capabilities.script_live {
-            self.script_live = leg;
-        }
-        self
-    }
-
-    /// Capabilities whose rows are rebuilding from genesis.
-    #[must_use]
-    pub const fn rebuilding(self) -> IndexCapabilities {
-        IndexCapabilities {
-            tx_lookup: matches!(self.tx_lookup, ReconcileLeg::Rebuilding),
-            script_history: matches!(self.script_history, ReconcileLeg::Rebuilding),
-            script_live: matches!(self.script_live, ReconcileLeg::Rebuilding),
-        }
-    }
-
-    /// Widest rollback in flight: the highest watermark being rewound and
-    /// the lowest common ancestor any capability rewinds to.
-    #[must_use]
-    pub fn rolling_back(self) -> Option<(u32, u32)> {
-        [self.tx_lookup, self.script_history, self.script_live]
-            .into_iter()
-            .filter_map(|leg| match leg {
-                ReconcileLeg::RollingBack {
-                    from_height,
-                    to_height,
-                } => Some((from_height, to_height)),
-                ReconcileLeg::Forward | ReconcileLeg::Rebuilding => None,
-            })
-            .reduce(|(from_a, to_a), (from_b, to_b)| (from_a.max(from_b), to_a.min(to_b)))
-    }
-
-    /// Ends every rollback leg; rebuild legs persist until their rows reach
-    /// the applied tip.
-    #[must_use]
-    fn rollbacks_finished(self) -> Self {
-        let finish = |leg| match leg {
-            ReconcileLeg::RollingBack { .. } => ReconcileLeg::Forward,
-            other => other,
-        };
-        Self {
-            tx_lookup: finish(self.tx_lookup),
-            script_history: finish(self.script_history),
-            script_live: finish(self.script_live),
-        }
-    }
-}
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
 /// `Chainstate`, the worker thread, and the query engine.
@@ -657,35 +557,6 @@ pub(crate) struct OpenTxIndex {
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
-/// Opens an `IndexWriter` with legacy/unsupported-format recovery.
-///
-/// Format 3 is upgraded inside [`bitcoin_rs_index::IndexWriter::open`] by
-/// resetting `ScriptHistory` only. This path still full-resets foreign
-/// versions and cursorless legacy tables so they can rebuild.
-pub(crate) fn open_writer<S>(
-    store: &Arc<S>,
-    generation: u64,
-) -> Result<bitcoin_rs_index::IndexWriter<S>, IndexError>
-where
-    S: bitcoin_rs_storage::KvStore,
-{
-    match bitcoin_rs_index::IndexWriter::open(Arc::clone(store), generation) {
-        Ok(writer) => Ok(writer),
-        Err(
-            error @ (IndexError::LegacyCursorlessIndex
-            | IndexError::UnsupportedTxIndexFormatVersion { .. }),
-        ) => {
-            tracing::warn!(
-                %error,
-                "resetting incompatible derived transaction index for rebuild"
-            );
-            bitcoin_rs_index::IndexWriter::reset_index(store.as_ref(), generation)?;
-            bitcoin_rs_index::IndexWriter::open(Arc::clone(store), generation)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 /// Worker-owned open: opens the store, constructs writer/reader/engine,
 /// publishes lifecycle, and runs reconciliation — all behind one
 /// `catch_unwind` boundary that starts before directory creation and includes
@@ -1093,150 +964,6 @@ impl bitcoin_rs_index::SpentCoinScripts for UndoScripts {
     }
 }
 
-/// Object-safe `ScriptLive` seed producer used by [`TxIndexWriter`].
-type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
-    + 'a;
-
-/// Erased prepared-index writer used by the worker and stored in `NodeState`.
-///
-/// Prepare and rollback have one owner each: spent-script-aware
-/// [`Self::prepare_block_with_spent_scripts`] and
-/// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
-/// Callers that are not rebuilding `ScriptLive` pass [`NoSpentScripts`].
-/// Durability, crash visibility, and failure classification for rollback are
-/// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
-/// (`IDX-06` / `IDX-07`).
-pub(crate) trait TxIndexWriter: Send + Sync {
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
-    fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError>;
-    fn seed_script_live_stream(
-        &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        let _ = (produce, tip);
-        Err(IndexError::UnsupportedRollback)
-    }
-    fn commit_forward_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        batch: PreparedBatch,
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<IndexWatermark, IndexError>;
-    fn commit_rollback_one_for_with_cursor_with_spent_scripts(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError>;
-
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        let _ = capabilities;
-        Err(IndexError::UnsupportedRollback)
-    }
-    fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;
-    fn commit_consumer_cursor(
-        &self,
-        fence: IndexWriteFence,
-        cursor: &[u8],
-    ) -> Result<(), IndexError>;
-}
-
-/// `RwLock`-backed writer: `prepare_block_with_spent_scripts` and
-/// `consumer_cursor` take a shared read lock so the CPU-bound decode/row-build
-/// can run concurrently across the rayon pool, while `commit_*`,
-/// `fenced_watermarks`, and `reset_capabilities` take an exclusive write lock
-/// to preserve the single-writer atomic commit and watermark semantics.
-impl<S> TxIndexWriter for RwLock<IndexWriter<S>>
-where
-    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
-{
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
-        self.write().fenced_watermarks()
-    }
-
-    fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        self.read().prepare_block_with_spent_scripts(
-            capabilities,
-            height,
-            hash,
-            body,
-            spent_scripts,
-        )
-    }
-
-    fn commit_forward_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        batch: PreparedBatch,
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<IndexWatermark, IndexError> {
-        self.write()
-            .commit_forward_with_cursor(fence, batch, cursor)
-    }
-
-    fn seed_script_live_stream(
-        &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        self.write().seed_script_live_stream(produce, tip)
-    }
-
-    fn commit_rollback_one_for_with_cursor_with_spent_scripts(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError> {
-        self.write()
-            .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                fence,
-                capabilities,
-                prev,
-                body,
-                cursor,
-                spent_scripts,
-            )
-    }
-
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        self.write().reset_capabilities(capabilities)
-    }
-
-    fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {
-        self.read().consumer_cursor()
-    }
-
-    fn commit_consumer_cursor(
-        &self,
-        fence: IndexWriteFence,
-        cursor: &[u8],
-    ) -> Result<(), IndexError> {
-        self.write().commit_consumer_cursor(fence, cursor)
-    }
-}
-
 /// Detached publisher for test worker construction; records still sequence.
 #[cfg(test)]
 pub(crate) fn detached_chain_publisher() -> Arc<crate::state::ChainEventPublisher> {
@@ -1305,34 +1032,6 @@ impl PendingForward {
             unreachable!("pending forward batch is nonempty");
         };
         watermark
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum SelectedWatermark {
-    Valid(Option<IndexWatermark>),
-    Invalid,
-}
-
-fn selected_watermark(
-    watermarks: IndexWatermarks,
-    capabilities: IndexCapabilities,
-) -> SelectedWatermark {
-    let selected = [
-        capabilities.tx_lookup.then_some(watermarks.tx_lookup),
-        capabilities
-            .script_history
-            .then_some(watermarks.script_history),
-        capabilities.script_live.then_some(watermarks.script_live),
-    ];
-    let mut selected = selected.into_iter().flatten();
-    let Some(first) = selected.next() else {
-        return SelectedWatermark::Invalid;
-    };
-    if selected.all(|watermark| watermark == first) {
-        SelectedWatermark::Valid(first)
-    } else {
-        SelectedWatermark::Invalid
     }
 }
 
