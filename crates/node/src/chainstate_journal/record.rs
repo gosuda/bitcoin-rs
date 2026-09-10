@@ -1,6 +1,8 @@
 //! Framed, checksummed chainstate journal records.
 
-use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{
+    ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut, consensus_len,
+};
 use thiserror::Error;
 
 const MAGIC: [u8; 4] = *b"JRNL";
@@ -9,6 +11,14 @@ pub(crate) const FRAME_HEADER_LEN: usize = MAGIC.len() + 1 + core::mem::size_of:
 const FRAME_TRAILER_LEN: usize = core::mem::size_of::<u32>();
 pub(crate) const MAX_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
 const MAX_MUTATIONS: u32 = 4_000_000;
+const FIXED_PAYLOAD_LEN: usize = core::mem::size_of::<u32>()
+    + 32
+    + 32
+    + core::mem::size_of::<u64>()
+    + core::mem::size_of::<i64>()
+    + 80
+    + core::mem::size_of::<u32>();
+const FIXED_COIN_LEN: usize = 32 + core::mem::size_of::<u32>() + core::mem::size_of::<u32>() + 1;
 
 /// A complete coin, including the fields required by `CoinStats`' `MuHash` preimage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,40 +118,69 @@ pub(crate) enum JournalRecordError {
 /// Encodes a journal record with magic, version, length, payload, and CRC32C.
 #[must_use]
 pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
-    let mut payload = Vec::new();
-    put_u32(&mut payload, record.height);
-    payload.extend_from_slice(&record.block_hash);
-    payload.extend_from_slice(&record.prev_hash);
-    put_u64(&mut payload, record.block_tx_count);
-    put_i64(&mut payload, record.coin_stats_height_delta);
-    payload.extend_from_slice(&record.raw_header);
-    put_u32(&mut payload, u32_len(record.mutations.len()));
+    let expected_payload_len = record_payload_len(record);
+    let capacity = expected_payload_len
+        .and_then(|payload_len| FRAME_HEADER_LEN.checked_add(payload_len))
+        .and_then(|frame_len| frame_len.checked_add(FRAME_TRAILER_LEN))
+        .unwrap_or(FRAME_HEADER_LEN + FRAME_TRAILER_LEN);
+    let mut framed = Vec::with_capacity(capacity);
+    framed.extend_from_slice(&MAGIC);
+    framed.push(VERSION);
+    put_u32(&mut framed, 0);
+
+    put_u32(&mut framed, record.height);
+    framed.extend_from_slice(&record.block_hash);
+    framed.extend_from_slice(&record.prev_hash);
+    put_u64(&mut framed, record.block_tx_count);
+    put_i64(&mut framed, record.coin_stats_height_delta);
+    framed.extend_from_slice(&record.raw_header);
+    put_u32(&mut framed, u32_len(record.mutations.len()));
     for mutation in &record.mutations {
         match mutation {
             Mutation::Create { coin } => {
-                payload.push(0);
-                put_coin(&mut payload, coin);
+                framed.push(0);
+                put_coin(&mut framed, coin);
             }
             Mutation::Spend { coin } => {
-                payload.push(1);
-                put_coin(&mut payload, coin);
+                framed.push(1);
+                put_coin(&mut framed, coin);
             }
             Mutation::Overwrite { old_coin, new_coin } => {
-                payload.push(2);
-                put_coin(&mut payload, old_coin);
-                put_coin(&mut payload, new_coin);
+                framed.push(2);
+                put_coin(&mut framed, old_coin);
+                put_coin(&mut framed, new_coin);
             }
         }
     }
 
-    let payload_len = u32_len(payload.len());
-    let mut framed = Vec::with_capacity(FRAME_HEADER_LEN + payload.len() + FRAME_TRAILER_LEN);
-    framed.extend_from_slice(&MAGIC);
-    framed.push(VERSION);
-    put_u32(&mut framed, payload_len);
-    framed.extend_from_slice(&payload);
-    put_u32(&mut framed, crc32c(&payload));
+    let payload_len = framed.len() - FRAME_HEADER_LEN;
+    debug_assert!(expected_payload_len.is_none_or(|expected| expected == payload_len));
+    framed[MAGIC.len() + 1..FRAME_HEADER_LEN]
+        .copy_from_slice(&u32_len(payload_len).to_le_bytes());
+    let checksum = crc32c(&framed[FRAME_HEADER_LEN..]);
+    put_u32(&mut framed, checksum);
     framed
+}
+
+fn record_payload_len(record: &JournalRecord) -> Option<usize> {
+    let mut len = FIXED_PAYLOAD_LEN;
+    for mutation in &record.mutations {
+        len = len.checked_add(1)?;
+        match mutation {
+            Mutation::Create { coin } | Mutation::Spend { coin } => {
+                len = len.checked_add(coin_len(coin)?)?;
+            }
+            Mutation::Overwrite { old_coin, new_coin } => {
+                len = len.checked_add(coin_len(old_coin)?)?;
+                len = len.checked_add(coin_len(new_coin)?)?;
+            }
+        }
+    }
+    Some(len)
+}
+
+fn coin_len(coin: &Coin) -> Option<usize> {
+    FIXED_COIN_LEN.checked_add(consensus_len(&coin.txout))
 }
 
 /// Decodes and validates one complete journal record.
