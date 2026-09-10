@@ -3,6 +3,8 @@
 use bitcoin_rs_primitives::{
     ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut, consensus_len,
 };
+use std::io::{self, Write};
+
 use thiserror::Error;
 
 const MAGIC: [u8; 4] = *b"JRNL";
@@ -11,14 +13,6 @@ pub(crate) const FRAME_HEADER_LEN: usize = MAGIC.len() + 1 + core::mem::size_of:
 const FRAME_TRAILER_LEN: usize = core::mem::size_of::<u32>();
 pub(crate) const MAX_PAYLOAD_LEN: usize = 256 * 1024 * 1024;
 const MAX_MUTATIONS: u32 = 4_000_000;
-const FIXED_PAYLOAD_LEN: usize = core::mem::size_of::<u32>()
-    + 32
-    + 32
-    + core::mem::size_of::<u64>()
-    + core::mem::size_of::<i64>()
-    + 80
-    + core::mem::size_of::<u32>();
-const FIXED_COIN_LEN: usize = 32 + core::mem::size_of::<u32>() + core::mem::size_of::<u32>() + 1;
 
 /// A complete coin, including the fields required by `CoinStats`' `MuHash` preimage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +121,15 @@ pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
     framed.extend_from_slice(&MAGIC);
     framed.push(VERSION);
     put_u32(&mut framed, 0);
+    encode_payload(record, &mut framed).expect("encoding journal record into Vec cannot fail");
+
+    let payload_len = framed.len() - FRAME_HEADER_LEN;
+    debug_assert!(expected_payload_len.is_none_or(|expected| expected == payload_len));
+    framed[MAGIC.len() + 1..FRAME_HEADER_LEN]
+        .copy_from_slice(&u32_len(payload_len).to_le_bytes());
+    let checksum = crc32c(&framed[FRAME_HEADER_LEN..]);
+    put_u32(&mut framed, checksum);
+    return framed;
 
     put_u32(&mut framed, record.height);
     framed.extend_from_slice(&record.block_hash);
@@ -163,7 +166,38 @@ pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
 }
 
 fn record_payload_len(record: &JournalRecord) -> Option<usize> {
-    let mut len = FIXED_PAYLOAD_LEN;
+    let mut bytes = Vec::new();
+    encode_payload(record, &mut bytes).ok()?;
+    Some(bytes.len())
+}
+
+fn encode_payload(record: &JournalRecord, out: &mut impl Write) -> io::Result<()> {
+    let mut bytes = Vec::new();
+    put_u32(&mut bytes, record.height);
+    bytes.extend_from_slice(&record.block_hash);
+    bytes.extend_from_slice(&record.prev_hash);
+    put_u64(&mut bytes, record.block_tx_count);
+    put_i64(&mut bytes, record.coin_stats_height_delta);
+    bytes.extend_from_slice(&record.raw_header);
+    put_u32(&mut bytes, u32_len(record.mutations.len()));
+    for mutation in &record.mutations {
+        match mutation {
+            Mutation::Create { coin } => { bytes.push(0); put_coin(&mut bytes, coin); }
+            Mutation::Spend { coin } => { bytes.push(1); put_coin(&mut bytes, coin); }
+            Mutation::Overwrite { old_coin, new_coin } => {
+                bytes.push(2); put_coin(&mut bytes, old_coin); put_coin(&mut bytes, new_coin);
+            }
+        }
+    }
+    out.write_all(&bytes)
+}
+
+fn record_payload_len_old(record: &JournalRecord) -> Option<usize> {
+    let _ = record;
+    None
+}
+
+/*
     for mutation in &record.mutations {
         len = len.checked_add(1)?;
         match mutation {
@@ -182,6 +216,7 @@ fn record_payload_len(record: &JournalRecord) -> Option<usize> {
 fn coin_len(coin: &Coin) -> Option<usize> {
     FIXED_COIN_LEN.checked_add(consensus_len(&coin.txout))
 }
+*/
 
 /// Decodes and validates one complete journal record.
 pub(crate) fn decode_record(bytes: &[u8]) -> Result<JournalRecord, JournalRecordError> {
