@@ -108,6 +108,7 @@ def _frame(selector: int, script_pubkey: bytes, witness: Sequence[bytes]) -> byt
 
 def _strip_rust_comments(text: str) -> str:
     """Remove Rust line/nested-block comments without touching string contents."""
+    raw_start = re.compile(r'r(#{0,255})"')
     out: list[str] = []
     index = block_depth = 0
     in_string = False
@@ -133,11 +134,11 @@ def _strip_rust_comments(text: str) -> str:
             elif char == '"':
                 in_string = False
             continue
-        raw = re.match(r'r(#{0,255})"', text[index:])
+        raw = raw_start.match(text, index)
         if raw:
             hashes = raw.group(1)
-            terminator = '"' + hashes + '"'
-            end = text.find(terminator, index + len(raw.group(0)))
+            terminator = '"' + hashes
+            end = text.find(terminator, raw.end())
             if end < 0:
                 raise ValueError("Unterminated Rust raw string in script_eval contract")
             out.append(text[index:end + len(terminator)])
