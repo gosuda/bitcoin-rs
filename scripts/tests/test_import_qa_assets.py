@@ -36,7 +36,7 @@ class MapperTests(unittest.TestCase):
         for name in names: (self.corpora / name).mkdir(parents=True)
         self.inv = self.root / "compat.rs"
         self.inv.write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }, Command { name: "pong" }];\n')
-        self.harness = self.root / "script_eval.rs"; self.harness.write_text("const FLAGS: [VerifyFlags; 4] = [VerifyFlags::NONE, VerifyFlags::MANDATORY, VerifyFlags::TAPROOT, VerifyFlags::CLEANSTACK];\nconst ELEMENT_LEN_MAX: usize = 1_024;\n")
+        self.harness = self.root / "script_eval.rs"; self.harness.write_text("const FLAGS: [VerifyFlags; 4] = [VerifyFlags::NONE, VerifyFlags::TAPROOT, VerifyFlags::MANDATORY, VerifyFlags::STANDARD];\nconst ELEMENT_LEN_MAX: usize = 1_024;\n")
 
     def msg(self, command: str, payload: bytes) -> None:
         (self.corpora / "p2p_deserialize_raw_net_msg" / command).write_bytes(
@@ -95,7 +95,7 @@ class ShellFlowTests(unittest.TestCase):
         scripts = self.root / "scripts"; scripts.mkdir(); (scripts / MAPPER.name).write_bytes(MAPPER.read_bytes())
         (self.root / "crates/p2p/src").mkdir(parents=True); (self.root / "fuzz/fuzz_targets").mkdir(parents=True)
         (self.root / "crates/p2p/src/compat.rs").write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }];')
-        (self.root / "fuzz/fuzz_targets/script_eval.rs").write_text("const FLAGS: [VerifyFlags; 2] = [VerifyFlags::NONE, VerifyFlags::TAPROOT];\nconst ELEMENT_LEN_MAX: usize = 1_024;\n")
+        (self.root / "fuzz/fuzz_targets/script_eval.rs").write_text("const FLAGS: [VerifyFlags; 4] = [VerifyFlags::NONE, VerifyFlags::TAPROOT, VerifyFlags::MANDATORY, VerifyFlags::STANDARD];\nconst ELEMENT_LEN_MAX: usize = 1_024;\n")
         self.prov = self.root / "fuzz/CORPUS_PROVENANCE.md"; self.prov.parent.mkdir(exist_ok=True); self.prov.write_text("old\n")
         self.pin = re.search(r'^readonly QA_ASSETS_PIN="([0-9a-f]{40})"', SCRIPT.read_text(), re.M).group(1)
         corpus = self.stage / "fuzz_corpora"

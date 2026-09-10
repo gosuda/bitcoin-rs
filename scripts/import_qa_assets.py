@@ -84,18 +84,20 @@ def map_p2p(source: Path, inventory: Path, output: Path, max_bytes: int) -> None
 
 
 def _script_selectors(harness: Path) -> tuple[int, int]:
-    """Read the script target's flag inventory; never duplicate its positions."""
+    """Resolve the corpus selectors from the harness' authoritative FLAGS list."""
     text = harness.read_text()
-    table = re.search(r"const\s+FLAGS\s*:\s*\[[^]]+\]\s*=\s*\[(.*?)\];", text, re.S)
-    if table is None:
+    flags = re.search(r"const\s+FLAGS\s*:\s*\[VerifyFlags;\s*\d+\]\s*=\s*\[(.*?)\];", text, re.S)
+    if flags is None:
         raise ValueError("Cannot find script_eval FLAGS inventory")
-    entries = re.findall(r"VerifyFlags::([A-Z_]+)", table.group(1))
-    def selector(name: str) -> int:
-        matches = [index for index, value in enumerate(entries) if value == name]
-        if len(matches) != 1:
-            raise ValueError(f"Script FLAGS inventory must contain exactly one {name}")
-        return matches[0]
-    return selector("NONE"), selector("TAPROOT")
+    entries = [entry.strip() for entry in flags.group(1).split(",") if entry.strip()]
+    matches = {}
+    for name in ("NONE", "TAPROOT"):
+        found = [index for index, entry in enumerate(entries)
+                 if re.fullmatch(r"VerifyFlags::" + name, entry)]
+        if len(found) != 1:
+            raise ValueError(f"Expected exactly one script_eval {name} flag")
+        matches[name] = found[0]
+    return matches["NONE"], matches["TAPROOT"]
 
 
 def _frame(selector: int, script_pubkey: bytes, witness: Sequence[bytes]) -> bytes:
