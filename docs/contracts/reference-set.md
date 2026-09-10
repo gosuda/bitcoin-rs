@@ -18,8 +18,9 @@ A version label alone is never custody.
 - The `[reference]` record in `docs/api/core-compat.toml` is the
   machine-readable authority for reference identity values.
 - `bin/bitcoin-rs/tests/support/reference_set.rs` is the typed parser that
-  enforces required identities, digest formats, corpus presence, and product
-  versus kernel-tree separation.
+  enforces required identities, complete source commits, digest formats,
+  corpus presence, and product versus kernel-tree separation. The RPC corpus
+  gate compiles this same test support module to validate its capture provenance.
 - `docs/contracts/reference-set.md` is a readable projection. It does not
   override the manifest values or parser validation on conflict.
 - A version label alone is never custody. A reference must carry source and
@@ -42,6 +43,13 @@ recorded under `[reference.release]` in the manifest:
 This is the behavioral reference. No compatibility claim may be made against a
 version string or a source snapshot alone.
 
+The checked-in RPC captures retain their own `core_source_commit`,
+`core_binary_sha256`, version, regtest inputs, and allowed differences.
+`crates/rpc/tests/support/fixture.rs` compares that provenance to the selected
+release through the shared parser. Changing the reference leaves an old
+capture stale and fails its gate; it does not relabel the recorded response.
+The process harness separately hashes the actual executable before launch.
+
 ### `REF-03`: Core 31.99.0 kernel tree evidence
 
 The kernel oracle is a development tree identity, not a released product,
@@ -51,7 +59,18 @@ carried by the scalar keys of `[reference]` itself:
 - `kernel_crate = "bitcoinkernel"` at `kernel_crate_version = "0.2.1"`
 - `kernel_sys_crate = "libbitcoinkernel-sys"` at
   `kernel_sys_crate_version = "0.3.0"`
+- `kernel_vendor_commit = "4b51ffdddfa82b84a03a1fa76bbfa72a4f0b6ccf"`
+- `kernel_source_commit = "fb0e8612d6f74071af77b3f27d915da69e0a726b"`
+- `kernel_sys_crate_sha256 = "2906bc31f02dff7af9611fe9129c9eae021bd359f9d8e79824026fe1aaf28ab1"`
 - `differential_harness = false`
+
+The published crate's `.cargo_vcs_info.json` identifies the vendor revision.
+Its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/691b006f271c6d19565266541d7397eaf0c64944)
+records the Bitcoin Core revision in `git-subtree-split`. The reference gate
+checks the package digest against `Cargo.lock`; source and package identities
+must be reviewed together on an oracle upgrade. Build options remain owned by
+that pinned crate's `build.rs`, including its static `RelWithDebInfo` kernel
+build with wallet, daemon, tests, and IPC disabled.
 
 This identity is used only for differential evidence. It is not a policy pin,
 it is not a stable release, and it must never be read as the `REF-02` product
@@ -74,8 +93,8 @@ The product corpora are defined in
   response at height 709,635. A cell may not close on a guessed or recalled
   UTXO total.
 
-`manifest_sha256` is optional and absent from the manifest until the archive
-exists; `corpus_custody()` in
+`manifest_sha256` is optional until the archive exists. C150 carries its
+exported digest; Cmodern has no exported digest yet. `corpus_custody()` in
 `bin/bitcoin-rs/tests/support/reference_set.rs` reports such a corpus as
 `Blocked { missing: "manifest_sha256" }` rather than inventing a digest.
 
@@ -100,10 +119,11 @@ This is an evidence tool pin. No checker run is claimed by this page.
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
   floating or unpinned. The 1 TB budget applies only to that pinned default
   lane.
-- A reference with only a version label or a mismatched binary digest is
-  rejected with a typed `ReferenceError` variant (`VersionLabelOnly`,
-  `DigestMalformed`, `IdentityConfusion`, `MissingCorpus`) from
-  `bin/bitcoin-rs/tests/support/reference_set.rs`.
+- Missing identities, malformed commits or digests, and confused product
+  identities are rejected with a typed `ReferenceError` from
+  `bin/bitcoin-rs/tests/support/reference_set.rs`. The fixture gate rejects
+  stale capture provenance, and the process harness rejects missing binaries
+  or executable hashes that differ from the selected reference.
 - The 31.1 product reference and the 31.99.0 kernel tree are distinct. No
   test may claim product parity against the kernel tree identity.
 - Known deviations are explicit. No status in the manifest upgrades to
@@ -115,7 +135,10 @@ This is an evidence tool pin. No checker run is claimed by this page.
 - `bin/bitcoin-rs/tests/support/reference_set.rs`: typed parsing and custody
   validation for those values.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
-  digest-mismatch identities, and pins `corpus_custody()` honesty.
+  malformed identities, checks kernel package custody, and pins
+  `corpus_custody()` honesty.
+- `crates/rpc/tests/support/fixture.rs`: rejects missing or stale capture
+  provenance against the same selected release.
 
 ## Vocabulary
 

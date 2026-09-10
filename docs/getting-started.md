@@ -1,5 +1,9 @@
 # Getting started
 
+For a bounded first visit, follow the [local regtest evaluation](local-evaluation.md).
+It covers build, public reads, shutdown, and same-directory reopen without
+reusing a production datadir. Its runtime verification status is stated there.
+
 ## Prerequisites
 
 The repository development toolchain is `stable`; the workspace MSRV is Rust `1.95.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).

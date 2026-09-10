@@ -79,6 +79,14 @@ jobs:
             > target/apalache/run-context.txt
           cargo test --locked -p bitcoin-rs --no-fail-fast \
             --no-default-features --features "${FULL_NODE_FEATURES}"
+      - name: Preserve public process compatibility evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: process-compatibility-full-node-${{ github.run_attempt }}
+          path: target/process-harness/**
+          if-no-files-found: warn
+          retention-days: 7
       - name: Preserve full-node formal evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
