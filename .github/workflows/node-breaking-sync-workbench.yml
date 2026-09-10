@@ -14,7 +14,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
-  BASE_SHA: 135d2e54d8d3630a609db6d5cc25045a59c966e1
+  BASE_SHA: 6774dbeb9ad188def43858a13d2b2a3a8b0b1b59
   TARGET_BRANCH: refactor/node-break-sync-staging
 
 jobs:
@@ -25,6 +25,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+      - name: Reset source to current refactor base
+        shell: bash
+        run: |
+          cp scripts/node-breaking-sync.py "$RUNNER_TEMP/transform.py"
+          cp .github/workflows/node-breaking-sync-workbench.yml "$RUNNER_TEMP/workflow.yml"
+          git reset --hard "$BASE_SHA"
+          mkdir -p scripts .github/workflows
+          cp "$RUNNER_TEMP/transform.py" scripts/node-breaking-sync.py
+          cp "$RUNNER_TEMP/workflow.yml" .github/workflows/node-breaking-sync-workbench.yml
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
@@ -33,8 +42,10 @@ jobs:
         run: python3 scripts/node-breaking-sync.py
       - name: Format
         run: cargo fmt --all
-      - name: P2P and node Clippy
-        run: cargo clippy --locked -p bitcoin-rs-p2p -p bitcoin-rs-node --no-default-features --features bitcoin-rs-node/fjall,bitcoin-rs-node/zmq --all-targets -- -D warnings
+      - name: P2P Clippy
+        run: cargo clippy --locked -p bitcoin-rs-p2p --all-targets -- -D warnings
+      - name: Node Clippy
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: P2P tests
         run: cargo test --locked -p bitcoin-rs-p2p --lib
       - name: Node sync tests
@@ -48,7 +59,7 @@ jobs:
           set -euo pipefail
           rm -f scripts/node-breaking-sync.py .github/workflows/node-breaking-sync-workbench.yml
           git add -A
-          if git diff --cached --name-only | grep -Ev '^(crates/node/|crates/p2p/|docs/|CONCEPTS.md$)' ; then
+          if git diff --cached --name-only "$BASE_SHA" | grep -Ev '^(crates/node/|crates/p2p/|docs/|CONCEPTS.md$)' ; then
             echo 'unexpected changed path' >&2
             exit 1
           fi
