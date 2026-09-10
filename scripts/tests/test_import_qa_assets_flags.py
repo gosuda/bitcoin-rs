@@ -3,8 +3,8 @@
 Contract: `fuzz/fuzz_targets/script_eval.rs` owns the selector-indexed input framing
 and `FLAGS` order; `docs/contracts/qa-corpus.md` QAC-01 requires imported script
 seeds to feed that harness. This test mutates only owner syntax (order/comments),
-then derives selector indices from the parsed owner contract before independently
-constructing the documented byte frame.
+then derives expected selectors from the independently declared fixture order,
+not from the parser under test, before constructing the documented byte frame.
 """
 
 import importlib.util
@@ -29,17 +29,19 @@ class FlagCommentTests(unittest.TestCase):
             script = b"Q" * 64
             (source / "script").write_bytes(script)
             harness = root / "script_eval.rs"
+            flag_names = ("TAPROOT", "MANDATORY", "NONE", "STANDARD")
             harness.write_text(
                 "const FLAGS: [VerifyFlags; 4] = [\n"
-                "    VerifyFlags::TAPROOT, // taproot, selector owner\n"
+                f"    VerifyFlags::{flag_names[0]}, // taproot, selector owner\n"
                 "    /* mandatory, nested /* comment, comma */ still comment */\n"
-                "    VerifyFlags::MANDATORY,\n"
-                "    VerifyFlags::NONE, // none, selector owner\n"
-                "    VerifyFlags::STANDARD,\n"
+                f"    VerifyFlags::{flag_names[1]},\n"
+                f"    VerifyFlags::{flag_names[2]}, // none, selector owner\n"
+                f"    VerifyFlags::{flag_names[3]},\n"
                 "];\n"
                 "const ELEMENT_LEN_MAX: usize = 1_024;\n"
             )
-            _, none_selector, taproot_selector = mapper._script_contract(harness)
+            none_selector = flag_names.index("NONE")
+            taproot_selector = flag_names.index("TAPROOT")
             mapper.map_script([source], harness, output, 65_536)
             seeds = {path.read_bytes() for path in output.iterdir()}
             raw = bytes([none_selector]) + b"\0\0\x40\0" + script + b"\0"

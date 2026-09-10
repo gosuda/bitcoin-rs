@@ -13,6 +13,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 from collections.abc import Iterator, Sequence
@@ -28,7 +29,19 @@ def _seed_paths(source: Path) -> Iterator[Path]:
 
 
 def _read_seed(path: Path, limit: int) -> bytes:
-    with path.open("rb") as source:
+    # Revalidate the opened object: the directory entry may change after scandir.
+    # NONBLOCK avoids hanging on a raced FIFO before fstat can reject it.
+    def open_regular(name: str, flags: int) -> int:
+        descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError(f"Expected regular seed file: {path}")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    with open(path, "rb", opener=open_regular) as source:
         return source.read(limit)
 
 
@@ -39,6 +52,7 @@ def _publish(output: Path, name: str, seed: bytes) -> None:
     try:
         with temporary as stream:
             stream.write(seed)
+            os.fchmod(stream.fileno(), 0o644)
         os.replace(staged, output / name)
     finally:
         staged.unlink(missing_ok=True)
@@ -49,9 +63,10 @@ def _emit(output: Path, seed: bytes) -> None:
 
 
 def _commands(source: Path) -> dict[str, bytes]:
+    text = _strip_rust_comments(source.read_text())
     table = re.search(
         r"pub\s+const\s+COMMANDS\s*:\s*&\[Command\]\s*=\s*&\[(.*?)\];",
-        source.read_text(), re.S,
+        text, re.S,
     )
     if table is None:
         raise ValueError("Cannot find the P2P COMMANDS inventory")
@@ -63,14 +78,14 @@ def _commands(source: Path) -> dict[str, bytes]:
 
 
 def map_p2p(source: Path, inventory: Path, output: Path, max_bytes: int) -> None:
-    if max_bytes < 2:
-        raise ValueError("Seed budget is too small for a P2P selector and payload")
+    if max_bytes < 1:
+        raise ValueError("Seed budget is too small for a P2P selector")
     selector = _commands(inventory)
     output.mkdir(parents=True, exist_ok=True)
     imported = skipped_short = unknown_command = 0
     for path in _seed_paths(source):
         blob = _read_seed(path, 24 + max_bytes - 1)
-        if len(blob) <= 24:
+        if len(blob) < 24:
             skipped_short += 1
             continue
         command = blob[4:16].split(b"\0", 1)[0].decode("ascii", "replace")
@@ -117,6 +132,16 @@ def _strip_rust_comments(text: str) -> str:
                 index += 1
             elif char == '"':
                 in_string = False
+            continue
+        raw = re.match(r'r(#{0,255})"', text[index:])
+        if raw:
+            hashes = raw.group(1)
+            terminator = '"' + hashes + '"'
+            end = text.find(terminator, index + len(raw.group(0)))
+            if end < 0:
+                raise ValueError("Unterminated Rust raw string in script_eval contract")
+            out.append(text[index:end + len(terminator)])
+            index = end + len(terminator)
             continue
         if text.startswith("//", index):
             newline = text.find("\n", index + 2)
