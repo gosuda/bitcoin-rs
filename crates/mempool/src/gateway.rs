@@ -2460,16 +2460,16 @@ mod tests {
         let gateway = gateway_with(None);
         let mut tx = standard_tx(0x84);
         let redeem_script = vec![0xae; 201];
-        tx.inputs[0].script_sig = bitcoin_rs_script::script::push_data(&redeem_script);
+        tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::script::push_data(&redeem_script));
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
-        request.prevouts[0].1.script_pubkey = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        request.prevouts[0].1.script_pubkey = Script::from_bytes([vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat());
         request.context.sigop_cost = 0;
         let oracle: bitcoin::Transaction =
             bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))?;
         let previous = bitcoin::TxOut {
-            value: bitcoin::Amount::from_sat(request.prevouts[0].1.value),
+            value: bitcoin::Amount::from_sat(request.prevouts[0].1.value.to_sat()),
             script_pubkey: bitcoin::ScriptBuf::from_bytes(
-                request.prevouts[0].1.script_pubkey.clone(),
+                Vec::from(request.prevouts[0].1.script_pubkey.clone()),
             ),
         };
         let cost = oracle.total_sigop_cost(|_| Some(previous.clone()));
@@ -3092,7 +3092,7 @@ mod tests {
         let gateway = gateway_with(None);
         let mut candidate = standard_tx(93);
         candidate.inputs.push(candidate.inputs[0].clone());
-        candidate.inputs[0].witness = vec![vec![1]];
+        candidate.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let origin = AdmissionOrigin::Peer(crate::PeerToken {
             addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
             connection_id: 7,
@@ -3129,7 +3129,7 @@ mod tests {
             let mut candidate = standard_tx(95);
             candidate.version = version;
             candidate.inputs.push(candidate.inputs[0].clone());
-            candidate.inputs[0].witness = vec![vec![0; witness_len]];
+            candidate.inputs[0].witness = Witness::from_stack(vec![vec![0; witness_len]]);
             let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
             assert_eq!(
                 gateway.admit_transaction(request),

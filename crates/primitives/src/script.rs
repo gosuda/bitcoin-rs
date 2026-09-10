@@ -25,12 +25,6 @@ impl Script {
         &self.0
     }
 
-    /// Unwraps the consensus script bytes.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
-    }
-
     /// Returns true when the script is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {

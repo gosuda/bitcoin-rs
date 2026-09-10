@@ -5,7 +5,7 @@
 //! commit or a peer orphan/reject transition.
 
 use alloc::{sync::Arc, vec::Vec};
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
@@ -590,16 +590,16 @@ mod tests {
         script.extend_from_slice(&[0x88, 0xac]);
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: vec![],
-                sequence: u32::MAX,
-                witness: vec![],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 9_000,
-                script_pubkey: script,
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::from_bytes(script),
             }],
         }
     }
@@ -610,8 +610,8 @@ mod tests {
         // Gateway raw insertion fixtures stage an anyone-can-spend output;
         // the child still traverses complete policy/script admission.
         parent.outputs[0] = TxOut {
-            value: 10_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         };
         let child = Arc::new(standard_spend(OutPoint::new(parent.txid(), 0), 2));
         (parent, child)
@@ -811,7 +811,7 @@ mod tests {
             }
             1 => {
                 let mut conflict = (*valid).clone();
-                conflict.outputs[0].value -= 1;
+                conflict.outputs[0].value = Amount::from_sat(conflict.outputs[0].value.to_sat() - 1);
                 gateway.insert_entry(
                     AdmissionOrigin::Rpc,
                     MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 1),
@@ -914,7 +914,7 @@ mod tests {
             panic!("the missing transaction must be resident")
         };
         let mut refreshed = (*invalid).clone();
-        refreshed.inputs[0].witness = vec![vec![1]];
+        refreshed.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let refreshed = Arc::new(refreshed);
         assert!(matches!(
             gateway.submit_transaction(
@@ -952,7 +952,7 @@ mod tests {
             parent.outputs[0].clone(),
         )]);
         let mut invalid = (*valid).clone();
-        invalid.inputs[0].witness = vec![vec![1]];
+        invalid.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let invalid = Arc::new(invalid);
         assert_eq!(invalid.txid(), valid.txid());
         assert_ne!(invalid.wtxid(), valid.wtxid());
@@ -988,12 +988,12 @@ mod tests {
         let chain = Coins(vec![(
             child.inputs[0].previous_output,
             TxOut {
-                value: 10_000,
-                script_pubkey,
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(script_pubkey),
             },
         )]);
         let mut valid = (*child).clone();
-        valid.inputs[0].witness = vec![witness_script];
+        valid.inputs[0].witness = Witness::from_stack(vec![witness_script]);
         let valid = Arc::new(valid);
         let stripped_wtxid = child.wtxid();
         assert_eq!(child.txid(), valid.txid());
@@ -1145,7 +1145,7 @@ mod tests {
             // gateway must reject those tokens and rebuild from the pool.
             Coins(vec![]).snapshot(&Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
                 inputs: vec![],
                 outputs: vec![],
             })
@@ -1192,7 +1192,7 @@ mod tests {
                 };
                 self.gateway.chain_changed(&[]);
                 assert!(reservation.finish().is_ok());
-                coin.1.script_pubkey = vec![0x00];
+                coin.1.script_pubkey = Script::from_bytes(vec![0x00])
             }
             Some(ChainAdmissionSnapshot {
                 prevouts: vec![coin],
@@ -1343,9 +1343,9 @@ mod tests {
                 gateway.chain_changed(&[parent.txid()]);
                 let mut replacement = (*child).clone();
                 if refresh {
-                    replacement.inputs[0].witness = vec![vec![1]];
+                    replacement.inputs[0].witness = Witness::from_stack(vec![vec![1]])
                 } else {
-                    replacement.outputs[0].value -= 1;
+                    replacement.outputs[0].value = Amount::from_sat(replacement.outputs[0].value.to_sat() - 1);
                 }
                 let replacement = Arc::new(replacement);
                 let available = match mode {
@@ -1353,8 +1353,8 @@ mod tests {
                     2 => Some((
                         child.inputs[0].previous_output,
                         TxOut {
-                            value: 10_000,
-                            script_pubkey: vec![0x00],
+                            value: Amount::from_sat(10_000),
+                            script_pubkey: Script::from_bytes(vec![0x00]),
                         },
                     )),
                     _ => None,
@@ -1425,7 +1425,7 @@ mod tests {
             Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
         );
         let mut variant = (*malformed).clone();
-        variant.inputs[0].witness = vec![vec![0x51]];
+        variant.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
         assert_eq!(
             gateway.submit_transaction(
                 Arc::new(variant),
@@ -1472,10 +1472,10 @@ mod tests {
     fn witness_parent_and_child() -> (Tx, Arc<Tx>) {
         let (mut parent, child) = parent_and_child();
         let mut tx = (*child).clone();
-        tx.inputs[0].witness = vec![vec![0x51]];
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
         let mut script = vec![0x00, 0x20];
         script.extend_from_slice(&Sha256::digest([0x51]));
-        parent.outputs[0].script_pubkey = script;
+        parent.outputs[0].script_pubkey = Script::from_bytes(script);
         tx.inputs[0].previous_output.txid = parent.txid();
         (parent, Arc::new(tx))
     }
@@ -1510,36 +1510,36 @@ mod tests {
         for (script_pubkey, script_sig, witness, input_cost) in cases {
             let parent = Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::new(),
                 }],
                 outputs: vec![
                     TxOut {
-                        value: 1,
-                        script_pubkey: vec![0x51],
+                        value: Amount::from_sat(1),
+                        script_pubkey: Script::from_bytes(vec![0x51]),
                     },
                     TxOut {
-                        value: 9_000,
-                        script_pubkey,
+                        value: Amount::from_sat(9_000),
+                        script_pubkey: Script::from_bytes(script_pubkey),
                     },
                 ],
             };
             let child = Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(parent.txid(), 1),
-                    script_sig,
-                    sequence: u32::MAX,
-                    witness,
+                    script_sig: Script::from_bytes(script_sig),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::from_stack(witness),
                 }],
                 outputs: vec![TxOut {
-                    value: 8_000,
-                    script_pubkey: vec![0xac],
+                    value: Amount::from_sat(8_000),
+                    script_pubkey: Script::from_bytes(vec![0xac]),
                 }],
             };
             // Preparation only: no script execution or successful package
@@ -1548,9 +1548,9 @@ mod tests {
                 bitcoin::consensus::deserialize(&consensus_bytes(&child))?;
             let expected_outpoint = oracle.input[0].previous_output;
             let oracle_output = bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(parent.outputs[1].value),
+                value: bitcoin::Amount::from_sat(parent.outputs[1].value.to_sat()),
                 script_pubkey: bitcoin::ScriptBuf::from_bytes(
-                    parent.outputs[1].script_pubkey.clone(),
+                    Vec::from(parent.outputs[1].script_pubkey.clone()),
                 ),
             };
             assert_eq!(
@@ -1616,9 +1616,9 @@ mod tests {
         ));
         let (valid, chain) = witness_spend();
         let mut invalid = (*valid).clone();
-        invalid.inputs[0].witness = vec![vec![0x00]];
+        invalid.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
         let mut second = (*valid).clone();
-        second.outputs[0].value -= 1;
+        second.outputs[0].value = Amount::from_sat(second.outputs[0].value.to_sat() - 1);
         // A prior peer orphan must survive both successful and failed preview.
         assert!(matches!(
             preview_gateway.submit_transaction(
@@ -1693,7 +1693,7 @@ mod tests {
         let gateway = gateway();
         let (valid, chain) = witness_spend();
         let mut invalid = (*valid).clone();
-        invalid.inputs[0].witness = vec![vec![0x00]];
+        invalid.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
         for (tx, reason, submitted) in [
             (
                 (*valid).clone(),
@@ -1793,7 +1793,7 @@ mod tests {
             let gateway = gateway();
             let (valid, chain) = witness_spend();
             let mut invalid = (*valid).clone();
-            invalid.inputs[0].witness = if stripped { vec![] } else { vec![vec![0x00]] };
+            invalid.inputs[0].witness = if stripped { Witness::new()} else { Witness::from_stack(vec![vec![0x00]])};
             let invalid = Arc::new(invalid);
             assert_eq!(valid.txid(), invalid.txid());
             assert_ne!(valid.wtxid(), invalid.wtxid());
@@ -1847,7 +1847,7 @@ mod tests {
             Ok(SubmitOutcome::Held { .. })
         ));
         let mut invalid = (*valid).clone();
-        invalid.inputs[0].witness = vec![vec![0x00]];
+        invalid.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
         let invalid = Arc::new(invalid);
         let mut attacker = source();
         attacker.connection_id += 1;
@@ -1913,8 +1913,8 @@ mod tests {
         let coins = Coins(vec![(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             },
         )]);
         let retried = gateway.retry_orphans(&coins, 2);
@@ -1935,9 +1935,9 @@ mod tests {
         let mut tx = (*child).clone();
         tx.inputs.push(TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![],
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         });
         let tx = Arc::new(tx);
         let coins = Coins(vec![(
@@ -1979,7 +1979,7 @@ mod tests {
             coins,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        tx.inputs[0].witness = vec![vec![1]];
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let tx = Arc::new(tx);
         let origin = AdmissionOrigin::Peer(source());
         assert_eq!(
@@ -1993,7 +1993,7 @@ mod tests {
         assert!(gateway.get_tx(tx.txid()).is_none());
 
         let mut alternate = (*tx).clone();
-        alternate.inputs[0].witness = vec![vec![2]];
+        alternate.inputs[0].witness = Witness::from_stack(vec![vec![2]]);
         assert_eq!(alternate.txid(), tx.txid());
         assert_ne!(alternate.wtxid(), tx.wtxid());
         let alternate = Arc::new(alternate);
@@ -2028,8 +2028,8 @@ mod tests {
                 vec![(
                     outpoint,
                     TxOut {
-                        value: 10_000,
-                        script_pubkey: vec![0x51],
+                        value: Amount::from_sat(10_000),
+                        script_pubkey: Script::from_bytes(vec![0x51]),
                     },
                 )]
             } else {
@@ -2054,7 +2054,7 @@ mod tests {
         let gateway = gateway();
         let mut tx = standard_spend(OutPoint::default(), 5);
         tx.inputs.push(tx.inputs[0].clone());
-        tx.inputs[0].witness = vec![vec![1]];
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         assert_eq!(
             gateway.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, 1, &Coins(vec![])),
             Err(SubmitError::Consensus)
