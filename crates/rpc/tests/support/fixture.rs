@@ -520,13 +520,17 @@ fn validate_tuple_content_length(
         if tuple.body_len != Some(0) {
             return Err(fail("204 response must have an empty body".to_owned()));
         }
-        return if declared.is_empty() {
-            Ok(())
-        } else {
-            Err(fail(
-                "204 response must not carry Content-Length".to_owned(),
-            ))
-        };
+        // Accept both capture forms: RFC 9110 §8.6 omission and the
+        // libevent-era Core `Content-Length: 0`; the negative probe pins
+        // the node's own omission.
+        if let Some(value) = declared.first() {
+            if *value != "0" || declared.len() != 1 {
+                return Err(fail(
+                    "204 Content-Length must be absent or exactly \"0\"".to_owned(),
+                ));
+            }
+        }
+        return Ok(());
     }
     match (declared.first(), tuple.body_len) {
         (None, _) => Ok(()),

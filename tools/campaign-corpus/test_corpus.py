@@ -880,6 +880,71 @@ class PartialWrite(unittest.TestCase):
                 backing_archive.close()
                 backing_entries.close()
 
+    def test_failed_append_retries_on_same_writer_after_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            freeze = _fixture_freeze(root)
+            archive_path = root / "failed.archive"
+            entries_path = root / "failed.entries"
+            backing_archive = archive_path.open("w+b")
+            backing_entries = entries_path.open("w+b")
+            archive = _FlakyWrites(backing_archive)
+            entries = _FlakyWrites(backing_entries)
+            try:
+                writer = corpus.CorpusWriter(freeze, FIX_CORPUS, archive, entries)
+                writer.append(_GENESIS, expected_hash=GENESIS_HASH)
+                facts = writer.prefix_facts()
+                archive.poisoned = True
+                with self.assertRaises(OSError):
+                    writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
+                # Digest updates are deferred past successful writes, so a
+                # failed frame never contaminates them: once the caller
+                # truncates the partial tail, the same writer continues.
+                archive.truncate(facts.archive_bytes)
+                entries.truncate(facts.entries_bytes)
+                meta = writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
+                self.assertEqual(meta.offset, facts.archive_bytes)
+                writer.append(_BLOCK2, expected_hash=FIX_STOP_HASH)
+                summary, manifest_bytes = _finish_to(root, writer, "failed-final")
+                self.assertEqual(summary.archive_sha256, FIX_ARCHIVE_SHA256)
+                self.assertEqual(manifest_bytes, _GOLDEN_MANIFEST)
+            finally:
+                backing_archive.close()
+                backing_entries.close()
+
+    def test_resumed_tail_blocks_finish_until_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            freeze = _fixture_freeze(root)
+            with _writer_streams(root, "tailfinish") as (archive, entries, archive_path, _entries_path):
+                writer = corpus.CorpusWriter(freeze, FIX_CORPUS, archive, entries)
+                writer.append(_GENESIS, expected_hash=GENESIS_HASH)
+                writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
+                writer.append(_BLOCK2, expected_hash=FIX_STOP_HASH)
+                facts = writer.prefix_facts()
+                archive.write(b"uncommitted-tail")
+                entries.write(b"uncommitted-tail\n")
+                archive.flush()
+                entries.flush()
+                resumed = corpus.CorpusWriter.resume(freeze, FIX_CORPUS, archive, entries, facts)
+                with self.assertRaisesRegex(ContractError, "unverified tail"):
+                    resumed.finish(io.BytesIO())
+                archive.truncate(facts.archive_bytes)
+                entries.truncate(facts.entries_bytes)
+                summary, manifest_bytes = _finish_to(root, resumed, "tailfinish-final")
+                self.assertEqual(archive_path.read_bytes(), _GOLDEN_ARCHIVE)
+                self.assertEqual(manifest_bytes, _GOLDEN_MANIFEST)
+                self.assertEqual(summary.archive_sha256, FIX_ARCHIVE_SHA256)
+
+    def test_run_writer_rejects_identical_destinations(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            freeze = _fixture_freeze(root)
+            same = root / "same.bin"
+            with self.assertRaises(ContractError):
+                corpus._run_writer(freeze, FIX_CORPUS, same, same, [(None, _GENESIS)])
+            self.assertFalse(same.exists())
+
 
 # ---------------------------------------------------------------------------
 # Verifier schema: exact fields, types, duplicates, digests, linkage.
