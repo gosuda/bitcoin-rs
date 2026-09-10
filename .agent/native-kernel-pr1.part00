@@ -1,0 +1,119 @@
+diff --git a/crates/primitives/src/sighash.rs b/crates/primitives/src/sighash.rs
+--- a/crates/primitives/src/sighash.rs
++++ b/crates/primitives/src/sighash.rs
+@@ -302,7 +302,26 @@
+         value: u64,
+         sighash_type: Sighash,
+     ) -> Result<Hash256, SighashError> {
+-        let ty = sighash_type.to_ecdsa()?;
++        let raw = sighash_type.to_ecdsa()?.to_u32();
++        self.segwit_v0_signature_hash_raw(input_index, script_code, value, raw)
++    }
++
++    /// Computes the BIP143 digest for a raw ECDSA hash type.
++    ///
++    /// Field selection uses the low five bits and `SIGHASH_ANYONECANPAY`,
++    /// while all 32 bits are serialized into the digest. Undefined ECDSA hash
++    /// types remain valid without `STRICTENC`; enforcing that policy belongs
++    /// to the script checker, not the digest engine. Raw zero is valid here,
++    /// unlike the typed API's taproot-only [`Sighash::Default`].
++    /// The caller supplies the selected script-code suffix verbatim.
++    pub fn segwit_v0_signature_hash_raw(
++        &mut self,
++        input_index: usize,
++        script_code: &[u8],
++        value: u64,
++        sighash_type: u32,
++    ) -> Result<Hash256, SighashError> {
++        let ty = EcdsaType::from_consensus(sighash_type);
+         let total = self.tx.inputs.len();
+         let input = self
+             .tx
+@@ -339,9 +358,9 @@
+                         });
+                     finalize_double_sha256(single)
+                 }
+-                // BIP143 leaves this case undefined; Core rejects the signature while the
+-                // rust-bitcoin oracle emits the zero hash. Either way no signature can
+-                // verify, so we mirror the oracle's zero hash.
++                // BIP143 uses zero hashOutputs when SINGLE has no matching
++                // output. The complete preimage is still hashed and a signature
++                // over that digest can verify; this is not the legacy ONE bug.
+                 None => zero,
+             }
+         } else {
+@@ -360,7 +379,7 @@
+             .and_then(|()| writer.write_all(&input.sequence.to_le_bytes()))
+             .and_then(|()| writer.write_all(outputs_hash.as_byte_array()))
+             .and_then(|()| writer.write_all(&self.tx.lock_time.to_le_bytes()))
+-            .and_then(|()| writer.write_all(&ty.to_u32().to_le_bytes()))
++            .and_then(|()| writer.write_all(&sighash_type.to_le_bytes()))
+             .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+ 
+         Ok(finalize_double_sha256(engine))
+diff --git a/crates/script/src/checker.rs b/crates/script/src/checker.rs
+--- a/crates/script/src/checker.rs
++++ b/crates/script/src/checker.rs
+@@ -199,13 +199,14 @@
+                     .map_err(|e| sighash_to_script_error(&e))?
+             }
+             SigVersion::WitnessV0 => {
+-                let sighash_type = ecdsa_hashtype_from_byte(*hashtype_byte)?;
++                // STRICTENC alone restricts ECDSA hashtypes. BIP143 must
++                // classify, but still commit to, the original signature byte.
+                 self.cache
+-                    .segwit_v0_signature_hash(
++                    .segwit_v0_signature_hash_raw(
+                         self.input_index,
+                         script_code,
+                         self.amount,
+-                        sighash_type,
++                        u32::from(*hashtype_byte),
+                     )
+                     .map_err(|e| sighash_to_script_error(&e))?
+             }
+@@ -650,20 +650,5 @@
+ fn is_compressed_pubkey(pubkey: &[u8]) -> bool {
+     pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03)
+-}
+-
+-/// Converts a legacy hashtype byte to a [`Sighash`] for segwit v0.
+-fn ecdsa_hashtype_from_byte(byte: u8) -> Result<Sighash, ScriptError> {
+-    match byte {
+-        0x01 => Ok(Sighash::All),
+-        0x02 => Ok(Sighash::None),
+-        0x03 => Ok(Sighash::Single),
+-        0x81 => Ok(Sighash::AllAnyoneCanPay),
+-        0x82 => Ok(Sighash::NoneAnyoneCanPay),
+-        0x83 => Ok(Sighash::SingleAnyoneCanPay),
+-        _ => Err(ScriptError::Invalid {
+-            code: ScriptErrCode::SigHashtype,
+-        }),
+-    }
+ }
+ 
+ /// Converts a [`SighashError`] to a [`ScriptError`].
+diff --git a/crates/script/tests/segwit_raw_sighash.rs b/crates/script/tests/segwit_raw_sighash.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/script/tests/segwit_raw_sighash.rs
+@@ -0,0 +1,330 @@
++//! SegWit-v0 ECDSA sighash regressions against BIP143 and Core.
++//!
++//! The reference preimage uses rust-bitcoin's wire encoders and the BIP143
++//! field-selection rules, never the native sighash implementation. The published
++//! BIP143 P2WPKH digest and signature independently anchor that reference.
++//! Sources: bitcoin/bips bip-0143.mediawiki blob
++//! 5d451c221fa9ef052325c42086b8a7097b942556; bitcoin/bitcoin
++//! src/script/interpreter.cpp blob 98b16eca6bcdfb5c98b5f51f6afc42062efb5f01.
++
++#![expect(clippy::expect_used, reason = "fixed regression fixtures")]
++
++use bitcoin::consensus::{deserialize as oracle_decode, encode::VarInt, serialize};
++use bitcoin_rs_primitives::{Sighash, SighashCache, SighashError, Tx, TxOut, deserialize};
++use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
++use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
++use sha2::{Digest, Sha256};
++
++// Public test key and unsigned transaction from the BIP143 native-P2WPKH example.
++const TX_HEX: &str = concat!(
