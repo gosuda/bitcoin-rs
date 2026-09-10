@@ -85,8 +85,18 @@ fn epoch_seconds(time: SystemTime) -> u64 {
 /// absolute bantime is measured from `UNIX_EPOCH`. An unrepresentable expiry
 /// returns `RpcError::InvalidParameter` (-8) before any ban-list mutation.
 /// It must never become `BannedSubnet::banned_until = None`, which means a
-/// permanent ban. This contract does not change signed-input or past-time policy.
+/// permanent ban. Signed-input policy is unchanged.
+///
+/// SETBAN-ABSOLUTE-01: Bitcoin Core v31.1 `src/rpc/net.cpp::setban` rejects
+/// absolute bantime below the current whole epoch second with
+/// `RpcError::InvalidParameter` (-8), before any ban-list mutation. Equality
+/// is allowed, including when `now` has subsecond precision.
 fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Result<SystemTime, RpcError> {
+    if absolute && bantime < epoch_seconds(now) {
+        return Err(RpcError::InvalidParameter(
+            "Error: Absolute timestamp is in the past".to_owned(),
+        ));
+    }
     let until = if absolute {
         UNIX_EPOCH.checked_add(Duration::from_secs(bantime))
     } else {
@@ -195,7 +205,7 @@ fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
     // site in `net_processing.cpp`: "Don't use timedata samples from inbound
     // peers to make it harder for others to create false warnings about our
     // clock being out of sync." Anyone can open an inbound connection and
-    // declare any time they like; medianing over all peers hands that
+    // declare any time they like; medianing over all of them hands that
     // attacker the node's reported clock offset, and with it the operator's
     // belief about whether the machine's clock is wrong.
     let mut offsets: Vec<i64> = peers
@@ -1657,5 +1667,44 @@ mod getnodeaddresses_tests {
             arr[0].get("services").and_then(JsonValueTrait::as_u64),
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod setban_absolute_time_tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::ban_until;
+    use crate::error::RpcError;
+
+    // SETBAN-ABSOLUTE-01 on `ban_until` above; independent reference:
+    // Bitcoin Core v31.1 `src/rpc/net.cpp::setban` compares banTime < GetTime().
+    // Synthetic clock values cover the strict whole-second boundary without
+    // sleeps or changing any process-global clock.
+    #[test]
+    fn absolute_bantime_compares_whole_epoch_seconds() -> Result<(), RpcError> {
+        let now_seconds = 1_000;
+        for nanos in [0, 1, 999_999_999] {
+            let now = UNIX_EPOCH + Duration::new(now_seconds, nanos);
+            for seconds in [0, now_seconds - 1] {
+                let Err(error) = ban_until(now, seconds, true) else {
+                    panic!("past absolute timestamp must be rejected");
+                };
+                assert_eq!(error.code(), -8);
+                assert!(matches!(
+                    error,
+                    RpcError::InvalidParameter(message)
+                        if message == "Error: Absolute timestamp is in the past"
+                ));
+            }
+            for seconds in [now_seconds, now_seconds + 1] {
+                assert_eq!(
+                    ban_until(now, seconds, true)?,
+                    UNIX_EPOCH + Duration::from_secs(seconds),
+                    "current whole second and future timestamps are accepted"
+                );
+            }
+        }
+        Ok(())
     }
 }
