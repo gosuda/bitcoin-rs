@@ -1,4 +1,11 @@
-"""Regression for Rust comments in the script_eval FLAGS owner inventory."""
+"""Regression for Rust comments in the script_eval FLAGS owner inventory.
+
+Contract: `fuzz/fuzz_targets/script_eval.rs` owns the selector-indexed input framing
+and `FLAGS` order; `docs/contracts/qa-corpus.md` QAC-01 requires imported script
+seeds to feed that harness. This test mutates only owner syntax (order/comments),
+then derives selector indices from the parsed owner contract before independently
+constructing the documented byte frame.
+"""
 
 import importlib.util
 from pathlib import Path
@@ -32,10 +39,12 @@ class FlagCommentTests(unittest.TestCase):
                 "];\n"
                 "const ELEMENT_LEN_MAX: usize = 1_024;\n"
             )
+            _, none_selector, taproot_selector = mapper._script_contract(harness)
             mapper.map_script([source], harness, output, 65_536)
             seeds = {path.read_bytes() for path in output.iterdir()}
-            raw = b"\x02\0\0\x40\0" + script + b"\0"
-            taproot = b"\x00\0\0\x22\0\x51\x20" + script[:32] + b"\x01\x20\0" + script[32:]
+            raw = bytes([none_selector]) + b"\0\0\x40\0" + script + b"\0"
+            taproot = (bytes([taproot_selector]) + b"\0\0\x22\0\x51\x20" + script[:32]
+                       + b"\x01\x20\0" + script[32:])
             self.assertEqual(seeds, {raw, taproot})
 
 
