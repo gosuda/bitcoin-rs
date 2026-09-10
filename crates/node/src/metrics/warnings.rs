@@ -127,6 +127,7 @@ mod tests {
         }
     }
 
+    // CONTRACT: docs/contracts/external-api.md#API-08
     #[test]
     // CONTRACT: docs/contracts/external-api.md#API-06
 fn an_active_warning_does_not_convert_a_replacement_message() {

@@ -167,6 +167,7 @@ fn absent_fields_preserve_values_and_explicit_empty_values_win() {
     );
 }
 
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 // CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn journal_validation_keeps_each_bound_and_its_error() {
@@ -203,6 +204,7 @@ fn journal_validation_keeps_each_bound_and_its_error() {
     }
 }
 
+// CONTRACT: docs/contracts/architecture.md#ARCH-05
 #[test]
 // CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn disabled_journal_still_validates_settings() {
@@ -249,6 +251,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn explicit_fields_override_the_same_layers_network_defaults() -> anyhow::Result<()> {
@@ -265,6 +268,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn mining_address_is_decoded_against_the_final_network() -> anyhow::Result<()> {
@@ -285,6 +289,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn only_the_last_set_mining_address_is_decoded() -> anyhow::Result<()> {
@@ -306,6 +311,7 @@ mod resolution {
         Ok(())
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn an_explicit_empty_mining_address_is_not_absent() {
@@ -318,6 +324,7 @@ mod resolution {
         assert!(resolve(&[&layer]).is_err());
     }
 
+    // CONTRACT: docs/contracts/architecture.md#ARCH-05
     #[test]
     // CONTRACT: docs/contracts/external-api.md#API-06
     fn cookie_wins_within_a_layer_and_later_basic_auth_uses_defaults() -> anyhow::Result<()> {
