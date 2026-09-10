@@ -6,15 +6,15 @@
 # else: the copies drift (the pre-commit config kept referencing the removed
 # mdbx backend after its deletion).
 #
-# Every profile is kernel-free: no command below enables the `kernel` feature
-# and no lane needs CMake or Boost. The deny graph includes the kernel only as
-# metadata; cargo-deny resolves it without compiling.
+# Compile and test profiles are kernel-free and need no CMake or Boost. The
+# deny profile selects `kernel` only for metadata resolution; cargo-deny does
+# not compile that graph.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test|deny|all}" >&2
+  echo "usage: $0 {fmt|clippy|test|deny|kernel|all}" >&2
   exit 2
 }
 
