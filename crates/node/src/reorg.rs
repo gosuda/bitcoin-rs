@@ -132,24 +132,6 @@ pub fn invalidate_block(
                 preflight_disconnect_bodies(handles, &disconnect_nodes, &mut no_staged_body)?;
             }
 
-            let published_target = {
-                let mut tree = handles.block_tree.write();
-                let current_root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
-                let current_target = tree
-                    .tip_after_invalidation(current_root)
-                    .map_err(ReorgError::Plan)?
-                    .ok_or(ReorgError::NoValidTip)?;
-                if current_root != root || current_target != target {
-                    continue;
-                }
-                tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
-                let tip = tree.tip().ok_or(ReorgError::NoValidTip)?;
-                handles.chain_tip.store(Some(tip.clone()));
-                handles.assume_valid_gate.evaluate(&tree);
-                tip.tip_id
-            };
-            debug_assert_eq!(published_target, target);
-
             let (progress, outcome) = execute_streamed_plan(
                 &transition,
                 followers,
@@ -157,6 +139,14 @@ pub fn invalidate_block(
                 &connect,
                 &mut no_staged_body,
             );
+            if progress.disconnected == disconnect_nodes.len() {
+                let mut tree = handles.block_tree.write();
+                let root = tree.lookup(hash).ok_or(ReorgError::UnknownBlock(hash))?;
+                tree.invalidate_subtree(root).map_err(ReorgError::Plan)?;
+                let tip = tree.tip().ok_or(ReorgError::NoValidTip)?;
+                handles.chain_tip.store(Some(tip));
+                handles.assume_valid_gate.evaluate(&tree);
+            }
             if !outcome.as_ref().is_err_and(ReorgError::requires_recovery) {
                 reconsider_disconnected_transactions(
                     handles,
