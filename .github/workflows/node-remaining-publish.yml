@@ -1,0 +1,25 @@
+name: Publish checked node refactors
+on:
+  push:
+    branches: [automation/node-remaining-publish-20260910]
+    paths:
+      - '.github/node-publish/**'
+      - '.github/workflows/node-remaining-publish.yml'
+permissions:
+  contents: read
+concurrency:
+  group: node-remaining-publish-20260910
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'gosuda/bitcoin-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Reconstruct checked trees and push new source-only branches
+        run: python3 .github/node-publish/publish.py
