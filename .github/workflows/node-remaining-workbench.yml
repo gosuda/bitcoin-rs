@@ -19,11 +19,17 @@ jobs:
         with:
           toolchain: '1.95.0'
           components: rustfmt,clippy
-      - name: Package compiler and locked dependency sources
+      - name: Package compiler and dependency sources with explicit lockfile evidence
         shell: bash
         run: |
           mkdir -p /tmp/node-native-inputs/wheels
-          cargo vendor --locked --versioned-dirs /tmp/node-native-inputs/vendor > /tmp/node-native-inputs/vendor-config.toml
+          cp Cargo.lock /tmp/node-native-inputs/original.Cargo.lock
+          git cat-file commit HEAD > /tmp/node-native-inputs/baseline.commit
+          git rev-parse HEAD^{tree} > /tmp/node-native-inputs/baseline.tree
+          cargo vendor --versioned-dirs /tmp/node-native-inputs/vendor > /tmp/node-native-inputs/vendor-config.toml
+          cp Cargo.lock /tmp/node-native-inputs/resolved.Cargo.lock
+          git diff -- Cargo.lock > /tmp/node-native-inputs/lockfile-drift.patch
+          cat /tmp/node-native-inputs/lockfile-drift.patch
           python3 -m pip download --quiet --only-binary=:all: --python-version 313 --dest /tmp/node-native-inputs/wheels tree-sitter==0.25.2 tree-sitter-rust==0.24.0
           cp -a "$(rustc --print sysroot)" /tmp/node-native-inputs/toolchain
           rustc -Vv > /tmp/node-native-inputs/compiler.txt
