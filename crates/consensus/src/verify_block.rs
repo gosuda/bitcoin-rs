@@ -10,7 +10,7 @@ mod legacy {
     include!("verify_block_impl.rs");
 }
 
-pub(crate) use legacy::merkle_root_and_mutation_borrowed;
+pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 pub use legacy::{
     BlockRuleContext, block_has_witness, block_merkle_root_matches_txids,
     block_witness_commitment_matches, verify_merkle_root_with_txids,
@@ -65,13 +65,20 @@ pub fn verify_block_rules_precomputed(
         return Err(ConsensusError::MerkleMutation);
     }
 
-    if context.segwit_active && facts.has_witness() {
+    // BIP141/Core select a coinbase commitment independently of witness
+    // presence. A selected commitment requires its reserved-value proof even
+    // when every input witness is empty. Without an active commitment, witness
+    // data is forbidden (including before SegWit activation).
+    let has_witness_commitment = context.segwit_active && witness_commitment(block).is_some();
+    if has_witness_commitment {
         let Some(wtxids) = facts.wtxids() else {
             return Err(ConsensusError::WitnessCommitment);
         };
         if wtxids.len() != txdata.len() || !block_witness_commitment_matches(block, wtxids) {
             return Err(ConsensusError::WitnessCommitment);
         }
+    } else if facts.has_witness() {
+        return Err(ConsensusError::WitnessCommitment);
     }
 
     let weight = facts.weight();
