@@ -4,10 +4,12 @@
 //! the Merkle result so later validation stages do not derive them again.
 
 use bitcoin_rs_primitives::{
-    Tx, TxOut, Txid, Wtxid,
+    Hash256, Tx, TxOut, Txid, Wtxid,
     encode::double_sha256,
     layout::{ByteSpan, ParsedBlock, ParsedTransaction},
 };
+
+use sha2::{Digest, Sha256};
 
 use crate::verify_block::merkle_root_and_mutation_borrowed;
 
@@ -34,10 +36,9 @@ impl BlockFacts {
         let mut wtxids: Option<Vec<Wtxid>> = None;
         let mut base_sizes = 0_u64;
         let mut has_witness = false;
-        let mut scratch = Vec::new();
 
         for tx in parsed.transactions() {
-            let txid = txid_from_spans(tx, &mut scratch);
+            let (txid, base_size) = txid_and_base_size(tx);
             if tx.is_segwit() {
                 has_witness = true;
                 let ids = wtxids.get_or_insert_with(|| {
@@ -49,7 +50,7 @@ impl BlockFacts {
             } else if let Some(ids) = wtxids.as_mut() {
                 ids.push(Wtxid(txid.0));
             }
-            base_sizes = base_sizes.saturating_add(base_size_from_spans(tx));
+            base_sizes = base_sizes.saturating_add(base_size);
             txids.push(txid);
         }
 
@@ -158,7 +159,22 @@ impl BlockFacts {
 
     pub(crate) fn or_insert_wtxids_from(&mut self, txs: &[Tx]) {
         if self.wtxids.is_none() {
-            self.wtxids = Some(txs.iter().map(Tx::wtxid).collect());
+            // BIP141: a witness-free transaction's wtxid is its txid. Reuse
+            // the identity already owned by these facts instead of encoding
+            // and hashing the same transaction again. Iterate over txs, not
+            // a zip: even malformed caller-supplied identity counts must not
+            // silently truncate the witness-ID matrix.
+            self.wtxids = Some(
+                txs.iter()
+                    .enumerate()
+                    .map(|(index, tx)| {
+                        self.txids
+                            .get(index)
+                            .filter(|_| !tx.has_witness())
+                            .map_or_else(|| tx.wtxid(), |txid| Wtxid(txid.0))
+                    })
+                    .collect(),
+            );
         }
     }
 }
@@ -280,24 +296,49 @@ fn merkle_root_and_mutation(txids: &[Txid]) -> (Option<Txid>, bool) {
         .map_or((None, false), |(root, mutated)| (Some(root), mutated))
 }
 
-fn txid_from_spans(tx: &ParsedTransaction<'_>, scratch: &mut Vec<u8>) -> Txid {
-    scratch.clear();
-    extend_span(scratch, tx, tx.version_span());
-    extend_span(scratch, tx, tx.input_count_span());
-    for input in tx.inputs() {
-        extend_span(scratch, tx, input.outpoint());
-        push_compact(scratch, span_len(input.script_sig()));
-        extend_span(scratch, tx, input.script_sig());
-        extend_span(scratch, tx, input.sequence());
+/// Hash the canonical base serialization without reconstructing its fields.
+///
+/// The layout parser has already checked `CompactSize` canonicality and wire
+/// order. Legacy bytes are contiguous; `SegWit` removes exactly the marker/flag
+/// and witness section, leaving version, the input/output range, and lock time.
+/// The same borrowed ranges own the stripped-size calculation, so there is no
+/// second traversal of input/output metadata and no transaction-sized scratch.
+fn txid_and_base_size(tx: &ParsedTransaction<'_>) -> (Txid, u64) {
+    let bytes = tx
+        .span_bytes(tx.span())
+        .unwrap_or_else(|| unreachable!("span belongs to the parsed image"));
+    if !tx.is_segwit() {
+        return (Txid(double_sha256(bytes)), u64::from(tx.span().len()));
     }
-    extend_span(scratch, tx, tx.output_count_span());
-    for output in tx.outputs() {
-        extend_span(scratch, tx, output.value());
-        push_compact(scratch, span_len(output.script_pubkey()));
-        extend_span(scratch, tx, output.script_pubkey());
-    }
-    extend_span(scratch, tx, tx.lock_time_span());
-    Txid(double_sha256(scratch))
+
+    // An empty final script still ends after its CompactSize prefix. With no
+    // outputs, the output-count prefix itself is the end of the base body.
+    let body_end = tx.outputs().last().map_or_else(
+        || tx.output_count_span().end(),
+        |output| output.script_pubkey().end(),
+    );
+    // Layout offsets are image-relative, not transaction-relative. Subtract
+    // the transaction origin before indexing its borrowed byte slice.
+    let origin = u64::from(tx.span().start());
+    let start = usize::try_from(u64::from(tx.input_count_span().start()) - origin)
+        .unwrap_or_else(|_| unreachable!("body start is inside the transaction"));
+    let end = usize::try_from(body_end - origin)
+        .unwrap_or_else(|_| unreachable!("body end is inside the transaction"));
+    let body = &bytes[start..end];
+    let version = tx
+        .span_bytes(tx.version_span())
+        .unwrap_or_else(|| unreachable!("version belongs to the parsed image"));
+    let lock_time = tx
+        .span_bytes(tx.lock_time_span())
+        .unwrap_or_else(|| unreachable!("lock time belongs to the parsed image"));
+
+    let mut engine = Sha256::new();
+    engine.update(version);
+    engine.update(body);
+    engine.update(lock_time);
+    let digest: [u8; 32] = Sha256::digest(engine.finalize()).into();
+    let base_size = len_u64(version.len()) + len_u64(body.len()) + len_u64(lock_time.len());
+    (Txid(Hash256::from_le_bytes(&digest)), base_size)
 }
 
 fn wtxid_from_span(tx: &ParsedTransaction<'_>) -> Wtxid {
@@ -308,50 +349,6 @@ fn wtxid_from_span(tx: &ParsedTransaction<'_>) -> Wtxid {
     Wtxid(double_sha256(bytes))
 }
 
-fn base_size_from_spans(tx: &ParsedTransaction<'_>) -> u64 {
-    let mut size = 4 + u64::from(tx.input_count_span().len()) + 4;
-    for input in tx.inputs() {
-        size += 36
-            + u64::from(compact_size_len(span_len(input.script_sig())))
-            + u64::from(input.script_sig().len())
-            + 4;
-    }
-    size += u64::from(tx.output_count_span().len());
-    for output in tx.outputs() {
-        size += 8
-            + u64::from(compact_size_len(span_len(output.script_pubkey())))
-            + u64::from(output.script_pubkey().len());
-    }
-    size
-}
-
-fn extend_span(scratch: &mut Vec<u8>, tx: &ParsedTransaction<'_>, span: ByteSpan) {
-    scratch.extend_from_slice(
-        tx.span_bytes(span)
-            .unwrap_or_else(|| unreachable!("span belongs to the parsed image")),
-    );
-}
-
-fn push_compact(scratch: &mut Vec<u8>, value: u64) {
-    match value {
-        0..=0xfc => scratch.push(
-            u8::try_from(value).unwrap_or_else(|_| unreachable!("value fits u8 by the match arm")),
-        ),
-        0xfd..=0xffff => {
-            scratch.push(0xfd);
-            scratch.extend_from_slice(&value.to_le_bytes()[..2]);
-        }
-        0x1_0000..=0xffff_ffff => {
-            scratch.push(0xfe);
-            scratch.extend_from_slice(&value.to_le_bytes()[..4]);
-        }
-        _ => {
-            scratch.push(0xff);
-            scratch.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-}
-
 const fn compact_size_len(value: u64) -> u32 {
     match value {
         0..=0xfc => 1,
@@ -359,10 +356,6 @@ const fn compact_size_len(value: u64) -> u32 {
         0x1_0000..=0xffff_ffff => 5,
         _ => 9,
     }
-}
-
-fn span_len(span: ByteSpan) -> u64 {
-    u64::from(span.len())
 }
 
 fn len_u64(len: usize) -> u64 {
