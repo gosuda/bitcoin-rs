@@ -922,8 +922,11 @@ impl BlockSync {
     fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
         // A latched Fatal settlement left the gateway generation odd: starting
         // another transition would bounce off `AlreadyActive` and churn staged
-        // state every tick. Staged blocks stay queued until recreation.
+        // state every tick. Staged blocks stay queued until recreation. The
+        // counter keeps the stall observable: the one `error!` in
+        // `note_fatal_settlement` fires once, these ticks stay quiet.
         if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
+            metrics::counter!("node.sync.apply_halted_ticks").increment(1);
             return (0, 0);
         }
         let mut applied = 0_usize;
