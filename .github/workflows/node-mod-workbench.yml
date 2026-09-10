@@ -1,0 +1,28 @@
+name: node-mod-workbench
+
+on:
+  push:
+    branches:
+      - agent/node-mod-workbench
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export exact source snapshot
+        run: |
+          git rev-parse HEAD > /tmp/HEAD
+          tar --exclude=.git --exclude=node-mod-workbench.yml -czf /tmp/bitcoin-rs-source.tgz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bitcoin-rs-source
+          path: |
+            /tmp/bitcoin-rs-source.tgz
+            /tmp/HEAD
+          retention-days: 1
