@@ -26,9 +26,26 @@ for name in ['open', 'kind', 'prune_service', 'block_body_store', 'undo_store', 
     storage = storage.replace(f'    fn {name}(', f'    pub(super) fn {name}(')
 write('state/storage.rs', '//! Chainstate storage capability composition.\n\nuse super::*;\n\n' + storage)
 
-bootstrap = sl(828, 1095).replace('struct InitialChainstate {', 'pub(super) struct InitialChainstate {')
-for fld in ['utxo', 'coin_stats', 'tree', 'applied_tip', 'chain_tx_count', 'resume_source', 'journal_bootstrap']:
-    bootstrap = bootstrap.replace(f'    {fld}:', f'    pub(super) {fld}:')
+bootstrap = sl(828, 1095).replace(
+    '''struct InitialChainstate {
+    utxo: UtxoSet,
+    coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    tree: bitcoin_rs_chain::BlockTree,
+    applied_tip: Option<TipSnapshot>,
+    chain_tx_count: u64,
+    resume_source: ResumeSource,
+    journal_bootstrap: Option<JournalBootstrap>,
+}''',
+    '''pub(super) struct InitialChainstate {
+    pub(super) utxo: UtxoSet,
+    pub(super) coin_stats: bitcoin_rs_utxo::stats::CoinStats,
+    pub(super) tree: bitcoin_rs_chain::BlockTree,
+    pub(super) applied_tip: Option<TipSnapshot>,
+    pub(super) chain_tx_count: u64,
+    pub(super) resume_source: ResumeSource,
+    pub(super) journal_bootstrap: Option<JournalBootstrap>,
+}'''
+)
 for name in ['requires_full_revalidation', 'reset_journal_dir', 'open_journal_dir', 'checkpoint_bootstrap', 'restored_initial', 'cold_initial_chainstate', 'prepare_initial_chainstate', 'replay_checkpoint_journal']:
     bootstrap = bootstrap.replace(f'fn {name}(', f'pub(super) fn {name}(')
 write('state/bootstrap.rs', '//! Checkpoint/journal startup selection and recovery bootstrap.\n\nuse super::*;\n\n' + bootstrap)
@@ -38,9 +55,24 @@ write('state/prune.rs', '//! Storage-backed manual pruning.\n\nuse super::*;\n\n
 tx = sl(1257, 1307)
 tx = tx.replace('fn tx_index_capabilities(', 'pub(super) fn tx_index_capabilities(')
 tx = tx.replace('fn build_tx_index_open_spec(', 'pub(super) fn build_tx_index_open_spec(')
-tx = tx.replace('struct TxIndexSpawn {', 'pub(super) struct TxIndexSpawn {')
-for fld in ['spec', 'generation', 'block_source', 'body_source', 'wake_rx', 'recovery_reporter']:
-    tx = tx.replace(f'    {fld}:', f'    pub(super) {fld}:')
+tx = tx.replace(
+    '''struct TxIndexSpawn {
+    spec: crate::txindex_worker::TxIndexOpenSpec,
+    generation: crate::txindex_worker::Generation,
+    block_source: crate::txindex_worker::IndexBlockSource,
+    body_source: Arc<dyn BlockBodySource>,
+    wake_rx: Receiver<()>,
+    recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
+}''',
+    '''pub(super) struct TxIndexSpawn {
+    pub(super) spec: crate::txindex_worker::TxIndexOpenSpec,
+    pub(super) generation: crate::txindex_worker::Generation,
+    pub(super) block_source: crate::txindex_worker::IndexBlockSource,
+    pub(super) body_source: Arc<dyn BlockBodySource>,
+    pub(super) wake_rx: Receiver<()>,
+    pub(super) recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
+}'''
+)
 write('state/txindex.rs', '//! Txindex capability selection and deferred worker spawn state.\n\nuse super::*;\n\n' + tx)
 
 write('state/open.rs', '//! Node runtime construction.\n\nuse super::*;\n\n' + sl(1372, 1845) + '}\n')
