@@ -15,10 +15,10 @@ def write(rel, body):
 
 write('state/events.rs', '//! Coherent chain snapshots and nonblocking post-commit hints.\n\nuse super::*;\n\n' + sl(64, 196))
 
-epoch = sl(198, 291).replace('fn allocate_process_epoch(', 'pub(super) fn allocate_process_epoch(')
+epoch = sl(198, 290).replace('fn allocate_process_epoch(', 'pub(super) fn allocate_process_epoch(')
 write('state/epoch.rs', '//! Durable per-process epoch allocation.\n\nuse super::*;\n\n' + epoch)
 
-write('state/errors.rs', '//! Typed authoritative chainstate failures.\n\nuse super::*;\n\n' + sl(293, 477))
+write('state/errors.rs', '//! Typed authoritative chainstate failures.\n\nuse super::*;\n\n' + sl(291, 477))
 
 storage = sl(479, 622) + sl(634, 824)
 storage = storage.replace('struct NodeStorage {', 'pub(super) struct NodeStorage {')
