@@ -99,6 +99,12 @@ def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: 
     if limit is None:
         raise ValueError("Cannot find script_eval ELEMENT_LEN_MAX")
     element_limit = int(limit.group(1).replace("_", ""))
+    selectors = {}
+    for name in ("QA_RAW_SELECTOR", "QA_P2TR_SELECTOR"):
+        selector = re.search(rf"const\s+{name}\s*:\s*usize\s*=\s*(\d+)\s*;", harness.read_text())
+        if selector is None:
+            raise ValueError(f"Cannot find script_eval {name}")
+        selectors[name] = int(selector.group(1))
     # P2TR framing adds ten bytes relative to the retained source script.
     script_limit = min(element_limit, 0xffff, max_bytes - 10)
     if script_limit < 0:
@@ -108,9 +114,9 @@ def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: 
     for source in sources:
         for path in _seed_paths(source):
             script = _read_seed(path, script_limit)
-            _emit(output, _frame(0, script, []))
+            _emit(output, _frame(selectors["QA_RAW_SELECTOR"], script, []))
             if len(script) >= 32 and element_limit >= 34:
-                _emit(output, _frame(3, b"\x51\x20" + script[:32], [script[32:]]))
+                _emit(output, _frame(selectors["QA_P2TR_SELECTOR"], b"\x51\x20" + script[:32], [script[32:]]))
             imported += 1
     print(f"script_eval: imported={imported} files (raw + P2TR variants)")
 
