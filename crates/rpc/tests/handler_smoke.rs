@@ -565,6 +565,7 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
     let peer_table = Arc::new(PeerTable::new());
     let info = PeerInfo {
+        wtxid_relay: false,
         addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333),
         version: 70016,
         services: 0,
@@ -925,40 +926,4 @@ fn encode_base64(bytes: &[u8]) -> String {
         }
     }
     result
-}
-
-#[test]
-fn getcapabilities_reports_revision_and_disabled_txindex_row()
--> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(Arc::clone(&ctx));
-    let response = handler.dispatch("getcapabilities", &json!([]))?;
-    let revision = response
-        .get("revision")
-        .and_then(JsonValueTrait::as_u64)
-        .ok_or("getcapabilities response must carry a u64 revision")?;
-    assert_eq!(
-        revision, 0,
-        "no worker is attached, so the runtime revision is zero"
-    );
-    let rows = response
-        .get("capabilities")
-        .and_then(|value| value.as_array())
-        .ok_or("getcapabilities response must carry a capabilities array")?;
-    assert_eq!(rows.len(), 1, "one compiled capability row");
-    let row = &rows[0];
-    let id = row
-        .get("id")
-        .and_then(JsonValueTrait::as_str)
-        .ok_or("capability row must carry an id")?;
-    assert_eq!(id, "txindex");
-    assert_eq!(
-        row.get("compiled").and_then(JsonValueTrait::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        row.get("enabled").and_then(JsonValueTrait::as_bool),
-        Some(false)
-    );
-    Ok(())
 }

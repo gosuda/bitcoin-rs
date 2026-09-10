@@ -289,21 +289,46 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     )?;
 
     let redeem = vec![opcode::OP_CHECKMULTISIG; 200];
-    let child = tx_one_input(
-        OutPoint::new(parent_txid, 0),
-        bitcoin_rs_script::push_data(&redeem),
-        Vec::new(),
-        99_000,
-        P2PKH_SCRIPT.to_vec(),
-    );
+    // Two inputs: input 0 spends the in-pool P2SH parent whose prevout the
+    // request omits; input 1 spends a plain resolved prevout so the request
+    // is non-empty and passes the empty-prevouts refusal.
+    let child = Tx {
+        version: 2,
+        lock_time: 0,
+        inputs: vec![
+            TxIn {
+                previous_output: OutPoint::new(parent_txid, 0),
+                script_sig: bitcoin_rs_script::push_data(&redeem),
+                sequence: u32::MAX,
+                witness: Vec::new(),
+            },
+            TxIn {
+                previous_output: outpoint(6, 0),
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+                witness: Vec::new(),
+            },
+        ],
+        outputs: vec![TxOut {
+            value: 198_000,
+            script_pubkey: P2PKH_SCRIPT.to_vec(),
+        }],
+    };
     let context = PackageTxContext {
         fee: 1_000,
         vsize: u32::try_from(child.vsize()).unwrap_or(u32::MAX),
         sigop_cost: 0,
         missing_inputs: false,
     };
-    // The request omits the prevout the pool can resolve.
-    let request = admission_request(&gateway, &child, context, Vec::new());
+    // The request carries only input 1's prevout; the pool resolves input 0.
+    let prevouts = vec![(
+        outpoint(6, 0),
+        TxOut {
+            value: 100_000,
+            script_pubkey: anyone_can_spend(),
+        },
+    )];
+    let request = admission_request(&gateway, &child, context, prevouts);
 
     let result = gateway.admit_transaction(request);
 

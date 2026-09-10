@@ -302,7 +302,6 @@ class CorpusWriter:
         self._archive_sha = hashlib.sha256()
         self._entries_sha = hashlib.sha256()
         self._tail_pending = False
-        self._write_failed = False
 
     def _tail_cleared(self) -> bool:
         """Observe caller-owned truncation: sizes must equal the committed prefix."""
@@ -312,23 +311,22 @@ class CorpusWriter:
         self._entries.seek(self._entries_pos)
         return archive_end == self._offset and entries_end == self._entries_pos
 
-    def _require_committed_prefix(self) -> None:
-        """Fail closed while an unverified tail or a poisoned frame remains.
-
-        Both entry gates (``append`` and ``finish``) enforce this: a writer
-        whose rolling digests absorbed uncommitted bytes, or whose files
-        carry a tail past the committed prefix, must neither advance nor
-        publish until the owner truncates to the recorded prefix.
-        """
-        if self._write_failed:
-            raise ContractError("a previous append failed mid-frame: resume a new writer over the committed prefix")
+    def _check_tail(self) -> None:
         if self._tail_pending:
             if not self._tail_cleared():
                 raise ContractError("unverified tail present: truncate owned files to the recorded prefix first")
             self._tail_pending = False
 
     def append(self, payload: bytes, *, expected_hash: str | None = None) -> FrameMeta:
-        self._require_committed_prefix()
+        """Commit a frame after both streams accept its complete bytes.
+
+        Validation failures do not write. I/O failures can leave partial tails,
+        but preserve prefix_facts() and its digests. Further append/finish calls
+        refuse until the caller restores both streams to that prefix or abandons
+        the writer. The caller owns flushing, fsync, and checkpoint publication;
+        successful write() calls alone do not establish crash durability.
+        """
+        self._check_tail()
         if self._count >= self._chosen.block_count:
             raise ContractError("append exceeds the frozen block count")
         if len(payload) > MAX_PAYLOAD:
@@ -348,21 +346,14 @@ class CorpusWriter:
                 raise ContractError(f"{self._chosen.corpus_id} stop hash does not match the frozen tip")
         meta = FrameMeta(offset=self._offset, payload_length=len(payload))
         header = self._freeze.network_magic + struct.pack("<I", len(payload))
-        # A failed frame poisons this writer: the rolling digests already
-        # absorbed uncommitted bytes and cannot rewind, so only a resumed
-        # writer (which rebuilds both digests from disk) may continue.
+        line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
         self._tail_pending = True
-        try:
-            _write_all(self._archive, header)
-            _write_all(self._archive, payload)
-            self._archive_sha.update(header)
-            self._archive_sha.update(payload)
-            line = _entry_chunk(height, block_hash, meta.offset, meta.payload_length) + b"\n"
-            _write_all(self._entries, line)
-            self._entries_sha.update(line)
-        except (OSError, ValueError):
-            self._write_failed = True
-            raise
+        _write_all(self._archive, header)
+        _write_all(self._archive, payload)
+        _write_all(self._entries, line)
+        self._archive_sha.update(header)
+        self._archive_sha.update(payload)
+        self._entries_sha.update(line)
         self._count += 1
         self._offset += HEADER_LEN + len(payload)
         self._entries_pos += len(line)
@@ -381,7 +372,7 @@ class CorpusWriter:
         )
 
     def finish(self, manifest: BinaryIO) -> CorpusSummary:
-        self._require_committed_prefix()
+        self._check_tail()
         if self._count != self._chosen.block_count:
             raise ContractError(
                 f"{self._chosen.corpus_id} archive has {self._count} blocks, expected {self._chosen.block_count}"

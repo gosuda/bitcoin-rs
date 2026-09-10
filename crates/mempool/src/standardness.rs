@@ -172,6 +172,10 @@ pub struct PackageAcceptanceFacts {
     pub results: Vec<TxAcceptanceFact>,
 }
 
+/// Per-transaction relay sigop limit: one fifth of the block limit,
+/// matching Core's `MAX_STANDARD_TX_SIGOPS_COST`.
+pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
+
 /// Policy rejection reason for dry-run package acceptance.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AcceptanceRejectReason {

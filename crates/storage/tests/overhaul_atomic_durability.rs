@@ -237,6 +237,80 @@ where
             one_scenario(backend, open, dir.path(), fault, route);
         }
     }
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_later_durable_receipt_covers_deferred(backend, open, dir.path());
+}
+
+/// A later durable receipt must carry earlier completed deferred writes
+/// across reopen (grafted from main's receipt sequencing): seed durably,
+/// defer one row, then take a durable (or guarded durable) receipt on the
+/// other; both rows must reopen with their post-batch values.
+fn assert_later_durable_receipt_covers_deferred<S, F>(backend: &str, open: F, path: &Path)
+where
+    S: KvStore,
+    F: Fn(&Path) -> Result<S, StorageError> + Copy,
+{
+    let rows: [(ColumnFamily, &[u8]); 2] = [
+        (ColumnFamily::TxConfirmed, b"receipt/deferred"),
+        (ColumnFamily::Funding, b"receipt/durable"),
+    ];
+    for guarded in [false, true] {
+        let label = if guarded {
+            format!("{backend}/guarded-receipt")
+        } else {
+            format!("{backend}/durable-receipt")
+        };
+        {
+            let store = open(path).expect("open for deferred receipt seed");
+            let mut seed = store.new_batch();
+            for (cf, key) in rows {
+                seed.put(cf, key, b"old");
+            }
+            store
+                .write_durable(seed)
+                .expect("seed deferred receipt state");
+            let mut deferred = store.new_batch();
+            deferred.put(rows[0].0, rows[0].1, b"deferred");
+            store.write_deferred(deferred).expect("deferred write");
+            if guarded {
+                let mut receipt = store.new_batch();
+                receipt.put(rows[1].0, rows[1].1, b"receipt");
+                let committed = store
+                    .write_durable_if(
+                        &[WriteCondition::Equals {
+                            cf: rows[1].0,
+                            key: rows[1].1,
+                            expected: b"old",
+                        }],
+                        receipt,
+                    )
+                    .expect("guarded durable receipt");
+                assert!(committed, "{label}: guard unexpectedly mismatched");
+            } else {
+                let mut receipt = store.new_batch();
+                receipt.put(rows[1].0, rows[1].1, b"receipt");
+                store.write_durable(receipt).expect("durable receipt");
+            }
+        }
+
+        let store = open(path).expect("reopen after durable receipt");
+        assert_eq!(
+            store
+                .get(rows[0].0, rows[0].1)
+                .expect("read earlier deferred row")
+                .as_deref(),
+            Some(&b"deferred"[..]),
+            "{label}: earlier deferred write did not survive reopen"
+        );
+        assert_eq!(
+            store
+                .get(rows[1].0, rows[1].1)
+                .expect("read receipt row")
+                .as_deref(),
+            Some(&b"receipt"[..]),
+            "{label}: durable receipt row did not survive reopen"
+        );
+    }
 }
 
 fn one_scenario<S, F>(backend: &str, open: F, path: &Path, fault: PersistFault, route: &Route)
@@ -633,7 +707,10 @@ fn apply_one_family_ops(rows: &mut OneFamilyShared, ops: Vec<OneFamilyOp>) {
     let Some(committed) = ops.first().map(OneFamilyOp::cf) else {
         return;
     };
-    for op in ops.into_iter().filter(|op| !defect_armed || op.cf() == committed) {
+    for op in ops
+        .into_iter()
+        .filter(|op| !defect_armed || op.cf() == committed)
+    {
         let cf = family_index(op.cf());
         match op {
             OneFamilyOp::Put { key, value, .. } => {

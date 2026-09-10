@@ -1,72 +1,46 @@
 # Architecture contract
 
 The normative contract for workspace crate layering, one-way dependency
-direction, storage engine confinement, owner boundaries, and the node
-composition surface.
+direction, storage engine confinement, and composition boundaries.
 
 Owners:
 - `Cargo.toml`, `crates/*/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
-- Workspace dependency gate: `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`
-- `crates/chainstate/src/transition.rs`, `crates/chainstate/src/recovery.rs`
+- Workspace dependency gate in `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`
 
 ## Layer model
 
 ```text
-  +-------------------------------------------------------------------------+
-  | Layer 4: Compose                                                        |
-  |   bitcoin-rs-node, bitcoin-rs                                           |
-  |   - Lifecycle orchestration, runtime assembly, config, cache allocation |
-  +----------------------------------+--------------------------------------+
-                                     |
-                                     v
-  +-------------------------------------------------------------------------+
-  | Layer 3: Surface                                                        |
-  |   bitcoin-rs-rpc                                                        |
-  |   - Protocol boundaries and RPC/REST/Esplora dispatch                   |
-  +----------------------------------+--------------------------------------+
-                                     |
-                                     v
-  +-------------------------------------------------------------------------+
-  | Layer 2: Services                                                       |
-  |   bitcoin-rs-chain, bitcoin-rs-chainstate, bitcoin-rs-utxo,             |
-  |   bitcoin-rs-p2p, bitcoin-rs-mempool, bitcoin-rs-index,                 |
-  |   bitcoin-rs-mining                                                     |
-  |   - Domain capabilities, chainstate authority, index runtimes, network  |
-  +----------------------------------+--------------------------------------+
-                                     |
-                                     v
-  +-------------------------------------------------------------------------+
-  | Layer 1: Storage                                                        |
-  |   bitcoin-rs-storage                                                    |
-  |   - Storage abstractions (KvStore), exclusive owner of engine deps      |
-  +----------------------------------+--------------------------------------+
-                                     |
-                                     v
-  +-------------------------------------------------------------------------+
-  | Layer 0: Core                                                           |
-  |   bitcoin-rs-primitives, bitcoin-rs-script, bitcoin-rs-consensus        |
-  |   - Protocol types, script validation, consensus rules; zero storage/IO |
-  +----------------------------------+--------------------------------------+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Layer 4: Compose                                                        │
+  │   bitcoin-rs-node, bitcoin-rs                                           │
+  │   - Lifecycle orchestration, runtime assembly, config, cache allocation │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Layer 3: Surface                                                        │
+  │   bitcoin-rs-rpc                                                       │
+  │   - Protocol boundaries and RPC dispatch                               │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Layer 2: Services                                                       │
+  │   bitcoin-rs-chain, bitcoin-rs-utxo, bitcoin-rs-p2p,                    │
+  │   bitcoin-rs-mempool, bitcoin-rs-index, bitcoin-rs-mining               │
+  │   - Domain capabilities, index query runtimes, network protocol state   │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Layer 1: Storage                                                        │
+  │   bitcoin-rs-storage                                                    │
+  │   - Storage abstractions (KvStore), exclusive owner of engine deps      │
+  └────────────────────────────────────┬────────────────────────────────────┘
+                                       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Layer 0: Core                                                           │
+  │   bitcoin-rs-primitives, bitcoin-rs-script, bitcoin-rs-consensus          │
+  │   - Protocol types, script validation, consensus rules; zero storage/IO │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
-
-## Owner table
-
-| Owner | Owns | Must not own |
-| --- | --- | --- |
-| `primitives` | IDs, canonical encodings, borrowed transaction and block layouts, network constants | Runtime policy, sockets, storage |
-| `script` | Interpreter, sighash execution context, verification primitives | Chain lookup, mempool policy, thread scheduling |
-| `consensus` | Pure structural and contextual validity and verification plans | Database, peers, operator RPC |
-| `storage` | Engine adapters, batches and snapshots, framed segment I/O, flush contract, physical accounting | Consensus, active-chain selection, mempool mechanics |
-| `utxo` | Coin formats, grouped record mutation, coin views, undo encoding | Cross-store transition sequencing, optional script and history index |
-| `chain` | Header tree, chainwork, activation context, common ancestors, branch selection | Socket lifetime, HTTP schemas |
-| `chainstate` | Transition serialization, accepted-prefix commit, durable root, connect, disconnect, recovery | RPC, mining selection, P2P session ownership, optional index policy |
-| `mempool` | Admission preparation and verification, graph, RBF, lifecycle, fee policy and estimation, orphans | Network sockets, chain persistence |
-| `p2p` | Transport, sessions, addresses, scheduling, relay and request state | A second mempool evaluator or UTXO writer |
-| `index` | Generic schemas, backfill, selective rebuild, readiness and query engines | Authoritative chain apply |
-| `mining` | Candidate selection, GBT state, generations, proposal and submission interface | Private keys, independent admission policy |
-| `rpc` | Core RPC, REST, public Esplora and backend dialect adapters, typed error mapping | Storage engines, direct mutable NodeState, template ownership |
-| `node` | Resolved configuration, lifecycle, resource budgets, wiring, cross-owner ordering | Domain algorithms already assigned above |
-| Binary | argv, environment, TOML and `bitcoin.conf` parsing, process signals, measurement commands | Consensus decisions |
 
 ## Clauses
 
@@ -91,6 +65,12 @@ Owners:
     depends on `consensus` for BIP9 parameters and the BIP113 locktime
     cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
     candidate selection and `chain` for candidate header/work/time context.
+    `p2p` depends on `mempool` for the transaction inventory view and
+    committed-mutation relay consumer. This same-layer edge keeps peer
+    protocol mechanics with their consumer; `mempool` must not depend on
+    `p2p`, `rpc`, `node`, or the binary. Admission retains peer attribution
+    as data without owning connections or runtime assembly. The
+    `g17_dependency_direction` gate checks this boundary explicitly.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
     handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
@@ -102,27 +82,40 @@ Owners:
 
 ### `ARCH-02`: Exclusive storage engine dependency ownership
 
-- `bitcoin-rs-storage` is the sole crate in the workspace permitted to depend on underlying storage engine crates (`fjall`, `redb`, `rust-rocksdb`, `mdbx`).
-- No crate outside `bitcoin-rs-storage` may name a storage engine dependency in `[dependencies]`, `[build-dependencies]`, or `[dev-dependencies]`.
-- All higher layers interact with persistent state through the `KvStore` facade and storage abstractions exported by `bitcoin-rs-storage`.
+- `bitcoin-rs-storage` is the sole crate in the workspace permitted to depend on
+  underlying storage engine crates (`fjall`, `redb`, `rust-rocksdb`,
+  `signet-libmdbx`).
+- No crate outside `bitcoin-rs-storage` may name a storage engine dependency in
+  `[dependencies]`, `[build-dependencies]`, or `[dev-dependencies]`.
+- All higher layers interact with persistent state through the `KvStore` facade
+  and storage abstractions exported by `bitcoin-rs-storage`.
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
-- Backend feature forwarding (`fjall`, `redb`, `rocksdb`, `mdbx`) is strictly confined to:
-  1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose backend selection to operators and packaging scripts.
-  2. Services-tier adapter crates (Layer 2) whose features exist solely so `cargo -p` package builds propagate backend selection into `bitcoin-rs-storage`.
-- Crates in Layer 0 (Core) and Layer 3 (Surface and RPC) must never define or forward storage backend features.
+- Backend feature forwarding (`fjall`, `redb`, `rocksdb`, `mdbx`) is strictly
+  confined to:
+  1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
+     backend selection to operators and packaging scripts.
+  2. Services-tier adapter crates (Layer 2) whose features exist solely so `-p`
+     package builds propagate backend selection into `bitcoin-rs-storage`.
+- Crates in Layer 0 (Core) and Layer 3 (Surface / RPC) must never define or
+  forward storage backend features.
 
 ### `ARCH-04`: RPC surface independence from storage
 
-- `bitcoin-rs-rpc` must have zero non-test dependency edges on `bitcoin-rs-storage` and zero dependencies on storage engine crates.
-- RPC consumes node capabilities (`chain`, `mempool`, `index`, `mining`, `p2p`, `utxo`) exclusively through capability query handles and domain clinician interfaces (`Context`, `ContextHandlers`).
-- `bitcoin-rs-rpc` defines and forwards zero backend features. The `bench-only` `dev-dependency` used for offline `txoutproof` fixtures is isolated to test scope and documented in `crates/rpc/Cargo.toml`.
+- `bitcoin-rs-rpc` must have zero non-test dependency edges on
+  `bitcoin-rs-storage` and zero dependencies on storage engine crates.
+- RPC consumes node capabilities (chain, mempool, index, mining, p2p, utxo)
+  exclusively through capability query handles and domain context interfaces
+  (`Context`, `ContextHandles`), never through direct database access.
+- `bitcoin-rs-rpc` defines and forwards zero backend features. (The bench-only
+  dev-dependency used for offline `txoutproof` fixtures is isolated to test
+  scope and documented in `crates/rpc/Cargo.toml`).
 
 ### `ARCH-05`: Node composition and orchestration boundary
 
 - `bitcoin-rs-node` (Layer 4) is the assembly and lifecycle orchestration layer.
-- It wires together storage backends, consensus validators, mempool gateway, P2P
+  It wires together storage backends, consensus validators, mempool gateway, P2P
   listeners, index reconciliation workers, and RPC services into an executable
   node runtime.
 - Domain mechanics belong to domain crates: consensus rules in consensus/script,
@@ -131,6 +124,16 @@ Owners:
   schemas in their owning crates. `bitcoin-rs-mining` owns `Candidate`,
   `BlockTemplate`, `MiningInfo`, and `MiningControl`. RPC maps those types onto
   BIP22/BIP23 JSON and does not cache templates or long-poll.
+- `bitcoin-rs-mempool` owns transaction admission preparation and retry,
+  orphan bodies and their indexes, ready-orphan work, and recent rejects
+  through the shared `MempoolGateway`. `bitcoin-rs-p2p` owns the transaction
+  inventory implementation, missing-parent requests, source-connection checks,
+  and the bounded transaction relay queue, worker, and saturation policy.
+  Node supplies the chain view, connects committed admission results to relay
+  and mining, and owns channel wiring and worker startup/shutdown. It keeps no
+  second admission-state store or transaction policy implementation. Admission
+  sequencing follows [MPL-04](mempool-mutations.md); wire behavior and its
+  deviations follow [P2P-01](p2p-wire.md).
 - `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
   resolution and validation (`UserConfig` layers → `NodeConfig`), the mining
   generation coordinator keyed by `(applied_tip_hash, mempool_sequence)`,
@@ -155,90 +158,109 @@ Owners:
 
 ### `ARCH-06`: Hierarchy change and exception process
 
-- Any change to workspace crate layer assignments, introduction of new workspace crates, or addition of cross-crate dependencies requires:
-  1. Updating the approved layer table and engine crate assertions in `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`.
-  2. Updating this normative contract (`docs/contracts/architecture.md`) with the rationale and invariant justification.
+- Any change to workspace crate layer assignments, introduction of new workspace
+  crates, or addition of cross-crate dependencies requires:
+  1. Updating the `approved_layer` table or engine crate assertions in
+     `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`.
+  2. Updating this normative contract (`docs/contracts/architecture.md`) with
+     the rationale and invariant justification.
   3. Passing the `g17_dependency_direction` gate test.
-- Speculative or circular dependency edges that violate the one-way flow are rejected by automated gate enforcement in CI.
+- Speculative or circular dependency edges that violate the one-way flow are
+  rejected by automated gate enforcement in CI.
 
-### `ARCH-07`: Chainstate owner owns transition admission
+### `ARCH-07`: Chainstate facade owns transition admission
 
-- `crates/chainstate` is the in-process owner of applied-tip mutation.
-- `NodeState`, `BlockSync`, mining, and RPC chain-control hold or clone the `Chainstate` owner; they do not assemble a transition from independent locks.
-- `Chainstate::begin_transition` is the only public constructor of a `ChainTransition`. Reorg planning that must abort without mutating takes the lock and promotes it with `begin_transition_locked` only after the authoritative plan matches the preloaded plan.
-- Snapshot reads (`Chainstate::snapshot`) copy the independently published header tip and a coherent applied-tip and chain-tx-count pair. They do not take the transition lock and cannot mutate chainstate.
-- `ChainEventPublisher` calls remain a separate coherent snapshot of the applied tip for index consumers (`EVT-01`).
-- `Chainstate::validate_block` dry-runs the apply path's pre-write consensus gates under `lock_transition`. It does not take mempool generation and does not persist. BIP22 proposal omits proof-of-work; every other pre-write gate is the same function called with `Mode::Proposal`.
-- Authoritative apply still lives in `crates/chainstate` because it composes `chain`, `consensus`, `utxo`, and `storage`.
-- `Chainstate` does not hold or import RPC, ZMQ, `TxIndex`, mining, or P2P admission types.
-- Apply publishes the tip and returns a `ConnectOutcome` or `DisconnectOutcome`. Capture flags are set at construction so apply can produce `rawtx` bytes and canonical block bytes without holding consumers.
+- `bitcoin_rs_node::Chainstate` is the in-process owner of applied-tip
+  mutation. `NodeState`, `BlockSync`, mining, and RPC chain-control hold or
+  clone that facade; they do not assemble a transition from independent locks.
+- `Chainstate::begin_transition` is the only public constructor of a
+  `ChainTransition`. Reorg planning that must abort without mutating takes
+  `lock_transition` first and promotes it with `begin_transition_locked` only
+  after the authoritative plan matches the preloaded plan.
+- Snapshot reads (`Chainstate::snapshot`) copy the independently published
+  header tip and a coherent applied-tip / chain-tx-count pair. They do not
+  take the transition lock and cannot mutate chainstate. `ChainEventPublisher`
+  cells remain a separate coherent snapshot of the applied tip for index
+  consumers (`EVT-01`).
+- `Chainstate::validate_block` dry-runs the apply path's pre-write consensus
+  gates under `lock_transition`. It does not take mempool generation and does
+  not persist. BIP22 proposal omits proof-of-work; every other pre-write gate
+  is the same function commit runs. Owner: `crates/node/src/apply.rs`.
+- Authoritative apply still lives in `crates/node` because it composes chain,
+  consensus, utxo, and storage. `Chainstate` does not hold or import RPC,
+  ZMQ, TxIndex, mining, or P2P admission types. Apply publishes the tip and
+  returns a `ConnectOutcome` or `DisconnectOutcome`. Capture flags
+  (`Chainstate::capturing`) are set at construction so apply can produce
+  `rawtx` and canonical block bytes without holding the consumers.
+- The composition root (`NodeState`, `BlockSync`, reorg, mining) dispatches
+  `ChainFollowers` while the `ChainTransition` is still held, then calls
+  `finish`. Convenience methods that finish before returning
+  (`Chainstate::apply_block`, `disconnect_block`) do not dispatch followers.
+  RPC `BlockLog`, hash/raw ZMQ, TxIndex wake, sequence `C`/`D`, mining
+  generation, and admission run from that dispatch. Mempool eviction stays
+  inside apply. Consumer failure cannot invalidate chainstate. Issue #77
+  owns the durable event journal; this is dependency direction, not a second
+  event contract. Do not push cross-store ordering into `utxo` or `storage`.
 
-### `ARCH-08`: Single mutation owner and non-alternating projection authority
+## Live gaps
 
-- `bitcoin-rs-mempool` owns the mempool pool through one `MempoolGateway`; no second production writer holds the pool lock.
-- Mutating `Mempool` methods are reached only through the gateway inside production code. Projections and observers read committed snapshots and never acquire the pool writer.
-- `bitcoin-rs-node` may expose read-only composition handles, but it must not forward a pool writer through a duplicate field or wrapper around another owner.
-- P2P session handles, network controls, and chainstate accessors are owned by their named crates; duplicated fields in `NodeState` that merely clone another owner's handle are forwarding wrappers and must be collapsed or reported as an unapproved public boundary.
-- Current enforcement of this clause is partial and must not be read as proof of it. `bin/bitcoin-rs/tests/overhaul_ownership.rs` runs a lexical source scan that flags two literal raw-write patterns (`.mempool().write(`, `.pool().write(`) and a fixed list of mutating `Mempool` method names whose receiver is not spelled `mempool`, `mempool_gateway`, or `gateway`. This is inventory-level detection, not capability enforcement: it matches receiver identifier spellings rather than resolved types, covers only the enumerated method names and lock patterns, omits `clear`, truncates each line at the first `//` regardless of lexical context, stops scanning a file after the first detected test item, and silently skips unreadable files and directories. A clean scan does not prove the absence of non-owner mutation paths.
-- The raw pool lock is still reachable outside the owner today: `NodeState::mempool()` returns `Arc<RwLock<Mempool>>`, `MempoolGateway::pool()` returns `&Arc<RwLock<Mempool>>`, and `MempoolGateway::new`/`shared`/`shared_with` accept a caller-retained `Arc<RwLock<Mempool>>`. These are known capability gaps to be closed by the approved admission-owner cut (T18); they are not approved long-term exceptions to this clause.
-- The `NodeState` forwarding-wrapper audit is a frozen inventory that fails when a new wrapper appears. It records the current surface; it does not establish that the P2P handle surface has been narrowed. Collapsing the inventoried wrappers remains assigned to the P2P ownership tasks (T24/T26).
-- Gate status: G2 is not yet proven. The dependency-direction and storage-confinement gates hold, but compiler-enforced single-writer capability for the pool and the narrowed handle surfaces required by this clause remain open work under the approved boundary cuts.
-
-## Coherent view protocol
-
-`ReadStamp` is the coherent view token:
-
-```rust
-struct ReadStamp {
-    process_epoch: u64,
-    chain_generation: u64,
-    chain_tip: BlockHash,
-    mempool_sequence: u64,
-    policy_epoch: u64,
-}
-```
-
-- All fields are checked where relevant.
-- `chain_generation` is even while stable and odd during a coordinated change.
-- A caller cannot compose a view by separately loading a tip and mutable UTXOs.
-- The initial implementation retains the existing bounded read fence that protects live UTXO resolution. A later storage snapshot plus immutable committed-cache overlay with the same version is a measured optimization, not a correctness prerequisite.
-- During a chain change, admission and mixed chain-and-mempool reads are closed. `chainstate` durably commits the transition, `mempool` consumes the committed facts, the coordinator publishes the coherent stable generation, then best-effort consumers are notified in contract order.
-- A failure before stability leaves the fence closed until explicit recovery. A guard destructor must never quietly reopen the fence after an error.
-
-## Lock and order contract
-
-- Acquire the chain-transition reservation before beginning the mempool chain-change fence.
-- Never hold the mempool write lock while doing script verification, network I/O, fsync, or callbacks.
-- Do not await while holding a non-async mutex guard.
-- Snapshot gathering copies or retains owned facts, then releases locks.
-- Observer delivery occurs outside all domain locks.
-
-## Anti-shim cutover rule
-
-- Every in-tree caller of an approved cut symbol migrates to the new owner location in the same changeset.
-- The obsolete path is deleted with no re-export shim, alias, forwarding handle, or compatibility flag.
-- Generic advice to keep a one-release re-export does not apply.
-- Before each cut, resolve forward and reverse exported-symbol references and generated or external consumers; display the exact tracked file and symbol set; classify every old behavior as `dead`, `duplicate`, `superseded`, `generated residue`, or `keep`.
-- Any newly discovered public boundary not covered by the approved boundary set stops that cut.
+- **Node slimming and extraction (#217)**: Peer connection session and lease
+  ownership has moved to `PeerTable` / `P2pService` in `crates/p2p` (#215,
+  #217, #218). BIP9/softfork lookups, P2P chain serving, txindex status
+  projection, mempool mutation consumers, and block-body access live with their
+  owner crates (#272). Applied-tip mutation goes through the `Chainstate`
+  / `ChainTransition` facade (`ARCH-07`). Derived consumers live in
+  `ChainFollowers` / `ChainEffects` and are dispatched after commit
+  while the `ChainTransition` is still held; `Chainstate` does not hold
+  them. `crates/node` still carries leftover
+  domain mechanics: UTXO undo persistence and disconnect markers (`apply.rs`),
+  the P2P download scheduler (`sync.rs`), and direct backend construction and
+  cache share dispatch (`state.rs`). Relocating those into `crates/utxo`,
+  `crates/storage`, and `crates/p2p` remains tracked under #217 (open). A
+  dedicated `crates/chainstate` waits until journal, checkpoint, and
+  `ChainEventPublisher` also leave node. `crates/node` is the composition
+  layer, but is not yet fully slim.
 
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`:
-  - parses `cargo metadata` with `--locked --offline --no-deps`;
-  - validates every internal workspace dependency edge against the approved layer table;
-  - verifies `bitcoin-rs-storage` exclusively owns storage engine dependencies;
-  - confirms `bitcoin-rs-rpc` has no dependency on `bitcoin-rs-storage` and forwards no backend features;
-  - validates backend feature forwarding is confined to operator tiers and service adapters.
-- `bin/bitcoin-rs/tests/gates/g20_formal_models.rs` (planned): checks the TLA+ models `ChainAdmission`, `PeerLeases`, and `ProjectionMining` with Apalache 0.62.2 before production bodies in `chainstate`, `mempool`, `p2p`, and `index` are changed.
-- `crates/chainstate/src/transition.rs` (planned): owns `Chainstate`, `ChainTransition`, and the ordered commit protocol.
-- `crates/chainstate/src/recovery.rs` (planned): owns durable root recovery and `CURRENT_SCHEMA` refusal.
-- `crates/node/tests/overhaul_checkpoint_independence.rs` (planned): candidate `chainstate` recovery, retained maintenance, matched startup and replay performance, and full-tip storage checks before complete authority cutover.
-- `bin/bitcoin-rs/tests/overhaul_ownership.rs`:
-  - parses `cargo metadata` with `--locked --offline --no-deps` and validates the five-layer one-way dependency direction;
-  - asserts `bitcoin-rs-storage` is the only crate that names storage-engine dependencies and that `bitcoin-rs-rpc` does not depend on `bitcoin-rs-storage` or forward backend features;
-  - runs a lexical source scan (excluding `tests/`, `benches/`, and `#[cfg(test)]` modules) that flags the enumerated raw pool-write patterns and listed mutating `Mempool` method names on receivers not spelled as the gateway — a bounded inventory check whose limits are recorded under `ARCH-08`, not proof that no non-owner mutation path exists;
-  - audits `NodeState` for forwarding wrappers around `P2pService` handles and fails if a wrapper outside the frozen inventory appears; the inventory records the current surface pending the T24/T26 collapse and does not establish narrowing;
-  - does not discharge G2: the scan and audit are detection aids, and the capability gaps listed under `ARCH-08` remain open.
-
-## Vocabulary
-Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md): five-layer direction, chainstate owner, coherent view protocol, `ReadStamp`.
+  - `workspace_dependency_direction_is_one_way`: parses `cargo metadata --no-deps`,
+    validates every internal workspace dependency edge against the approved
+    layer table, verifies `bitcoin-rs-storage` exclusively owns storage engine
+    dependencies, confirms `bitcoin-rs-rpc` has no dependency on storage and
+    forwards no backend features, and verifies backend feature forwarding is
+    confined to operator tiers and service adapters.
+    It also rejects mempool dependencies on transaction consumers, including
+    the same-layer P2P edge; `transaction_consumers_can_depend_on_mempool`
+    and `mempool_cannot_depend_on_transaction_consumers` exercise the allowed
+    and forbidden directions.
+- Manifest enforcement:
+  - Root `Cargo.toml`: workspace member list and package versions.
+  - `crates/storage/Cargo.toml`: engine dependency definitions.
+  - `crates/rpc/Cargo.toml`: zero storage backend dependencies or features.
+  - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
+    operator-tier backend feature flags.
+- `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
+  `chain_transition_connect_and_finish_publish_the_new_tip`,
+  `proposal_rejects_excess_coinbase_without_persisting`,
+  `proposal_omits_proof_of_work`: the facade copies published tips without
+  reserving generation, connect/finish through `ChainTransition` is the
+  mutation path, and BIP22 proposal reuses the apply gates without persistence.
+- `crates/node/src/apply.rs` tests `apply_block_publishes_rawtx_bytes_in_block_order`,
+  `connected_sequence_event_observes_the_published_applied_tip`,
+  `connect_and_disconnect_wake_the_mining_generation`,
+  `follower_dispatch_holds_the_chain_transition`,
+  `with_zmq_publisher_swaps_handle`: apply returns a committed outcome;
+  `ChainFollowers` consume it after the tip is published and while the
+  transition is still held; ZMQ publishers are configured outside apply.
+- `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
+  `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
+  `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
+  owned by `ChainEffects`, not by apply.
+- `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`:
+  later `UserConfig` layers win on set fields, including nested
+  `ChainstateJournalOverrides` (`ARCH-05`).
+- `crates/node/src/config.rs` test `mining_payout_overlay_lets_the_later_address_win`
+  and `crates/node/tests/config_layered.rs` test
+  `mining_payout_address_decodes_after_all_layers`: watch-only mining payout is
+  decoded once after overlay, against the resolved network (`ARCH-05`).

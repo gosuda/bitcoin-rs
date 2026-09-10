@@ -1,16 +1,14 @@
 # MuHash RPC campaign contract
 
-Target contract for the production full-UTXO query comparator.
-`gettxoutsetinfo` owns the measured RPC arity and the coherent-view scan.
-`tools/benchmark-campaign/muhash_rpc.py` owns trial transport, campaign
-spawn, and receipt identity. The measured contract, cell evidence, and
-acceptance rule live in
-[docs/benchmarks/muhash-rpc.md](../benchmarks/muhash-rpc.md).
+The production full-UTXO query comparator. `gettxoutsetinfo` owns the measured
+RPC arity. `tools/benchmark-campaign/muhash_rpc.py` owns trial transport,
+campaign spawn, and receipt identity.
 
 Owners:
-
 - `crates/rpc/src/handlers/chain.rs` (`gettxoutsetinfo`)
 - `tools/benchmark-campaign/muhash_rpc.py`
+
+Operator procedure: [`docs/benchmarks/muhash-rpc.md`](../benchmarks/muhash-rpc.md).
 
 ## Clauses
 
@@ -40,41 +38,10 @@ bits; Linux 6.3 introduced those two flags, so older kernels retry with
 write to that inode cannot change the bytes the daemon reads. Receipts
 keep the original FileRef identity.
 
-### `MRPC-04`: Coherent whole-UTXO read
-
-- The scan runs over one coherent view stamped with `ReadStamp`
-  (`architecture.md`). The reported `height` and `best_block` come from
-  the same stamp as the scanned set. The handler never composes the
-  answer from a separately loaded tip and mutable UTXOs.
-- The whole-UTXO read is ordered under the chain-transition reservation:
-  a transition cannot commit between the stamp capture and the answer
-  without invalidating the stamp. A scan that loses its view returns the
-  declared typed `Retry` or `Unavailable`, never a mixed-tip answer.
-- The scan is bounded and cancellable. Cancellation releases the retained
-  snapshot. A public `gettxoutsetinfo` call cannot consume the CPU or
-  memory quota needed to validate new blocks.
-
-### `MRPC-05`: Cross-node commitment oracle
-
-- The `muhash` commitment is compared against the pinned Bitcoin Core
-  31.1 product oracle (`reference-set.md` `REF-02`) at the same pinned
-  stop identity. Both nodes stand at the same tip. Identical `muhash`,
-  `txouts`, and `total_amount` form the cross-node commitment. A version
-  label alone is not the oracle.
-- Core 31.1 performs `ForceFlushStateToDisk(false)` inside this RPC. That
-  flush stays inside the measured interval because it is part of the
-  call.
-
 ## Proven by
 
-- `crates/rpc/src/handlers/chain.rs` test
-  `gettxoutsetinfo_rejects_trailing_parameters` (existing)
-- `crates/rpc/tests/handler_smoke.rs` tests
-  `gettxoutsetinfo_rejects_trailing_parameters`,
-  `gettxoutsetinfo_returns_real_utxo_counts`,
-  `gettxoutsetinfo_empty_muhash_matches_core_digest`,
-  `gettxoutsetinfo_production_triplet_matches_core_digest`,
-  `gettxoutsetinfo_hash_type_modes_match_core_shapes` (existing)
+- `crates/rpc/src/handlers/chain.rs` test `gettxoutsetinfo_rejects_trailing_parameters`
+- `crates/rpc/tests/handler_smoke.rs` test `gettxoutsetinfo_rejects_trailing_parameters`
 - `tools/benchmark-campaign/test_muhash_rpc.py` tests
   `test_rpc_does_not_send_credentials_to_a_foreign_peer`,
   `test_readiness_rejects_a_listener_the_child_does_not_own`,
@@ -84,12 +51,4 @@ keep the original FileRef identity.
   `test_snapshot_falls_back_when_exec_flags_are_einval`,
   `test_verified_config_inode_survives_workspace_path_replace`,
   `test_spawn_reads_verified_config_after_workspace_replace`,
-  `test_warm_campaign_agrees_across_all_backends` (existing)
-- `docs/benchmarks/muhash-rpc.md` end-state cells (planned): cold and
-  warm cache policy, comparison backends, and cancellation. All are
-  `planned_not_executed` until the campaign runs.
-
-## Vocabulary
-
-[ReadStamp](../../CONCEPTS.md),
-[chain-transition reservation](../../CONCEPTS.md).
+  `test_warm_campaign_agrees_across_all_backends`

@@ -6,15 +6,13 @@
 //! Without it the node follows the chain forward and cannot leave a branch that
 //! loses, which is the difference between a chain follower and a full node.
 
-use std::sync::Arc;
-
 use alloc::vec::Vec;
 
 use bitcoin_rs_chain::{NodeId, ReorgPlan, current_unix_seconds, plan_reorg};
-use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
-use bitcoin_rs_primitives::{Block, DecodeError, Hash256, Tx, Txid};
+use bitcoin_rs_mempool::AdmissionOrigin;
+use bitcoin_rs_primitives::{Block, DecodeError, Hash256, Txid};
 use bitcoin_rs_storage::StorageError;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashSet;
 
 use crate::apply::{ChainTransition, Chainstate};
 use crate::chain_effects::ChainFollowers;
@@ -583,7 +581,7 @@ where
 /// disconnect order, and block order within a block, which consensus keeps
 /// topological — so a transaction's inputs are decided before the
 /// transaction spending them is offered. Coinbase transactions are skipped
-/// by structure (`is_coinbase`), never by position: a disconnected coinbase
+/// by the mempool candidate preparer, never by position: a disconnected coinbase
 /// must never re-enter the mempool.
 ///
 /// Pricing reads the post-disconnect UTXO set plus the outputs of
@@ -618,68 +616,21 @@ fn reconsider_disconnected_transactions<F>(
         .iter()
         .flat_map(|body| body.block.txs.iter().map(bitcoin_rs_primitives::Tx::txid))
         .collect();
-    let mut offered: HashMap<Txid, Vec<u64>> = HashMap::new();
-    let mut entries = Vec::new();
+    let mut candidates = bitcoin_rs_mempool::reconsider::DisconnectedCandidates::new(time, height);
     for (hash, block_height) in disconnect_nodes[..disconnected_count].iter().rev() {
         let Ok(body) = load_branch_body(handles, *hash, *block_height, staged_body) else {
             continue;
         };
         for tx in &body.block.txs {
-            if is_coinbase(tx) || still_on_chain.contains(&tx.txid()) {
+            if still_on_chain.contains(&tx.txid()) {
                 continue;
             }
-            let Some((entry, output_values)) =
-                reconsider_entry(&handles.utxo, tx, time, height, &offered)
-            else {
-                continue;
-            };
-            offered.insert(tx.txid(), output_values);
-            entries.push(entry);
+            candidates.offer(tx, |outpoint| handles.utxo.get(outpoint));
         }
     }
     let _ = handles
         .mempool_gateway
-        .reconsider_disconnected(AdmissionOrigin::Reorg, entries);
-}
-
-/// Core's `IsCoinBase`: a single input spending the null prevout.
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
-}
-
-/// Prices `tx` for re-admission, or returns `None` when an input is neither a
-/// restored confirmed coin nor an output of an earlier candidate in the same
-/// batch.
-fn reconsider_entry(
-    utxo: &bitcoin_rs_utxo::UtxoSet,
-    tx: &Tx,
-    time: u64,
-    height: u32,
-    offered: &HashMap<Txid, Vec<u64>>,
-) -> Option<(MempoolEntry, Vec<u64>)> {
-    let mut input_total = 0_u64;
-    for input in &tx.inputs {
-        let outpoint = input.previous_output;
-        if let Some(output) = utxo.get(&outpoint) {
-            input_total = input_total.saturating_add(output.value);
-            continue;
-        }
-        let values = offered.get(&input.previous_output.txid)?;
-        let value = values
-            .get(usize::try_from(input.previous_output.vout).ok()?)
-            .copied()?;
-        input_total = input_total.saturating_add(value);
-    }
-    let output_values: Vec<u64> = tx.outputs.iter().map(|output| output.value).collect();
-    let output_total = output_values
-        .iter()
-        .fold(0_u64, |total, value| total.saturating_add(*value));
-    let fee = input_total.saturating_sub(output_total);
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    Some((
-        MempoolEntry::new(Arc::new(tx.clone()), vsize, fee, time, height),
-        output_values,
-    ))
+        .reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());
 }
 
 fn current_reorg_plan(

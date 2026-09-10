@@ -880,7 +880,7 @@ class PartialWrite(unittest.TestCase):
                 backing_archive.close()
                 backing_entries.close()
 
-    def test_failed_append_poisons_same_writer(self) -> None:
+    def test_failed_append_retries_on_same_writer_after_truncation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             freeze = _fixture_freeze(root)
@@ -897,36 +897,17 @@ class PartialWrite(unittest.TestCase):
                 archive.poisoned = True
                 with self.assertRaises(OSError):
                     writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
-                # The digests absorbed uncommitted bytes, so the writer stays
-                # poisoned: truncation cannot make it safe to reuse.
+                # Digest updates are deferred past successful writes, so a
+                # failed frame never contaminates them: once the caller
+                # truncates the partial tail, the same writer continues.
                 archive.truncate(facts.archive_bytes)
                 entries.truncate(facts.entries_bytes)
-                with self.assertRaises(ContractError):
-                    writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
-                self.assertEqual(writer.prefix_facts(), facts)
-            finally:
-                backing_archive.close()
-                backing_entries.close()
-
-    def test_poisoned_writer_finish_reports_poison_not_count(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw)
-            freeze = _fixture_freeze(root)
-            backing_archive = (root / "poison-finish.archive").open("w+b")
-            backing_entries = (root / "poison-finish.entries").open("w+b")
-            archive = _FlakyWrites(backing_archive)
-            entries = _FlakyWrites(backing_entries)
-            try:
-                writer = corpus.CorpusWriter(freeze, FIX_CORPUS, archive, entries)
-                writer.append(_GENESIS, expected_hash=GENESIS_HASH)
-                archive.poisoned = True
-                with self.assertRaises(OSError):
-                    writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
-                # The poison error must surface, not the incidental count
-                # shortfall: without the finish gate this asserts the wrong
-                # message and fails.
-                with self.assertRaisesRegex(ContractError, "previous append failed"):
-                    writer.finish(io.BytesIO())
+                meta = writer.append(_BLOCK1, expected_hash=FIX_B1_HASH)
+                self.assertEqual(meta.offset, facts.archive_bytes)
+                writer.append(_BLOCK2, expected_hash=FIX_STOP_HASH)
+                summary, manifest_bytes = _finish_to(root, writer, "failed-final")
+                self.assertEqual(summary.archive_sha256, FIX_ARCHIVE_SHA256)
+                self.assertEqual(manifest_bytes, _GOLDEN_MANIFEST)
             finally:
                 backing_archive.close()
                 backing_entries.close()

@@ -1,4 +1,4 @@
-//! T01 — the differential lane runs two public processes, never handlers.
+//! REF-02/REF-07 — the differential lane runs two public processes, never handlers.
 //!
 //! The pinned Core 31.1 `bitcoind` and the `bitcoin-rs` binary each start in
 //! an isolated regtest datadir, share identical block bytes, answer only
@@ -17,11 +17,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin_rs_rpc::compat_manifest::reference_set;
 use serde_json::json;
 use support::process_node::{
     ClockControl, HarnessError, NodeBinary, ProcessNode, mine_common_chain, verify_reference_binary,
 };
+use support::reference_set::reference_set;
 
 const COMMON_BLOCKS: u32 = 3;
 

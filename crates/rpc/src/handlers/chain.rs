@@ -842,7 +842,7 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
     let total_weight = per_tx
         .iter()
         .fold(0_u64, |sum, (_fee, weight)| sum.saturating_add(*weight));
-    let tx_count = u64::try_from(per_tx.len()).map_or(1, |count| count);
+    let tx_count = u64::try_from(per_tx.len()).unwrap_or(1);
     let avgfee = totalfee / tx_count;
     let avgfeerate = totalfee
         .saturating_mul(4)
@@ -857,19 +857,11 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
         rates.push((rate, *weight));
     }
 
-    let minfee = fees.iter().copied().min().map_or(0, |fee| fee);
-    let maxfee = fees.iter().copied().max().map_or(0, |fee| fee);
+    let minfee = fees.iter().copied().min().unwrap_or(0);
+    let maxfee = fees.iter().copied().max().unwrap_or(0);
     let medianfee = truncated_median(&mut fees);
-    let minfeerate = rates
-        .iter()
-        .map(|(rate, _weight)| *rate)
-        .min()
-        .map_or(0, |rate| rate);
-    let maxfeerate = rates
-        .iter()
-        .map(|(rate, _weight)| *rate)
-        .max()
-        .map_or(0, |rate| rate);
+    let minfeerate = rates.iter().map(|(rate, _weight)| *rate).min().unwrap_or(0);
+    let maxfeerate = rates.iter().map(|(rate, _weight)| *rate).max().unwrap_or(0);
     let feerate_percentiles = percentiles_by_weight(&mut rates, total_weight);
 
     Ok(FeeFields {
@@ -1155,7 +1147,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let snapshot = crate::capabilities::txindex_snapshot(ctx.txindex_status.as_deref());
-    Ok(json!({ "revision": snapshot.revision, "capabilities": snapshot.capabilities }))
+    Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 
 #[derive(Clone, Debug)]
@@ -4051,7 +4043,7 @@ mod verifychain_tests {
         let ctx = Arc::new(Context::new());
         let result = verifychain(&ctx, &json!([0, 6]))
             .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
-        assert!(result.as_bool() == Some(true));
+        assert_eq!(result.as_bool(), Some(true));
     }
 }
 
@@ -5416,7 +5408,6 @@ mod scantxoutset_tests {
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
     use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
-    use sonic_rs::JsonValueTrait as _;
 
     use super::*;
 

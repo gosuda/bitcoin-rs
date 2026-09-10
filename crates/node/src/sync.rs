@@ -7527,6 +7527,7 @@ mod tests {
         PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height,

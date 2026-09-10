@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, NoSpentScripts, PreparedBatch,
     PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptLiveScan, TxIndexScan, TxIndexScanRow,
     TxIndexSnapshot,
     types::{TxPosition, TxPositionValue},
@@ -91,11 +91,16 @@ pub(crate) const DEFAULT_ROLLBACK_REBUILD_CUTOVER: u32 = 100_000;
 
 const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
 const POSITION_PREFETCH_BLOCKS: usize = 65_536;
-/// Maximum number of blocks whose bodies are held in memory and whose
-/// `prepare_block_for` row-build work is fanned out across the rayon pool
-/// in one parallel prepare step. Bounds memory while keeping the CPU-bound
-/// decode/row-build off the single writer thread.
-const PREPARE_CHUNK_BLOCKS: usize = 128;
+/// In-memory parallel-prepare cap owned by this worker. 256 matches the IBD
+/// download window so a filled staging set can prepare in one pass when bodies
+/// are small; catch-up also prepares already-stored bodies, so this is not
+/// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
+const PREPARE_CHUNK_BLOCKS: usize = 256;
+/// Serialized-body budget for one parallel prepare step. Later bodies are not
+/// retained once this bound would be exceeded. Stops a 1 MiB-class window from
+/// holding 256 bodies in RAM while still packing early-chain blocks up to the
+/// count cap.
+const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
@@ -1265,24 +1270,16 @@ type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) 
     + 'a;
 
 /// Erased prepared-index writer used by the worker and stored in `NodeState`.
+///
+/// Prepare and rollback have one owner each: spent-script-aware
+/// [`Self::prepare_block_with_spent_scripts`] and
+/// [`Self::commit_rollback_one_for_with_cursor_with_spent_scripts`].
+/// Callers that are not rebuilding `ScriptLive` pass [`NoSpentScripts`].
+/// Durability, crash visibility, and failure classification for rollback are
+/// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
+/// (`IDX-06` / `IDX-07`).
 pub(crate) trait TxIndexWriter: Send + Sync {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
-    fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError>;
-    fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        let _ = capabilities;
-        self.prepare_block(height, hash, body)
-    }
     fn prepare_block_with_spent_scripts(
         &self,
         capabilities: IndexCapabilities,
@@ -1290,10 +1287,7 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         hash: [u8; 32],
         body: &[u8],
         spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        let _ = spent_scripts;
-        self.prepare_block_for(capabilities, height, hash, body)
-    }
+    ) -> Result<PreparedBlock, IndexError>;
     fn seed_script_live_stream(
         &self,
         produce: &mut ScriptLiveSeedProduce<'_>,
@@ -1308,14 +1302,6 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         batch: PreparedBatch,
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<IndexWatermark, IndexError>;
-    fn commit_rollback_one_for_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<(), IndexError>;
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &self,
         fence: IndexWriteFence,
@@ -1324,10 +1310,7 @@ pub(crate) trait TxIndexWriter: Send + Sync {
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
         spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError> {
-        let _ = spent_scripts;
-        self.commit_rollback_one_for_with_cursor(fence, capabilities, prev, body, cursor)
-    }
+    ) -> Result<(), IndexError>;
 
     fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
         let _ = capabilities;
@@ -1341,148 +1324,17 @@ pub(crate) trait TxIndexWriter: Send + Sync {
     ) -> Result<(), IndexError>;
 }
 
-impl<S> TxIndexWriter for Mutex<IndexWriter<S>>
-where
-    S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
-{
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
-        self.lock().fenced_watermarks()
-    }
-
-    fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.lock().prepare_block(height, hash, body)
-    }
-
-    fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.lock()
-            .prepare_block_for(capabilities, height, hash, body)
-    }
-
-    fn prepare_block_with_spent_scripts(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<PreparedBlock, IndexError> {
-        self.lock().prepare_block_with_spent_scripts(
-            capabilities,
-            height,
-            hash,
-            body,
-            spent_scripts,
-        )
-    }
-
-    fn commit_forward_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        batch: PreparedBatch,
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<IndexWatermark, IndexError> {
-        self.lock().commit_forward_with_cursor(fence, batch, cursor)
-    }
-
-    fn seed_script_live_stream(
-        &self,
-        produce: &mut ScriptLiveSeedProduce<'_>,
-        tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        self.lock().seed_script_live_stream(produce, tip)
-    }
-
-    fn commit_rollback_one_for_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<(), IndexError> {
-        self.lock()
-            .commit_rollback_one_for_with_cursor(fence, capabilities, prev, body, cursor)
-    }
-
-    fn commit_rollback_one_for_with_cursor_with_spent_scripts(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-        spent_scripts: &dyn bitcoin_rs_index::SpentCoinScripts,
-    ) -> Result<(), IndexError> {
-        self.lock()
-            .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                fence,
-                capabilities,
-                prev,
-                body,
-                cursor,
-                spent_scripts,
-            )
-    }
-
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        self.lock().reset_capabilities(capabilities)
-    }
-
-    fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {
-        self.lock().consumer_cursor()
-    }
-
-    fn commit_consumer_cursor(
-        &self,
-        fence: IndexWriteFence,
-        cursor: &[u8],
-    ) -> Result<(), IndexError> {
-        self.lock().commit_consumer_cursor(fence, cursor)
-    }
-}
-
-/// `RwLock`-backed writer: `prepare_block_for` and `consumer_cursor` take a
-/// shared read lock so the CPU-bound decode/row-build can run concurrently
-/// across the rayon pool, while `commit_*`, `fenced_watermarks`, and
-/// `reset_capabilities` take an exclusive write lock to preserve the
-/// single-writer atomic commit and watermark semantics.
+/// `RwLock`-backed writer: `prepare_block_with_spent_scripts` and
+/// `consumer_cursor` take a shared read lock so the CPU-bound decode/row-build
+/// can run concurrently across the rayon pool, while `commit_*`,
+/// `fenced_watermarks`, and `reset_capabilities` take an exclusive write lock
+/// to preserve the single-writer atomic commit and watermark semantics.
 impl<S> TxIndexWriter for RwLock<IndexWriter<S>>
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
         self.write().fenced_watermarks()
-    }
-
-    fn prepare_block(
-        &self,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.read().prepare_block(height, hash, body)
-    }
-
-    fn prepare_block_for(
-        &self,
-        capabilities: IndexCapabilities,
-        height: u32,
-        hash: [u8; 32],
-        body: &[u8],
-    ) -> Result<PreparedBlock, IndexError> {
-        self.read()
-            .prepare_block_for(capabilities, height, hash, body)
     }
 
     fn prepare_block_with_spent_scripts(
@@ -1518,18 +1370,6 @@ where
         tip: IndexWatermark,
     ) -> Result<usize, IndexError> {
         self.write().seed_script_live_stream(produce, tip)
-    }
-
-    fn commit_rollback_one_for_with_cursor(
-        &self,
-        fence: IndexWriteFence,
-        capabilities: IndexCapabilities,
-        prev: Option<IndexWatermark>,
-        body: &[u8],
-        cursor: ConsumerCursorUpdate<'_>,
-    ) -> Result<(), IndexError> {
-        self.write()
-            .commit_rollback_one_for_with_cursor(fence, capabilities, prev, body, cursor)
     }
 
     fn commit_rollback_one_for_with_cursor_with_spent_scripts(
@@ -2439,14 +2279,16 @@ impl Worker {
                 .prefetch_positions(&requests)
                 .map_err(TxIndexWorkerError::Storage)?;
 
-            // Sub-chunk: load bodies serially (preserving the reader's
-            // prefetch state), prepare blocks in parallel across the rayon
-            // pool, then push prepared blocks into the batch in height order.
-            // The single-writer commit and watermark publish remain the only
-            // ordering points (#209 invariants).
-            for sub_chunk in identities.chunks(PREPARE_CHUNK_BLOCKS) {
+            // Sub-chunk: load bodies serially until the count or byte cap
+            // (preserving the reader's prefetch state), prepare blocks in
+            // parallel across the rayon pool, then push prepared blocks into
+            // the batch in height order. The single-writer commit and
+            // watermark publish remain the only ordering points (#209
+            // invariants).
+            let mut remaining = identities;
+            while !remaining.is_empty() {
                 match self.prepare_and_admit_chunk(
-                    sub_chunk,
+                    &mut remaining,
                     &mut body_reader,
                     capabilities,
                     &mut state,
@@ -2462,15 +2304,16 @@ impl Worker {
         self.finish_catch_up(state, chunk_end, target, pending)
     }
 
-    /// Loads bodies serially, prepares blocks in parallel across the rayon pool,
-    /// then admits them into the batch in height order on the single writer
-    /// thread. Returns `Stalled` if a body is missing or shutdown was requested,
-    /// `Progressed` if the batch filled and was committed, or `Continue` to keep
-    /// processing.
+    /// Loads bodies serially until the count or byte cap, prepares that prefix
+    /// in parallel across the rayon pool, then admits them into the batch in
+    /// height order on the single writer thread. Advances `identities` past
+    /// the loaded prefix. Returns `Stalled` if a body is missing or shutdown
+    /// was requested, `Progressed` if the batch filled and was committed, or
+    /// `Continue` to keep processing.
     #[allow(clippy::too_many_lines)]
     fn prepare_and_admit_chunk(
         &self,
-        sub_chunk: &[BlockIdentity],
+        identities: &mut &[BlockIdentity],
         body_reader: &mut Box<dyn PruneBodyReader + '_>,
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
@@ -2480,15 +2323,26 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        // Load bodies serially through the single reader.
-        let mut bodies = Vec::with_capacity(sub_chunk.len());
-        for identity in sub_chunk {
+        // Load bodies serially through the single reader until either cap.
+        // The first body is always retained so catch-up moves; a later body
+        // that would cross the byte cap is left at the front of `identities`.
+        let mut bodies = Vec::new();
+        let mut loaded_bytes = 0_usize;
+        for identity in *identities {
             if self.runtime.should_stop() {
                 return Ok(ChunkAction::Stalled);
             }
             let hash = Hash256::from_le_bytes(&identity.hash);
             match body_reader.load_block_body(identity.height, hash) {
-                Ok(Some(body)) => bodies.push(body),
+                Ok(Some(body)) => {
+                    if !bodies.is_empty()
+                        && loaded_bytes.saturating_add(body.len()) > PREPARE_CHUNK_BYTES
+                    {
+                        break;
+                    }
+                    loaded_bytes = loaded_bytes.saturating_add(body.len());
+                    bodies.push(body);
+                }
                 Ok(None) => {
                     if !state.batch.is_empty() {
                         let replacement = PendingForward {
@@ -2505,7 +2359,12 @@ impl Worker {
                 }
                 Err(e) => return Err(TxIndexWorkerError::Storage(e)),
             }
+            if bodies.len() >= PREPARE_CHUNK_BLOCKS {
+                break;
+            }
         }
+        let loaded = bodies.len();
+        let sub_chunk = &identities[..loaded];
 
         let anchors = if capabilities.script_live {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
@@ -2536,22 +2395,17 @@ impl Worker {
             .zip(bodies.par_iter())
             .enumerate()
             .map(|(index, (identity, body))| {
-                if let Some(anchors) = anchors.as_ref() {
-                    self.writer.prepare_block_with_spent_scripts(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                        &anchors[index],
-                    )
-                } else {
-                    self.writer.prepare_block_for(
-                        capabilities,
-                        identity.height,
-                        identity.hash,
-                        body.as_slice(),
-                    )
-                }
+                let spent: &dyn bitcoin_rs_index::SpentCoinScripts = match anchors.as_ref() {
+                    Some(anchors) => &anchors[index],
+                    None => &NoSpentScripts,
+                };
+                self.writer.prepare_block_with_spent_scripts(
+                    capabilities,
+                    identity.height,
+                    identity.hash,
+                    body.as_slice(),
+                    spent,
+                )
             })
             .collect();
         drop(bodies);
@@ -2606,6 +2460,7 @@ impl Worker {
                 };
             }
         }
+        *identities = &identities[loaded..];
         Ok(ChunkAction::Continue)
     }
     fn finish_catch_up(
@@ -2657,22 +2512,22 @@ impl Worker {
             .then(|| self.live_anchor(watermark.height, watermark.hash))
             .transpose()?;
 
+        let spent: &dyn bitcoin_rs_index::SpentCoinScripts =
+            anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
+
         let prev = if watermark.height == 0 {
             None
         } else {
-            let prepared = if let Some(anchor) = anchor.as_ref() {
-                self.writer.prepare_block_with_spent_scripts(
+            let prepared = self
+                .writer
+                .prepare_block_with_spent_scripts(
                     capabilities,
                     watermark.height,
                     watermark.hash,
                     &body,
-                    anchor,
+                    spent,
                 )
-            } else {
-                self.writer
-                    .prepare_block_for(capabilities, watermark.height, watermark.hash, &body)
-            }
-            .map_err(TxIndexWorkerError::Index)?;
+                .map_err(TxIndexWorkerError::Index)?;
             Some(IndexWatermark {
                 height: watermark.height.saturating_sub(1),
                 hash: prepared.parent_hash,
@@ -2688,26 +2543,16 @@ impl Worker {
             .map_or(ConsumerCursorUpdate::Clear, |bytes| {
                 ConsumerCursorUpdate::Set(bytes.as_slice())
             });
-        if let Some(anchor) = anchor.as_ref() {
-            self.writer
-                .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                    fence,
-                    capabilities,
-                    prev,
-                    &body,
-                    cursor,
-                    anchor,
-                )
-        } else {
-            self.writer.commit_rollback_one_for_with_cursor(
+        self.writer
+            .commit_rollback_one_for_with_cursor_with_spent_scripts(
                 fence,
                 capabilities,
                 prev,
                 &body,
                 cursor,
+                spent,
             )
-        }
-        .map_err(TxIndexWorkerError::Index)?;
+            .map_err(TxIndexWorkerError::Index)?;
         Ok(prev)
     }
 
@@ -4016,7 +3861,7 @@ mod body_reader_tests {
         let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
         let data_dir = tempfile::tempdir()?;
         let index_store = Arc::new(bitcoin_rs_storage::FjallStore::open(data_dir.path())?);
-        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::Mutex::new(
+        let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(
             bitcoin_rs_index::IndexWriter::open(index_store, 1)?,
         ));
         let body_store = Arc::new(SessionBodyStore {

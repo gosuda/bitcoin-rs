@@ -1,62 +1,51 @@
 # Contracts
 
-A contract doc states behavior the code must keep, and names where the code
-proves it. Every normative claim cites the file that implements it and the
-test that pins it, both present in the tree. A contract page is short: the
-invariants, the owners, the proof. Explanation lives in `CONCEPTS.md`, code
-comments, and consumer documents that link back to the owning contract.
-
-## Documentation roles
-
-Documentation in this repository follows explicit ownership and precedence:
-
-- `docs/contracts/`: current normative behavior, invariants, and ownership rules;
-- `docs/solutions/`: historical decisions, evidence, and failed approaches; informative, not normative;
-- `CONCEPTS.md`: project-specific domain vocabulary only;
-- README/getting-started: user workflows and concise subsystem summaries that link to the owning contract;
-- code comments: local invariants, lock/commit ordering, unsafe justification, and non-obvious constraints;
-- tests: executable proof of named contract clauses.
-
-Do not copy complete behavioral descriptions from a contract into every consumer. Consumer documents cite the canonical clause IDs defined here.
+`docs/contracts/` owns current normative behavior. Each page names its owners and executable proof. `CONCEPTS.md` owns vocabulary; `docs/solutions/` and `docs/benchmarks/` hold historical or measured evidence.
 
 ## Precedence
 
-When documents disagree, use this order:
+1. `docs/contracts/`
+2. Source comments for local invariants
+3. `docs/policies/` for detailed domain matrices
+4. Informative documents and historical evidence
 
-1. A contract page under `docs/contracts/` wins. Each page is code-cited:
-   file paths, clause IDs, and test names, with no prose-only claims about behavior.
-2. Source comments (rustdoc and inline comments) come next. They explain
-   local intent and invariants. They do not override the contract.
-3. Specialized domain policies under `docs/policies/` define detailed wire/parity matrices; pointer pages below fold those policies into this precedence chain.
-4. Everything else is informative context: `docs/solutions/`, `docs/benchmarks/`, `CONCEPTS.md`, and consumer `README.md` files.
-
-On conflict between a contract page and the code, the drift is a bug. Fix the
-code or amend the contract in the same commit. Never reword the contract to
-match a regression.
+When code and a contract disagree, fix the drift in the same change. Do not duplicate complete contract text into consumers; cite the owning clause instead.
 
 ## Index
 
-| Contract page | Clauses | Scope | Consumed by | Proven by |
-| --- | --- | --- | --- | --- |
-| [architecture.md](architecture.md) | `ARCH-01`..`ARCH-07` | Five-layer dependency hierarchy, storage engine confinement, feature forwarding rules, RPC storage independence, node composition boundary, `crates/chainstate` owner, consumer-defined narrow traits, lock and order contract, `ReadStamp` coherent view protocol, anti-shim cutover rule | Workspace crates, `crates/node`, `crates/rpc`, `crates/storage`, `bin/bitcoin-rs` | `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs` (`cargo test -p bitcoin-rs --test g17_dependency_direction`); `crates/node/tests/overhaul_ownership.rs` (planned); `crates/chainstate/src/transition.rs` (planned); `bin/bitcoin-rs/tests/gates/g20_formal_models.rs` (planned) |
-| [validation-default.md](validation-default.md) | `VAL-01`..`VAL-03` | Native strict-Rust validation is the default; `bitcoinkernel` is an explicit opt-in oracle; promotion flips only with measured evidence | `crates/consensus`, `crates/node`, `crates/script`, `bin/bitcoin-rs` | `bin/bitcoin-rs/tests/gates/g19_validation_default.rs` (`cargo test -p bitcoin-rs --test g19_validation_default`); `bin/bitcoin-rs/tests/overhaul_default_closure.rs` (planned); `crates/script/tests/overhaul_native_crypto.rs` (planned); `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned); `docs/benchmarks/native-validation-default.md` (planned) |
-| [indexing.md](indexing.md) | `IDX-01`..`IDX-07` | Index capability gating, watermark identity, query consistency, selective reset, reorg rollback, and error isolation | `crates/node/src/txindex_worker.rs`, `crates/index/src/index.rs`, RPC/Esplora queries | `crates/node/src/txindex_worker_recovery_tests.rs`, `crates/node/src/txindex_worker_query_tests.rs`, `crates/node/src/txindex_worker_lifecycle_tests.rs`, `crates/node/src/txindex_worker_block_source_tests.rs`; `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row` |
-| [recovery.md](recovery.md) | `RCV-01`..`RCV-11` | Durable root `R`, ordered commit protocol, prior-or-whole-proposed rule, orphan tails, crash matrix, index worker rollback and rebuild, exact disconnect and reorg, fresh replay and `CURRENT_SCHEMA` refusal, owner-local versions, checkpoint authority removal | `crates/node/src/state.rs`, `crates/chainstate/src/{transition,recovery}.rs`, `crates/node/src/txindex_worker.rs` | `crates/node/src/txindex_worker_recovery_tests.rs`; `crates/node/tests/overhaul_crash_matrix.rs` (planned); `crates/node/tests/overhaul_streaming_reorg.rs` (planned); `crates/node/tests/overhaul_checkpoint_independence.rs` (planned); `crates/storage/tests/overhaul_atomic_durability.rs` (planned); `crates/chainstate/src/transition.rs` and `crates/chainstate/src/recovery.rs` (planned) |
-| [chain-events.md](chain-events.md) | `EVT-01`..`EVT-05` | `ChainSnapshot` and process epoch, ordered commit and bounded observer delivery, consumer cursor, consumer error isolation, durable disconnect marker and `ChainChangeProof` | `crates/node/src/txindex_worker.rs` (first consumer); any index mirroring the applied chain | `crates/chainstate/src/transition.rs` (planned); `crates/mempool/src/{gateway,mutation}.rs` (planned); `crates/rpc/src/zmq.rs` (planned); `crates/node/tests/overhaul_mempool_lifecycle.rs` (planned); `crates/node/tests/overhaul_durable_head.rs` (planned); `bin/bitcoin-rs/tests/gates/g20_formal_models.rs` (planned); `crates/node/src/apply.rs` existing tests |
-| [mempool-mutations.md](mempool-mutations.md) | `MPL-01`..`MPL-04` | Gateway ordering invariant, `MutationEnvelope`/`MutationResult` semantics, ZMQ `A`/`R` payload bytes, generation-validated admission and chain-change fencing | apply path (`crates/node/src/apply.rs`), `sendrawtransaction` (`crates/rpc/src/handlers/tx.rs`), ZMQ `sequence` subscribers (enforcer `--enable-mempool`) | `crates/mempool/src/gateway.rs` test `accepted_and_block_inclusion_events_arrive_in_commit_order`; `crates/rpc/src/zmq.rs` tests `block_inclusion_suppresses_r_frames` and `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`; `crates/node/src/apply.rs` test `stable_generation_is_even_before_and_after_connect` |
-| [mempool-policy.md](mempool-policy.md) | `POL-01` | Pointer: relay policy contract pinned to Core 31.1 | `sendrawtransaction`/`testmempoolaccept` (`crates/rpc/src/handlers/tx.rs`), P2P relay admission | `crates/mempool/tests/policy_contract.rs` and `crates/rpc/tests/policy_contract.rs` (`cargo test -p bitcoin-rs-mempool --test policy_contract` / `-p bitcoin-rs-rpc --test policy_contract`) |
-| [external-api.md](external-api.md) | `API-01`..`API-07` | Pointer: JSON-RPC/REST/ZMQ manifest, generated reference, error code mappings, query budgeting, solo-mining generate, `getnetworkhashps` snapshot behavior, and RPC fixture reference provenance | RPC/REST/ZMQ clients; `tools/bip300301-enforcer` | `crates/rpc/tests/manifest_coverage.rs` tests `rpc_rows_and_the_live_registry_agree_both_ways`, `generated_reference_matches_checked_in`; `crates/rpc/tests/core_parity.rs` corpus provenance tests (`API-07`); `crates/rpc/src/handlers/mining.rs` generate tests; `crates/node/tests/mining.rs` generate tests; `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`; `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows` |
-| [wallet-facing.md](wallet-facing.md) | `WF-01`..`WF-03` | Public Esplora/JSON-RPC surface an external wallet may use; no `NodeState` / `UtxoSet` / index types | [bitcoin-wallet](https://github.com/gosuda/bitcoin-wallet) (`btcw`); any Esplora HTTP client | `bin/bitcoin-rs/tests/wallet_facing.rs` tests `external_wallet_can_scan_estimate_and_broadcast`, `source_does_not_import_node_internals`; `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, `esplora_is_the_mempool_backend_superset` |
-| [p2p-wire.md](p2p-wire.md) | `P2P-01`–`P2P-05` | Pointer: command inventory in `crates/p2p/src/compat.rs`, handshake/reject/deviations pinned to Core 31.1; demonstrated best-known-height credit and request eligibility | `crates/p2p` peers; `crates/p2p/src/chain_query.rs` active-chain serving | `crates/p2p/tests/core_compat.rs` (`cargo test -p bitcoin-rs-p2p --test core_compat`); live lane `scripts/run-p2p-core-interop.sh`; `crates/p2p/src/peer_table.rs` tests `note_announced_height_credits_only_the_delivering_connection`, `note_announced_height_raises_monotonically_and_reports_actual_updates`; `crates/node/src/sync.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`, `tick_fetches_reorg_fork_announced_by_at_tip_peer`, `losing_fork_credit_survives_winner_disconnect`, `cold_start_stall_hedges_front_without_reassigning_owner` |
-| [qa-corpus.md](qa-corpus.md) | `QAC-01`..`QAC-02` | Fuzz seed provenance and refresh rules; G0 pin, G5 replay and parity arms, G6 policy and admission | `fuzz/fuzz_targets/{p2p_message,block_decode,tx_decode,script_eval}.rs`; CI fuzz lanes | `fuzz/CORPUS_PROVENANCE.md` mapping table; `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned); `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned); `cargo fuzz run <target> -- -runs=10000` |
-| [campaign-corpora.md](campaign-corpora.md) | `CORP-01`..`CORP-06` | C150 and Cmodern identities, Core-framed archive/manifest, full-validation posture, script census, Core 31.1 MuHash oracle, and end-state evidence roles | Product-domain campaign cells; `tools/campaign-corpus/corpus.py` | `tools/campaign-corpus/test_corpus.py` (`python3 tools/campaign-corpus/test_corpus.py`); `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned); `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned); `crates/consensus/tests/overhaul_parse_parity.rs` (planned) |
-| [reference-set.md](reference-set.md) | `REF-01`..`REF-07` | Readable projection of the `[reference]` record in `docs/api/core-compat.toml` and `crates/rpc/src/compat_manifest.rs`; Core 31.1 product, Core 31.99.0 kernel tree, corpus, formal tool, and pinned mainnet stop identities | `crates/rpc/src/compat_manifest.rs`; `bin/bitcoin-rs/tests/overhaul_reference_set.rs` | `docs/api/core-compat.toml` and `crates/rpc/src/compat_manifest.rs` (existing); `bin/bitcoin-rs/tests/overhaul_reference_set.rs` (planned) |
-| [muhash-rpc.md](muhash-rpc.md) | `MRPC-01`..`MRPC-03` | Production `gettxoutsetinfo` arity, attested-child ownership of the timed RPC connection, and workspace copies of pinned arm configs | `crates/rpc` `gettxoutsetinfo`; `tools/benchmark-campaign/muhash_rpc.py` | `crates/rpc` `gettxoutsetinfo_rejects_trailing_parameters`; `tools/benchmark-campaign/test_muhash_rpc.py` (`python3.13 tools/benchmark-campaign/test_muhash_rpc.py`) |
-| [embedding.md](embedding.md) | `EMB-01`..`EMB-07` | One `Node` lifecycle for daemon and embedded forms, no second lifecycle, shutdown publishes durable root | In-process embedders; `crates/node/src/embed.rs`; daemon `run()` (first embedder) | `crates/node/tests/embed.rs` tests `embedded_node_lifecycle_round_trip`, `dropped_node_releases_services_and_datadir_for_reopen`; `crates/node/src/run.rs` test `daemon_and_embedded_paths_share_one_teardown`; `crates/node/tests/shutdown.rs` existing tests |
-| [storage-footprint.md](storage-footprint.md) | `FP-01`..`FP-04` | Logical and physical data-directory ledgers, custody-grade collection, explicit `--measure-storage` command, default unpruned 1-TB conservative high-water budget with pinned stop | `crates/storage/src/footprint.rs`, `crates/node/src/storage_footprint.rs`, `bin/bitcoin-rs --measure-storage` | `crates/storage/tests/storage_footprint.rs`; `crates/node/src/storage_footprint.rs` tests; `bin/bitcoin-rs/tests/overhaul_storage_evidence.rs` (planned); `crates/storage/tests/overhaul_atomic_durability.rs` (planned); `crates/node/tests/overhaul_streaming_reorg.rs` (planned); `crates/node/tests/overhaul_checkpoint_independence.rs` (planned) |
-| [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`..`HPA-13` | Frozen 36-cell denominator, attribution noise floor, overlap-aware wall accounting, ledger ownership, forbidden probes, dispositions, evidence identity per sample, and promotion/regression thresholds | `docs/benchmarks/hot-path-ledger.toml`; product-domain comparators | `bin/bitcoin-rs/tests/gates/g18_hot_path_ledger.rs` (`cargo test -p bitcoin-rs --test g18_hot_path_ledger`); `bin/bitcoin-rs/tests/overhaul_evidence.rs` (planned) |
+| Contract | Clauses | Scope | Primary proof |
+| --- | --- | --- | --- |
+| [architecture.md](architecture.md) | `ARCH-01`–`ARCH-08` | Layering, storage confinement, composition, chainstate authority, single mutation owners | `g17_dependency_direction`; `overhaul_ownership`; node apply/effects tests |
+| [validation-default.md](validation-default.md) | `VAL-01`–`VAL-03` | Kernel/native default decision and portable validation | `g19_validation_default`; Core-vector and kernel parity tests |
+| [indexing.md](indexing.md) | `IDX-01`–`IDX-07` | Capability gating, coherent reads, reset/rebuild, reorg reconciliation | txindex worker recovery/query/lifecycle suites; RPC capability tests |
+| [recovery.md](recovery.md) | `RCV-01`–`RCV-11` | Durable root, ordered commits, crash outcomes, reorgs, schema refusal | storage durability tests; txindex recovery tests; planned chainstate crash/reorg suites |
+| [chain-events.md](chain-events.md) | `EVT-01`–`EVT-05` | Applied-chain event seam and consumer cursors | state/apply/txindex recovery tests |
+| [mempool-mutations.md](mempool-mutations.md) | `MPL-01`–`MPL-04` | Mutation ordering, sequence events, chain-change fencing | mempool gateway, RPC ZMQ, and node apply tests |
+| [mempool-policy.md](mempool-policy.md) | `POL-01`–`POL-06` | Admission owner, policy pins, preview/finality, replacement and package rules | policy/RBF suites plus planned admission/finality/cluster suites |
+| [external-api.md](external-api.md) | `API-01`–`API-07` | RPC/REST/ZMQ manifest, errors, mining RPCs, reference provenance | manifest coverage, Core parity, mining tests |
+| [wallet-facing.md](wallet-facing.md) | `WF-01`–`WF-03` | Public wallet-facing surface and isolation from node internals | wallet-facing and Esplora tests |
+| [p2p-wire.md](p2p-wire.md) | `P2P-01`–`P2P-03` | Wire compatibility, peer leases, best-known-height credit | P2P compatibility/live interop, peer-table and sync tests |
+| [qa-corpus.md](qa-corpus.md) | `QAC-01` | Fuzz corpus provenance | corpus provenance and fuzz targets |
+| [campaign-corpora.md](campaign-corpora.md) | `CORP-01`–`CORP-05` | C150/Cmodern custody and Core-framed corpus format | `tools/campaign-corpus/test_corpus.py` |
+| [muhash-rpc.md](muhash-rpc.md) | `MRPC-01`–`MRPC-03` | MuHash RPC arity and benchmark custody | RPC arity and benchmark-campaign tests |
+| [embedding.md](embedding.md) | `EMB-01`–`EMB-08` | Embedded lifecycle and shared node services | `crates/node/tests/embed.rs`; daemon teardown test |
+| [storage-footprint.md](storage-footprint.md) | `FP-01`–`FP-04` | Logical/physical storage accounting and 1-TB gate | storage/node footprint tests and CLI help |
+| [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-13` | Product cells, overlap accounting, evidence identity, promotion thresholds | `g18_hot_path_ledger`; `overhaul_evidence` |
+| [reference-set.md](reference-set.md) | `REF-01`–`REF-07` | Released Core, kernel, corpus, and formal-tool identities | compatibility manifest and `overhaul_reference_set` |
+
+## Permanent suite traceability
+
+The overhaul suites map to current contracts, not task numbers:
+
+- `bin/bitcoin-rs/tests/overhaul_process_harness.rs` → `REF-02`, `REF-07`
+- `bin/bitcoin-rs/tests/overhaul_evidence.rs` → `HPA-12`
+- `bin/bitcoin-rs/tests/overhaul_ownership.rs` → `ARCH-01`, `ARCH-02`, `ARCH-08`
+- `crates/consensus/tests/overhaul_parse_parity.rs` → `VAL-02`
+- `crates/consensus/tests/overhaul_prepared_inputs.rs` → `POL-03`, `VAL-02`
+- `crates/node/tests/overhaul_config_status.rs` → `ARCH-05`, `IDX-02`
+- `crates/primitives/tests/overhaul_layout.rs` → `ARCH-01`
+- `crates/utxo/tests/overhaul_persistent_coins.rs` → `RCV-02`, `RCV-03`
 
 ## Vocabulary
 
-Terms used above are defined in [../../CONCEPTS.md](../../CONCEPTS.md). A
-contract page may reference a concept by name without redefining it.
+Project-specific terms are defined once in [../../CONCEPTS.md](../../CONCEPTS.md).

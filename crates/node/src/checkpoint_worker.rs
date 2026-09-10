@@ -307,13 +307,14 @@ pub(crate) fn spawn_periodic_checkpoint_worker(
 
                 let retention_pressure = publisher.maintain_journal();
                 let pressure_transition = retention_pressure && !prev_pressure;
-                prev_pressure = retention_pressure;
 
                 let current_tip = publisher.applied_tip.load();
                 let Some(tip) = current_tip.as_ref() else {
                     // No applied tip yet; nothing to checkpoint.
                     continue;
                 };
+
+                prev_pressure = retention_pressure;
 
                 if pressure_transition {
                     tracing::info!(

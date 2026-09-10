@@ -1,12 +1,8 @@
-//! Scenario tests for the configuration ladder and the one status owner.
+//! ARCH-05/IDX-02 configuration and status-owner scenarios.
 //!
-//! These pin the merge contract users depend on: later explicitly supplied
-//! fields override earlier layers, absent nested fields never clobber
-//! earlier values, the mining payout validates against the fully resolved
-//! network, runtime/test controls stay out of the public configuration
-//! surface, and the status snapshot carries one runtime revision. The
-//! revision flow through the adapter seam is pinned in
-//! `bitcoin-rs-rpc`'s capabilities tests (IDX-02).
+//! Later explicit fields override earlier layers, absent nested fields do not
+//! clobber earlier values, payout validation uses the resolved network, and
+//! runtime/test controls stay outside the public configuration surface.
 
 #![expect(clippy::expect_used, reason = "test assertions")]
 
@@ -17,8 +13,6 @@ fn bind(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
-/// A later layer that supplies a field explicitly overrides the earlier
-/// layer's value for that field.
 #[test]
 fn later_explicit_fields_override_earlier_layers() {
     let early = UserConfig {
@@ -51,8 +45,6 @@ fn later_explicit_fields_override_earlier_layers() {
     }
 }
 
-/// A layer that leaves a nested group absent preserves the earlier layer's
-/// values in that group.
 #[test]
 fn absent_nested_groups_preserve_earlier_layers() {
     let early = UserConfig {
@@ -76,9 +68,6 @@ fn absent_nested_groups_preserve_earlier_layers() {
     }
 }
 
-/// The mining payout decodes against the consensus network resolved after
-/// every layer merged, so a mainnet address under a regtest profile is
-/// rejected at resolve time.
 #[test]
 fn network_invalid_payout_is_rejected_after_merge() {
     let layer = UserConfig {
@@ -96,7 +85,6 @@ fn network_invalid_payout_is_rejected_after_merge() {
         "error should name the payout conflict: {message}"
     );
 
-    // The same address resolves cleanly when the network matches.
     let mainnet = UserConfig {
         network: Some(NetworkSelection::Mainnet),
         mining: bitcoin_rs_node::config::MiningOverrides {
@@ -107,13 +95,8 @@ fn network_invalid_payout_is_rejected_after_merge() {
     resolve(&[&mainnet]).expect("matching-network payout resolves");
 }
 
-/// Runtime and test controls are not expressible in the public
-/// configuration surface: unknown TOML keys are rejected by
-/// `deny_unknown_fields`, and runtime inputs live in their own type.
 #[test]
 fn runtime_controls_stay_out_of_public_config() {
-    // The public TOML surface rejects unknown members, so a runtime-only
-    // knob spelled in a config file cannot be accepted.
     let rejected = sonic_rs::from_str::<bitcoin_rs_node::config::ChainstateJournalOverrides>(
         "rpc_enabled_for_tests = true\n",
     );
@@ -122,14 +105,10 @@ fn runtime_controls_stay_out_of_public_config() {
         "unknown members must be rejected by the public config surface"
     );
 
-    // RuntimeInputs is a distinct type: a UserConfig cannot be constructed
-    // where a RuntimeInputs is required, and vice versa.
     let runtime = RuntimeInputs::default();
     let _ = &runtime;
 }
 
-/// The data directory travels with its layer: a later layer that names a
-/// data directory overrides an earlier one.
 #[test]
 fn later_data_dir_overrides_earlier() {
     let early = UserConfig {

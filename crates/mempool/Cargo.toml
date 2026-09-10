@@ -35,6 +35,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
+bitcoin.workspace = true
 criterion.workspace = true
 
 [[bench]]
