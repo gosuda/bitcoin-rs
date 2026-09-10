@@ -65,13 +65,24 @@ pub fn verify_block_rules_precomputed(
         return Err(ConsensusError::MerkleMutation);
     }
 
-    if context.segwit_active && facts.has_witness() {
+    // BIP141/Core select a coinbase commitment independently of witness
+    // presence. A selected commitment requires its reserved-value proof even
+    // when every input witness is empty. Without an active commitment, witness
+    // data is forbidden (including before SegWit activation).
+    let has_witness_commitment = context.segwit_active
+        && txdata[0].outputs.iter().rev().any(|output| {
+            output.script_pubkey.len() >= 38
+                && output.script_pubkey[..6] == [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]
+        });
+    if has_witness_commitment {
         let Some(wtxids) = facts.wtxids() else {
             return Err(ConsensusError::WitnessCommitment);
         };
         if wtxids.len() != txdata.len() || !block_witness_commitment_matches(block, wtxids) {
             return Err(ConsensusError::WitnessCommitment);
         }
+    } else if facts.has_witness() {
+        return Err(ConsensusError::WitnessCommitment);
     }
 
     let weight = facts.weight();
