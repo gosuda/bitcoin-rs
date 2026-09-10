@@ -850,14 +850,75 @@ fn open_new_block_file(blocks_dir: &Path, file_no: u32) -> Result<File, StorageE
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, io::Write as _};
+    use std::{
+        fs::OpenOptions,
+        io::{self, Write as _},
+    };
 
     use tempfile::tempdir;
 
-    use super::{BLOCK_FILE_MAGIC, BlockFilePosition, FlatFileBlockStore, RECORD_HEADER_LEN_U64};
+    use super::{
+        write_record, BLOCK_FILE_MAGIC, BlockFilePosition, FlatFileBlockStore, RECORD_HEADER_LEN_U64,
+    };
 
     fn hash(byte: u8) -> [u8; 32] {
         [byte; 32]
+    }
+
+    struct VectoredTestWriter {
+        bytes: Vec<u8>,
+        max_write: usize,
+        interrupt_once: bool,
+    }
+
+    impl io::Write for VectoredTestWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let written = bytes.len().min(self.max_write);
+            self.bytes.extend_from_slice(&bytes[..written]);
+            Ok(written)
+        }
+
+        fn write_vectored(&mut self, slices: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            if self.interrupt_once {
+                self.interrupt_once = false;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "try again"));
+            }
+            let requested = slices.iter().map(|slice| slice.len()).sum::<usize>();
+            let written = requested.min(self.max_write);
+            let mut remaining = written;
+            for slice in slices {
+                let count = remaining.min(slice.len());
+                self.bytes.extend_from_slice(&slice[..count]);
+                remaining -= count;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_record_handles_short_interrupted_and_zero_writes() {
+        let mut writer = VectoredTestWriter {
+            bytes: Vec::new(),
+            max_write: 1,
+            interrupt_once: true,
+        };
+        write_record(&mut writer, b"header", b"body").expect("short writes must be retried");
+        assert_eq!(writer.bytes, b"headerbody");
+
+        let mut writer = VectoredTestWriter {
+            bytes: Vec::new(),
+            max_write: 0,
+            interrupt_once: false,
+        };
+        let error = write_record(&mut writer, b"header", b"body").expect_err("zero write");
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
     }
 
     /// `disk_usage` reports bytes that are there, and stops reporting them when
