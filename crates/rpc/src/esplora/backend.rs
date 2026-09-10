@@ -287,6 +287,9 @@ mod pagination_tests {
         }
     }
 
+    // Contract: docs/contracts/external-api.md, API-09 (Esplora dialects),
+    // which defines exact lowercase txid cursors and restart behavior for
+    // malformed, noncanonical, unknown, and missing values.
     #[test]
     fn noncanonical_and_missing_cursors_keep_restart_behavior() {
         let (ctx, expected) = fixture(&[4, 1, 4, 2, 4, 3]);
