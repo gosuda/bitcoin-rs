@@ -132,6 +132,19 @@ jobs:
       - name: RPC tests without default features
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         run: cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+      # Keep backend-sensitive Rust tests in their existing full-backend profile.
+      # G20's solver uses the same pinned checker, models, configuration, and
+      # properties regardless of Cargo storage features. Run that one expensive
+      # test in the unfiltered workspace pass below, not again for each backend
+      # profile. G20's tool/inventory and JVM-default tests still run here.
+      # Run backend tests before the solver so its timeout cannot delay their
+      # results. Either profile failing still fails this job.
+      - name: Full-backend native binary tests
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        run: |
+          cargo test --locked -p bitcoin-rs --no-fail-fast \
+            --no-default-features --features "rocksdb,fjall,redb,mdbx" \
+            -- --exact --skip all_model_specs_check_with_apalache
       # consensus and node have kernel-enabled defaults, so the workspace
       # pass excludes them and the explicit native profiles above cover them.
       # This pass includes the binary's process and formal gates, unfiltered.
@@ -146,42 +159,13 @@ jobs:
             > target/apalache/run-context.txt
           cargo test --locked --workspace --no-fail-fast \
             --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
-      # Save each profile before the next invocation can replace run-*.txt.
+      # Preserve the single solver run, including failures and timeouts.
       # Only formal diagnostics are uploaded, never downloaded executables.
       - name: Preserve workspace formal evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: apalache-workspace-${{ github.run_attempt }}
-          path: |
-            target/apalache/**/run-*.txt
-            target/apalache/**/detailed*.log
-            target/apalache/**/counterexample*
-          if-no-files-found: warn
-          retention-days: 7
-      # Node / binary tests run with the full-node backend set, minus the
-      # kernel engine: the kernel builds from C++ (cmake + libboost-dev),
-      # which this job deliberately does not install. Kernel-gated bin tests
-      # run in the main-only `full-node` lane, and the deny job still audits
-      # the full graph including kernel. -p is required because
-      # `--workspace --features` silently ignores --features in a virtual
-      # workspace (no root [package] section in the top-level Cargo.toml).
-      - name: Full-backend native binary tests
-        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
-        run: |
-          # Never attribute cached or earlier-profile diagnostics to this run.
-          rm -rf -- target/apalache
-          mkdir -p target/apalache
-          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-backend-native\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            > target/apalache/run-context.txt
-          cargo test --locked -p bitcoin-rs --no-fail-fast \
-            --no-default-features --features "rocksdb,fjall,redb,mdbx"
-      - name: Preserve full-backend native formal evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: apalache-full-backend-native-${{ github.run_attempt }}
           path: |
             target/apalache/**/run-*.txt
             target/apalache/**/detailed*.log
