@@ -821,6 +821,10 @@ impl BlockSync {
                     "block sync: chainstate torn by a failed disconnect, shutting down"
                 );
             }
+            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
+                // The reorg owner has closed admission and requested shutdown.
+                tracing::error!(%error, "block sync: reorg generation settlement failed");
+            }
             Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
                 tracing::error!(
                     %error,
@@ -2788,9 +2792,20 @@ mod tests {
         assert!(!stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 0);
+        // MPL-04: rejecting the invalid branch must still allow the selected
+        // valid main branch to reconnect through ordinary forward apply.
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(main_hash)
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
+    /// Generation settlement: MPL-04 in docs/contracts/mempool-mutations.md.
+    /// Prefix and body ownership: docs/solutions/architecture-patterns/node-reorg-execution-design.md.
     #[test]
     fn operational_reorg_failure_preserves_branch_and_retries_without_restart()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -2844,12 +2859,13 @@ mod tests {
         );
         assert!(
             matches!(
-                outcome,
+                &outcome,
                 Err(crate::reorg::ReorgError::ConnectFailed {
                     disconnected: 1,
                     connected: 0,
+                    source,
                     ..
-                })
+                }) if matches!(source.as_ref(), crate::ApplyError::BlockBodyPersistence(_))
             ),
             "the body-store refusal must follow a committed disconnect, got {outcome:?}"
         );
@@ -8206,6 +8222,8 @@ mod tests {
             Some(connected_tip),
             "the successful connected prefix is the final active chain"
         );
+        // MPL-04: the valid connected prefix reopens only after re-admission.
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         let mempool = handles.mempool.read();
         assert_eq!(
             mempool.len(),
@@ -8284,6 +8302,9 @@ mod tests {
             "a fatal disconnect must never reconsider disconnected transactions"
         );
         assert_eq!(handles.mempool.read().sequence_number(), 0);
+        // MPL-04: a stuck marker must keep all later chain changes fenced.
+        assert!(handles.mempool_gateway.stable_generation().is_none());
+        assert!(handles.begin_transition().is_err());
         let spend_in_pool = handles.mempool.read().contains_txid(&spend_txid);
         assert!(
             !spend_in_pool,

@@ -9375,7 +9375,7 @@ mod consensus_rule_tests {
             vec![coinbase_transaction(1)],
         )?;
         let raw = bytes::Bytes::from(consensus_bytes(&block));
-        let applied = apply_block_with_serialized(&handles, &block, raw)?;
+        let applied = apply_block_with_serialized(&handles, &block, raw.clone())?;
         bodies
             .bodies
             .write()
@@ -9402,6 +9402,31 @@ mod consensus_rule_tests {
         assert_eq!(handles.chain_tip.load_full(), header_tip_before);
         assert_eq!(handles.applied_tip.load_full(), applied_tip_before);
         assert_eq!(utxo.len(), utxo_len_before);
+        // MPL-04: a read-only preflight refusal must release its generation.
+        assert!(
+            handles.mempool_gateway.stable_generation().is_some(),
+            "missing disconnect data must not leave admission closed"
+        );
+
+        bodies
+            .bodies
+            .write()
+            .insert((applied.height, applied.hash), raw.to_vec());
+        crate::reorg::invalidate_block(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            applied.hash,
+        )?;
+        assert_eq!(
+            handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(genesis_hash),
+            "restoring the body must allow invalidation without restarting"
+        );
+        assert_eq!(
+            handles.block_tree.read().node(applied.tip_id)?.status,
+            NodeStatus::Invalid
+        );
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
@@ -9891,11 +9916,7 @@ mod consensus_rule_tests {
                 vec![coinbase_transaction(seed)],
             )?;
             let raw = bytes::Bytes::from(consensus_bytes(&block));
-            let tip = apply_block_with_serialized(&handles, &block, raw.clone())?;
-            bodies
-                .bodies
-                .write()
-                .insert((tip.height, tip.hash), raw.to_vec());
+            let tip = apply_block_with_serialized(&handles, &block, raw)?;
             old_tips.push(tip);
             prev = block.block_hash();
         }
@@ -9961,6 +9982,31 @@ mod consensus_rule_tests {
             Some(12),
             "applied tip must be at the height reached by the completed window"
         );
+        // MPL-04: the completed disconnect prefix is a stable chain, even
+        // when the next window cannot load its bodies.
+        assert_eq!(utxo.len(), 12);
+        assert!(
+            handles.mempool_gateway.stable_generation().is_some(),
+            "mid-rollback body loss must reopen admission at the committed prefix"
+        );
+        bodies
+            .fail_on_second_read
+            .write()
+            .remove(&(target_tip.height, target_tip.hash));
+        crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            fork_target,
+            |_| None,
+            |_| {},
+        )?;
+        assert_eq!(
+            handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(Hash256::from(fork_prev)),
+            "retry must resume from the committed prefix and reach the fork tip"
+        );
+        assert_eq!(utxo.len(), 21);
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
@@ -10129,57 +10175,17 @@ mod consensus_rule_tests {
     #[test]
     fn a_coinstats_desync_refuses_before_it_can_tear_anything()
     -> Result<(), Box<dyn std::error::Error>> {
-        let utxo = Arc::new(UtxoSet::new());
-        let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
-        let bodies = Arc::new(MapBodyStore::default());
-        let body_arc = Arc::clone(&bodies);
-        let body_handle: Arc<dyn crate::apply::PruneBodyStore> = body_arc;
-        handles.block_body_store = Some(body_handle);
+        let ReorgBodyLoadingFixture {
+            handles,
+            utxo,
+            target,
+            losing,
+            applied,
+            ..
+        } = reorg_body_loading_fixture()?;
 
-        let genesis = Network::Regtest.genesis_block();
-        let genesis_hash = Hash256::from(genesis.block_hash());
-        let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
-        handles.applied_tip.store(Some(Arc::new(genesis_tip)));
-
-        let losing = mined_block_with_prev_hash_and_transactions(
-            genesis.block_hash(),
-            vec![coinbase_transaction(1)],
-        )?;
-        let raw = bytes::Bytes::from(consensus_bytes(&losing));
-        let applied = apply_block_with_serialized(&handles, &losing, raw.clone())?;
-        bodies
-            .bodies
-            .write()
-            .insert((applied.height, applied.hash), raw.to_vec());
-
-        let win_one = mined_block_with_prev_hash_and_transactions(
-            genesis.block_hash(),
-            vec![coinbase_transaction(2)],
-        )?;
-        let win_two = mined_block_with_prev_hash_and_transactions(
-            win_one.block_hash(),
-            vec![coinbase_transaction(3)],
-        )?;
-        let target = {
-            let mut tree = handles.block_tree.write();
-            let mut last = None;
-            for (height, block) in [(1_u32, &win_one), (2_u32, &win_two)] {
-                let hash = Hash256::from(block.block_hash());
-                last = Some(tree.insert_header(
-                    block.header,
-                    bitcoin_rs_chain::node::NodeStatus::HeaderValid,
-                )?);
-                bodies
-                    .bodies
-                    .write()
-                    .insert((height, hash), consensus_bytes(block));
-            }
-            last.ok_or_else(|| anyhow::anyhow!("no winning branch built"))?
-        };
-
-        // Desynchronise the coinstats height. The disconnect's UTXO undo lands
-        // first and the coinstats rewind then rejects the height, which is a
-        // real tear: some state reverted, some did not.
+        // Inject only the stats height mismatch. The disconnect precheck must
+        // catch it before committing any UTXO undo.
         handles.coin_stats.finish_block(999, 0);
 
         let outcome = crate::reorg::switch_to_branch(
@@ -10202,6 +10208,27 @@ mod consensus_rule_tests {
             utxo.has_live_outputs_for_txid(&Hash256::from(losing.txs[0].txid())),
             "a refused disconnect must not have undone any coins"
         );
+        // MPL-04: a refused disconnect leaves the original committed tip
+        // coherent and must release the generation before another attempt.
+        assert!(
+            handles.mempool_gateway.stable_generation().is_some(),
+            "a clean disconnect refusal must reopen admission"
+        );
+        handles.coin_stats.finish_block(applied.height, 0);
+        crate::reorg::switch_to_branch(
+            &handles,
+            &crate::chain_effects::ChainFollowers::noop(),
+            target,
+            |_| None,
+            |_| {},
+        )?;
+        assert_eq!(
+            handles.applied_tip.load_full().map(|tip| tip.tip_id),
+            Some(target),
+            "repairing the injected stats mismatch must permit the same reorg"
+        );
+        assert!(!utxo.has_live_outputs_for_txid(&Hash256::from(losing.txs[0].txid())));
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
