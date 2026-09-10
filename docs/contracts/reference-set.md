@@ -40,7 +40,7 @@ recorded under `[reference.release]` in the manifest:
   `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`
 - `bitcoind_sha256`
   `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`
-- `version_output = "Bitcoin Core daemon version v31.1.0"`
+- `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
 
 This is the behavioral reference. No compatibility claim may be made against a
 version string or a source snapshot alone.

@@ -131,7 +131,7 @@ fn cold_initial_chainstate(
 pub(super) fn prepare_initial_chainstate(
     checkpoint_load: crate::checkpoint::CheckpointLoad,
     checkpoint_data_dir: &cap_std::fs::Dir,
-    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
     config: &NodeConfig,
 ) -> Result<InitialChainstate> {
     let journal_config = config.chainstate_journal;
@@ -188,7 +188,7 @@ pub(super) fn prepare_initial_chainstate(
 fn replay_checkpoint_journal(
     restored: crate::checkpoint::RestoredChainstate,
     checkpoint_data_dir: &cap_std::fs::Dir,
-    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
     config: &NodeConfig,
     journal_config: crate::config::ChainstateJournalConfig,
 ) -> Result<InitialChainstate> {

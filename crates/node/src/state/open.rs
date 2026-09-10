@@ -64,7 +64,7 @@ impl NodeState {
         // Allocate the process epoch before anything else can consume one:
         // durable, strictly greater than every earlier run of this data dir.
         let epoch = allocate_process_epoch(&checkpoint_data_dir)?;
-        let checkpoint_config = crate::checkpoint::HeaderCheckpointConfig {
+        let checkpoint_config = crate::checkpoint::headers::HeaderCheckpointConfig {
             network: config.network,
             genesis: config.network.genesis_block_hash(),
         };

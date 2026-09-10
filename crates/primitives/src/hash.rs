@@ -106,7 +106,9 @@ impl Hash256 {
 impl fmt::Display for Hash256 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut encoded = [0_u8; 64];
-        for (byte, pair) in self.0.iter().rev().zip(encoded.chunks_exact_mut(2)) {
+        // Display order is byte-reversed (the Bitcoin convention).
+        let (pairs, _) = encoded.as_chunks_mut::<2>();
+        for (byte, pair) in self.0.iter().rev().zip(pairs) {
             pair[0] = HEX[usize::from(byte >> 4)];
             pair[1] = HEX[usize::from(byte & 0x0f)];
         }

@@ -4,19 +4,18 @@
 //! `CheckWitnessMalleation`. These fixtures isolate block witness rules; they
 //! are not mined or UTXO-valid chain fixtures.
 
+use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::block_view::BlockView;
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
 };
-use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_primitives::{Block, BlockHash, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 // SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
 const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
-    0xe2, 0xf6, 0x1c, 0x3f, 0x71, 0xd1, 0xde, 0xfd, 0x3f, 0xa9, 0x99, 0xdf, 0xa3, 0x69,
-    0x53, 0x75, 0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36,
-    0x97, 0x4e, 0x8c, 0xf9,
+    0xe2, 0xf6, 0x1c, 0x3f, 0x71, 0xd1, 0xde, 0xfd, 0x3f, 0xa9, 0x99, 0xdf, 0xa3, 0x69, 0x53, 0x75,
+    0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e, 0x8c, 0xf9,
 ];
 
 fn commitment_output() -> TxOut {
@@ -80,7 +79,10 @@ fn verify_with_activation(block: &Block, segwit_active: bool) -> Result<(), Cons
 #[test]
 fn active_commitment_without_reserved_value_is_rejected() {
     let block = block(coinbase(false, true));
-    assert_eq!(verify_block_rules(&block), Err(ConsensusError::WitnessCommitment));
+    assert_eq!(
+        verify_block_rules(&block),
+        Err(ConsensusError::WitnessCommitment)
+    );
 }
 
 #[test]
@@ -116,5 +118,8 @@ fn active_commitment_with_exact_reserved_value_is_valid_at_this_stage() {
 #[test]
 fn active_witness_without_commitment_is_rejected() {
     let block = block(coinbase(true, false));
-    assert_eq!(verify_block_rules(&block), Err(ConsensusError::WitnessCommitment));
+    assert_eq!(
+        verify_block_rules(&block),
+        Err(ConsensusError::WitnessCommitment)
+    );
 }

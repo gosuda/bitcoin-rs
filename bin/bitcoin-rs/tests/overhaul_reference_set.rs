@@ -105,7 +105,7 @@ fn the_embedded_manifest_loads_the_full_reference_set() {
     assert_eq!(set.release.bitcoind_sha256, digest(RELEASE_BITCOIND_SHA256));
     assert_eq!(
         set.release.version_output,
-        "Bitcoin Core daemon version v31.1.0"
+        "Bitcoin Core daemon version v31.1.0 bitcoind"
     );
 
     assert_eq!(set.kernel.core_version, "31.99.0");

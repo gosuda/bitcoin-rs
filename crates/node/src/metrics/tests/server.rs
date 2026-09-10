@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
-use super::super::{EvidenceIdentity, MetricsServer, Sha256Hex, start_metrics};
 use super::super::prometheus::PROMETHEUS_HANDLE;
+use super::super::{EvidenceIdentity, MetricsServer, Sha256Hex, start_metrics};
 
 // MetricsServer::bind installs a process-global recorder. Serialize only
 // these server tests so another test cannot change the recorder between
@@ -38,7 +38,9 @@ fn scrape(addr: SocketAddr) -> (u16, String) {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
             Ok(mut stream) => {
                 stream
-                    .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                    .write_all(
+                        b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                    )
                     .unwrap_or_else(|error| panic!("write scrape request: {error}"));
                 stream
                     .flush()

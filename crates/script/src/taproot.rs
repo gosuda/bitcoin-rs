@@ -466,7 +466,10 @@ mod tests {
             } else {
                 (sibling, expected)
             };
-            expected = tagged_hash(b"TapBranch", &[first, second].concat());
+            let mut branch = [0_u8; 64];
+            branch[..32].copy_from_slice(&first);
+            branch[32..].copy_from_slice(&second);
+            expected = tagged_hash(b"TapBranch", &branch);
             control.extend_from_slice(&sibling);
         }
     }

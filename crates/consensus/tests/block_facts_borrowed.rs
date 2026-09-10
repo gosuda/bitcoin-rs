@@ -75,7 +75,9 @@ fn a_single_empty_witness_item_is_not_a_legacy_transaction() {
     block.txs[1].inputs[1].witness = vec![Vec::new()];
     let result = facts(&block);
     assert!(result.has_witness());
-    let ids = result.wtxids().expect("one empty item still has witness data");
+    let ids = result
+        .wtxids()
+        .expect("one empty item still has witness data");
     assert_ne!(ids[1].0, result.txids()[1].0);
     assert_eq!(ids[0].0, result.txids()[0].0);
     assert_eq!(ids[2].0, result.txids()[2].0);
@@ -153,7 +155,7 @@ fn noncanonical_script_lengths_still_fail_at_the_layout_boundary() {
         let script = parsed.transactions()[0].inputs()[0].script_sig();
         let prefix = usize::try_from(script.start()).expect("fixture offset") - 1;
         drop(parsed);
-        drop(bytes.splice(prefix..prefix + 1, [0xfd, 1, 0]));
+        drop(bytes.splice(prefix..=prefix, [0xfd, 1, 0]));
         assert!(ParsedBlock::parse_exact(&bytes).is_err());
         assert!(bitcoin::consensus::deserialize::<bitcoin::Block>(&bytes).is_err());
     }

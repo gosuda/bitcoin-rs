@@ -17,8 +17,13 @@ use std::path::Path;
 /// `gateway` or `mempool` cannot prove ownership. Every exception is therefore
 /// tied to one source file and one complete receiver expression. Adding a new
 /// production gateway mutation requires an explicit review of this list.
-const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] =
-    &[("crates/rpc/src/handlers/mining.rs", "ctx.mempool")];
+const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
+    // Mining RPC prioritisation through the handler's gateway view.
+    ("crates/rpc/src/handlers/mining.rs", "ctx.mempool"),
+    // Block apply evicts the block's transactions through the generation
+    // guarded gateway; this is the node's only production mutation site.
+    ("crates/node/src/apply.rs", "handles.mempool_gateway"),
+];
 
 /// Mutating methods on `Mempool` that only the mempool owner may call from
 /// production code. `MempoolGateway` deliberately reuses some of these names,
@@ -79,7 +84,10 @@ fn scan_dir(dir: &Path, result: &mut WriterScanResult) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
                 if matches!(name, "target" | "tests" | "benches" | "examples") {
                     continue;
                 }
@@ -358,13 +366,15 @@ fn is_authorized_gateway_call(
     };
 
     let normalized_path = path.replace('\\', "/");
-    AUTHORIZED_GATEWAY_CALLS.iter().any(|(allowed_path, allowed_receiver)| {
-        let path_matches = normalized_path == *allowed_path
-            || normalized_path
-                .strip_suffix(allowed_path)
-                .is_some_and(|prefix| prefix.ends_with('/'));
-        path_matches && receiver == *allowed_receiver
-    })
+    AUTHORIZED_GATEWAY_CALLS
+        .iter()
+        .any(|(allowed_path, allowed_receiver)| {
+            let path_matches = normalized_path == *allowed_path
+                || normalized_path
+                    .strip_suffix(allowed_path)
+                    .is_some_and(|prefix| prefix.ends_with('/'));
+            path_matches && receiver == *allowed_receiver
+        })
 }
 
 #[cfg(test)]
@@ -483,7 +493,7 @@ pub fn production() {
 
     #[test]
     fn cfg_test_helper_and_visibility_qualified_test_are_skipped_only_to_their_end() {
-        let source = r#"
+        let source = r"
 #[cfg(test)]
 pub fn helper() {
     gateway.prioritise(txid, 1);
@@ -497,7 +507,7 @@ pub fn fixture() {
 pub fn production() {
     mempool.prioritise(txid, 3);
 }
-"#;
+";
         let found = violations(source);
         assert_eq!(found.len(), 1);
         assert!(found[0].contains("mempool.prioritise(txid, 3)"));
@@ -505,14 +515,14 @@ pub fn production() {
 
     #[test]
     fn external_test_module_declaration_does_not_hide_following_production() {
-        let source = r#"
+        let source = r"
 #[cfg(test)]
 mod tests;
 
 pub fn production() {
     gateway.prioritise(txid, 3);
 }
-"#;
+";
         let found = violations(source);
         assert_eq!(found.len(), 1);
         assert!(found[0].contains("gateway.prioritise(txid, 3)"));

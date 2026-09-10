@@ -383,7 +383,11 @@ mod wire_metadata_tests {
             let tx = Arc::new(fixture(mode));
             let entry = MempoolEntry::new(Arc::clone(&tx), 999, 7_000, 42, 100);
             assert_eq!(entry.txid, expected_txid, "mode {mode}");
-            assert_eq!(entry.wtxid, Wtxid(Hash256::from_str_be(wtxid)?), "mode {mode}");
+            assert_eq!(
+                entry.wtxid,
+                Wtxid(Hash256::from_str_be(wtxid)?),
+                "mode {mode}"
+            );
             assert_eq!(
                 (entry.size, entry.weight, entry.bip141_vsize),
                 (size, weight, vsize)
@@ -399,8 +403,7 @@ mod wire_metadata_tests {
     fn policy_size_is_not_overwritten_by_bip141_size() {
         for mode in 0..7 {
             for policy_size in [0, 1, 999, u32::MAX] {
-                let entry =
-                    MempoolEntry::new(Arc::new(fixture(mode)), policy_size, 7_000, 42, 100);
+                let entry = MempoolEntry::new(Arc::new(fixture(mode)), policy_size, 7_000, 42, 100);
                 assert_eq!(entry.vsize, policy_size);
                 assert_eq!(entry.ancestor_size, u64::from(policy_size));
                 assert_eq!(entry.descendant_size, u64::from(policy_size));
