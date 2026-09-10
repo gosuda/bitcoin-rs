@@ -156,19 +156,16 @@ Owners:
   `crates/node/src/config.rs` tests `user_config_overlay_lets_set_fields_win` and
   `mining_payout_overlay_lets_the_later_address_win`.
 
-### `ARCH-05A`: Network and RPC configuration resolution
-
-  - Network selection resets network-dependent defaults before applying
-    same-layer overrides. Regtest uses RPC port `18443`, enables DNS seeds by
-    default, and clears inherited peer lists; explicit same-layer overrides,
-    including an empty peer list, win.
-  - RPC authentication gives a cookie path precedence over credentials within
-    one layer. A later layer supplying either Basic-auth field replaces cookie
-    auth; an omitted Basic-auth field falls back to `bitcoin-rs` as the password.
-  - Accepted network names are `bitcoin`/`main`, `test`/`testnet`/`testnet3`,
-    `testnet4`, `signet`, `regtest`, and `drynet4`, with surrounding whitespace
-    ignored and case folded. Unknown names are rejected, and `drynet4` maps to
-    the Mainnet consensus network.
+- Network selection resets network-dependent defaults before applying overrides
+  from that same layer. Regtest uses RPC port `18443`, enables DNS seeds by
+  default, and explicit empty `connect` or `listen` lists remain empty.
+- RPC authentication gives an explicit cookie path precedence within a layer.
+  A later layer may replace it with Basic auth when it sets a user; an unset
+  password falls back to `bitcoin-rs`.
+- Network names accept `bitcoin`/`main`, `test`/`testnet`/`testnet3`, `testnet4`,
+  `signet`, `regtest`, and `drynet4` (case-insensitive, with surrounding
+  whitespace ignored). Unknown names are rejected, and `drynet4` uses Mainnet
+  consensus.
 
 ### `ARCH-06`: Hierarchy change and exception process
 

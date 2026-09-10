@@ -96,7 +96,7 @@ fn explicit_false_zero_and_empty_values_override_lower_layers() {
 }
 
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05A
+// CONTRACT: docs/contracts/architecture.md#ARCH-05 (network aliases)
 fn network_aliases_preserve_the_selected_profile() {
     for (value, expected) in [
         (" BITCOIN ", NetworkSelection::Mainnet),
@@ -119,6 +119,7 @@ fn network_aliases_preserve_the_selected_profile() {
 }
 
 #[test]
+// CONTRACT: docs/contracts/indexing.md#IDX-01
 fn script_index_boolean_aliases_preserve_history_selection() {
     for value in ["full", "TRUE", "1", " yes "] {
         assert_eq!(ScriptIndexMode::parse(value), Some(ScriptIndexMode::Full));
@@ -136,7 +137,7 @@ fn script_index_boolean_aliases_preserve_history_selection() {
 
 #[cfg(feature = "fjall")]
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05
+// CONTRACT: docs/contracts/architecture.md#ARCH-05 (authentication layering)
 fn resolve_keeps_cookie_and_partial_basic_auth_precedence() -> anyhow::Result<()> {
     let lower = UserConfig {
         rpc: RpcOverrides {
@@ -170,7 +171,7 @@ fn resolve_keeps_cookie_and_partial_basic_auth_precedence() -> anyhow::Result<()
 
 #[cfg(feature = "fjall")]
 #[test]
-// CONTRACT: docs/contracts/architecture.md#ARCH-05A
+// CONTRACT: docs/contracts/architecture.md#ARCH-05 (network reset ordering and defaults)
 fn network_selection_resets_defaults_before_same_layer_overrides() -> anyhow::Result<()> {
     use std::net::SocketAddr;
 
@@ -204,6 +205,6 @@ fn network_selection_resets_defaults_before_same_layer_overrides() -> anyhow::Re
     assert!(config.p2p.listen.is_empty());
     Ok(())
 }
-!(config.p2p.listen.is_empty());
+is_empty());
     Ok(())
 }
