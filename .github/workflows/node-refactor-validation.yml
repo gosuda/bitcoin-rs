@@ -1,0 +1,39 @@
+name: node-refactor-validation
+
+on:
+  push:
+    branches: [refactor/node-modularization]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-refactor-validation
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Export tracked sources for refactoring
+        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/node-source.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: node-refactor-source
+          path: ${{ runner.temp }}/node-source.tar.gz
+          retention-days: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Native node Clippy
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: Native node tests
+        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --no-fail-fast
