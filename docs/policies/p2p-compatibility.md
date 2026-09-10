@@ -15,7 +15,7 @@ The decoded command inventory is owned by `crates/p2p/src/compat.rs` (`COMMANDS`
 | Reference implementation | Bitcoin Core |
 | Pinned version | **31.1** (`crates/p2p/src/compat.rs::PINNED_CORE_VERSION`) |
 | Protocol version advertised | `70016` (`crates/p2p/src/wire.rs::PROTOCOL_VERSION`) |
-| Transport | v1 envelope is the baseline; BIP324 v2 is optional behind the `bip324` feature, default off (§7) |
+| Transport | v1 envelope only; BIP324 v2 is planned, not present — no `bip324` feature exists today (§7) |
 
 ### 2.1 Version-Bump Rules
 

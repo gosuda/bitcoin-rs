@@ -399,7 +399,7 @@ Disconnect tip-to-fork in bounded chunks through exact inverse transitions,
 then validate and connect the competing branch through the ordinary pipeline.
 No whole-branch preload. Each intermediate committed ancestor is a valid
 restart point. Missing retained undo fails closed. *Avoid:* "full-revalidation
-marker", "disconnect marker phase".
+marker".
 
 ### Fresh replay
 The only migration policy for authoritative chainstate bytes: increment
@@ -414,11 +414,6 @@ owner and never fails authoritative startup.
 Derived work after a committed connect or disconnect: RPC `BlockLog`, ZMQ
 projections, index wake, mining generation, and mempool alignment, owned by
 `ChainFollowers` / `ChainEffects` and dispatched after publication.
-
-### Chain control
-Consensus-affecting RPCs never mutate the block tree directly; `invalidateblock`
-previews the replacement plan, and branch switching runs through the chainstate
-owner under the same reservation as sync-triggered reorgs.
 
 ## Mempool
 
