@@ -5,8 +5,8 @@ configuration, storage-backend selection, signal bridging, metrics/tracing setup
 and the central crossbeam-driven event loop that connects the
 subsystem crates.
 
-`run` is the top-level entry point: it loads the layered `Config` (with RPC `Auth`), and
-drives `event_loop`, the central synchronous loop.
+`run` is the top-level entry point: it consumes the resolved `NodeConfig` (with RPC
+`Auth`) and drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `Chainstate` facade for
 authoritative apply; `ChainFollowers` dispatch post-commit RPC/ZMQ/index,
 mining, and admission work while the `ChainTransition` is still held;
@@ -32,9 +32,29 @@ Data-directory storage evidence is an explicit command, not a node service:
 `bitcoin-rs --measure-storage` emits the logical and physical ledgers defined
 in [storage-footprint.md](../../docs/contracts/storage-footprint.md).
 
-The node crate registers only `benches/sync_pipeline.rs` as a Criterion benchmark.
-Large corpus/replay/evidence harnesses are intentionally not shipped by this
-runtime crate.
+The node crate registers `benches/sync_pipeline.rs` and
+`benches/chainstate_journal.rs` as Criterion benchmarks.
+
+## Configuration and observability modules
+
+`config.rs` and `metrics.rs` are public entry points with explicit re-exports.
+Their implementation modules are private; callers continue to use the existing
+`bitcoin_rs_node::config`, `bitcoin_rs_node::metrics`, and crate-root paths.
+
+| Owner | Responsibility |
+| --- | --- |
+| `config/layer.rs` | Parser-independent overrides and last-set-field-wins merging. `None` preserves a lower layer; explicit empty, false, and zero values replace it. |
+| `config/resolution.rs` | Ordered application of layers, network-profile resets, and mining-address decoding against the final network. |
+| `config/resolved.rs` | Resolved settings, defaults, and cross-field validation. |
+| `config/auth.rs`, `network.rs`, `index.rs`, `journal.rs` | Credential redaction, network spellings, index modes, and journal settings with their local invariants. |
+| `config/runtime.rs` | Process dependencies such as shutdown receivers and observers, separate from user configuration. |
+| `metrics/server.rs`, `catalog.rs` | Scrape-listener lifecycle, the single process-wide recorder, and metric descriptions. |
+| `metrics/uptime.rs`, `warnings.rs` | The single uptime origin and first-message-wins warning registry. |
+| `metrics/evidence.rs` | Measurement identity, interval accounting, and ledger serialization, independent of scrape transport. |
+
+Configuration regression tests live in `config/tests.rs`; metrics lifecycle tests
+live next to their owners, including `metrics/server/tests.rs`. Moving an owner
+must not introduce a second global registry, recorder, or representation.
 
 ## Features
 - `default` (enables `fjall`, `kernel`, and `zmq`): the performance-oriented fjall
