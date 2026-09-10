@@ -303,7 +303,7 @@ mod tests {
         let _accepted = accepting.join();
     }
 
-    /// getpeerinfo byte accounting (module header, Core CNode parity):
+    /// getpeerinfo byte accounting (module header, Core `CNode` parity):
     /// a vectored header+payload write counts every byte exactly once and
     /// forwards as one inner `write_vectored` call. The default `Write` impl
     /// would split the coalescing this wrapper exists to preserve.
