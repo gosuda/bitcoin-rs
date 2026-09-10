@@ -1,18 +1,29 @@
 """Offline, subprocess-level regression tests for fetch-golden.sh.
 
+The acquisition contract and failure cases are recorded in PR #740:
+https://github.com/gosuda/bitcoin-rs/pull/740
+The baseline script (Git blob 6073db3294ec4ce88571ca55a9dad7e18b2cd7b5)
+owns fixture paths and cache reuse; PR #740 adds failure-atomic publication
+and offline reuse. Heights come from the script, not a second inventory.
+Response bytes are synthetic transport fixtures, not Bitcoin validity vectors:
+expected file contents are the stub's input bytes, never downloader output.
+
 Run from the repository root: python3 -m unittest discover -s scripts/tests -v
 """
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "fetch-golden.sh"
-HEIGHTS = (0, 1, 170, 91722, 91812, 91842, 91880, 173818, 363731,
-           481823, 481824, 624455, 709632, 800000, 880000)
+_height_array = re.search(r"^heights=\((\d+(?:\s+\d+)*)\)$", SCRIPT.read_text(), re.M)
+if _height_array is None:
+    raise RuntimeError("Cannot read the downloader's fixture-height inventory")
+HEIGHTS = tuple(int(height) for height in _height_array.group(1).split())
 TXID = "ab" * 32
 CURL_STUB = r'''#!/usr/bin/env bash
 set -eu
@@ -55,6 +66,8 @@ class FetchGoldenTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.output = self.root / "crates/primitives/tests/testdata"
         self.output.mkdir(parents=True)
+        self.block_path = self.output / f"{HEIGHTS[0]}.bin"
+        self.txids_path = self.output / f"{HEIGHTS[0]}.txids.txt"
         self.bin = self.root / "bin"
         self.bin.mkdir()
         stub = self.bin / "curl"
@@ -95,7 +108,7 @@ class FetchGoldenTests(unittest.TestCase):
         result = self.run_fetch("offline")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.requests(), [])
-        self.assertEqual((self.output / "0.bin").read_bytes(), b"existing block")
+        self.assertEqual(self.block_path.read_bytes(), b"existing block")
 
     def test_complete_cache_needs_no_staging_directory(self):
         self.seed_cache()
@@ -109,44 +122,44 @@ class FetchGoldenTests(unittest.TestCase):
     def test_failed_raw_is_not_published_and_retry_succeeds(self):
         result = self.run_fetch("partial_raw")
         self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.output / "0.bin").exists())
-        self.assertFalse((self.output / "0.txids.txt").exists())
+        self.assertFalse(self.block_path.exists())
+        self.assertFalse(self.txids_path.exists())
         retry = self.run_fetch()
         self.assertEqual(retry.returncode, 0, retry.stderr)
-        self.assertEqual((self.output / "0.bin").read_bytes(), b"block bytes")
+        self.assertEqual(self.block_path.read_bytes(), b"block bytes")
 
     def test_invalid_raw_and_hash_are_not_published(self):
         for mode in ("empty_raw", "invalid_hash"):
             with self.subTest(mode=mode):
                 result = self.run_fetch(mode)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertFalse((self.output / "0.bin").exists())
-                self.assertFalse((self.output / "0.txids.txt").exists())
+                self.assertFalse(self.block_path.exists())
+                self.assertFalse(self.txids_path.exists())
 
     def test_invalid_txids_are_not_published(self):
         for mode in ("invalid_json", "invalid_txid", "wrong_shape", "empty_txids", "failed_txids"):
             with self.subTest(mode=mode):
                 result = self.run_fetch(mode)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertFalse((self.output / "0.txids.txt").exists())
-                self.assertEqual((self.output / "0.bin").read_bytes(), b"block bytes")
+                self.assertFalse(self.txids_path.exists())
+                self.assertEqual(self.block_path.read_bytes(), b"block bytes")
 
     def test_empty_cache_entries_are_replaced(self):
         self.seed_cache()
-        (self.output / "0.bin").write_bytes(b"")
-        (self.output / "0.txids.txt").write_bytes(b"")
+        self.block_path.write_bytes(b"")
+        self.txids_path.write_bytes(b"")
         result = self.run_fetch()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.output / "0.bin").read_bytes(), b"block bytes")
-        self.assertEqual((self.output / "0.txids.txt").read_text(), TXID + "\n")
+        self.assertEqual(self.block_path.read_bytes(), b"block bytes")
+        self.assertEqual(self.txids_path.read_text(), TXID + "\n")
         self.assertEqual(len(self.requests()), 3)
 
     def test_partial_cache_preserves_existing_files(self):
         self.seed_cache()
-        (self.output / "0.txids.txt").unlink()
+        self.txids_path.unlink()
         result = self.run_fetch()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.output / "0.bin").read_bytes(), b"existing block")
+        self.assertEqual(self.block_path.read_bytes(), b"existing block")
         self.assertEqual(len(self.requests()), 2)
 
 
