@@ -102,7 +102,7 @@ impl MutationResult {
             return None;
         }
         let offset = u64::try_from(index).ok()?;
-        self.sequence_base.checked_add(offset)
+        Some(self.sequence_base.wrapping_add(offset))
     }
 
     /// The txid of every change that left the pool, in commit order.
@@ -233,6 +233,17 @@ mod tests {
                 "out-of-bounds index {index}"
             );
         }
+    }
+
+    #[test]
+    fn sequence_of_wraps_for_an_in_bounds_change() {
+        let result = MutationResult {
+            changes: vec![change(&Txid::default(), MutationOutcome::Accepted); 2],
+            sequence_base: u64::MAX,
+        };
+        assert_eq!(result.sequence_of(0), Some(u64::MAX));
+        assert_eq!(result.sequence_of(1), Some(0));
+        assert_eq!(result.sequence_of(2), None);
     }
 
     // MPL-02 (docs/contracts/mempool-mutations.md): an empty mutation assigns
