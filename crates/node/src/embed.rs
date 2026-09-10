@@ -90,8 +90,7 @@ impl Node {
         config: crate::NodeConfig,
         runtime: crate::RuntimeInputs,
     ) -> Result<Self, NodeError> {
-        start_node(config, runtime, false)
-            .map_err(|error| NodeError::Startup(error.to_string()))
+        start_node(config, runtime, false).map_err(|error| NodeError::Startup(error.to_string()))
     }
 
     /// Returns the current coherent, generation-stamped chain snapshot.
