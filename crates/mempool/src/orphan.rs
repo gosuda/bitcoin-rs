@@ -174,7 +174,7 @@ impl OrphanPool {
             .entries
             .iter()
             .filter_map(|(txid, entry)| {
-                let expired = now.saturating_sub(entry.arrival_time) > DEFAULT_ORPHAN_TIMEOUT_SECS;
+                let expired = now.saturating_sub(entry.arrival_time) >= DEFAULT_ORPHAN_TIMEOUT_SECS;
                 (expired || !live_peers.contains(&entry.source)).then_some(*txid)
             })
             .collect();
@@ -375,6 +375,7 @@ mod tests {
         assert!(pool.take_ready().is_empty());
     }
 
+    // MPL-04 contract: docs/contracts/mempool-mutations.md (orphan lifecycle).
     #[test]
     fn maintenance_expires_old_bodies_and_cleans_every_index() {
         let parent = tx(9, Txid::default()).txid();
@@ -394,6 +395,7 @@ mod tests {
         assert_eq!(pool.total_weight(), current.weight());
     }
 
+    // MPL-04 contract: docs/contracts/mempool-mutations.md (orphan lifecycle).
     #[test]
     fn maintenance_uses_exact_connection_identity() {
         let parent = tx(9, Txid::default()).txid();
@@ -409,8 +411,11 @@ mod tests {
         assert!(!pool.contains(&predecessor.txid()));
         assert!(pool.contains(&successor.txid()));
 
-        // The boundary is strict; the body expires once it is older than 120s.
-        assert_eq!(pool.maintain(240, &live), 1);
+        // MPL-04: retention expires at the DEFAULT_ORPHAN_TIMEOUT_SECS boundary.
+        assert_eq!(
+              pool.maintain(119 + DEFAULT_ORPHAN_TIMEOUT_SECS, &live),
+              1
+          );
         assert_eq!(pool.len(), 0);
         assert_eq!(pool.total_weight(), 0);
         assert!(pool.by_wtxid.is_empty());
@@ -418,6 +423,7 @@ mod tests {
         assert!(pool.order.is_empty());
     }
 
+    // MPL-04 contract: docs/contracts/mempool-mutations.md (orphan lifecycle).
     #[test]
     fn witness_refresh_does_not_extend_expiry() {
         let parent = tx(9, Txid::default()).txid();
