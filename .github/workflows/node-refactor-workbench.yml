@@ -1,0 +1,43 @@
+name: node-refactor-workbench
+on:
+  push:
+    branches: [workbench/node-modularity-20260910]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d370a6c8f0ebf06e11058a67134636c5a2b4df00
+          persist-credentials: false
+      - name: Export immutable source snapshot
+        run: |
+          mkdir -p /tmp/node-refactor-export
+          git archive HEAD | gzip > /tmp/node-refactor-export/source.tar.gz
+          git rev-parse HEAD > /tmp/node-refactor-export/base.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: node-refactor-source
+          path: /tmp/node-refactor-export
+          retention-days: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - name: Export offline build inputs
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          mkdir -p /tmp/node-refactor-tooling
+          toolchain=$(dirname "$(dirname "$(rustup which rustc)")")
+          tar -C "$toolchain" -czf /tmp/node-refactor-tooling/toolchain.tar.gz --exclude=share/doc --exclude=lib/rustlib/src bin lib etc share
+          tar -C "$HOME/.cargo" -czf /tmp/node-refactor-tooling/registry.tar.gz registry
+          rustc -Vv > /tmp/node-refactor-tooling/rustc.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: node-refactor-tooling
+          path: /tmp/node-refactor-tooling
+          compression-level: 0
+          retention-days: 1
