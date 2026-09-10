@@ -43,9 +43,9 @@ jobs:
       - name: Format
         run: cargo fmt --all
       - name: P2P Clippy
-        run: cargo clippy -p bitcoin-rs-p2p --all-targets -- -D warnings
+        run: cargo clippy --no-deps -p bitcoin-rs-p2p --all-targets -- -D warnings
       - name: Node Clippy
-        run: cargo clippy -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+        run: cargo clippy --no-deps -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
       - name: P2P tests
         run: cargo test -p bitcoin-rs-p2p --lib
       - name: Node sync tests
