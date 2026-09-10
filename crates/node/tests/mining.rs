@@ -1,25 +1,35 @@
 //! Focused behavioral tests for the node-owned mining coordinator.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
     MiningControlError,
 };
+
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, NodeConfig, UserConfig, resolve,
     state::NodeState,
 };
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+
+use bitcoin_rs_primitives::{
+    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, encode::double_sha256,
+};
+
 use compact_str::CompactString;
+
 use crossbeam_channel::bounded;
+
 use parking_lot::Mutex;
-use std::str::FromStr as _;
+
+use std::{
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 fn open_regtest() -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
@@ -39,7 +49,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.applied_tip(),
         state.block_tree(),
         state.mempool(),
-        state.apply_handles(),
+        state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
@@ -635,7 +645,7 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -672,7 +682,7 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -1039,7 +1049,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             state.shutdown(),

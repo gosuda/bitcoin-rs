@@ -1,15 +1,17 @@
 //! End-to-end crash-recovery coverage for the chainstate journal.
 
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-
 use anyhow::Result;
-use bitcoin_rs_node::{
-    Network, NodeConfig,
-    state::{ApplyError, NodeState},
-};
+
+use bitcoin_rs_node::{Network, NodeConfig, apply::error::ApplyError, state::NodeState};
+
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+
 use sha2::{Digest, Sha256};
+
+use std::{
+    sync::atomic::Ordering,
+    time::{Duration, Instant},
+};
 
 fn stable_utxo_hash(
     view: &bitcoin_rs_utxo::UtxoSetView<'_>,
@@ -79,7 +81,7 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let tip1 = state.apply_block(&block1)?;
     let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     state.apply_block(&block2)?;
-    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block2)?;
+    state.chainstate().disconnect_block(&block2)?;
     let expected_utxo = state.utxo().with_stable_view(stable_utxo_hash)?;
     let expected_stats = state.coin_stats().snapshot();
     drop(state);
@@ -136,7 +138,7 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     drop(initial);
 
     let state = NodeState::open(config.clone(), None)?;
-    bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block1)?;
+    state.chainstate().disconnect_block(&block1)?;
     drop(state);
 
     let resumed = NodeState::open(config.clone(), None)?;

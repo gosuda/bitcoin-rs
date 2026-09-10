@@ -199,6 +199,15 @@ impl PeerSource {
     }
 }
 
+impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {
+    fn from(source: PeerSource) -> Self {
+        Self {
+            addr: source.addr,
+            connection_id: source.connection_id.get(),
+        }
+    }
+}
+
 /// Maximum queued messages for one peer connection.
 pub const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 /// Maximum queued full wire bytes for one peer connection.
@@ -670,9 +679,11 @@ mod tests {
         crate::PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,
+            best_known_height: 0,
             conn_time,
             inbound: false,
             addr_bind: addr,

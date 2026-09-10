@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing::debug;
 use zerocopy::IntoBytes;
 
+use crate::reconcile::{SelectedWatermark, selected_watermark as reconcile_selected_watermark};
 use crate::types::{
     HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow,
 };
@@ -154,16 +155,23 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
+
 const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+
 /// Format 3 stores Spending keys without positions. This build still
 /// understands those rows (resolvers fall back to a full block) and upgrades
 /// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
 const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
+
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
+
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
+
 /// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
+
 /// Permanent versioned capability-reset state (`0x00, b'R'`). Absent only
 /// before the first reset; afterwards the key always exists, either as
 /// `Idle = [0xFF, version(u64 LE)]` (9 bytes) or as a claim
@@ -176,17 +184,23 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
 /// across repeated resets.
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
+
 /// Consumer cursor slot (`0x00, b'C'`). Opaque bytes owned by the node-side
 /// reconciliation consumer; data row keys begin with ASCII letters only and
 /// can never collide with the reserved `0x00` prefix.
 const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
+
 const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
+
 const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
     max_rows: 1_000,
     max_bytes: 256 * 1024,
 };
+
 const RESET_IDLE_TAG: u8 = 0xFF;
+
 const RESET_IDLE_LEN: usize = 1 + size_of::<u64>();
+
 const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
 
 /// Decoded durable capability-reset state.
@@ -1796,22 +1810,14 @@ fn pending_rows_for_block_with_header(
     height: u32,
     capabilities: IndexCapabilities,
     spent_scripts: &dyn SpentCoinScripts,
-) -> Result<
-    (
-        PendingRows,
-        usize,
-        Option<[u8; crate::types::HEADER_ROW_SIZE]>,
-    ),
-    IndexError,
-> {
+) -> Result<(PendingRows, Option<[u8; crate::types::HEADER_ROW_SIZE]>), IndexError> {
     let mut rows = PendingRows::default();
     let mut header = None;
-    let (txid_count, live_created, live_spent) = {
+    let (live_created, live_spent) = {
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
             header: &mut header,
             height_bytes: height.to_le_bytes(),
-            txid_count: 0,
             invalid_header_len: None,
             block,
             pending_funding: Vec::new(),
@@ -1822,7 +1828,7 @@ fn pending_rows_for_block_with_header(
             capabilities,
         };
         match bsl::Block::visit(block, &mut visitor) {
-            Ok(_) => (visitor.txid_count, visitor.live_created, visitor.live_spent),
+            Ok(_) => (visitor.live_created, visitor.live_spent),
             Err(bitcoin_slices::Error::VisitBreak) => {
                 if let Some(len) = visitor.invalid_header_len {
                     return Err(IndexError::InvalidHeaderLength { len });
@@ -1835,7 +1841,7 @@ fn pending_rows_for_block_with_header(
     if capabilities.script_live {
         push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
     }
-    Ok((rows, txid_count, header))
+    Ok((rows, header))
 }
 
 /// Turns a block's created and spent outputs into ordered live mutations.
@@ -2116,28 +2122,10 @@ fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> Result<Option<IndexWatermark>, IndexError> {
-    let mut selected: Option<Option<IndexWatermark>> = None;
-    for capability in [
-        IndexCapability::TxLookup,
-        IndexCapability::ScriptHistory,
-        IndexCapability::ScriptLive,
-    ] {
-        if !capabilities.contains(capability) {
-            continue;
-        }
-        let cursor = watermarks.get(capability);
-        match selected {
-            None => selected = Some(cursor),
-            Some(first) if first == cursor => {}
-            Some(first) => {
-                return Err(IndexError::WatermarkMismatch {
-                    expected: first,
-                    actual: cursor,
-                });
-            }
-        }
+    match reconcile_selected_watermark(watermarks, capabilities) {
+        SelectedWatermark::Valid(watermark) => Ok(watermark),
+        SelectedWatermark::Invalid => Err(IndexError::NonContiguousPrepared { watermark: None }),
     }
-    selected.ok_or(IndexError::NonContiguousPrepared { watermark: None })
 }
 
 fn delete_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows, delete_shared_identity: bool) {
@@ -2164,7 +2152,6 @@ struct IndexBlockVisitor<'a> {
     rows: &'a mut PendingRows,
     header: &'a mut Option<[u8; crate::types::HEADER_ROW_SIZE]>,
     height_bytes: [u8; crate::types::HEIGHT_SIZE],
-    txid_count: usize,
     invalid_header_len: Option<usize>,
     /// The serialized block being visited, used as the base for byte offsets.
     block: &'a [u8],
@@ -2262,7 +2249,6 @@ impl Visitor for IndexBlockVisitor<'_> {
                 self.push_txid_row(hash.as_slice(), position);
             }
         }
-        self.txid_count += 1;
         ControlFlow::Continue(())
     }
 
@@ -2928,7 +2914,7 @@ impl<S: KvStore> IndexWriter<S> {
                 watermark: self.watermark()?,
             });
         }
-        let (mut rows, _txid_count, header) =
+        let (mut rows, header) =
             pending_rows_for_block_with_header(body, height, capabilities, spent_scripts)?;
         let header = header.ok_or(IndexError::InvalidHeaderLength { len: 0 })?;
         let actual_hash = encode::double_sha256(header.as_slice()).to_le_bytes();
@@ -2960,6 +2946,13 @@ impl<S: KvStore> IndexWriter<S> {
     /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
     /// [`PreparedBatch`] to bound multi-block writes. This is the same owner
     /// for a single block: tests and benches must not grow a second ingest path.
+    /// Delegates to [`Self::commit_forward`]. See `IDX-06` / `IDX-07` in
+    /// `docs/contracts/indexing.md`.
+    ///
+    /// This path selects [`IndexCapabilities::HISTORICAL`]: it advances
+    /// `TxLookup` and `ScriptHistory` only. Callers that maintain `ScriptLive`
+    /// must use [`Self::prepare_block_with_spent_scripts`] with `script_live`
+    /// selected and a spent-script source, then [`Self::commit_forward`].
     pub fn commit_block(&mut self, height: u32, body: &[u8]) -> Result<IndexWatermark, IndexError> {
         let header = body.get(..crate::types::HEADER_ROW_SIZE).ok_or_else(|| {
             IndexError::InvalidHeaderLength {
@@ -2983,7 +2976,8 @@ impl<S: KvStore> IndexWriter<S> {
     /// Atomically connects a bounded batch and advances the durable watermark.
     ///
     /// Captures its own fence before any store-dependent derivation and keeps
-    /// the consumer cursor untouched.
+    /// the consumer cursor untouched. See `IDX-06` / `IDX-07` in
+    /// `docs/contracts/indexing.md`.
     pub fn commit_forward(&mut self, batch: PreparedBatch) -> Result<IndexWatermark, IndexError> {
         let (fence, _) = self.fenced_watermarks()?;
         self.commit_forward_with_cursor(fence, batch, ConsumerCursorUpdate::Keep)
@@ -3170,6 +3164,9 @@ impl<S: KvStore> IndexWriter<S> {
     /// recovery, and must reacquire a fence and reconcile the stored watermark
     /// and cursor before retrying or compensating. A successful return is the
     /// durability guarantee; an error must not be treated as proof of rollback.
+    ///
+    /// Same fenced batch as [`Self::commit_forward`]. See `IDX-06` / `IDX-07`
+    /// in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,
@@ -4094,3 +4091,4 @@ mod tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
     }
 }
+// weave: run 'weave explain crates/index/src/index.rs' for per-hunk detail, 'weave check' to verify your resolution
