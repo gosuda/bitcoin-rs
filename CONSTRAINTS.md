@@ -127,3 +127,13 @@ probe failure exits with status 7, and an insufficient-space check exits with
 status 1. Every setup failure removes the temporary staging directory and does
 not attempt the clone. `scripts/tests/test_import_qa_assets.py`
 `SetupFailureTests` is the regression suite for this contract.
+
+The acquisition and publication contract is also versioned here: failures of
+the commit probe, size probe, timestamp acquisition, minimization, provenance
+write, and provenance publication exit with statuses 29, 31, 47, 43, 51, and
+53 respectively. A terminated import exits 143. Acquisition and mapping
+failures stop before minimization; minimization and provenance failures leave
+the prior provenance record unchanged; and provenance is written completely
+to a staged file, whose ordinary readable mode is restored before atomic
+publication. `scripts/tests/test_import_qa_assets_provenance.py`
+`ImportFlowTests` is the regression suite for these rules.

@@ -140,6 +140,9 @@ Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the script after major decoder changes to
 refresh.
 EOF
+# mktemp creates a private file; restore the repository document mode before
+# atomically publishing the completed record.
+chmod 0644 -- "${PROVENANCE_TMP}"
 mv -T -- "${PROVENANCE_TMP}" "${PROVENANCE}"
 PROVENANCE_TMP=""
 log "provenance written to ${PROVENANCE}"

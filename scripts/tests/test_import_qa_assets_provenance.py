@@ -1,4 +1,7 @@
-"""End-to-end failure and provenance-publication tests for the QA corpus importer."""
+"""End-to-end importer contract regressions.
+
+Contract: ``CONSTRAINTS.md`` § QA corpus importer setup contract.
+"""
 
 import os
 from pathlib import Path
@@ -10,6 +13,17 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "import-qa-assets.sh"
 MAPPER = SCRIPT.with_name("import_qa_assets.py")
+
+# Statuses specified by CONSTRAINTS.md § QA corpus importer setup contract.
+STATUS = {
+    "commit_probe": 29,
+    "size_probe": 31,
+    "timestamp": 47,
+    "minimization": 43,
+    "provenance_write": 51,
+    "provenance_publish": 53,
+    "termination": 143,
+}
 
 
 class ImportFlowTests(unittest.TestCase):
@@ -101,6 +115,7 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
     def test_success_maps_then_minimizes_and_records_provenance(self):
         result = self.run_import()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.provenance.stat().st_mode & 0o777, 0o644)
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(),
                          ["p2p_message", "block_decode", "tx_decode", "script_eval"])
         self.assertIn(self.pin, self.provenance.read_text())
@@ -118,36 +133,36 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
 
     def test_failed_minimization_preserves_provenance(self):
         result = self.run_import("cmin")
-        self.assertEqual(result.returncode, 43, result.stderr)
+        self.assertEqual(result.returncode, STATUS["minimization"], result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(), ["p2p_message"])
 
     def test_failed_commit_probe_is_not_hidden_by_valid_output(self):
         result = self.run_import("git_head")
-        self.assertEqual(result.returncode, 29, result.stderr)
+        self.assertEqual(result.returncode, STATUS["commit_probe"], result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_size_probe_stops_before_mapping(self):
         result = self.run_import("du")
-        self.assertEqual(result.returncode, 31, result.stderr)
+        self.assertEqual(result.returncode, STATUS["size_probe"], result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertFalse((self.root / "fuzz/corpus").exists())
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_timestamp_preserves_provenance(self):
         result = self.run_import("date")
-        self.assertEqual(result.returncode, 47, result.stderr)
+        self.assertEqual(result.returncode, STATUS["timestamp"], result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_provenance_write_preserves_previous_file(self):
         result = self.run_import("provenance_write")
-        self.assertEqual(result.returncode, 51, result.stderr)
+        self.assertEqual(result.returncode, STATUS["provenance_write"], result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_failed_provenance_publish_preserves_previous_file(self):
         result = self.run_import("provenance_publish")
-        self.assertEqual(result.returncode, 53, result.stderr)
+        self.assertEqual(result.returncode, STATUS["provenance_publish"], result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
     def test_provenance_symlink_is_replaced_without_following_it(self):
@@ -170,7 +185,7 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
 
     def test_termination_cleans_staging_and_preserves_provenance(self):
         result = self.run_import("term")
-        self.assertEqual(result.returncode, 143, result.stderr)
+        self.assertEqual(result.returncode, STATUS["termination"], result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
 
