@@ -10,3 +10,4 @@
 - Tie permanent tests to current contracts and independent references. Missing evidence blocks a claim; it does not prove it.
 - Run the applicable `CONSTRAINTS.md` checks and report results. Do not claim performance or promote defaults without evidence.
 - Keep plans and scratch outside the PR; keep acceptance evidence in the PR or CI artifacts.
+- Check and fix clippy lints before pushing or publishing pull requests.
