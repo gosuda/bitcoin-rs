@@ -101,9 +101,17 @@ impl TxIngressConsumer {
     }
 
     fn process_retries(&self) -> bool {
-        let retries = self
-            .mempool_gateway
-            .retry_orphans(&self.chain_view(), unix_time_secs());
+        let now = unix_time_secs();
+        let live_peers =
+            self.peer_table
+                .live_connections()
+                .into_iter()
+                .map(|(addr, connection_id)| PeerToken {
+                    addr,
+                    connection_id: connection_id.get(),
+                });
+        self.mempool_gateway.maintain_orphans(now, live_peers);
+        let retries = self.mempool_gateway.retry_orphans(&self.chain_view(), now);
         let made_progress = retries
             .iter()
             .any(|retry| matches!(retry.result, Ok(SubmitOutcome::Committed(_))));
@@ -582,5 +590,24 @@ mod tests {
             !consumer.mempool_gateway.have_tx(Hash256::from(txid), false),
             "a smaller witness variant must remain requestable"
         );
+    }
+
+    #[test]
+    fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let gateway = MempoolGateway::shared(Arc::clone(&pool));
+        let mining = Arc::new(RecordingMining::new());
+        let consumer = make_consumer(&gateway, mining);
+        let orphan = spending_tx();
+        let txid = orphan.txid();
+
+        // The fixture source was never registered in this consumer's peer table,
+        // which models a connection disappearing before the next ingress poll.
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(orphan, test_source()));
+        assert_eq!(gateway.orphan_count(), 1);
+
+        assert!(!consumer.process_retries());
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(!gateway.have_tx(Hash256::from(txid), false));
     }
 }
