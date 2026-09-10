@@ -302,7 +302,26 @@ impl<'t> SighashCache<'t> {
         value: u64,
         sighash_type: Sighash,
     ) -> Result<Hash256, SighashError> {
-        let ty = sighash_type.to_ecdsa()?;
+        let raw = sighash_type.to_ecdsa()?.to_u32();
+        self.segwit_v0_signature_hash_raw(input_index, script_code, value, raw)
+    }
+
+    /// Computes the BIP143 digest for a raw ECDSA hash type.
+    ///
+    /// Field selection uses the low five bits and `SIGHASH_ANYONECANPAY`,
+    /// while all 32 bits are serialized into the digest. Undefined ECDSA hash
+    /// types remain valid without `STRICTENC`; enforcing that policy belongs
+    /// to the script checker, not the digest engine. Raw zero is valid here,
+    /// unlike the typed API's taproot-only [`Sighash::Default`].
+    /// The caller supplies the selected script-code suffix verbatim.
+    pub fn segwit_v0_signature_hash_raw(
+        &mut self,
+        input_index: usize,
+        script_code: &[u8],
+        value: u64,
+        sighash_type: u32,
+    ) -> Result<Hash256, SighashError> {
+        let ty = EcdsaType::from_consensus(sighash_type);
         let total = self.tx.inputs.len();
         let input = self
             .tx
@@ -339,9 +358,9 @@ impl<'t> SighashCache<'t> {
                         });
                     finalize_double_sha256(single)
                 }
-                // BIP143 leaves this case undefined; Core rejects the signature while the
-                // rust-bitcoin oracle emits the zero hash. Either way no signature can
-                // verify, so we mirror the oracle's zero hash.
+                // BIP143 uses zero hashOutputs when SINGLE has no matching
+                // output. The complete preimage is still hashed and a signature
+                // over that digest can verify; this is not the legacy ONE bug.
                 None => zero,
             }
         } else {
@@ -360,7 +379,7 @@ impl<'t> SighashCache<'t> {
             .and_then(|()| writer.write_all(&input.sequence.to_le_bytes()))
             .and_then(|()| writer.write_all(outputs_hash.as_byte_array()))
             .and_then(|()| writer.write_all(&self.tx.lock_time.to_le_bytes()))
-            .and_then(|()| writer.write_all(&ty.to_u32().to_le_bytes()))
+            .and_then(|()| writer.write_all(&sighash_type.to_le_bytes()))
             .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
 
         Ok(finalize_double_sha256(engine))
