@@ -76,19 +76,16 @@ const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
 /// commit bounded.
 const BATCH_BYTE_LIMIT: usize = 256 << 20;
 
-#[cfg(feature = "rocksdb")]
 pub(crate) const ROCKSDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-#[cfg(any(feature = "fjall", test))]
 pub(crate) const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
-#[cfg(feature = "redb")]
 pub(crate) const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 16_000_000,
     max_bytes: BATCH_BYTE_LIMIT,
@@ -311,8 +308,6 @@ pub(crate) struct TxIndexOpenSpec {
     pub(crate) namespace: &'static str,
     pub(crate) storage_backend: bitcoin_rs_storage::StorageBackend,
     pub(crate) cache_bytes: u64,
-    #[allow(dead_code)]
-    pub(crate) batch_limits: PreparedBatchLimits,
     pub(crate) epoch: u64,
     pub(crate) enabled: IndexCapabilities,
     pub(crate) rollback_rebuild_cutover: u32,
@@ -713,7 +708,6 @@ fn open_and_run(
         spec.storage_backend,
         &txindex_dir,
         spec.cache_bytes,
-        spec.batch_limits,
         spec.epoch,
         Duration::ZERO,
         TXINDEX_OPEN_TIMEOUT,
@@ -759,7 +753,7 @@ fn open_and_run(
         applied_tip: Arc::clone(applied_tip),
         block_tree: Arc::clone(block_tree),
         body_store: body_store.clone(),
-        batch_limits: spec.batch_limits,
+        batch_limits: open.batch_limits,
         enabled: spec.enabled,
         rollback_rebuild_cutover: spec.rollback_rebuild_cutover,
         wake_rx: wake_rx.clone(),
@@ -787,7 +781,6 @@ fn open_tx_index_with_timeout(
     storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
-    batch_limits: PreparedBatchLimits,
     epoch: u64,
     open_delay: Duration,
     open_timeout: Duration,
@@ -799,14 +792,7 @@ fn open_tx_index_with_timeout(
     let _join = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
-            let result = open_tx_index_on_worker(
-                backend,
-                &dir,
-                cache_bytes,
-                batch_limits,
-                epoch,
-                open_delay,
-            );
+            let result = open_tx_index_on_worker(backend, &dir, cache_bytes, epoch, open_delay);
             let _ = tx.send(result);
         })
         .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
@@ -846,59 +832,48 @@ fn open_tx_index_with_timeout(
     }
 }
 
-/// Opens the txindex store on the worker thread, preserving all backend
-/// constructors, cache paths, and batch limits.
+/// Opens the txindex store on the worker thread through the namespace's single
+/// runtime composition owner.
 fn open_tx_index_on_worker(
     storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
-    batch_limits: PreparedBatchLimits,
     epoch: u64,
     open_delay: Duration,
 ) -> Result<OpenTxIndex, TxIndexWorkerError> {
     if !open_delay.is_zero() {
         std::thread::sleep(open_delay);
     }
-    match storage_backend {
-        #[cfg(feature = "rocksdb")]
-        bitcoin_rs_storage::StorageBackend::RocksDb => {
-            let store = Arc::new(
-                bitcoin_rs_storage::RocksDbStore::open_with_cache(txindex_dir, cache_bytes)
-                    .map_err(|e| {
-                        TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e))
-                    })?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(feature = "fjall")]
-        bitcoin_rs_storage::StorageBackend::Fjall => {
-            let store = Arc::new(
-                bitcoin_rs_storage::FjallStore::open_with_cache(txindex_dir, cache_bytes).map_err(
-                    |e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e)),
-                )?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(feature = "redb")]
-        bitcoin_rs_storage::StorageBackend::Redb => {
-            let store = Arc::new(
-                bitcoin_rs_storage::open_redb_tx_index_store_with_cache(txindex_dir, cache_bytes)
-                    .map_err(|e| {
-                    TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::backend(e))
-                })?,
-            );
-            open_tx_index_store_on_worker(store, batch_limits, epoch)
-        }
-        #[cfg(any(
-            not(feature = "rocksdb"),
-            not(feature = "fjall"),
-            not(feature = "redb")
-        ))]
-        other => Err(TxIndexWorkerError::Storage(
-            bitcoin_rs_storage::StorageError::Backend(format!(
-                "unsupported storage backend for txindex: {other}"
-            )),
-        )),
+    crate::storage_backend::open_txindex(
+        storage_backend,
+        txindex_dir,
+        Some(cache_bytes),
+        TxIndexComposer {
+            backend: storage_backend,
+            epoch,
+        },
+    )
+}
+
+struct TxIndexComposer {
+    backend: bitcoin_rs_storage::StorageBackend,
+    epoch: u64,
+}
+
+impl crate::storage_backend::StoreConsumer for TxIndexComposer {
+    type Output = OpenTxIndex;
+    type Error = TxIndexWorkerError;
+
+    fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
+    where
+        S: bitcoin_rs_storage::KvStore,
+    {
+        let batch_limits = match self.backend {
+            bitcoin_rs_storage::StorageBackend::RocksDb => ROCKSDB_BATCH_LIMITS,
+            bitcoin_rs_storage::StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
+            bitcoin_rs_storage::StorageBackend::Redb => REDB_BATCH_LIMITS,
+        };
+        open_tx_index_store_on_worker(store, batch_limits, self.epoch)
     }
 }
 
@@ -2150,7 +2125,7 @@ enum TxIndexWorkerError {
     #[error("txindex durable watermark changed while a forward batch was pending")]
     PendingDurableChanged,
     #[error("txindex storage error: {0}")]
-    Storage(#[source] bitcoin_rs_storage::StorageError),
+    Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error(
         "txindex store open timed out after {secs}s — the storage engine recovery may be stuck"
     )]

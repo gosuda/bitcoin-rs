@@ -12,12 +12,6 @@ use bitcoin_rs_primitives::{Block, Tx, Txid, deserialize};
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,
 };
-#[cfg(any(
-    not(feature = "rocksdb"),
-    not(feature = "fjall"),
-    not(feature = "redb")
-))]
-use core::fmt;
 use core::mem::size_of;
 use crossbeam_channel::{Receiver, Sender};
 use hashbrown::HashMap;
@@ -482,79 +476,75 @@ pub enum DisconnectError {
     },
 }
 
-enum NodeStorage {
-    #[cfg(feature = "rocksdb")]
-    RocksDb(Arc<bitcoin_rs_storage::RocksDbStore>),
-    #[cfg(feature = "fjall")]
-    Fjall(Arc<bitcoin_rs_storage::FjallStore>),
-    #[cfg(feature = "redb")]
-    Redb(Arc<bitcoin_rs_storage::RedbStore>),
+struct NodeStorage {
+    backend: StorageBackend,
+    undo_store: Arc<dyn crate::apply::UndoStore>,
+    block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+    deferred: Arc<dyn DeferredChainstateServices>,
+    #[cfg(test)]
+    test_store: Arc<dyn TestStoreAccess>,
+}
+
+struct ChainstateComposer {
+    backend: StorageBackend,
+    block_files: Arc<FlatFileBlockStore>,
+}
+
+impl crate::storage_backend::StoreConsumer for ChainstateComposer {
+    type Output = NodeStorage;
+    type Error = bitcoin_rs_storage::StorageError;
+
+    fn consume<S>(
+        self,
+        store: Arc<S>,
+    ) -> core::result::Result<Self::Output, bitcoin_rs_storage::StorageError>
+    where
+        S: KvStore,
+    {
+        let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
+            store: Arc::clone(&store),
+        });
+        Ok(NodeStorage {
+            backend: self.backend,
+            undo_store: Arc::new(crate::apply::KvUndoStore::new(Arc::clone(&store))),
+            block_body_store: Arc::new(crate::apply::FlatFilePruneBodyStore::open(
+                Arc::clone(&store),
+                self.block_files,
+            )),
+            deferred,
+            #[cfg(test)]
+            test_store: Arc::new(TestStore { store }),
+        })
+    }
 }
 
 impl NodeStorage {
     /// Opens the configured backend for the chainstate namespace with its
     /// cache share from the process budget.
-    fn open(config: &NodeConfig, chainstate_cache_bytes: u64) -> Result<Self> {
+    fn open(
+        config: &NodeConfig,
+        chainstate_cache_bytes: u64,
+        block_files: Arc<FlatFileBlockStore>,
+    ) -> Result<Self> {
         let chainstate_dir = config.data_dir.join("chainstate");
         std::fs::create_dir_all(&chainstate_dir)
             .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
 
-        match config.storage.backend {
-            #[cfg(feature = "rocksdb")]
-            StorageBackend::RocksDb => Ok(Self::RocksDb(Arc::new(
-                bitcoin_rs_storage::RocksDbStore::open_with_cache(
-                    &chainstate_dir,
-                    chainstate_cache_bytes,
-                )
-                .map_err(anyhow::Error::new)?,
-            ))),
-            #[cfg(feature = "fjall")]
-            StorageBackend::Fjall => Ok(Self::Fjall(Arc::new(
-                bitcoin_rs_storage::FjallStore::open_with_cache(
-                    &chainstate_dir,
-                    chainstate_cache_bytes,
-                )
-                .map_err(anyhow::Error::new)?,
-            ))),
-            #[cfg(feature = "redb")]
-            StorageBackend::Redb => Ok(Self::Redb(Arc::new(
-                bitcoin_rs_storage::RedbStore::open_with_cache(
-                    &chainstate_dir,
-                    chainstate_cache_bytes,
-                )
-                .map_err(anyhow::Error::new)?,
-            ))),
-            #[cfg(any(
-                not(feature = "rocksdb"),
-                not(feature = "fjall"),
-                not(feature = "redb")
-            ))]
-            other => bail!(
-                "unsupported storage backend: {other} (compiled features = {CompiledStorageFeatures})"
-            ),
-        }
+        let backend = config.storage.backend;
+        crate::storage_backend::open_chainstate(
+            backend,
+            &chainstate_dir,
+            Some(chainstate_cache_bytes),
+            ChainstateComposer {
+                backend,
+                block_files,
+            },
+        )
+        .map_err(anyhow::Error::new)
     }
 
     const fn kind(&self) -> &'static str {
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => {
-                let _ = store;
-                "rocksdb"
-            }
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => {
-                let _ = store;
-                "fjall"
-            }
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => {
-                let _ = store;
-                "redb"
-            }
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+        self.backend.as_str()
     }
 
     fn prune_service(
@@ -566,65 +556,18 @@ impl NodeStorage {
         authority: crate::apply::PruneAuthority,
         durable_tip_height: &Arc<AtomicU32>,
     ) -> Result<Arc<dyn PruneService>> {
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => Ok(Arc::new(NodePruneService::new(
-                Arc::clone(store),
-                Arc::clone(block_files),
-                Arc::clone(block_body_store),
-                blocks,
-                transactions,
-                authority,
-                Arc::clone(durable_tip_height),
-            )?)),
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Ok(Arc::new(NodePruneService::new(
-                Arc::clone(store),
-                Arc::clone(block_files),
-                Arc::clone(block_body_store),
-                blocks,
-                transactions,
-                authority,
-                Arc::clone(durable_tip_height),
-            )?)),
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => Ok(Arc::new(NodePruneService::new(
-                Arc::clone(store),
-                Arc::clone(block_files),
-                Arc::clone(block_body_store),
-                blocks,
-                transactions,
-                authority,
-                Arc::clone(durable_tip_height),
-            )?)),
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+        self.deferred.prune_service(
+            Arc::clone(block_files),
+            Arc::clone(block_body_store),
+            blocks,
+            transactions,
+            authority,
+            Arc::clone(durable_tip_height),
+        )
     }
 
-    fn block_body_store(
-        &self,
-        files: Arc<FlatFileBlockStore>,
-    ) -> Arc<dyn crate::apply::PruneBodyStore> {
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => Arc::new(crate::apply::FlatFilePruneBodyStore::open(
-                Arc::clone(store),
-                files,
-            )),
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Arc::new(crate::apply::FlatFilePruneBodyStore::open(
-                Arc::clone(store),
-                files,
-            )),
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => Arc::new(crate::apply::FlatFilePruneBodyStore::open(
-                Arc::clone(store),
-                files,
-            )),
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+    fn block_body_store(&self) -> Arc<dyn crate::apply::PruneBodyStore> {
+        Arc::clone(&self.block_body_store)
     }
 
     /// Builds the undo store for the configured backend.
@@ -633,16 +576,7 @@ impl NodeStorage {
     /// disconnect a block, so it could advance its tip into a chain it is
     /// unable to leave.
     fn undo_store(&self) -> Arc<dyn crate::apply::UndoStore> {
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => Arc::new(crate::apply::KvUndoStore::new(Arc::clone(store))),
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+        Arc::clone(&self.undo_store)
     }
 
     fn journal_writer(
@@ -650,16 +584,7 @@ impl NodeStorage {
         dir: cap_std::fs::Dir,
         bootstrap: JournalBootstrap,
     ) -> Result<crate::chainstate_journal::SharedJournalWriter> {
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => build_journal_writer(dir, Arc::clone(store), bootstrap),
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+        self.deferred.journal_writer(dir, bootstrap)
     }
 
     #[cfg(test)]
@@ -669,18 +594,9 @@ impl NodeStorage {
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>> {
         let key = bitcoin_rs_storage::pruning::block_body_key(height, hash);
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => {
-                Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?)
-            }
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => Ok(store.get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?),
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+        Ok(self
+            .test_store
+            .get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?)
     }
 
     #[cfg(test)]
@@ -690,16 +606,17 @@ impl NodeStorage {
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>> {
         let key = bitcoin_rs_storage::pruning::block_undo_key(height, hash);
-        match self {
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
-            #[cfg(feature = "fjall")]
-            Self::Fjall(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
-            #[cfg(feature = "redb")]
-            Self::Redb(store) => Ok(store.get(ColumnFamily::UndoData, &key)?),
-            #[cfg(not(any(feature = "rocksdb", feature = "fjall", feature = "redb")))]
-            _ => match *self {},
-        }
+        Ok(self.test_store.get(ColumnFamily::UndoData, &key)?)
+    }
+
+    #[cfg(test)]
+    fn write_test_rows(&self, rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)]) -> Result<()> {
+        self.test_store.write_rows(rows).map_err(anyhow::Error::new)
+    }
+
+    #[cfg(test)]
+    fn read_test_row(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.test_store.get(cf, key).map_err(anyhow::Error::new)
     }
 }
 
@@ -712,6 +629,102 @@ struct JournalBootstrap {
     prev_hash: [u8; 32],
     chain_tx_count: u64,
     config: crate::config::ChainstateJournalConfig,
+}
+
+/// Capabilities whose inputs become available after the chainstate store is
+/// opened. This is a composition seam, not a storage API: concrete reads,
+/// batches, and durability remain generic over `KvStore` below it.
+trait DeferredChainstateServices: Send + Sync {
+    fn prune_service(
+        &self,
+        block_files: Arc<FlatFileBlockStore>,
+        block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+        blocks: Arc<RwLock<BlockLog>>,
+        transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
+        authority: crate::apply::PruneAuthority,
+        durable_tip_height: Arc<AtomicU32>,
+    ) -> Result<Arc<dyn PruneService>>;
+
+    fn journal_writer(
+        &self,
+        dir: cap_std::fs::Dir,
+        bootstrap: JournalBootstrap,
+    ) -> Result<crate::chainstate_journal::SharedJournalWriter>;
+}
+
+struct ChainstateStoreServices<S> {
+    store: Arc<S>,
+}
+
+impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
+    fn prune_service(
+        &self,
+        block_files: Arc<FlatFileBlockStore>,
+        block_body_store: Arc<dyn crate::apply::PruneBodyStore>,
+        blocks: Arc<RwLock<BlockLog>>,
+        transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
+        authority: crate::apply::PruneAuthority,
+        durable_tip_height: Arc<AtomicU32>,
+    ) -> Result<Arc<dyn PruneService>> {
+        Ok(Arc::new(NodePruneService::new(
+            Arc::clone(&self.store),
+            block_files,
+            block_body_store,
+            blocks,
+            transactions,
+            authority,
+            durable_tip_height,
+        )?))
+    }
+
+    fn journal_writer(
+        &self,
+        dir: cap_std::fs::Dir,
+        bootstrap: JournalBootstrap,
+    ) -> Result<crate::chainstate_journal::SharedJournalWriter> {
+        build_journal_writer(dir, Arc::clone(&self.store), bootstrap)
+    }
+}
+
+#[cfg(test)]
+trait TestStoreAccess: Send + Sync {
+    fn get(
+        &self,
+        cf: ColumnFamily,
+        key: &[u8],
+    ) -> core::result::Result<Option<Vec<u8>>, bitcoin_rs_storage::StorageError>;
+
+    fn write_rows(
+        &self,
+        rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)],
+    ) -> core::result::Result<(), bitcoin_rs_storage::StorageError>;
+}
+
+#[cfg(test)]
+struct TestStore<S> {
+    store: Arc<S>,
+}
+
+#[cfg(test)]
+impl<S: KvStore> TestStoreAccess for TestStore<S> {
+    fn get(
+        &self,
+        cf: ColumnFamily,
+        key: &[u8],
+    ) -> core::result::Result<Option<Vec<u8>>, bitcoin_rs_storage::StorageError> {
+        self.store.get(cf, key)
+    }
+
+    fn write_rows(
+        &self,
+        rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)],
+    ) -> core::result::Result<(), bitcoin_rs_storage::StorageError> {
+        let mut batch = self.store.new_batch();
+        for (cf, key, value) in rows {
+            batch.put(*cf, key, value);
+        }
+        self.store.write(batch)
+    }
 }
 
 fn build_journal_writer<S: KvStore + 'static>(
@@ -1241,47 +1254,6 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
     }
 }
 
-#[cfg(any(
-    not(feature = "rocksdb"),
-    not(feature = "fjall"),
-    not(feature = "redb")
-))]
-const COMPILED_STORAGE_FEATURES: &[&str] = &[
-    #[cfg(feature = "rocksdb")]
-    "rocksdb",
-    #[cfg(feature = "fjall")]
-    "fjall",
-    #[cfg(feature = "redb")]
-    "redb",
-];
-
-#[cfg(any(
-    not(feature = "rocksdb"),
-    not(feature = "fjall"),
-    not(feature = "redb")
-))]
-struct CompiledStorageFeatures;
-
-#[cfg(any(
-    not(feature = "rocksdb"),
-    not(feature = "fjall"),
-    not(feature = "redb")
-))]
-impl fmt::Display for CompiledStorageFeatures {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Some((first, rest)) = COMPILED_STORAGE_FEATURES.split_first() else {
-            return f.write_str("none");
-        };
-
-        f.write_str(first)?;
-        for feature in rest {
-            f.write_str(",")?;
-            f.write_str(feature)?;
-        }
-        Ok(())
-    }
-}
-
 fn tx_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
     bitcoin_rs_index::IndexCapabilities {
         // Full ScriptIndex-backed Esplora responses need exact historical
@@ -1307,20 +1279,6 @@ fn build_tx_index_open_spec(
     if config.storage.prune_target_mb > 0 {
         bail!("transaction and script indexing are not compatible with -prune");
     }
-    let batch_limits = match config.storage.backend {
-        #[cfg(feature = "rocksdb")]
-        StorageBackend::RocksDb => crate::txindex_worker::ROCKSDB_BATCH_LIMITS,
-        #[cfg(feature = "fjall")]
-        StorageBackend::Fjall => crate::txindex_worker::DEFAULT_BATCH_LIMITS,
-        #[cfg(feature = "redb")]
-        StorageBackend::Redb => crate::txindex_worker::REDB_BATCH_LIMITS,
-        #[cfg(any(
-            not(feature = "rocksdb"),
-            not(feature = "fjall"),
-            not(feature = "redb")
-        ))]
-        other => bail!("unsupported storage backend for txindex: {other}"),
-    };
     let canonical_data_root = config
         .data_dir
         .canonicalize()
@@ -1330,7 +1288,6 @@ fn build_tx_index_open_spec(
         namespace: "txindex",
         storage_backend: config.storage.backend,
         cache_bytes: txindex_cache_bytes,
-        batch_limits,
         epoch,
         enabled,
         rollback_rebuild_cutover: crate::txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
@@ -1455,7 +1412,9 @@ impl NodeState {
         );
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
-        let storage = NodeStorage::open(&config, chainstate_cache_bytes)?;
+        let block_files =
+            Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
+        let storage = NodeStorage::open(&config, chainstate_cache_bytes, Arc::clone(&block_files))?;
         let undo_store = storage.undo_store();
         // Before anything reads the chainstate, let alone serves or syncs it.
         // A node that starts on a torn chainstate builds on it, and every block
@@ -1497,9 +1456,7 @@ impl NodeState {
                 );
             }
         }
-        let block_files =
-            Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
-        let block_body_store = storage.block_body_store(Arc::clone(&block_files));
+        let block_body_store = storage.block_body_store();
 
         let zmq_endpoints = config.zmq_endpoints();
         #[cfg(feature = "zmq")]
@@ -3397,40 +3354,6 @@ mod tests {
 
     #[test]
     fn prune_reclaims_whole_files_and_keeps_current_file() -> anyhow::Result<()> {
-        fn seed<S: KvStore>(
-            store: &S,
-            height: u32,
-            hash: bitcoin_rs_primitives::Hash256,
-        ) -> anyhow::Result<()> {
-            let position = bitcoin_rs_storage::BlockFilePosition {
-                file_no: 0,
-                offset: 0,
-                len: 0,
-            };
-            let mut batch = store.new_batch();
-            batch.put(
-                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
-                &bitcoin_rs_storage::pruning::block_body_key(height, hash),
-                &position.encode(),
-            );
-            batch.put(
-                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
-                &bitcoin_rs_storage::block_file_max_height_key(0),
-                &bitcoin_rs_storage::encode_block_file_max_height(height),
-            );
-            store.write(batch)?;
-            Ok(())
-        }
-
-        fn metadata_exists<S: KvStore>(store: &S) -> anyhow::Result<bool> {
-            Ok(store
-                .get(
-                    bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
-                    &bitcoin_rs_storage::block_file_max_height_key(0),
-                )?
-                .is_some())
-        }
-
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
@@ -3451,15 +3374,23 @@ mod tests {
             .durable_tip_height
             .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&[10_u8; 32]);
-
-        match &state.storage {
-            #[cfg(feature = "rocksdb")]
-            NodeStorage::RocksDb(store) => seed(&**store, 10, hash)?,
-            #[cfg(feature = "fjall")]
-            NodeStorage::Fjall(store) => seed(&**store, 10, hash)?,
-            #[cfg(feature = "redb")]
-            NodeStorage::Redb(store) => seed(&**store, 10, hash)?,
-        }
+        let position = bitcoin_rs_storage::BlockFilePosition {
+            file_no: 0,
+            offset: 0,
+            len: 0,
+        };
+        state.storage.write_test_rows(&[
+            (
+                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
+                bitcoin_rs_storage::pruning::block_body_key(10, hash).to_vec(),
+                position.encode().to_vec(),
+            ),
+            (
+                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
+                bitcoin_rs_storage::block_file_max_height_key(0).to_vec(),
+                bitcoin_rs_storage::encode_block_file_max_height(10).to_vec(),
+            ),
+        ])?;
         let Some(service) = state.prune_service() else {
             anyhow::bail!("prune service should exist when prune_target_mb > 0");
         };
@@ -3470,14 +3401,13 @@ mod tests {
         assert!(!prunable_file.exists());
         assert!(current_file.exists());
         assert!(state.storage.stored_prune_body(10, hash)?.is_none());
-        let has_metadata = match &state.storage {
-            #[cfg(feature = "rocksdb")]
-            NodeStorage::RocksDb(store) => metadata_exists(&**store)?,
-            #[cfg(feature = "fjall")]
-            NodeStorage::Fjall(store) => metadata_exists(&**store)?,
-            #[cfg(feature = "redb")]
-            NodeStorage::Redb(store) => metadata_exists(&**store)?,
-        };
+        let has_metadata = state
+            .storage
+            .read_test_row(
+                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
+                &bitcoin_rs_storage::block_file_max_height_key(0),
+            )?
+            .is_some();
         assert!(!has_metadata);
         Ok(())
     }
@@ -3495,17 +3425,6 @@ mod tests {
     /// what makes the first worth having.
     #[test]
     fn pruning_a_block_file_reduces_the_reported_disk_size() -> anyhow::Result<()> {
-        fn seed_file_height<S: KvStore>(store: &S, height: u32) -> anyhow::Result<()> {
-            let mut batch = store.new_batch();
-            batch.put(
-                bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
-                &bitcoin_rs_storage::block_file_max_height_key(0),
-                &bitcoin_rs_storage::encode_block_file_max_height(height),
-            );
-            store.write(batch)?;
-            Ok(())
-        }
-
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
         config.data_dir = dir.path().join("node");
@@ -3548,14 +3467,11 @@ mod tests {
 
         // Tell the pruner that file 0 tops out at height 10, so pruning to 11
         // makes it prunable.
-        match &state.storage {
-            #[cfg(feature = "rocksdb")]
-            NodeStorage::RocksDb(store) => seed_file_height(&**store, 10)?,
-            #[cfg(feature = "fjall")]
-            NodeStorage::Fjall(store) => seed_file_height(&**store, 10)?,
-            #[cfg(feature = "redb")]
-            NodeStorage::Redb(store) => seed_file_height(&**store, 10)?,
-        }
+        state.storage.write_test_rows(&[(
+            bitcoin_rs_storage::pruning::BLOCK_DATA_CF,
+            bitcoin_rs_storage::block_file_max_height_key(0).to_vec(),
+            bitcoin_rs_storage::encode_block_file_max_height(10).to_vec(),
+        )])?;
 
         let Some(service) = state.prune_service() else {
             anyhow::bail!("prune service should exist when prune_target_mb > 0");

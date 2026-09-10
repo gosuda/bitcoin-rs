@@ -103,6 +103,13 @@ Owners:
   retained shipped alternatives and independent product-matrix comparisons.
   MDBX had only a diagnostic role and no current consumer; it is removed as a
   complete ownership unit. Existing MDBX datadirs are not migrated or opened.
+- `crates/node/src/storage_backend.rs` is the sole owner of concrete runtime
+  backend construction in the node. Chainstate and txindex each cross that
+  boundary once, then immediately compose backend-neutral capabilities for
+  undo, pruning, journal, indexing, and footprint inspection. The consumer
+  visitor is only a composition seam; `KvStore` remains the owner of reads,
+  writes, batches, and durability. The txindex redb lane retains its specialized
+  fixed-width store rather than being widened to the generic redb adapter.
 
 ### `ARCH-04`: RPC surface independence from storage
 
