@@ -96,6 +96,15 @@ state (`crates/mempool/src/orphan.rs`).
   explicit `finish` leaves the generation odd — admission stays closed.
   Only `finish` may compare-exchange the odd value to the reserved even value,
   reopening admission. One guard covers one externally coherent chain operation.
+- The reorg owner settles both sync branch switches and RPC invalidation.
+  A clean refusal finishes at the fully committed disconnect/connect prefix,
+  after reconsidering its disconnected transactions under the odd generation.
+  Read-only planning or body-loading refusals also leave admission usable.
+  `ConnectFailed` caused by `ApplyError::UtxoCommit`, fatal disconnects and
+  stuck markers retain the odd generation; reorg must not reconsider
+  transactions or checkpoint possibly torn state. A failed `finish` is a
+  fatal invariant failure: retain the execution cause, close apply admission
+  and request shutdown rather than report success or retry the chain walk.
 - `submit_transaction` owns common preparation and bounded retry for RPC
   and peer submissions in mempool. `admit_transaction` remains their
   atomic admission operation:
@@ -208,6 +217,13 @@ state (`crates/mempool/src/orphan.rs`).
 - `crates/node/src/apply.rs` (inline tests, `chain_generation_tests` module):
   `stable_generation_is_even_before_and_after_connect`,
   `stable_generation_is_even_after_disconnect`.
+- `crates/node/src/sync.rs`: clean reorg retry preserves branch and download
+  ownership; partial and fatal reorgs preserve generation fencing.
+- `crates/node/src/apply.rs`: RPC body preflight, mid-rollback body loss and
+  clean disconnect refusal permit retry from their coherent committed state.
+- `crates/node/src/reorg/tests.rs`: possibly torn UTXO commits retain the
+  fence and checkpoint debt; failed generation settlement preserves its
+  original cause and requests shutdown.
 - `crates/rpc/src/handlers/tx.rs` (inline tests):
   admission retry rebuilds context after a transient rejection.
 - `crates/mempool/src/admission.rs` (inline tests):
