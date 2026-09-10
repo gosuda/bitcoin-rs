@@ -5,6 +5,10 @@ on:
     branches:
       - agent/166-native-sighash-precompute-ff965
 
+concurrency:
+  group: agent-native-sighash-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
