@@ -123,12 +123,13 @@ impl Stack {
 
     /// Moves the top item to another bounded stack.
     pub fn move_to(&mut self, destination: &mut Self) -> Result<(), StackError> {
-        let item = self.pop()?;
-        if let Err(error) = destination.push(item.clone()) {
-            self.push(item)?;
-            return Err(error);
+        if self.is_empty() {
+            return Err(StackError::Underflow);
         }
-        Ok(())
+        if destination.items.is_full() {
+            return Err(StackError::Overflow);
+        }
+        destination.push(self.pop()?)
     }
 
     /// Moves an item from another bounded stack onto this stack.
