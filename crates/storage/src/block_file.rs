@@ -215,15 +215,15 @@ impl FlatFileBlockStore {
         header[8..12].copy_from_slice(&height.to_le_bytes());
         header[12..].copy_from_slice(&hash);
 
-        writer.file.seek(SeekFrom::Start(position.offset))?;
         let next_offset = position
             .offset
             .checked_add(record_len)
             .ok_or(StorageError::InvalidOperation("block file offset overflow"))?;
-        let append_result = writer
-            .file
-            .write_all(&header)
-            .and_then(|()| writer.file.write_all(body))
+        // The writer cursor is established at `append_offset` when the store
+        // opens or recovers, starts at zero on rollover, and advances by the
+        // exact record length after every successful write. Keep that invariant
+        // instead of issuing an unconditional seek for every block.
+        let append_result = write_record(&mut writer.file, &header, body)
             .and_then(|()| writer.file.flush());
         if let Err(append_error) = append_result {
             writer.rollback_offset = Some(position.offset);
@@ -708,6 +708,25 @@ fn body_offset(offset: u64) -> Option<u64> {
 
 fn record_end(position: BlockFilePosition) -> Option<u64> {
     body_offset(position.offset)?.checked_add(u64::from(position.len))
+}
+
+fn write_record(writer: &mut impl io::Write, header: &[u8], body: &[u8]) -> io::Result<()> {
+    let mut slices: &mut [io::IoSlice<'_>] =
+        &mut [io::IoSlice::new(header), io::IoSlice::new(body)];
+    while !slices.is_empty() {
+        match writer.write_vectored(slices) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole block record",
+                ));
+            }
+            Ok(written) => io::IoSlice::advance_slices(&mut slices, written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Complete framed record count and byte length in an already-open block file.
