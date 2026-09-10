@@ -1,3 +1,9 @@
+//! Contract coverage for reconciliation invariants in
+//! [`docs/contracts/indexing.md`](../../../docs/contracts/indexing.md).
+//! The tests below cover exact watermark alignment (`IDX-03`), selective
+//! capability reset (`IDX-04`), reorganization rollback (`IDX-06`), and
+//! isolated rebuild behavior (`IDX-07`).
+
 use super::{ReconcileLeg, ReconcilePhase, SelectedWatermark, selected_watermark};
 use crate::{IndexCapabilities, IndexWatermark, IndexWatermarks};
 
@@ -22,6 +28,7 @@ const fn capabilities(mask: u8) -> IndexCapabilities {
     }
 }
 
+/// IDX-03: selected capabilities must share one exact durable watermark.
 #[test]
 fn selection_matches_exact_pairwise_equality_for_every_subset() {
     let states = [None, Some(A), Some(SAME_HEIGHT_FORK), Some(NEXT_HEIGHT)];
@@ -60,6 +67,7 @@ fn selection_matches_exact_pairwise_equality_for_every_subset() {
     }
 }
 
+/// IDX-03: no selected capability is distinct from an initialized empty cursor.
 #[test]
 fn empty_selection_is_not_an_uninitialized_selection() {
     let watermarks = IndexWatermarks {
@@ -77,6 +85,7 @@ fn empty_selection_is_not_an_uninitialized_selection() {
     );
 }
 
+/// IDX-03: watermark identity includes both height and block hash.
 #[test]
 fn same_height_different_hash_is_not_alignment() {
     let watermarks = IndexWatermarks {
@@ -95,6 +104,7 @@ fn same_height_different_hash_is_not_alignment() {
     );
 }
 
+/// IDX-04: resetting one capability preserves sibling reconciliation state.
 #[test]
 fn phase_changes_only_selected_capabilities() {
     let original = ReconcilePhase {
@@ -128,6 +138,7 @@ fn phase_changes_only_selected_capabilities() {
     }
 }
 
+/// IDX-06 and IDX-07: rollback completion does not cancel an independent rebuild.
 #[test]
 fn finishing_rollback_preserves_independent_rebuild() {
     let phase = ReconcilePhase {
@@ -146,6 +157,7 @@ fn finishing_rollback_preserves_independent_rebuild() {
     assert_eq!(phase.rolling_back(), None);
 }
 
+/// IDX-06: rollback progress covers every active capability rollback.
 #[test]
 fn rollback_progress_covers_every_active_rollback() {
     let phase = ReconcilePhase {
