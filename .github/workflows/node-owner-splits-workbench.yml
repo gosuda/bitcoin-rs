@@ -9,35 +9,11 @@ concurrency:
   group: node-owner-splits-20260910
   cancel-in-progress: true
 jobs:
-  source:
+  offline-tools:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: d370a6c8f0ebf06e11058a67134636c5a2b4df00
-          persist-credentials: false
-      - name: Package tracked source and offline parser
-        run: |
-          mkdir -p "$RUNNER_TEMP/node-source/wheels"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/node-source/source.tar.gz" HEAD
-          git rev-parse HEAD > "$RUNNER_TEMP/node-source/commit.txt"
-          python3 -m pip download --disable-pip-version-check --only-binary=:all: --platform manylinux_2_17_x86_64 --python-version 313 --implementation cp --abi cp313 --dest "$RUNNER_TEMP/node-source/wheels" tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: node-pinned-source
-          path: ${{ runner.temp }}/node-source/
-          retention-days: 1
-  baseline:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       RUSTUP_TOOLCHAIN: '1.95.0'
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -47,23 +23,20 @@ jobs:
         with:
           toolchain: '1.95.0'
           components: rustfmt,clippy
-      - name: Diagnose manifest and compiler baseline without publishing
+      - name: Populate only public dependency caches
         run: |
-          mkdir -p "$RUNNER_TEMP/baseline-evidence"
-          cp Cargo.lock "$RUNNER_TEMP/baseline-evidence/Cargo.lock.before"
-          set +e
-          cargo +1.95.0 check -p bitcoin-rs-node --all-targets --no-default-features --features fjall > "$RUNNER_TEMP/baseline-evidence/check.log" 2>&1
-          code=$?
-          set -e
-          echo "$code" > "$RUNNER_TEMP/baseline-evidence/check.exit"
-          cp Cargo.lock "$RUNNER_TEMP/baseline-evidence/Cargo.lock.after"
-          git diff -- Cargo.lock | tee "$RUNNER_TEMP/baseline-evidence/lock.diff"
-          tail -n 220 "$RUNNER_TEMP/baseline-evidence/check.log"
-          sha256sum Cargo.lock
-          exit "$code"
+          cargo +1.95.0 fetch --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/offline-rust"
+          cp Cargo.lock "$RUNNER_TEMP/offline-rust/Cargo.lock.resolved"
+          git diff -- Cargo.lock > "$RUNNER_TEMP/offline-rust/lock.diff"
+          tar -czf "$RUNNER_TEMP/offline-rust/toolchain.tar.gz" -C "$HOME/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu" bin lib libexec share
+          tar -czf "$RUNNER_TEMP/offline-rust/registry.tar.gz" -C "$HOME/.cargo" registry
+          tar -czf "$RUNNER_TEMP/offline-rust/git-base.tar.gz" .git
+          rustc +1.95.0 -Vv > "$RUNNER_TEMP/offline-rust/rustc.txt"
+          sha256sum "$RUNNER_TEMP/offline-rust/"*.tar.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
-          name: node-baseline-evidence
-          path: ${{ runner.temp }}/baseline-evidence/
+          name: node-offline-rust
+          path: ${{ runner.temp }}/offline-rust/
+          compression-level: 0
           retention-days: 1
