@@ -7,6 +7,10 @@ use super::*;
 use crate::config::{NodeConfig, RuntimeInputs};
 use crate::run::{run, start_node};
 
+// Contract references: CONSTRAINTS.md CL-08 (single owners) and CL-17/CL-18
+// (durable lifecycle and exact inverse). These tests are executable evidence for
+// the shutdown, rollback, checkpoint, idempotence, and observer obligations.
+
 fn isolated_config(data_dir: &Path) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir.to_owned();
@@ -30,17 +34,19 @@ fn seed_checkpoint(state: &NodeState) -> anyhow::Result<(PathBuf, Vec<u8>)> {
 }
 
 #[test]
-fn disabled_zmq_still_seals_the_observer_slot() {
-    let pool = Arc::new(parking_lot::RwLock::new(bitcoin_rs_mempool::Mempool::new(
-        bitcoin_rs_mempool::MempoolLimits::default(),
-    )));
-    let observer: Arc<dyn bitcoin_rs_mempool::MempoolObserver> =
-        Arc::new(bitcoin_rs_mempool::CompositeObserver::new());
-    let gateway = bitcoin_rs_mempool::MempoolGateway::shared_with(pool, observer);
+fn disabled_zmq_still_seals_the_observer_slot() -> anyhow::Result<()> {
+    // Contract: CONSTRAINTS.md CL-08; exercise the production startup wiring,
+    // rather than constructing a gateway that startup never touched.
+    let temp = tempfile::tempdir()?;
+    let config = isolated_config(&temp.path().join("node-no-zmq"));
+    let (state, services, context) = start_node(config, RuntimeInputs::default(), true)?;
     assert!(
-        gateway.has_observer(),
+        state.mempool_gateway().has_observer(),
         "startup must seal the observer slot even without a ZMQ endpoint"
     );
+    let node = crate::embed::node_from_parts(state, services, context);
+    node.shutdown_blocking()?;
+    Ok(())
 }
 
 #[test]
