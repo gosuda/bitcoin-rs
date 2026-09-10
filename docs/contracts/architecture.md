@@ -57,7 +57,7 @@ Owners:
     network, or filesystem I/O.
   - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
     batching primitives, and backend engine drivers.
-  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-utxo`,
+  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
     `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
     `bitcoin-rs-mining`. Domain services and capability runtimes.
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
@@ -149,6 +149,7 @@ Owners:
   `getzmqnotifications`; node does not keep a parallel notifier metadata model.
   The `g17_dependency_direction` gate pins the external `zmq` dependency to the
   surface crate and permits node only to forward `bitcoin-rs-rpc/zmq`.
+- The composition root (`NodeState`, `BlockSync`, reorg logic, mining) dispatches `ChainFollowers` while the `ChainTransition` is still held, then calls `finish` to release the chain transition reservation. Convenience methods that finish before returning (`apply_block`, `disconnect_block`) do not dispatch followers. RPC, `BlockLog`, hash/zmq, `TxIndex` wake, sequence `C`/`D`, mining generation, and admission run from that dispatch. Mempool eviction stays inside `apply`.
 - `UserConfig::overlay` applies a later layer field-wise: a set field replaces
   the earlier value; an unset field leaves it. Nested override structs merge
   the same way, including `ChainstateJournalOverrides` and `MiningOverrides`. Proof:

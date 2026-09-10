@@ -452,12 +452,15 @@ fn parse_content_length(headers: &[(String, String)], status: u16) -> Result<usi
         .map(|(_, value)| value.as_str())
         .collect();
     if status == 204 {
-        return if declared.is_empty() {
-            Ok(0)
-        } else {
-            Err(HttpError::Framing(
-                "204 response must not carry Content-Length",
-            ))
+        // Accept both capture forms: RFC 9110 §8.6 omission and the
+        // libevent-era Core `Content-Length: 0`. Our own server's
+        // omission is pinned by the negative probe.
+        return match declared.as_slice() {
+            [] => Ok(0),
+            [single] if *single == "0" => Ok(0),
+            _ => Err(HttpError::Framing(
+                "204 Content-Length must be absent or exactly \"0\"",
+            )),
         };
     }
     match declared.as_slice() {
@@ -680,14 +683,18 @@ mod negative_probes {
     }
 
     #[test]
-    fn content_length_on_no_content_is_refused() -> Result<(), HttpError> {
-        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+    fn nonzero_content_length_on_no_content_is_refused() -> Result<(), HttpError> {
+        // A captured `Content-Length: 0` on a 204 is accepted (libevent-era
+        // Core emitted it); any nonzero declared length stays a framing
+        // violation. The node's own omission is pinned by the server-side
+        // negative probe over the production wire.
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n";
         match decode(stub(response)?) {
             Err(HttpError::Framing(why)) => {
-                assert!(why.contains("204 response"), "{why}");
+                assert!(why.contains("204"), "{why}");
                 Ok(())
             }
-            other => panic!("expected 204 framing refusal, got {other:?}"),
+            other => panic!("expected framing refusal, got {other:?}"),
         }
     }
 
