@@ -133,6 +133,16 @@ def _strip_rust_comments(text: str) -> str:
             elif char == '"':
                 in_string = False
             continue
+        raw = re.match(r'r(#{0,255})"', text[index:])
+        if raw:
+            hashes = raw.group(1)
+            terminator = '"' + hashes + '"'
+            end = text.find(terminator, index + len(raw.group(0)))
+            if end < 0:
+                raise ValueError("Unterminated Rust raw string in script_eval contract")
+            out.append(text[index:end + len(terminator)])
+            index = end + len(terminator)
+            continue
         if text.startswith("//", index):
             newline = text.find("\n", index + 2)
             if newline < 0:

@@ -1,6 +1,6 @@
 """QAC-01 boundary regressions for seed ingress and publication.
 
-`docs/contracts/qa-corpus.md` QAC-01 and the framing in
+`docs/contracts/qa-corpus.md` QAC-01 and QAC-04 and the framing in
 `fuzz/fuzz_targets/p2p_message.rs` require a selector followed by the payload,
 which may be empty. `crates/p2p/src/compat.rs` owns selector order; comments
 are not inventory entries. AGENTS.md's data-preservation rule applies to
@@ -54,6 +54,14 @@ class SeedBoundaryTests(unittest.TestCase):
         # Only two live entries exist; ping is independently the second entry.
         self.assertEqual([path.read_bytes() for path in self.output.iterdir()],
                          [b"\x01payload"])
+
+    def test_raw_strings_before_commands_do_not_stop_inventory_scan(self):
+        self.inventory.write_text('''const NOTE: &str = r#""/*"#;
+    pub const COMMANDS: &[Command] = &[Command { name: "ping" }];
+''')
+        self.write_message("ping", b"payload")
+        self.map_p2p()
+        self.assertEqual([path.read_bytes() for path in self.output.iterdir()], [b"\0payload"])
 
     def test_header_only_command_becomes_a_selector_only_seed(self):
         self.inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "verack" }];')
@@ -137,6 +145,7 @@ class SeedBoundaryTests(unittest.TestCase):
             mapper._publish(self.output, "seed", b"public corpus bytes")
         finally:
             os.umask(previous_umask)
+        # QAC-04 requires repository-readable mode for published corpus seeds.
         self.assertEqual(stat.S_IMODE((self.output / "seed").stat().st_mode), 0o644)
 
     def test_failed_seed_mode_change_preserves_previous_bytes(self):
