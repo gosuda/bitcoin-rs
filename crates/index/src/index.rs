@@ -155,16 +155,23 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
+
 const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
+
 /// Format 3 stores Spending keys without positions. This build still
 /// understands those rows (resolvers fall back to a full block) and upgrades
 /// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
 const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
+
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
+
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
+
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
+
 /// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
+
 /// Permanent versioned capability-reset state (`0x00, b'R'`). Absent only
 /// before the first reset; afterwards the key always exists, either as
 /// `Idle = [0xFF, version(u64 LE)]` (9 bytes) or as a claim
@@ -177,17 +184,23 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
 /// across repeated resets.
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
+
 /// Consumer cursor slot (`0x00, b'C'`). Opaque bytes owned by the node-side
 /// reconciliation consumer; data row keys begin with ASCII letters only and
 /// can never collide with the reserved `0x00` prefix.
 const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
+
 const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
+
 const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
     max_rows: 1_000,
     max_bytes: 256 * 1024,
 };
+
 const RESET_IDLE_TAG: u8 = 0xFF;
+
 const RESET_IDLE_LEN: usize = 1 + size_of::<u64>();
+
 const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
 
 /// Decoded durable capability-reset state.
@@ -2930,6 +2943,16 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Commits one serialized block through the prepared-write owner.
     ///
+    /// The successful return is the commit point: all prepared rows and the
+    /// watermark become durable together under the store's atomic-write
+    /// guarantee. A crash before that point leaves the previous watermark and
+    /// rows; a crash after it leaves both the rows and watermark. A failed
+    /// call is therefore ambiguous to the caller: do not retry blindly or
+    /// write column families directly. The supervised index worker owns
+    /// retry-from-the-last-confirmed-watermark, or reset and rebuild when
+    /// the persisted state cannot be established; storage failures are
+    /// non-retriable after the worker is marked failed.
+    ///
     /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
     /// [`PreparedBatch`] to bound multi-block writes. This is the same owner
     /// for a single block: tests and benches must not grow a second ingest path.
@@ -3138,6 +3161,20 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Atomically rolls back one block with the exact scripts of its spent
     /// coins. This is the anchored variant used when `ScriptLive` is selected.
+    ///
+    /// The commit point is the successful return from the durable conditional
+    /// store write. Until then, no rollback rows, selected watermark, cursor,
+    /// or ordinary revision is committed; after it, they are committed as one
+    /// batch. Consequently, crash recovery sees either the prior state or the
+    /// complete rollback state, never a partially applied rollback.
+    ///
+    /// Preparation and fence checks are deterministic failures and should be
+    /// corrected rather than retried unchanged. Storage failures are returned
+    /// without claiming whether the write reached the backend; the caller owns
+    /// recovery, and must reacquire a fence and reconcile the stored watermark
+    /// and cursor before retrying or compensating. A successful return is the
+    /// durability guarantee; an error must not be treated as proof of rollback.
+    ///
     /// Same fenced batch as [`Self::commit_forward`]. See `IDX-06` / `IDX-07`
     /// in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
