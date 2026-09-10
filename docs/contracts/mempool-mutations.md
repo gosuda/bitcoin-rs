@@ -59,6 +59,16 @@ state (`crates/mempool/src/orphan.rs`).
   the mempool read lock (`crates/node/src/mining.rs`); `node` attaches that
   mining observer at gateway construction and the ZMQ sequence observer as
   an extra named leg on the gateway's `CompositeObserver`.
+- Local RPC/reorg transaction relay is qualified by the accepted mempool
+  admission identified by that change's sequence. A delayed callback may
+  relay only while that admission remains resident. Removal and
+  re-admission retire the older callback even when the txid, wtxid, or
+  transaction allocation is identical. Unrelated mempool mutations and fee
+  prioritisation do not retire the admission. The observer resolves
+  admission identity and wtxid under one pool read guard, releases it before
+  relay enqueue, and remains a best-effort mirror: removal may still
+  overtake an announcement already queued. Sequence rollover follows
+  `MPL-02`; this clause does not create a second identity counter.
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 
@@ -191,6 +201,10 @@ state (`crates/mempool/src/orphan.rs`).
 
 ## Proven by
 
+- `crates/p2p/src/tx_relay.rs` (inline tests):
+  `delayed_local_relay_does_not_adopt_a_reinserted_body`,
+  `delayed_local_relay_survives_unrelated_mutations`,
+  `local_replacement_relay_uses_the_accepted_change_sequence`.
 - `crates/mempool/src/gateway.rs` (inline tests):
   `input_structure_checks_follow_generation_and_sequence_guards`,
   `input_structure_nonstandard_transactions_keep_policy_precedence`,

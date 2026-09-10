@@ -948,6 +948,7 @@ mod tests {
         }
     }
 
+    // MPL-01: unrelated commits do not retire a resident local admission.
     #[test]
     fn delayed_local_relay_survives_unrelated_mutations() {
         let original = relay_identity_tx();
@@ -971,6 +972,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    // MPL-01: relay keys the Accepted change, not the batch base or removal.
     #[test]
     fn local_replacement_relay_uses_the_accepted_change_sequence() {
         use bitcoin_rs_mempool::{MempoolEntry, ReplacementCandidate};
