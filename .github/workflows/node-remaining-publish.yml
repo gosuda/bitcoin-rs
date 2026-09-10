@@ -3,7 +3,9 @@ on:
   push:
     branches: [automation/node-remaining-publish-20260910]
     paths:
-      - '.github/node-publish/**'
+      - '.github/node-publish/*.receipt'
+      - '.github/node-publish/*.json'
+      - '.github/node-publish/*.py'
       - '.github/workflows/node-remaining-publish.yml'
 permissions:
   contents: read
@@ -21,5 +23,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+      - name: Verify complete source-manifest transfers
+        run: python3 .github/node-publish/decode.py
       - name: Reconstruct checked trees and push new source-only branches
         run: python3 .github/node-publish/publish.py
