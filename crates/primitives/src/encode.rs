@@ -51,7 +51,11 @@ pub fn double_sha256(bytes: &[u8]) -> Hash256 {
 }
 
 /// Finishes a streamed double-SHA256 over everything written to the engine.
-pub(crate) fn finalize_double_sha256(engine: Sha256) -> Hash256 {
+///
+/// This is the canonical finalization path for callers that build a hash from
+/// borrowed or otherwise incrementally available byte ranges.
+#[must_use]
+pub fn finalize_double_sha256(engine: Sha256) -> Hash256 {
     let first = engine.finalize();
     let second = Sha256::digest(first);
     let bytes: [u8; 32] = second.into();

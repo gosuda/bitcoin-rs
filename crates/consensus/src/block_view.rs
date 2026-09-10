@@ -5,7 +5,7 @@
 
 use bitcoin_rs_primitives::{
     Hash256, Tx, TxOut, Txid, Wtxid,
-    encode::double_sha256,
+    encode::{double_sha256, finalize_double_sha256},
     layout::{ByteSpan, ParsedBlock, ParsedTransaction},
 };
 
@@ -336,9 +336,8 @@ fn txid_and_base_size(tx: &ParsedTransaction<'_>) -> (Txid, u64) {
     engine.update(version);
     engine.update(body);
     engine.update(lock_time);
-    let digest: [u8; 32] = Sha256::digest(engine.finalize()).into();
     let base_size = len_u64(version.len()) + len_u64(body.len()) + len_u64(lock_time.len());
-    (Txid(Hash256::from_le_bytes(&digest)), base_size)
+    (Txid(finalize_double_sha256(engine)), base_size)
 }
 
 fn wtxid_from_span(tx: &ParsedTransaction<'_>) -> Wtxid {
