@@ -1,0 +1,60 @@
+name: node-breaking-sync-workbench
+
+on:
+  push:
+    branches: [automation/node-breaking-sync-workbench-20260910]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: node-breaking-sync-workbench
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  BASE_SHA: 135d2e54d8d3630a609db6d5cc25045a59c966e1
+  TARGET_BRANCH: refactor/node-break-sync-staging
+
+jobs:
+  transform-validate-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Apply ownership cut
+        run: python3 scripts/node-breaking-sync.py
+      - name: Format
+        run: cargo fmt --all
+      - name: P2P and node Clippy
+        run: cargo clippy --locked -p bitcoin-rs-p2p -p bitcoin-rs-node --no-default-features --features bitcoin-rs-node/fjall,bitcoin-rs-node/zmq --all-targets -- -D warnings
+      - name: P2P tests
+        run: cargo test --locked -p bitcoin-rs-p2p --lib
+      - name: Node sync tests
+        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- sync::
+      - name: Ownership gate
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
+      - name: Publish clean validated commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f scripts/node-breaking-sync.py .github/workflows/node-breaking-sync-workbench.yml
+          git add -A
+          if git diff --cached --name-only | grep -Ev '^(crates/node/|crates/p2p/|docs/|CONCEPTS.md$)' ; then
+            echo 'unexpected changed path' >&2
+            exit 1
+          fi
+          tree=$(git write-tree)
+          commit=$(printf '%s\n\n%s\n' \
+            'refactor(sync): move block staging to p2p ownership' \
+            'Break the node-local sync::stage path. P2P now owns BlockStager and its budget/eviction/apply-prefix policy beside DownloadWindow; node BlockSync only drives that owner. No compatibility module or node-side alias remains.' \
+            | git commit-tree "$tree" -p "$BASE_SHA")
+          git push origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "published_commit=$commit" >> "$GITHUB_STEP_SUMMARY"
