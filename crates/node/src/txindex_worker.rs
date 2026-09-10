@@ -17,11 +17,13 @@
 //! A snapshot-gated query engine serves `bitcoin_rs_rpc::context::TxIndexQuery`
 //! and the generic [`ScriptIndexQuery`] without raw index mutex paths.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
 use bitcoin_rs_index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
@@ -46,6 +48,15 @@ use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 
 use crate::apply::{PruneBodyReader, PruneBodyStore};
+
+mod heartbeat;
+mod namespace;
+mod query_adapter;
+mod scheduling;
+
+use heartbeat::Heartbeat;
+use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
+use scheduling::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -304,15 +315,6 @@ impl TxIndexRuntime {
     }
 }
 
-// ---------------------------------------------------------------------------
-// A1: lifecycle snapshot, stable query adapter, namespace registry, heartbeat
-// ---------------------------------------------------------------------------
-
-use hashbrown::HashMap;
-use std::path::{Path, PathBuf};
-
-use arc_swap::ArcSwap;
-
 /// Monotonic publication token. Each worker holds one; a revoked token makes
 /// `rcu` publication a no-op so a late worker cannot publish after abandonment.
 #[derive(Clone, Debug)]
@@ -398,180 +400,6 @@ impl TxIndexQueryAdapter {
             None => Err(TxQueryError::Unavailable(
                 snapshot.unavailable_reason().into(),
             )),
-        }
-    }
-}
-
-impl TxIndexQuery for TxIndexQueryAdapter {
-    fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.transaction(txid)
-    }
-
-    fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.outpoint_value(outpoint)
-    }
-
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.transaction_height(txid)
-    }
-
-    fn index_info(&self) -> Result<TxIndexInfo, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.index_info()
-    }
-}
-
-impl ScriptIndexQuery for TxIndexQueryAdapter {
-    fn history_snapshot(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.history_snapshot(scripthash)
-    }
-
-    fn unspent_outputs(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.unspent_outputs(scripthash)
-    }
-
-    fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.spender(outpoint)
-    }
-}
-
-/// Process-global namespace ownership state.
-#[derive(Debug)]
-enum NamespaceEntry {
-    /// An active open owns this namespace.
-    Active(u64),
-    /// An abandoned open poisoned this namespace permanently.
-    Poisoned,
-}
-
-/// Process-global, process-lifetime namespace map. The key is the canonical
-/// data root joined with one validated fixed child component.
-pub(crate) struct NamespaceRegistry {
-    entries: parking_lot::Mutex<HashMap<PathBuf, NamespaceEntry>>,
-}
-
-impl NamespaceRegistry {
-    pub(crate) fn new() -> Self {
-        Self {
-            entries: parking_lot::Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// Validates the child component: exactly the fixed name, no separator, not
-    /// `.` or `..`, not absolute. Does not canonicalize the child.
-    fn validate_child(root: &Path, child: &str) -> Result<PathBuf, String> {
-        if child.is_empty() {
-            return Err("namespace child is empty".to_owned());
-        }
-        if child.contains(std::path::MAIN_SEPARATOR) {
-            return Err(format!("namespace child {child} contains a path separator"));
-        }
-        if child == "." || child == ".." {
-            return Err(format!("namespace child {child} is a path traversal"));
-        }
-        if Path::new(child).is_absolute() {
-            return Err(format!("namespace child {child} is absolute"));
-        }
-        Ok(root.join(child))
-    }
-
-    /// Atomically claims `Active(owner)` for the key. Rejects an existing
-    /// `Active` or `Poisoned` entry without touching the store.
-    fn claim(&self, key: PathBuf, owner: u64) -> bool {
-        let mut entries = self.entries.lock();
-        match entries.get(&key) {
-            None => {
-                entries.insert(key, NamespaceEntry::Active(owner));
-                true
-            }
-            Some(NamespaceEntry::Active(_) | NamespaceEntry::Poisoned) => false,
-        }
-    }
-
-    /// Releases `Active(owner)` only if the map still contains the same owner.
-    /// Does nothing if the entry was already changed (e.g. poisoned).
-    fn release(&self, key: &Path, owner: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(NamespaceEntry::Active(current)) = entries.get(key) {
-            if *current == owner {
-                entries.remove(key);
-            }
-        }
-    }
-
-    /// Poisons the namespace only if the entry is `Active(owner)`. Used for
-    /// abandoned opens only.
-    fn poison(&self, key: &Path, owner: u64) {
-        let mut entries = self.entries.lock();
-        if let Some(NamespaceEntry::Active(current)) = entries.get(key) {
-            if *current == owner {
-                entries.insert(key.to_path_buf(), NamespaceEntry::Poisoned);
-            }
-        }
-    }
-
-    /// Returns true if the namespace is poisoned.
-    fn is_poisoned(&self, key: &Path) -> bool {
-        matches!(self.entries.lock().get(key), Some(NamespaceEntry::Poisoned))
-    }
-}
-
-/// One shared process-global namespace registry for all index workers.
-pub(crate) static NAMESPACE_REGISTRY: std::sync::LazyLock<NamespaceRegistry> =
-    std::sync::LazyLock::new(NamespaceRegistry::new);
-
-/// Heartbeat helper: emits a log line every 30 seconds while the worker's
-/// backend open is blocked. Observability only — not a timeout.
-struct Heartbeat {
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl Heartbeat {
-    fn start(capability: &'static str, namespace: String, backend: String) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_clone = Arc::clone(&stop);
-        let start = Instant::now();
-        let handle = thread::Builder::new()
-            .name(format!("bitcoin-rs-{capability}-heartbeat"))
-            .spawn(move || {
-                while !stop_clone.load(Ordering::Acquire) {
-                    let elapsed = start.elapsed();
-                    tracing::info!(
-                        capability,
-                        namespace = %namespace,
-                        backend = %backend,
-                        elapsed_secs = elapsed.as_secs(),
-                        "index store recovery in progress"
-                    );
-                    for _ in 0..300 {
-                        if stop_clone.load(Ordering::Acquire) {
-                            return;
-                        }
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                }
-            })
-            .ok();
-        Self { stop, handle }
-    }
-
-    fn stop_and_join(mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
         }
     }
 }
@@ -1520,62 +1348,6 @@ fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<Strin
         names.push("script_live");
     }
     (!names.is_empty()).then(|| names.join(","))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BatchWait {
-    Woken,
-    Deadline,
-    Stopped,
-}
-
-fn wait_for_revision_quiet(
-    runtime: &TxIndexRuntime,
-    wake_rx: &Receiver<()>,
-    quiet_period: Duration,
-    mut seen_revision: u64,
-) -> Option<u64> {
-    loop {
-        if runtime.should_stop() {
-            return None;
-        }
-        match wake_rx.recv_timeout(quiet_period) {
-            Ok(()) => seen_revision = runtime.revision(),
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                let current = runtime.revision();
-                if current == seen_revision {
-                    return Some(current);
-                }
-                seen_revision = current;
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
-        }
-    }
-}
-/// Waits for a wake hint or the pending batch's original deadline.
-fn wait_for_batch_deadline(
-    runtime: &TxIndexRuntime,
-    wake_rx: &Receiver<()>,
-    deadline: Instant,
-) -> BatchWait {
-    if runtime.should_stop() {
-        return BatchWait::Stopped;
-    }
-    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-        return BatchWait::Deadline;
-    };
-    if remaining.is_zero() {
-        return BatchWait::Deadline;
-    }
-    match wake_rx.recv_timeout(remaining) {
-        Ok(()) if runtime.should_stop() => BatchWait::Stopped,
-        Ok(()) => BatchWait::Woken,
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) if runtime.should_stop() => {
-            BatchWait::Stopped
-        }
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
-        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
-    }
 }
 
 /// Identity of one block on the active chain, captured under a short tree lock.
