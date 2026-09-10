@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
 use parking_lot::RwLock;
@@ -809,7 +809,7 @@ fn find_record(table: &ShardTable, key: UtxoKey, txid: Hash256) -> Option<&UtxoR
 fn payload_parts<'a>(payload: &BuildPayload<'a>) -> OutputParts<'a> {
     OutputParts::new(
         payload.vout,
-        payload.txout.value,
+        payload.txout.value.to_sat(),
         payload.txout.script_pubkey.as_slice(),
         payload.coinbase,
         payload.height,
@@ -969,8 +969,8 @@ fn flush_inserted_coins(
 
 fn txout_from_parts(value: u64, script: &[u8]) -> TxOut {
     TxOut {
-        value,
-        script_pubkey: script.to_vec(),
+        value: Amount::from_sat(value),
+        script_pubkey: Script::from_bytes(script.to_vec()),
     }
 }
 

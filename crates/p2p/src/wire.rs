@@ -356,14 +356,14 @@ pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
 pub fn encode_payload(message: &Message) -> Result<Vec<u8>, PeerError> {
     let mut payload = Vec::new();
     match message {
-        Message::Tx(tx) => tx.consensus_encode(&mut payload)?,
-        Message::Block(block) => block.consensus_encode(&mut payload)?,
+        Message::Tx(tx) => tx.consensus_encode(&mut payload),
+        Message::Block(block) => block.consensus_encode(&mut payload),
         Message::Headers(headers) => {
             let count = u64::try_from(headers.len())
                 .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
             encode_varint(&mut payload, count);
             for header in headers {
-                header.consensus_encode(&mut payload)?;
+                header.consensus_encode(&mut payload);
                 payload.push(0);
             }
         }

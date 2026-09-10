@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    deserialize,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::RocksDbStore;
 use bitcoin_rs_storage::block_file::{BlockFilePosition, FlatFileBlockStore};
@@ -118,24 +118,24 @@ fn filler_tx(seed: u64) -> Tx {
     fill_bytes(seed, &mut txid_bytes);
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
                 vout: u32::try_from(seed & 0x3).unwrap_or(0),
             },
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![
             TxOut {
-                value: 5_000,
-                script_pubkey: witness_script(seed ^ 0xa5a5_a5a5),
+                value: Amount::from_sat(5_000),
+                script_pubkey: witness_script(seed ^ 0xa5a5_a5a5).into(),
             },
             TxOut {
-                value: 7_000,
-                script_pubkey: witness_script(seed ^ 0x5a5a_5a5a),
+                value: Amount::from_sat(7_000),
+                script_pubkey: witness_script(seed ^ 0x5a5a_5a5a).into(),
             },
         ],
     }
@@ -151,19 +151,19 @@ fn target_tx(height: u32, target_script: &[u8]) -> Tx {
     );
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
                 vout: 0,
             },
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 11_000,
-            script_pubkey: target_script.to_vec(),
+            value: Amount::from_sat(11_000),
+            script_pubkey: target_script.to_vec().into(),
         }],
     }
 }
@@ -174,7 +174,7 @@ fn empty_header() -> Header {
         prev_blockhash: BlockHash::default(),
         merkle_root: Hash256::default(),
         time: 0,
-        bits: 0,
+        bits: CompactTarget::from_consensus(0),
         nonce: 0,
     }
 }

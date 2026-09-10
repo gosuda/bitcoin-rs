@@ -13,8 +13,8 @@ use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
-    Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    deserialize as native_deserialize,
+    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
 };
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::{
@@ -162,15 +162,17 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
                 previous_output: null_prevout(),
                 // BIP34 height push plus one pad byte: consensus requires a
                 // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-                script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
+                    .concat()
+                    .into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: REGTEST_SUBSIDY_SATS,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+                script_pubkey: vec![0x51].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let mut block = Block {
             header: bitcoin_rs_primitives::Header {
@@ -178,7 +180,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
                 prev_blockhash: bitcoin_rs_primitives::BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
                 time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-                bits: REGTEST_BITS,
+                bits: CompactTarget::from_consensus(REGTEST_BITS),
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -215,7 +217,8 @@ fn grind_pow(block: &mut Block) -> Result<()> {
 
 /// Returns true when the header hash, read as a little-endian integer, meets
 /// the compact bits target (Core `CheckProofOfWork` shape).
-fn pow_is_met(bits: u32, hash: &Hash256) -> bool {
+fn pow_is_met(bits: CompactTarget, hash: &Hash256) -> bool {
+    let bits = bits.to_consensus();
     let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
     let mantissa = bits & 0x00ff_ffff;
     if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {
@@ -301,29 +304,29 @@ fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
             previous_output: null_prevout(),
             // Must mirror the height-1 seed coinbase exactly (txid anchors
             // the mempool spend).
-            script_sig: [script_push_int(1), script_push_int(0)].concat(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: [script_push_int(1), script_push_int(0)].concat().into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
     Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS - fee_sats,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - fee_sats),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -341,15 +344,17 @@ fn mine_regtest_block(
             previous_output: null_prevout(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
+                .concat()
+                .into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
     let mut block = Block {
         header: bitcoin_rs_primitives::Header {
@@ -357,7 +362,7 @@ fn mine_regtest_block(
             prev_blockhash: bitcoin_rs_primitives::BlockHash::from(prev),
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-            bits: REGTEST_BITS,
+            bits: CompactTarget::from_consensus(REGTEST_BITS),
             nonce: 0,
         },
         txs: std::iter::once(coinbase).chain(txs).collect(),
@@ -433,21 +438,21 @@ fn assemble_block(
         inputs: vec![TxIn {
             previous_output: null_prevout(),
             // BIP34: the coinbase scriptSig begins with the serialized height.
-            script_sig: script_push_int(i64::from(height)),
-            sequence: 0xffff_ffff,
-            witness: vec![WITNESS_RESERVED.to_vec()],
+            script_sig: script_push_int(i64::from(height)).into(),
+            sequence: Sequence::MAX,
+            witness: vec![WITNESS_RESERVED.to_vec()].into(),
         }],
         outputs: vec![
             TxOut {
-                value: coinbase_value,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(coinbase_value),
+                script_pubkey: vec![0x51].into(),
             },
             TxOut {
-                value: 0,
-                script_pubkey: commitment_script,
+                value: Amount::from_sat(0),
+                script_pubkey: commitment_script.into(),
             },
         ],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
 
     let mut block_txs = Vec::with_capacity(txs.len() + 1);
@@ -462,7 +467,7 @@ fn assemble_block(
                 .map_err(|err| anyhow::anyhow!("invalid previousblockhash: {err}"))?,
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: curtime,
-            bits,
+            bits: CompactTarget::from_consensus(bits),
             nonce: 0,
         },
         txs: block_txs,
@@ -590,15 +595,15 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
     let child_txid = child.txid();
 
@@ -701,15 +706,15 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
     let child_txid = child.txid();
 
@@ -751,15 +756,15 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS - 1 - 5_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 1 - 5_000),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;

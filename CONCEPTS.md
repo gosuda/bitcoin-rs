@@ -128,9 +128,12 @@ retained Criterion benchmark targets are compiled in the `bench-smoke` CI lane
 
 ### Native protocol primitives
 The owned Bitcoin protocol vocabulary in `crates/primitives`: `Tx`, `Block`,
-`Header`, `OutPoint`, hashes, sighash, compact-size encoding, and network
+`Header`, `OutPoint`, `Amount`, `Sequence`, `LockTime`, `CompactTarget`,
+`Script`, `Witness`, hashes, sighash, compact-size encoding, and network
 constants. These types are implemented here; they are not `rust-bitcoin`
-aliases, wrappers, or conversion shims. Durable tests pin Core vectors,
+aliases, wrappers, or conversion shims. Field types on `Tx`/`Header` are the
+same native newtypes — satoshis, nBits, scripts, and locktime are not raw
+integers at the protocol boundary. Durable tests pin Core vectors,
 published genesis hashes, and golden fixtures. RPC address/`asm` rendering
 may still use `rust-bitcoin` at the RPC boundary only.
 

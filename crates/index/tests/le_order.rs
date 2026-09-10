@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 
 use common::MemoryStore;
@@ -35,7 +36,7 @@ fn header() -> Header {
         prev_blockhash: BlockHash::default(),
         merkle_root: Hash256::default(),
         time: 0,
-        bits: 0,
+        bits: CompactTarget::from_consensus(0),
         nonce: 0,
     }
 }
@@ -43,16 +44,16 @@ fn header() -> Header {
 fn tx_with_script(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output,
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 5_000,
-            script_pubkey,
+            value: Amount::from_sat(5_000),
+            script_pubkey: script_pubkey.into(),
         }],
     }
 }

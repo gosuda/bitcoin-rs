@@ -5,8 +5,11 @@ use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver, MutationResult};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
+    Block, BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, Script};
 use compact_str::CompactString;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1121,7 +1124,7 @@ impl Context {
     /// changing the repeated 256 scaling into an equivalent exponentiation can
     /// change the final floating-point bit.
     #[must_use]
-    pub fn difficulty_for_bits(&self, bits: u32) -> f64 {
+    pub fn difficulty_for_bits(&self, bits: CompactTarget) -> f64 {
         bitcoin_rs_mining::difficulty_for_bits(bits)
     }
 
@@ -1744,8 +1747,8 @@ mod tests {
         let ctx = Context::new();
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[1_u8; 32])), 0);
         let txout = TxOut {
-            value: 125_000,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(125_000),
+            script_pubkey: Script::new(),
         };
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(outpoint, txout, true, 7));
@@ -1954,7 +1957,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_000_000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 7,
         };
         let hash = {
@@ -1998,7 +2001,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -2007,7 +2010,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_000_900,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             child.nonce = 1;
@@ -2051,7 +2054,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -2060,7 +2063,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_000_900,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 1,
             };
             let applied_id = tree.insert_node(Some(genesis_id), applied, NodeStatus::Active)?;
@@ -2074,7 +2077,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_000_901,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
             };
             let fork_id = tree.insert_node(Some(genesis_id), fork, NodeStatus::HeaderValid)?;
@@ -2083,7 +2086,7 @@ mod tests {
                 prev_blockhash: fork.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_001_800,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 3,
             };
             let header_tip_id =

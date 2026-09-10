@@ -241,7 +241,7 @@ fn decode_payload(payload: &[u8]) -> Result<JournalRecord, JournalRecordError> {
 fn put_coin(out: &mut Vec<u8>, coin: &Coin) {
     out.extend_from_slice(coin.outpoint.txid.as_bytes());
     put_u32(out, coin.outpoint.vout);
-    let _ = coin.txout.consensus_encode(out);
+    coin.txout.consensus_encode(out);
     put_u32(out, coin.height);
     out.push(u8::from(coin.coinbase));
 }
@@ -365,15 +365,15 @@ mod tests {
     use super::{
         BlockMeta, Coin, JournalRecord, JournalRecordError, Mutation, decode_record, encode_record,
     };
-    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
     use proptest::prelude::*;
 
     fn coin(seed: u8, height: u32, coinbase: bool) -> Coin {
         Coin {
             outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), u32::from(seed)),
             txout: TxOut {
-                value: u64::from(seed) * 1_000,
-                script_pubkey: vec![0x51, seed],
+                value: Amount::from_sat(u64::from(seed) * 1_000),
+                script_pubkey: vec![0x51, seed].into(),
             },
             height,
             coinbase,
@@ -485,8 +485,8 @@ mod tests {
             |(seed, height, coinbase, script_len)| Coin {
                 outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), u32::from(seed)),
                 txout: TxOut {
-                    value: u64::from(seed),
-                    script_pubkey: vec![seed; script_len],
+                    value: Amount::from_sat(u64::from(seed)),
+                    script_pubkey: vec![seed; script_len].into(),
                 },
                 height,
                 coinbase,

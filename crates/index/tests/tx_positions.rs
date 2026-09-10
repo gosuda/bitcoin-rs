@@ -14,8 +14,8 @@ use std::sync::Arc;
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{Indexer, ScriptHash};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    deserialize,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use proptest::prelude::*;
@@ -30,7 +30,7 @@ fn header() -> Header {
         prev_blockhash: BlockHash::default(),
         merkle_root: Hash256::default(),
         time: 7,
-        bits: 0,
+        bits: CompactTarget::from_consensus(0),
         nonce: 42,
     }
 }
@@ -44,14 +44,14 @@ fn script(tag: u8) -> Vec<u8> {
 fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&[seed; 32])),
                 vout: u32::from(seed),
             },
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
             // A segwit transaction serializes with a marker, a flag and a
             // witness. If `total_size()` and the zero-copy measurement disagree
             // anywhere, it is here.
@@ -59,7 +59,8 @@ fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
                 vec![vec![0xab; 71], vec![0xcd; 33]]
             } else {
                 Vec::new()
-            },
+            }
+            .into(),
         }],
         outputs,
     }
@@ -67,8 +68,8 @@ fn tx(seed: u8, outputs: Vec<TxOut>, witness: bool) -> Tx {
 
 fn out(script_pubkey: Vec<u8>, sats: u64) -> TxOut {
     TxOut {
-        value: sats,
-        script_pubkey,
+        value: Amount::from_sat(sats),
+        script_pubkey: script_pubkey.into(),
     }
 }
 

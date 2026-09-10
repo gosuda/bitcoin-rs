@@ -18,9 +18,10 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MutationResult,
 };
 use bitcoin_rs_primitives::{
-    Block as NativeBlock, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    deserialize as native_deserialize,
+    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
 };
+
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
@@ -217,7 +218,7 @@ fn txout_typed(
     typed_to_sonic(&v31::GetTxOut {
         best_block: ctx.best_hash().to_string(),
         confirmations,
-        value: sat_to_btc(output.value),
+        value: sat_to_btc(output.value.to_sat()),
         script_pubkey: convert::script_pub_key_typed(&output.script_pubkey, ctx.chain_network)?,
         coinbase,
     })
@@ -693,9 +694,9 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         };
         tx_inputs.push(TxIn {
             previous_output: OutPoint::new(txid, vout),
-            script_sig: Vec::new(),
-            sequence,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(sequence),
+            witness: Witness::new(),
         });
     }
 
@@ -711,8 +712,8 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             let mut script = vec![opcode::OP_RETURN];
             script.extend_from_slice(&push_data(&data));
             tx_outputs.push(TxOut {
-                value: 0,
-                script_pubkey: script,
+                value: Amount::from_sat(0),
+                script_pubkey: script.into(),
             });
             continue;
         }
@@ -722,14 +723,14 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             .require_network(network)
             .map_err(|_| RpcError::InvalidParams("invalid Bitcoin address"))?;
         tx_outputs.push(TxOut {
-            value: parse_btc_amount(value)?,
-            script_pubkey: address.script_pubkey().as_bytes().to_vec(),
+            value: Amount::from_sat(parse_btc_amount(value)?),
+            script_pubkey: address.script_pubkey().as_bytes().to_vec().into(),
         });
     }
 
     let tx = Tx {
         version: 2,
-        lock_time: locktime,
+        lock_time: LockTime::from_consensus(locktime),
         inputs: tx_inputs,
         outputs: tx_outputs,
     };
@@ -886,22 +887,21 @@ fn resolve_full_context(
             continue;
         }
         if let Some(output) = mempool_prevouts.get(&input.previous_output) {
-            input_value = input_value.saturating_add(output.value);
+            input_value = input_value.saturating_add(output.value.to_sat());
             prevouts.push((input.previous_output, output.clone()));
             continue;
         }
         if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-            input_value = input_value.saturating_add(live.txout.value);
+            input_value = input_value.saturating_add(live.txout.value.to_sat());
             prevouts.push((input.previous_output, live.txout.clone()));
             continue;
         }
         missing_inputs = true;
     }
 
-    let output_value = tx
-        .outputs
-        .iter()
-        .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+    let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
+        sum.saturating_add(output.value.to_sat())
+    });
     let fee = input_value.saturating_sub(output_value);
     let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
     let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
@@ -941,8 +941,8 @@ fn package_contexts(
                 prevouts.push((
                     input.previous_output,
                     TxOut {
-                        value: *value,
-                        script_pubkey: Vec::new(),
+                        value: Amount::from_sat(*value),
+                        script_pubkey: Script::new(),
                     },
                 ));
                 continue;
@@ -951,22 +951,21 @@ fn package_contexts(
                 && let Ok(vout) = usize::try_from(input.previous_output.vout)
                 && let Some(output) = parent.outputs.get(vout)
             {
-                input_value = input_value.saturating_add(output.value);
+                input_value = input_value.saturating_add(output.value.to_sat());
                 prevouts.push((input.previous_output, output.clone()));
                 continue;
             }
             if let Some(live) = ctx.utxo.get_entry(&input.previous_output) {
-                input_value = input_value.saturating_add(live.txout.value);
+                input_value = input_value.saturating_add(live.txout.value.to_sat());
                 prevouts.push((input.previous_output, live.txout.clone()));
                 continue;
             }
             missing_inputs = true;
         }
 
-        let output_value = tx
-            .outputs
-            .iter()
-            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
+            sum.saturating_add(output.value.to_sat())
+        });
         let fee = input_value.saturating_sub(output_value);
         let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
         let sigop_cost = u32::try_from(total_sigop_cost(tx, &prevouts)).unwrap_or(u32::MAX);
@@ -981,7 +980,7 @@ fn package_contexts(
         let txid = tx.txid();
         for (vout, output) in tx.outputs.iter().enumerate() {
             let vout = u32::try_from(vout).unwrap_or(u32::MAX);
-            package_outputs.insert((txid, vout), output.value);
+            package_outputs.insert((txid, vout), output.value.to_sat());
         }
     }
 
@@ -1225,8 +1224,8 @@ mod tests {
         AdmissionOrigin, MempoolEntry, arm_admission_park, reset_admission_park,
     };
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-        encode::double_sha256,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
     };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -1246,16 +1245,16 @@ mod tests {
     fn fixture_genesis() -> Block {
         let coinbase = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x51; 4],
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: vec![0x51; 4].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let mut block = Block {
@@ -1264,7 +1263,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -1661,7 +1660,7 @@ mod tests {
     fn distinct_block(marker: u8) -> Block {
         let mut block = fixture_genesis();
         if let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) {
-            input.script_sig = vec![marker; 4];
+            input.script_sig = vec![marker; 4].into();
         }
         block.header.merkle_root = merkle_root_for(&block.txs);
         block
@@ -1675,16 +1674,16 @@ mod tests {
         // MerkleBlock seam, whose decoder rejects input-less transactions.
         let extra = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000 + u64::from(marker),
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000 + u64::from(marker)),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         block.txs.push(extra);
@@ -2214,8 +2213,8 @@ mod tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
             TxOut {
-                value,
-                script_pubkey: retry_spendable_script(),
+                value: Amount::from_sat(value),
+                script_pubkey: retry_spendable_script().into(),
             },
             false,
             1,
@@ -2230,16 +2229,16 @@ mod tests {
     fn retry_tx(prevout: OutPoint, output_value: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prevout,
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: vec![vec![0x51]],
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: vec![vec![0x51]].into(),
             }],
             outputs: vec![TxOut {
-                value: output_value,
-                script_pubkey: retry_spendable_script(),
+                value: Amount::from_sat(output_value),
+                script_pubkey: retry_spendable_script().into(),
             }],
         }
     }
@@ -2373,11 +2372,11 @@ mod gettxout_via_utxo_tests {
         let ctx = Arc::new(Context::new());
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let txid = ctx.add_transaction(tx);
@@ -2398,7 +2397,8 @@ mod acceptance_tests {
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
     use bitcoin_rs_primitives::{
-        BlockHash, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+        Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+        TxOut, Txid, Witness, consensus_bytes,
     };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -2421,8 +2421,8 @@ mod acceptance_tests {
         changes.add(UtxoAdd::new(
             internal_outpoint(tag),
             TxOut {
-                value,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(value),
+                script_pubkey: vec![0x51].into(),
             },
             false,
             7,
@@ -2435,15 +2435,15 @@ mod acceptance_tests {
     fn spending_tx(tag: u8, output_value: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: spent_outpoint(tag),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: output_value,
+                value: Amount::from_sat(output_value),
                 script_pubkey: {
                     let mut out = Vec::with_capacity(25);
                     out.push(0x76); // OP_DUP
@@ -2453,7 +2453,8 @@ mod acceptance_tests {
                     out.push(0x88); // OP_EQUALVERIFY
                     out.push(0xac); // OP_CHECKSIG
                     out
-                },
+                }
+                .into(),
             }],
         }
     }
@@ -2595,24 +2596,24 @@ mod acceptance_tests {
         let prev = spent_outpoint(1);
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![
                 TxIn {
                     previous_output: prev,
-                    script_sig: Vec::new(),
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 },
                 TxIn {
                     previous_output: prev,
-                    script_sig: Vec::new(),
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 },
             ],
             outputs: vec![TxOut {
-                value: 90_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(90_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
 
@@ -2660,7 +2661,7 @@ mod acceptance_tests {
         seed_utxo(&ctx, 1, 100_000);
 
         let mut original = spending_tx(1, 90_000);
-        original.inputs[0].sequence = 0xFFFF_FFFD;
+        original.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let original_hex = hex_of(&original);
         let original_txid = original.txid();
         let params = json!([original_hex]);
@@ -2833,7 +2834,7 @@ mod acceptance_tests {
                     prev_blockhash: BlockHash::from(prev_hash),
                     merkle_root: Hash256::default(),
                     time: BASE + STEP * height,
-                    bits: 0x207f_ffff,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
                     nonce: 0,
                 };
                 let id = tree
@@ -2896,8 +2897,8 @@ mod acceptance_tests {
 
         seed_utxo(&ctx, 1, 100_000);
         let mut tx = spending_tx(1, 90_000);
-        tx.lock_time = lock_time;
-        tx.inputs[0].sequence = 0xFFFF_FFFE; // non-final
+        tx.lock_time = LockTime::from_consensus(lock_time);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE); // non-final
 
         let result = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
         assert!(

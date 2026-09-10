@@ -7,8 +7,8 @@ use bitcoin_rs_index::{
     HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    encode::double_sha256,
+    Block, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, encode::double_sha256,
 };
 use bitcoin_rs_rpc::context::{BlockRecord, ScriptHistoryRecord};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
@@ -507,16 +507,16 @@ fn block_with_spending_transaction() -> Result<(Block, OutPoint, ScriptHash, Txi
     };
     block.txs.push(Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint,
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value,
-            script_pubkey: Vec::new(),
+            script_pubkey: Script::new(),
         }],
     });
     block.header.merkle_root = compute_merkle_root(&block)
@@ -838,16 +838,16 @@ fn confirmed_history_snapshot_includes_the_spending_transaction_from_legacy_empt
 
     let spend_tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint { txid, vout: 0 },
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value,
-            script_pubkey: Vec::new(),
+            script_pubkey: Script::new(),
         }],
     };
     block.txs.push(spend_tx);
@@ -1047,16 +1047,16 @@ fn confirmed_history_snapshot_retries_after_aba_on_spending_scan()
 
     let spend_tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint { txid, vout: 0 },
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value,
-            script_pubkey: Vec::new(),
+            script_pubkey: Script::new(),
         }],
     };
     block.txs.push(spend_tx);
