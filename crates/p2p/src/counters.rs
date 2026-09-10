@@ -303,9 +303,10 @@ mod tests {
         let _accepted = accepting.join();
     }
 
-    /// `write_message` uses `write_vectored`. The default `Write` impl only
-    /// forwards the first slice through `write`, which would split the
-    /// header/payload coalescing this wrapper exists to preserve.
+    /// getpeerinfo byte accounting (module header, Core CNode parity):
+    /// a vectored header+payload write counts every byte exactly once and
+    /// forwards as one inner `write_vectored` call. The default `Write` impl
+    /// would split the coalescing this wrapper exists to preserve.
     #[test]
     fn a_vectored_write_counts_every_slice_in_one_inner_call() {
         struct RecordingWriter {
