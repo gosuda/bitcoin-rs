@@ -132,7 +132,7 @@ esac''')
         Path(env["TMPDIR"]).mkdir(exist_ok=True)
         return subprocess.run(["bash", str(SCRIPT)], cwd=self.root, env=env, capture_output=True, text=True, timeout=15)
 
-    def test_success_replaces_provenance_after_cmin(self):
+    def test_qac01_success_replaces_provenance_after_cmin(self):
         result = self.run_import(); self.assertEqual(result.returncode, 0, result.stderr)
         text = self.prov.read_text(); self.assertIn(self.pin, text); self.assertIn("2000-01-01T00:00:00Z", text)
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(), ["p2p_message", "block_decode", "tx_decode", "script_eval"])
