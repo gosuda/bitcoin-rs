@@ -48,16 +48,16 @@ jobs:
           rustc --version --verbose | tee /tmp/ban-evidence/toolchain.txt
           test "$(git hash-object ../tooling/.github/prepare_manual_bans.py)" = 2a88a17fb39f9c194d6bb69af2179d4b13f5587c
           cargo fmt --all
+          git diff --binary > /tmp/ban-evidence/formatting.patch
           python3 - <<'PY'
           import subprocess
-          allowed = {'bin/bitcoin-rs/tests/gates/g20_formal_models.rs', 'crates/utxo/src/set/persistent.rs', 'crates/utxo/tests/overhaul_persistent_coins.rs'}
+          allowed = {'bin/bitcoin-rs/tests/gates/g20_formal_models.rs', 'bin/bitcoin-rs/tests/support/ownership_scan.rs', 'crates/utxo/src/set/persistent.rs', 'crates/utxo/tests/overhaul_persistent_coins.rs'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
           assert changed <= allowed, ('Unexpected formatting edits', sorted(changed))
           PY
-          git diff --binary > /tmp/ban-evidence/formatting.patch
           git diff --check
           if ! git diff --quiet; then
-            git add -- bin/bitcoin-rs/tests/gates/g20_formal_models.rs crates/utxo/src/set/persistent.rs crates/utxo/tests/overhaul_persistent_coins.rs
+            git add -- bin/bitcoin-rs/tests/gates/g20_formal_models.rs bin/bitcoin-rs/tests/support/ownership_scan.rs crates/utxo/src/set/persistent.rs crates/utxo/tests/overhaul_persistent_coins.rs
             git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'style: apply inherited rustfmt corrections'
           fi
           git rev-parse HEAD > /tmp/ban-evidence/format-head.txt
