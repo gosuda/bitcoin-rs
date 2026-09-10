@@ -52,6 +52,7 @@ pub mod shutdown;
 pub mod signal;
 /// Shared node state.
 pub mod state;
+mod storage_backend;
 /// Custody-grade data-directory storage-footprint evidence.
 pub mod storage_footprint;
 /// Block download orchestrator.

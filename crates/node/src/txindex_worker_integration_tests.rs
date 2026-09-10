@@ -26,7 +26,6 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> TxIndexOpenSpec {
         namespace: "txindex",
         storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
         cache_bytes: 8 * 1024 * 1024,
-        batch_limits: DEFAULT_BATCH_LIMITS,
         epoch,
         enabled: IndexCapabilities::default(),
         rollback_rebuild_cutover: 0,
@@ -396,7 +395,6 @@ fn async_index_open_preserves_backend() {
             bitcoin_rs_storage::StorageBackend::Fjall,
             &fjall_dir,
             8 * 1024 * 1024,
-            DEFAULT_BATCH_LIMITS,
             1,
             Duration::ZERO,
         );
@@ -415,7 +413,6 @@ fn async_index_open_preserves_backend() {
             bitcoin_rs_storage::StorageBackend::Redb,
             &redb_dir,
             8 * 1024 * 1024,
-            REDB_BATCH_LIMITS,
             1,
             Duration::ZERO,
         );
@@ -434,7 +431,6 @@ fn async_index_open_preserves_backend() {
             bitcoin_rs_storage::StorageBackend::RocksDb,
             &rocks_dir,
             8 * 1024 * 1024,
-            ROCKSDB_BATCH_LIMITS,
             1,
             Duration::ZERO,
         );
@@ -604,7 +600,6 @@ fn open_timeout_publishes_error_not_infinite_spin() {
         bitcoin_rs_storage::StorageBackend::Fjall,
         &dir.path().join("txindex"),
         8 * 1024 * 1024,
-        DEFAULT_BATCH_LIMITS,
         1,
         Duration::from_secs(10),
         Duration::from_secs(1),
