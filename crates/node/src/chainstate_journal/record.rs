@@ -447,6 +447,11 @@ mod tests {
         }
     }
 
+    // Contract: version 1 journal frames use MAGIC, VERSION, a u32 payload
+    // length, the encoded JournalRecord payload, and a trailing u32 checksum
+    // (see the encoder/decoder above). These tests preserve that local,
+    // versioned format contract: valid records round-trip, while truncation,
+    // corruption, bad magic, and unsupported versions are rejected.
     #[test]
     fn round_trips_genesis_and_all_mutation_kinds() -> std::io::Result<()> {
         let genesis = JournalRecord {
