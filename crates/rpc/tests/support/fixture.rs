@@ -642,8 +642,10 @@ fn validate_provenance(
     release: &reference_set::ReleaseIdentity,
 ) -> Result<(), LoadError> {
     if provenance.core_version != format!("{}.0", release.core_version)
-        || format!("Bitcoin Core daemon version v{}", provenance.core_version)
-            != release.version_output
+        || format!(
+            "Bitcoin Core daemon version v{} bitcoind",
+            provenance.core_version
+        ) != release.version_output
     {
         return Err(LoadError::Violation(format!(
             "{}: pinned version {:?} does not match selected release {:?}",
@@ -1003,9 +1005,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), CAPTURED_FIXTURE)?;
-        let reference = reference_set::load_reference_set(
-            bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML,
-        )?;
+        let reference =
+            reference_set::load_reference_set(bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML)?;
         for (field, reason) in [
             ("core_version", "pinned version"),
             ("source_commit", "pinned source commit"),
@@ -1016,15 +1017,15 @@ mod tests {
             match field {
                 "core_version" => edited.core_version = "31.2".to_owned(),
                 "source_commit" => {
-                    edited.source_commit = "0000000000000000000000000000000000000000".to_owned()
+                    edited.source_commit = "0000000000000000000000000000000000000000".to_owned();
                 }
                 "bitcoind_sha256" => edited.bitcoind_sha256 = [0; 32],
                 "version_output" => {
-                    edited.version_output = "Bitcoin Core daemon version v31.2.0".to_owned()
+                    edited.version_output = "Bitcoin Core daemon version v31.2.0".to_owned();
                 }
                 _ => unreachable!(),
             }
-            let Err(error) = load_corpus_from(dir.path(), &reference.release) else {
+            let Err(error) = load_corpus_from(dir.path(), &edited) else {
                 return Err(format!("old fixture was accepted after changing {field}").into());
             };
             let message = error.to_string();

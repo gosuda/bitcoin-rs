@@ -853,8 +853,12 @@ fn real_durable_write_releases_earlier_deferred_pins() {
         let a = txid(26);
         let b = txid(27);
 
-        set.connect_block(&block(one_output_add(a), vec![]), &a, CoinDurability::Durable)
-            .expect("seed first record");
+        set.connect_block(
+            &block(one_output_add(a), vec![]),
+            &a,
+            CoinDurability::Durable,
+        )
+        .expect("seed first record");
         set.connect_block(
             &block(vec![], vec![outpoint(a, 0)]),
             &a,
@@ -914,29 +918,20 @@ impl ReentrantListener {
             .and_then(Weak::upgrade)
             .expect("persistent set installed");
         let hash = txid(999);
-        let rejected = matches!(
-            set.get(op),
-            Err(PersistentUtxoError::ReentrantOperation)
-        ) && matches!(
-            set.ledger(),
-            Err(PersistentUtxoError::ReentrantOperation)
-        ) && matches!(
-            set.flush(),
-            Err(PersistentUtxoError::ReentrantOperation)
-        ) && matches!(
-            set.connect_block(
-                &BlockChanges::default(),
-                &hash,
-                CoinDurability::Durable,
-            ),
-            Err(PersistentUtxoError::ReentrantOperation)
-        ) && matches!(
-            set.undo_block(
-                &bitcoin_rs_utxo::set::UndoBatch::default(),
-                CoinDurability::Durable,
-            ),
-            Err(PersistentUtxoError::ReentrantOperation)
-        );
+        let rejected = matches!(set.get(op), Err(PersistentUtxoError::ReentrantOperation))
+            && matches!(set.ledger(), Err(PersistentUtxoError::ReentrantOperation))
+            && matches!(set.flush(), Err(PersistentUtxoError::ReentrantOperation))
+            && matches!(
+                set.connect_block(&BlockChanges::default(), &hash, CoinDurability::Durable,),
+                Err(PersistentUtxoError::ReentrantOperation)
+            )
+            && matches!(
+                set.undo_block(
+                    &bitcoin_rs_utxo::set::UndoBatch::default(),
+                    CoinDurability::Durable,
+                ),
+                Err(PersistentUtxoError::ReentrantOperation)
+            );
         self.rejected.store(rejected, Ordering::SeqCst);
         self.called.store(true, Ordering::SeqCst);
     }
@@ -959,8 +954,12 @@ fn blocked_flush_does_not_block_resident_reads() {
     let store = MemoryStore::default();
     let set = PersistentUtxoSet::new(UtxoSet::new(), store.clone());
     let a = txid(28);
-    set.connect_block(&block(one_output_add(a), vec![]), &a, CoinDurability::Durable)
-        .expect("seed persisted resident coin");
+    set.connect_block(
+        &block(one_output_add(a), vec![]),
+        &a,
+        CoinDurability::Durable,
+    )
+    .expect("seed persisted resident coin");
 
     let gate = store.block_next_flush();
     let (tx, rx) = mpsc::channel();

@@ -47,7 +47,9 @@ fn selection_matches_exact_pairwise_equality_for_every_subset() {
                     let agree = (!selected.tx_lookup
                         || !selected.script_history
                         || tx_lookup == script_history)
-                        && (!selected.tx_lookup || !selected.script_live || tx_lookup == script_live)
+                        && (!selected.tx_lookup
+                            || !selected.script_live
+                            || tx_lookup == script_live)
                         && (!selected.script_history
                             || !selected.script_live
                             || script_history == script_live);
