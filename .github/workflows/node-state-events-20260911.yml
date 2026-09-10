@@ -1,0 +1,153 @@
+name: node-state-events-20260911
+
+on:
+  push:
+    branches: [automation/node-state-events-20260911]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: node-state-events-20260911
+  cancel-in-progress: true
+
+env:
+  BASE_SHA: 11a85c814801346a874311438db3a9a977f9cc3b
+  TARGET_BRANCH: refactor/node-state-events-20260911
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  event-owner:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Prepare pinned event ownership cut
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/node-state-events-20260911.py "$RUNNER_TEMP/transform.py"
+          git checkout --detach "$BASE_SHA"
+          cp "$RUNNER_TEMP/transform.py" scripts/node-state-events-20260911.py
+          python3 scripts/node-state-events-20260911.py
+          rm scripts/node-state-events-20260911.py
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          changed += subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).splitlines()
+          if not changed or any(not (p.startswith(('crates/', 'bin/bitcoin-rs/tests/', 'docs/contracts/')) or p == 'CONCEPTS.md') for p in changed):
+              raise SystemExit(f'unexpected source scope: {changed}')
+          if any(not p.endswith(('.rs', '.md')) for p in changed):
+              raise SystemExit('non-source change in candidate')
+          Path(os.environ['RUNNER_TEMP'], 'changed-paths.json').write_text(json.dumps(changed))
+          print('\n'.join(changed))
+          PY
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Format changed sources and freeze candidate tree
+        id: format
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 fmt --all
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          allowed = set(json.loads(Path(os.environ['RUNNER_TEMP'], 'changed-paths.json').read_text()))
+          for path in subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines():
+              if path not in allowed:
+                  print('Retain unchanged baseline formatting:', path)
+                  subprocess.run(['git', 'checkout', os.environ['BASE_SHA'], '--', path], check=True)
+          PY
+          git diff --check
+          git add -A
+          if git diff --cached --name-only | grep -Ev '^(crates/.*\.rs$|bin/bitcoin-rs/tests/.*\.rs$|docs/contracts/.*\.md$|CONCEPTS.md$)'; then
+            echo 'unexpected staged path' >&2
+            exit 1
+          fi
+          echo "SOURCE_TREE=$(git write-tree)" >> "$GITHUB_ENV"
+          git diff --cached --stat
+          rustc +1.95.0 --version --verbose
+          cargo +1.95.0 --version
+          sha256sum Cargo.lock
+      - name: Strict all-target native node Clippy
+        id: clippy
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings > "$RUNNER_TEMP/clippy.log" 2>&1
+          rc=$?
+          tail -n 200 "$RUNNER_TEMP/clippy.log"
+          echo "Clippy exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Compile binary and integration consumers
+        id: consumers
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 check --locked -p bitcoin-rs --no-default-features --features fjall,zmq --all-targets > "$RUNNER_TEMP/consumers.log" 2>&1
+          rc=$?
+          tail -n 150 "$RUNNER_TEMP/consumers.log"
+          echo "Binary and integration consumer compile exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Complete serial native node unit suite
+        id: node_tests
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- --test-threads=1 > "$RUNNER_TEMP/node-tests.log" 2>&1
+          rc=$?
+          if [ "$rc" = 0 ]; then
+            grep -E 'state::|chain_event|process_epoch|test result:' "$RUNNER_TEMP/node-tests.log"
+          else
+            tail -n 220 "$RUNNER_TEMP/node-tests.log"
+          fi
+          echo "Native node unit tests exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: CL-08 and CL-13 ownership gate
+        id: ownership
+        if: ${{ !cancelled() && steps.clippy.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture > "$RUNNER_TEMP/ownership.log" 2>&1
+          rc=$?
+          tail -n 180 "$RUNNER_TEMP/ownership.log"
+          echo "CL-08/CL-13 ownership exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: CL-07 coherent API gate
+        id: coherence
+        if: ${{ !cancelled() && steps.clippy.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_core_api -- --nocapture > "$RUNNER_TEMP/coherence.log" 2>&1
+          rc=$?
+          tail -n 120 "$RUNNER_TEMP/coherence.log"
+          echo "CL-07 coherent API exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Publish source-only review candidate after lint and unit checks
+        if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.clippy.outcome == 'success' && steps.consumers.outcome == 'success' && steps.node_tests.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          test "$(git write-tree)" = "$SOURCE_TREE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          commit=$(printf '%s\n\n%s\n' \
+            'refactor(state)!: give chain events and process epochs one owner' \
+            'Move coherent snapshots, bounded hints, publication and durable process-epoch allocation to state::events. Migrate repository callers and contract pointers without retaining the old state-level paths. Preserve event and on-disk behavior.' \
+            | git commit-tree "$SOURCE_TREE" -p "$BASE_SHA")
+          git push origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "Review candidate: $commit" >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate tree: $SOURCE_TREE" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Constraint gates above retain their actual outcomes; publication is not a merge-ready verdict.' >> "$GITHUB_STEP_SUMMARY"
