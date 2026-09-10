@@ -155,23 +155,16 @@ pub enum IndexError {
 // Reserved metadata keys in `ColumnFamily::UtxoMeta`. The 0x00 prefix is reserved for
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
-
 const FORMAT_VERSION_VALUE: [u8; 4] = [0x04, 0x00, 0x00, 0x00];
-
 /// Format 3 stores Spending keys without positions. This build still
 /// understands those rows (resolvers fall back to a full block) and upgrades
 /// by resetting only `ScriptHistory`, leaving `TxLookup` ready (`IDX-04`).
 const FORMAT_VERSION_V3: [u8; 4] = [0x03, 0x00, 0x00, 0x00];
-
 const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
-
 const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
-
 const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
-
 /// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
-
 /// Permanent versioned capability-reset state (`0x00, b'R'`). Absent only
 /// before the first reset; afterwards the key always exists, either as
 /// `Idle = [0xFF, version(u64 LE)]` (9 bytes) or as a claim
@@ -184,23 +177,17 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 /// `Idle(base_version + 1)`, which makes stale fences un-reusable (no ABA)
 /// across repeated resets.
 const RESET_CAPABILITIES_KEY: &[u8] = &[0x00, b'R'];
-
 /// Consumer cursor slot (`0x00, b'C'`). Opaque bytes owned by the node-side
 /// reconciliation consumer; data row keys begin with ASCII letters only and
 /// can never collide with the reserved `0x00` prefix.
 const CONSUMER_CURSOR_KEY: &[u8] = &[0x00, b'C'];
-
 const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
-
 const RESET_SCAN_LIMIT: PrefixScanLimit = PrefixScanLimit {
     max_rows: 1_000,
     max_bytes: 256 * 1024,
 };
-
 const RESET_IDLE_TAG: u8 = 0xFF;
-
 const RESET_IDLE_LEN: usize = 1 + size_of::<u64>();
-
 const RESET_CLAIM_LEN: usize = 1 + 2 * size_of::<u64>();
 
 /// Decoded durable capability-reset state.
@@ -4091,4 +4078,3 @@ mod tests {
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
     }
 }
-// weave: run 'weave explain crates/index/src/index.rs' for per-hunk detail, 'weave check' to verify your resolution
