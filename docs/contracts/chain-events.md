@@ -5,6 +5,8 @@ applied chain. The contract orders durable commit, mempool reconciliation,
 stable generation publication, and best-effort observer delivery.
 
 Owners:
+- Coherent snapshot, bounded chain-event hints, and durable process epoch (current):
+  `crates/node/src/state/events.rs`
 - Durable commit and stable publication: `crates/chainstate/src/transition.rs`
 - Mempool reconciliation and canonical lifecycle:
   `crates/mempool/src/gateway.rs`, `crates/mempool/src/mutation.rs`

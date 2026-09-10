@@ -305,10 +305,7 @@ impl<S: KvStore> PersistentUtxoSet<S> {
         }
     }
 
-    fn transition_state<'a>(
-        &'a self,
-        transition: &Transition<'_, S>,
-    ) -> MutexGuard<'a, State> {
+    fn transition_state<'a>(&'a self, transition: &Transition<'_, S>) -> MutexGuard<'a, State> {
         let state = self.state.lock();
         debug_assert!(std::ptr::eq(self, transition.set));
         debug_assert!(state.in_flight.is_some_and(|active| {

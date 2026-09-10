@@ -236,7 +236,7 @@ impl CheckpointPublisher {
         self.block_body_store.sync()?;
         let written = checkpoint::write_checkpoint_from_dir(
             &self.checkpoint_data_dir,
-            checkpoint::HeaderCheckpointConfig {
+            checkpoint::headers::HeaderCheckpointConfig {
                 network: self.network,
                 genesis: self.genesis_hash,
             },

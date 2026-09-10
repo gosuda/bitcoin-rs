@@ -27,8 +27,26 @@ const P2PKH_SCRIPT: &[u8] = &[
     opcode::OP_DUP,
     opcode::OP_HASH160,
     0x14,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
     opcode::OP_EQUALVERIFY,
     opcode::OP_CHECKSIG,
 ];
@@ -58,7 +76,13 @@ fn outpoint(label: u8, vout: u32) -> OutPoint {
     OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), vout)
 }
 
-fn tx_one_input(prevout: OutPoint, script_sig: Vec<u8>, witness: Vec<Vec<u8>>, output_value: u64, output_script: Vec<u8>) -> Tx {
+fn tx_one_input(
+    prevout: OutPoint,
+    script_sig: Vec<u8>,
+    witness: Vec<Vec<u8>>,
+    output_value: u64,
+    output_script: Vec<u8>,
+) -> Tx {
     Tx {
         version: 2,
         lock_time: 0,
@@ -99,7 +123,10 @@ fn admission_request(
 /// A stale Policy/Consensus verdict from `prepare_and_verify` is discarded when
 /// the pool or generation mutates before the writer re-check, and the caller
 #[test]
-#[expect(clippy::expect_used, reason = "test invariants are checked with expect")]
+#[expect(
+    clippy::expect_used,
+    reason = "test invariants are checked with expect"
+)]
 fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     // Default limits: the request must pass `prepare_and_verify` in full so
     // the parked admission reaches the writer recheck rather than failing
@@ -110,13 +137,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     let gateway = Arc::new(MempoolGateway::new(pool, None));
 
     let prev = outpoint(1, 0);
-    let tx = tx_one_input(
-        prev,
-        Vec::new(),
-        Vec::new(),
-        99_000,
-        P2PKH_SCRIPT.to_vec(),
-    );
+    let tx = tx_one_input(prev, Vec::new(), Vec::new(), 99_000, P2PKH_SCRIPT.to_vec());
     let context = PackageTxContext {
         fee: 1_000,
         vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
@@ -157,22 +178,12 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     );
     gateway.insert_entry(
         AdmissionOrigin::Rpc,
-        MempoolEntry::new(
-            Arc::new(unrelated),
-            100,
-            100_000_000,
-            1,
-            1,
-        ),
+        MempoolEntry::new(Arc::new(unrelated), 100, 100_000_000, 1, 1),
     )?;
 
-    release_tx
-        .send(())
-        .expect("release the parked admission");
+    release_tx.send(()).expect("release the parked admission");
 
-    let result = admission
-        .join()
-        .expect("admission thread did not panic");
+    let result = admission.join().expect("admission thread did not panic");
 
     reset_admission_park();
 
@@ -189,7 +200,9 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
 /// P2SH sigops once the prevout is known.
 #[test]
 fn p2sh_sigop_cost_exceeds_standard_limit() {
-    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits::default())));
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
+        MempoolLimits::default(),
+    )));
     let gateway = Arc::new(MempoolGateway::new(pool, None));
 
     let prev = outpoint(3, 0);
@@ -223,7 +236,11 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
         Err(AdmitError::Policy(AcceptanceRejectReason::TooManySigops)),
         "P2SH sigops counted from the prevout must trigger the standard limit"
     );
-    assert_eq!(gateway.read().len(), 0, "rejected tx must not enter the pool");
+    assert_eq!(
+        gateway.read().len(),
+        0,
+        "rejected tx must not enter the pool"
+    );
 }
 
 /// A P2WSH spend whose witness script is heavy with `OP_CHECKMULTISIG` is
@@ -231,7 +248,9 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
 /// witness sigops once the prevout is known.
 #[test]
 fn p2wsh_sigop_cost_exceeds_standard_limit() {
-    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits::default())));
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
+        MempoolLimits::default(),
+    )));
     let gateway = Arc::new(MempoolGateway::new(pool, None));
 
     let prev = outpoint(4, 0);
@@ -265,7 +284,11 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
         Err(AdmitError::Policy(AcceptanceRejectReason::TooManySigops)),
         "P2WSH witness sigops counted from the prevout must trigger the standard limit"
     );
-    assert_eq!(gateway.read().len(), 0, "rejected tx must not enter the pool");
+    assert_eq!(
+        gateway.read().len(),
+        0,
+        "rejected tx must not enter the pool"
+    );
 }
 
 /// A child spending an in-pool P2SH parent counts the parent's sigops even
@@ -352,9 +375,14 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
 /// A caller-supplied `sigop_cost` must be ignored: the stored entry carries the
 /// value computed from the resolved prevouts.
 #[test]
-#[expect(clippy::expect_used, reason = "test invariants are checked with expect")]
+#[expect(
+    clippy::expect_used,
+    reason = "test invariants are checked with expect"
+)]
 fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> {
-    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(MempoolLimits::default())));
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
+        MempoolLimits::default(),
+    )));
     let gateway = Arc::new(MempoolGateway::new(pool, None));
 
     let prev = outpoint(5, 0);

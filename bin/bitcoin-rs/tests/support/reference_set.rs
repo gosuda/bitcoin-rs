@@ -13,7 +13,7 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 /// manifest remains their value owner; changing any value requires reviewing
 /// the external artifact evidence and deliberately updating its fingerprint.
 const RELEASE_CUSTODY_SHA256: &str =
-    "7062cbdb6122b6287ccd12688fe9fa193d02b22ad02784e08c59887c03305a00";
+    "12e58454e41bb8d15c6998b999c25c8ce407e513cb4ce7d09ccb494b321d24be";
 const KERNEL_CUSTODY_SHA256: &str =
     "86e246d78dcb313f55c367785e59ef51b38c45867b550bf68c45ce9df2221ddd";
 

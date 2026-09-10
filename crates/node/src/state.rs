@@ -538,7 +538,7 @@ fn cold_initial_chainstate(
 fn prepare_initial_chainstate(
     checkpoint_load: crate::checkpoint::CheckpointLoad,
     checkpoint_data_dir: &cap_std::fs::Dir,
-    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
     config: &NodeConfig,
 ) -> Result<InitialChainstate> {
     let journal_config = config.chainstate_journal;
@@ -595,7 +595,7 @@ fn prepare_initial_chainstate(
 fn replay_checkpoint_journal(
     restored: crate::checkpoint::RestoredChainstate,
     checkpoint_data_dir: &cap_std::fs::Dir,
-    checkpoint_config: crate::checkpoint::HeaderCheckpointConfig,
+    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
     config: &NodeConfig,
     journal_config: crate::config::ChainstateJournalConfig,
 ) -> Result<InitialChainstate> {
@@ -986,7 +986,7 @@ impl NodeState {
         // Allocate the process epoch before anything else can consume one:
         // durable, strictly greater than every earlier run of this data dir.
         let epoch = crate::state::events::allocate_process_epoch(&checkpoint_data_dir)?;
-        let checkpoint_config = crate::checkpoint::HeaderCheckpointConfig {
+        let checkpoint_config = crate::checkpoint::headers::HeaderCheckpointConfig {
             network: config.network,
             genesis: config.network.genesis_block_hash(),
         };
