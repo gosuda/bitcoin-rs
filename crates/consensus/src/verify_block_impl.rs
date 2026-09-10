@@ -319,18 +319,13 @@ fn hash_avx2_parent_batches<T: Copy>(
 /// computing them here would re-serialize and re-hash every transaction on a
 /// path the node can already serve from its parse-once view.
 pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
-    block.txs.first()?.outputs.iter().rev().find_map(|output| {
-        (output.script_pubkey.len() >= 38
-            && output.script_pubkey[..6] == WITNESS_COMMITMENT_PREFIX)
-            .then_some(&output.script_pubkey[6..38])
-    })
+    block.txs.first()?.outputs.iter().rev().find(|output| {
+        output.script_pubkey.len() >= 38
+            && output.script_pubkey[..6] == WITNESS_COMMITMENT_PREFIX
+    }).map(|output| &output.script_pubkey[6..38])
 }
 
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
-    let Some(coinbase) = block.txs.first() else {
-        return false;
-    };;
-    // Highest matching output: iterate in reverse to find the last one.
     let Some(commitment) = witness_commitment(block) else {
         return false;
     };
