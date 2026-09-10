@@ -14,7 +14,13 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "import-qa-assets.sh"
-BUDGET = 65536
+_SCRIPT_TEXT = SCRIPT.read_text()
+_budget_match = re.search(r"^readonly MAX_SEED_BYTES=([0-9]+)\s+#", _SCRIPT_TEXT, re.M)
+if _budget_match is None:
+    raise RuntimeError("importer MAX_SEED_BYTES definition is missing")
+BUDGET = int(_budget_match.group(1))
+if BUDGET <= 0:
+    raise RuntimeError("importer MAX_SEED_BYTES must be positive")
 
 
 def mapper_function(name):
@@ -189,6 +195,8 @@ MAX_SEED_BYTES=65536
 
 
 class SetupFailureTests(unittest.TestCase):
+    """Regression coverage for CONSTRAINTS.md#qa-corpus-importer-setup-contract."""
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
