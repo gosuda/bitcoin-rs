@@ -1,0 +1,168 @@
+name: node-journal-layout-20260911
+
+on:
+  push:
+    branches: [automation/node-journal-layout-20260911]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: node-journal-layout-20260911
+  cancel-in-progress: true
+
+env:
+  BASE_SHA: a1be979848253ec7d5763375a13b6af1d8e66dfc
+  TARGET_BRANCH: refactor/node-journal-layout-20260911
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  journal-layout:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          show-progress: false
+      - name: Prepare immutable baseline
+        run: |
+          cp scripts/node-journal-layout-20260911.py "$RUNNER_TEMP/journal-transform.py"
+          git checkout --detach "$BASE_SHA"
+          mkdir -p "$RUNNER_TEMP/journal-evidence"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Record baseline ownership result independently
+        id: baseline
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture > "$RUNNER_TEMP/journal-evidence/baseline-ownership.log" 2>&1
+          rc=$?
+          tail -n 100 "$RUNNER_TEMP/journal-evidence/baseline-ownership.log"
+          echo "Baseline ownership exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Apply checked owner extraction
+        id: transform
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          python3 "$RUNNER_TEMP/journal-transform.py" | tee "$RUNNER_TEMP/journal-evidence/transformation.log"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/node/src/chainstate_journal/head/tests.rs')
+          p.write_text(p.read_text().replace('Immutable headers-v1 representation', 'Immutable head-v1 representation'))
+          PY
+      - name: Freeze formatted source-only candidate
+        id: format
+        if: ${{ !cancelled() && steps.transform.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.95.0 fmt --all
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          allowed = set(json.loads(Path(os.environ['RUNNER_TEMP'], 'journal-layout-paths.json').read_text()))
+          for path in subprocess.check_output(['git', 'diff', '--name-only', os.environ['BASE_SHA']], text=True).splitlines():
+              if path not in allowed:
+                  print('Restore unrelated formatting:', path)
+                  subprocess.run(['git', 'checkout', os.environ['BASE_SHA'], '--', path], check=True)
+          PY
+          git add -A
+          git diff --cached --check
+          if git diff --cached --name-only "$BASE_SHA" | grep -Ev '^(crates/node/src/.*\.rs$|docs/chainstate-recovery.md$)'; then
+            echo 'unexpected changed path' >&2
+            exit 1
+          fi
+          tree=$(git write-tree)
+          echo "SOURCE_TREE=$tree" >> "$GITHUB_ENV"
+          { echo "BASE_SHA=$BASE_SHA"; echo "SOURCE_TREE=$tree"; rustc +1.95.0 --version --verbose; cargo +1.95.0 --version; sha256sum Cargo.lock; git diff --cached --stat "$BASE_SHA"; } | tee "$RUNNER_TEMP/journal-evidence/identity.txt"
+          git diff --cached --binary "$BASE_SHA" > "$RUNNER_TEMP/journal-evidence/candidate.patch"
+      - name: Strict MSRV all-target node Clippy
+        id: clippy
+        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings > "$RUNNER_TEMP/journal-evidence/clippy.log" 2>&1
+          rc=$?
+          tail -n 120 "$RUNNER_TEMP/journal-evidence/clippy.log"
+          echo "MSRV Clippy exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Complete serial native node library suite
+        id: tests
+        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- --test-threads=1 > "$RUNNER_TEMP/journal-evidence/node-tests.log" 2>&1
+          rc=$?
+          if [ "$rc" = 0 ]; then
+            grep -E 'chainstate_journal::|test result:' "$RUNNER_TEMP/journal-evidence/node-tests.log"
+          else
+            tail -n 150 "$RUNNER_TEMP/journal-evidence/node-tests.log"
+          fi
+          echo "Native library tests exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Journal integration suite
+        id: integration
+        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          timeout 240s cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test chainstate_journal -- --test-threads=1 > "$RUNNER_TEMP/journal-evidence/journal-integration.log" 2>&1
+          rc=$?
+          tail -n 100 "$RUNNER_TEMP/journal-evidence/journal-integration.log"
+          echo "Journal integration exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Candidate CL-08 and CL-13 ownership gate
+        id: ownership
+        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture > "$RUNNER_TEMP/journal-evidence/candidate-ownership.log" 2>&1
+          rc=$?
+          tail -n 100 "$RUNNER_TEMP/journal-evidence/candidate-ownership.log"
+          echo "Candidate CL-08/CL-13 exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Declared CL-12 checkpoint-independence gate
+        id: independence
+        if: ${{ !cancelled() && steps.format.outcome == 'success' }}
+        shell: bash
+        run: |
+          set +e
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall --test overhaul_checkpoint_independence -- --nocapture > "$RUNNER_TEMP/journal-evidence/independence.log" 2>&1
+          rc=$?
+          tail -n 60 "$RUNNER_TEMP/journal-evidence/independence.log"
+          echo "Declared CL-12 exit: $rc" >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Publish exact source for draft review, not a green verdict
+        if: ${{ !cancelled() && steps.format.outcome == 'success' && steps.clippy.outcome == 'success' && steps.tests.outcome == 'success' && steps.integration.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          test "$(git write-tree)" = "$SOURCE_TREE"
+          git diff --exit-code "$BASE_SHA" -- Cargo.lock
+          commit=$(printf '%s\n\n%s\n' 'refactor(journal): isolate head and segment representation owners' 'Move the framed head and shared filename grammar out of the mutation owner. Keep journal error variants and all writer regressions, delete old head paths and segment-name wrappers, and preserve persistence ordering and representation bytes. Owning gates retain their actual results; publication is a draft review artifact, not a merge-ready verdict.' | git commit-tree "$SOURCE_TREE" -p "$BASE_SHA")
+          git push origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "$commit" | tee "$RUNNER_TEMP/journal-evidence/published-commit.txt"
+          echo "Draft source commit: $commit" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain exact candidate and successful or failed checks
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: journal-layout-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/journal-evidence/
+          retention-days: 7
