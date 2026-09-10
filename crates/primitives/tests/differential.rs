@@ -3,7 +3,9 @@
 //!
 //! Fuzz-corpus gates loud-skip (with a stderr note) only when `fuzz/corpus/<target>/`
 //! is entirely absent; a present-but-empty corpus, or seeds that all fail to parse,
-//! fails.
+//! fails. Corpus seeds are gated by the expected-verdict manifest under the
+//! native-consensus-codec round-trip contract `QAC-05`
+//! (docs/contracts/qa-corpus.md).
 
 #![expect(
     clippy::expect_used,
@@ -260,6 +262,8 @@ fn error_kind(error: &DecodeError) -> String {
     }
 }
 
+// Both corpus gates enforce the QAC-05 round-trip contract
+// (docs/contracts/qa-corpus.md) through the pinned verdict manifest.
 #[test]
 fn tx_corpus_seeds_match_expected_verdicts() {
     enforce_corpus_verdicts("tx_decode");
