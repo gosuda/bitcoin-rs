@@ -1,1 +1,60 @@
-{"base":"11a85c814801346a874311438db3a9a977f9cc3b","stages":[{"payload":"state","branch":"agent/node-state-modules-11a85c8","message":"Separate node state composition and lifecycle owners","tests":["state::","storage_backend::tests"]}]}
+{
+  "base": "a1be979848253ec7d5763375a13b6af1d8e66dfc",
+  "object_branch": "agent/node-validated-a1be-stack",
+  "stages": [
+    {
+      "branch": "agent/node-state-owners",
+      "tree": "3a1d5ee85ba980c18380fac71ef463179dbc23ec",
+      "message": "Integrate current main into the node state ownership refactor",
+      "tests": ["state::", "storage_backend::tests"],
+      "expected_head": "7c9b3f9b7eda8b3a258b2e534ba034865dad4650",
+      "copy_commit": "7c9b3f9b7eda8b3a258b2e534ba034865dad4650",
+      "copy_parent": "11a85c814801346a874311438db3a9a977f9cc3b"
+    },
+    {
+      "branch": "agent/node-apply-owners",
+      "tree": "3ca742eb4f7a135fa586bfd630eb6b2370f21530",
+      "message": "Separate chainstate admission, validation, and commit owners",
+      "tests": ["apply::"],
+      "payload": "apply",
+      "chunks": 4,
+      "payload_sha": "90a42914fd1ad0b457a255c2aa3deb31f4c898fb"
+    },
+    {
+      "branch": "agent/node-sync-owners",
+      "tree": "de7dad9db2fdcc699dde75c05cccdb128fc5ccc9",
+      "message": "Separate block synchronization by protocol and apply responsibility",
+      "tests": ["sync::"],
+      "payload": "sync",
+      "chunks": 3,
+      "payload_sha": "af3a13ec5c896e3c04f451a3fefc0346b57515cf"
+    },
+    {
+      "branch": "agent/node-mining-owners",
+      "tree": "0ba58dc5c17461c20f09f3ddbae1a7965df8a199",
+      "message": "Separate mining generation, candidates, and control operations",
+      "tests": ["mining::"],
+      "payload": "mining",
+      "chunks": 3,
+      "payload_sha": "e021345e9eb16cb97b89357b0048bfdf84c39fc2"
+    },
+    {
+      "branch": "agent/node-checkpoint-owners",
+      "tree": "38c0767e063dcbf866d451b08b9fffa9128c503e",
+      "message": "Consolidate checkpoint codecs, publication, and worker lifecycle",
+      "tests": ["checkpoint::"],
+      "payload": "checkpoint",
+      "chunks": 3,
+      "payload_sha": "75d57473f9042eb31a951f12703436e69ebf5ee7"
+    },
+    {
+      "branch": "agent/node-txindex-owners",
+      "tree": "619787830802f2136fbd6c0154badb7b4ee96b6b",
+      "message": "Own transaction indexing in focused runtime and query modules",
+      "tests": ["txindex::", "storage_backend::tests"],
+      "payload": "txindex",
+      "chunks": 4,
+      "payload_sha": "dbdf73619bb463806d7c7b18534cea8557020bfa"
+    }
+  ]
+}

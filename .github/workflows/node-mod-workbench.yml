@@ -13,7 +13,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write
     env:
@@ -30,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt,clippy
-      - name: Validate exact candidate and publish atomic scope commits
+      - name: Validate every exact tree before publishing commit objects
         run: |
           cp .github/publish-node.py /tmp/publish-node.py
           python /tmp/publish-node.py
