@@ -1,6 +1,8 @@
 //! Framed, checksummed chainstate journal records.
 
 use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use std::io::{self, Write};
+
 use thiserror::Error;
 
 const MAGIC: [u8; 4] = *b"JRNL";
@@ -106,42 +108,75 @@ pub(crate) enum JournalRecordError {
 }
 
 /// Encodes a journal record with magic, version, length, payload, and CRC32C.
-#[must_use]
-pub(crate) fn encode_record(record: &JournalRecord) -> Vec<u8> {
-    let mut payload = Vec::new();
-    put_u32(&mut payload, record.height);
-    payload.extend_from_slice(&record.block_hash);
-    payload.extend_from_slice(&record.prev_hash);
-    put_u64(&mut payload, record.block_tx_count);
-    put_i64(&mut payload, record.coin_stats_height_delta);
-    payload.extend_from_slice(&record.raw_header);
-    put_u32(&mut payload, u32_len(record.mutations.len()));
+pub(crate) fn encode_record(record: &JournalRecord) -> io::Result<Vec<u8>> {
+    let expected_payload_len = record_payload_len(record);
+    let capacity = expected_payload_len
+        .and_then(|payload_len| FRAME_HEADER_LEN.checked_add(payload_len))
+        .and_then(|frame_len| frame_len.checked_add(FRAME_TRAILER_LEN))
+        .unwrap_or(FRAME_HEADER_LEN + FRAME_TRAILER_LEN);
+    let mut framed = Vec::with_capacity(capacity);
+    framed.extend_from_slice(&MAGIC);
+    framed.push(VERSION);
+    put_u32(&mut framed, 0)?;
+
+    encode_payload(&mut framed, record)?;
+
+    let payload_len = framed.len() - FRAME_HEADER_LEN;
+    debug_assert!(expected_payload_len.is_none_or(|expected| expected == payload_len));
+    framed[MAGIC.len() + 1..FRAME_HEADER_LEN].copy_from_slice(&u32_len(payload_len).to_le_bytes());
+    let checksum = crc32c(&framed[FRAME_HEADER_LEN..]);
+    put_u32(&mut framed, checksum)?;
+    Ok(framed)
+}
+
+fn record_payload_len(record: &JournalRecord) -> Option<usize> {
+    let mut count = CountingWriter { len: 0 };
+    encode_payload(&mut count, record).ok()?;
+    Some(count.len)
+}
+
+fn encode_payload(writer: &mut impl Write, record: &JournalRecord) -> io::Result<()> {
+    put_u32(writer, record.height)?;
+    writer.write_all(&record.block_hash)?;
+    writer.write_all(&record.prev_hash)?;
+    put_u64(writer, record.block_tx_count)?;
+    put_i64(writer, record.coin_stats_height_delta)?;
+    writer.write_all(&record.raw_header)?;
+    put_u32(writer, u32_len(record.mutations.len()))?;
     for mutation in &record.mutations {
         match mutation {
             Mutation::Create { coin } => {
-                payload.push(0);
-                put_coin(&mut payload, coin);
+                writer.write_all(&[0])?;
+                put_coin(writer, coin)?;
             }
             Mutation::Spend { coin } => {
-                payload.push(1);
-                put_coin(&mut payload, coin);
+                writer.write_all(&[1])?;
+                put_coin(writer, coin)?;
             }
             Mutation::Overwrite { old_coin, new_coin } => {
-                payload.push(2);
-                put_coin(&mut payload, old_coin);
-                put_coin(&mut payload, new_coin);
+                writer.write_all(&[2])?;
+                put_coin(writer, old_coin)?;
+                put_coin(writer, new_coin)?;
             }
         }
     }
+    Ok(())
+}
 
-    let payload_len = u32_len(payload.len());
-    let mut framed = Vec::with_capacity(FRAME_HEADER_LEN + payload.len() + FRAME_TRAILER_LEN);
-    framed.extend_from_slice(&MAGIC);
-    framed.push(VERSION);
-    put_u32(&mut framed, payload_len);
-    framed.extend_from_slice(&payload);
-    put_u32(&mut framed, crc32c(&payload));
-    framed
+struct CountingWriter {
+    len: usize,
+}
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.len = self
+            .len
+            .checked_add(bytes.len())
+            .ok_or(io::ErrorKind::Other)?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Decodes and validates one complete journal record.
@@ -238,24 +273,22 @@ fn decode_payload(payload: &[u8]) -> Result<JournalRecord, JournalRecordError> {
     })
 }
 
-fn put_coin(out: &mut Vec<u8>, coin: &Coin) {
-    out.extend_from_slice(coin.outpoint.txid.as_bytes());
-    put_u32(out, coin.outpoint.vout);
-    let _ = coin.txout.consensus_encode(out);
-    put_u32(out, coin.height);
-    out.push(u8::from(coin.coinbase));
+fn put_coin(out: &mut impl Write, coin: &Coin) -> io::Result<()> {
+    out.write_all(coin.outpoint.txid.as_bytes())?;
+    put_u32(out, coin.outpoint.vout)?;
+    coin.txout.consensus_encode(out)?;
+    put_u32(out, coin.height)?;
+    out.write_all(&[u8::from(coin.coinbase)])
 }
 
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
+fn put_u32(out: &mut impl Write, value: u32) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
 }
-
-fn put_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
+fn put_u64(out: &mut impl Write, value: u64) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
 }
-
-fn put_i64(out: &mut Vec<u8>, value: i64) {
-    out.extend_from_slice(&value.to_le_bytes());
+fn put_i64(out: &mut impl Write, value: i64) -> io::Result<()> {
+    out.write_all(&value.to_le_bytes())
 }
 
 fn u32_len(value: usize) -> u32 {
@@ -415,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_genesis_and_all_mutation_kinds() {
+    fn round_trips_genesis_and_all_mutation_kinds() -> std::io::Result<()> {
         let genesis = JournalRecord {
             height: 0,
             block_hash: [0; 32],
@@ -426,7 +459,7 @@ mod tests {
             mutations: Vec::new(),
         };
         for record in [genesis, sample()] {
-            assert_eq!(decode_record(&encode_record(&record)), Ok(record));
+            assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
         }
         let meta = sample().block_meta();
         assert_eq!(
@@ -439,11 +472,12 @@ mod tests {
                 coin_stats_height_delta: -1
             }
         );
+        Ok(())
     }
 
     #[test]
-    fn every_single_byte_corruption_is_rejected() {
-        let bytes = encode_record(&sample());
+    fn every_single_byte_corruption_is_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
         for index in 0..bytes.len() {
             let mut corrupted = bytes.clone();
             corrupted[index] ^= 1;
@@ -452,11 +486,12 @@ mod tests {
                 "byte {index} was accepted"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn every_truncated_prefix_is_rejected() {
-        let bytes = encode_record(&sample());
+    fn every_truncated_prefix_is_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
         for length in 0..bytes.len() {
             assert!(
                 decode_record(&bytes[..length]).is_err(),
@@ -464,11 +499,12 @@ mod tests {
             );
         }
         assert!(decode_record(&bytes).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn bad_magic_and_version_are_rejected() {
-        let bytes = encode_record(&sample());
+    fn bad_magic_and_version_are_rejected() -> std::io::Result<()> {
+        let bytes = encode_record(&sample())?;
         let mut bad_magic = bytes.clone();
         bad_magic[0] ^= 1;
         assert_eq!(decode_record(&bad_magic), Err(JournalRecordError::BadMagic));
@@ -478,6 +514,7 @@ mod tests {
             decode_record(&bad_version),
             Err(JournalRecordError::BadVersion { .. })
         ));
+        Ok(())
     }
 
     fn arb_coin() -> impl Strategy<Value = Coin> {
@@ -515,7 +552,7 @@ mod tests {
         ) {
             let raw_header = header_bytes(block_hash);
             let record = JournalRecord { height, block_hash, prev_hash, block_tx_count, coin_stats_height_delta, raw_header, mutations };
-            prop_assert_eq!(decode_record(&encode_record(&record)), Ok(record));
+            prop_assert_eq!(decode_record(&encode_record(&record)?), Ok(record));
         }
     }
 }

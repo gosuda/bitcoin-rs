@@ -141,6 +141,105 @@ fn fee_overflow_is_reported_instead_of_wrapping() {
     assert_eq!(err, MiningError::FeeOverflow);
 }
 
+/// The reserved reorg batch must store resolved BIP141 cost all the way
+/// through the real gateway and mining snapshot; template selection consumes it.
+#[test]
+fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box<dyn Error>> {
+    use bitcoin::hashes::{hash160, sha256};
+    use bitcoin_rs_mempool::reconsider::DisconnectedCandidates;
+    use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits};
+
+    // Both scripts succeed without signatures. Sigops in an unexecuted branch
+    // are still counted: one legacy CHECKSIG costs 4, two-key witness multisig 2.
+    let redeem = vec![0x00, 0x63, 0xac, 0x68, 0x51];
+    let witness_script = vec![0x00, 0x63, 0x52, 0xae, 0x68, 0x51];
+    let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x44; 32])), 0);
+    let confirmed = TxOut {
+        value: 10_000,
+        script_pubkey: [
+            vec![0xa9, 0x14],
+            hash160::Hash::hash(&redeem).to_byte_array().to_vec(),
+            vec![0x87],
+        ]
+        .concat(),
+    };
+    let parent = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: funding,
+            script_sig: bitcoin_rs_script::push_data(&redeem),
+            sequence: u32::MAX,
+            witness: Vec::new(),
+        }],
+        outputs: vec![TxOut {
+            value: 9_000,
+            script_pubkey: [
+                vec![0x00, 0x20],
+                sha256::Hash::hash(&witness_script).to_byte_array().to_vec(),
+            ]
+            .concat(),
+        }],
+        lock_time: 0,
+    };
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent.txid(), 0),
+            script_sig: Vec::new(),
+            sequence: u32::MAX,
+            witness: vec![witness_script],
+        }],
+        outputs: vec![TxOut {
+            value: 8_000,
+            script_pubkey: vec![0x51],
+        }],
+        lock_time: 0,
+    };
+    let mut batch = DisconnectedCandidates::new(0, 100);
+    assert!(batch.offer(&parent, |outpoint| {
+        (*outpoint == funding).then(|| confirmed.clone())
+    }));
+    assert!(batch.offer(&child, |_| None));
+    let gateway = MempoolGateway::shared(Arc::new(Mempool::new(MempoolLimits::default()).into()));
+    let transition = gateway.begin_chain_change()?;
+    assert!(gateway.stable_generation().is_none());
+    let changes = gateway.reconsider_disconnected(AdmissionOrigin::Reorg, batch.into_entries());
+    assert_eq!(changes.len(), 2);
+    transition.finish()?;
+    let snapshot = gateway.read().mining_snapshot();
+    assert_eq!(snapshot.entries.len(), 2);
+    assert_eq!(
+        snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.txid == parent.txid())
+            .ok_or("parent entry")?
+            .sigop_cost,
+        4
+    );
+    assert_eq!(
+        snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.txid == child.txid())
+            .ok_or("child entry")?
+            .sigop_cost,
+        2
+    );
+
+    let mut limited = context(101, true);
+    limited.max_sigops = 5;
+    let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
+    assert_eq!(candidate.transactions.len(), 1);
+    assert_eq!(candidate.transactions[0].txid, parent.txid());
+    assert_eq!(candidate.sigop_cost, 4);
+    limited.max_sigops = 6;
+    let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
+    assert_eq!(candidate.transactions.len(), 2);
+    assert_eq!(candidate.sigop_cost, 6);
+    Ok(())
+}
+
 fn context(height: u32, segwit_active: bool) -> CandidateContext {
     CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),

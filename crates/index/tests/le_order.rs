@@ -12,11 +12,9 @@ mod common;
 use std::sync::Arc;
 
 use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash};
-use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
 
-use common::MemoryStore;
+use common::{MemoryStore, put_funding_row, put_spending_row};
 
 /// A block source backed by a simple map, serving multiple heights.
 struct MultiHeightSource {
@@ -65,14 +63,18 @@ fn spent_outpoint(label: u8, vout: u32) -> OutPoint {
 /// iterate in numeric order under LE keys, but `resolve_script_history` DOES
 /// sort by numeric height.
 #[test]
-fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
+fn le_key_order_differs_from_numeric_and_history_sorts_by_height()
+-> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
-    let mut indexer = Indexer::new(Arc::new(MemoryStore::default()));
+    let store = Arc::new(MemoryStore::default());
+    put_funding_row(&store, scripthash, 1)?;
+    put_funding_row(&store, scripthash, 256)?;
+    let indexer = Indexer::new(store);
 
-    // Ingest a block at height 1 funding the script, then a block at height 256
-    // funding the same script. Both produce a funding row with the same 8-byte
-    // prefix; only the height suffix differs.
+    // Direct keys at heights 1 and 256: both produce a funding row with the
+    // same 8-byte prefix; only the height suffix differs. `commit_block`
+    // cannot write a gapped height, so these tests own the keys themselves.
     let block_at_1 = Block {
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(1, 0), script.clone())],
@@ -82,18 +84,9 @@ fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
         txs: vec![tx_with_script(spent_outpoint(2, 0), script)],
     };
 
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_1), 1) else {
-        panic!("ingest height 1");
-    };
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_256), 256) else {
-        panic!("ingest height 256");
-    };
-
     // --- Part A: iter_funding_rows returns LE byte order, not numeric ---
 
-    let Ok(rows) = indexer.iter_funding_rows(scripthash) else {
-        panic!("iter_funding_rows");
-    };
+    let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
     // Height 256 is [0x00, 0x01, 0x00, 0x00]; height 1 is [0x01, 0x00, 0x00, 0x00].
@@ -125,9 +118,7 @@ fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
     let source = MultiHeightSource {
         blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
     };
-    let Ok(entries) = indexer.resolve_script_history(scripthash, &source) else {
-        panic!("resolve_script_history");
-    };
+    let entries = indexer.resolve_script_history(scripthash, &source)?;
 
     assert_eq!(entries.len(), 2, "two confirmed entries");
     // Entries must be in numeric height order: 1 before 256, even though
@@ -141,15 +132,19 @@ fn le_key_order_differs_from_numeric_and_history_sorts_by_height() {
     // The first entry's txid must come from the height-1 block.
     assert_eq!(entries[0].txid, txid_at_1);
     assert_eq!(entries[1].txid, txid_at_256);
+    Ok(())
 }
 
 /// The scan reference resolver also sorts by numeric height, agreeing with
 /// the fast resolver.
 #[test]
-fn history_scan_resolver_also_sorts_by_height() {
+fn history_scan_resolver_also_sorts_by_height() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x02];
     let scripthash = ScriptHash::from_script_bytes(&script);
-    let mut indexer = Indexer::new(Arc::new(MemoryStore::default()));
+    let store = Arc::new(MemoryStore::default());
+    put_funding_row(&store, scripthash, 1)?;
+    put_funding_row(&store, scripthash, 256)?;
+    let indexer = Indexer::new(store);
 
     let block_at_1 = Block {
         header: header(),
@@ -160,23 +155,12 @@ fn history_scan_resolver_also_sorts_by_height() {
         txs: vec![tx_with_script(spent_outpoint(4, 0), script)],
     };
 
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_1), 1) else {
-        panic!("ingest height 1");
-    };
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_256), 256) else {
-        panic!("ingest height 256");
-    };
-
     let source = MultiHeightSource {
         blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
     };
 
-    let Ok(fast) = indexer.resolve_script_history(scripthash, &source) else {
-        panic!("fast resolver");
-    };
-    let Ok(scan) = indexer.resolve_script_history_scan(scripthash, &source) else {
-        panic!("scan resolver");
-    };
+    let fast = indexer.resolve_script_history(scripthash, &source)?;
+    let scan = indexer.resolve_script_history_scan(scripthash, &source)?;
 
     assert_eq!(fast, scan, "fast and scan resolvers must agree on order");
     assert_eq!(
@@ -184,14 +168,18 @@ fn history_scan_resolver_also_sorts_by_height() {
         vec![1, 256],
         "both resolvers sort by numeric height"
     );
+    Ok(())
 }
 
 /// `resolve_unspent_outputs_with_height` also sorts by numeric height.
 #[test]
-fn unspent_outputs_with_height_sorts_by_numeric_height() {
+fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x03];
     let scripthash = ScriptHash::from_script_bytes(&script);
-    let mut indexer = Indexer::new(Arc::new(MemoryStore::default()));
+    let store = Arc::new(MemoryStore::default());
+    put_funding_row(&store, scripthash, 1)?;
+    put_funding_row(&store, scripthash, 256)?;
+    let indexer = Indexer::new(store);
 
     let block_at_1 = Block {
         header: header(),
@@ -202,20 +190,11 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() {
         txs: vec![tx_with_script(spent_outpoint(6, 0), script)],
     };
 
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_1), 1) else {
-        panic!("ingest height 1");
-    };
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_256), 256) else {
-        panic!("ingest height 256");
-    };
-
     let source = MultiHeightSource {
         blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
     };
 
-    let Ok(outputs) = indexer.resolve_unspent_outputs_with_height(scripthash, &source) else {
-        panic!("resolve_unspent_outputs_with_height");
-    };
+    let outputs = indexer.resolve_unspent_outputs_with_height(scripthash, &source)?;
 
     assert_eq!(outputs.len(), 2);
     assert_eq!(
@@ -223,42 +202,25 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() {
         vec![1, 256],
         "unspent outputs must be sorted by numeric height"
     );
+    Ok(())
 }
 
 /// Spending rows share the same LE height-order caveat as funding rows.
 /// This test confirms the on-disk key for spending rows also uses LE height,
 /// so `iter_spending_rows` returns LE byte order, not numeric.
 #[test]
-fn spending_rows_also_use_le_height_order() {
-    let script = vec![0x51, 0x04];
+fn spending_rows_also_use_le_height_order() -> Result<(), Box<dyn std::error::Error>> {
     let outpoint = spent_outpoint(7, 0);
+    let store = Arc::new(MemoryStore::default());
+    put_spending_row(&store, &outpoint, 1)?;
+    put_spending_row(&store, &outpoint, 256)?;
+    let indexer = Indexer::new(store);
 
-    // Block at height 1 spends the outpoint; block at height 256 also spends
-    // it (different block, same prevout — unrealistic on a real chain but
-    // sufficient to create two spending rows with the same prefix).
-    let block_at_1 = Block {
-        header: header(),
-        txs: vec![tx_with_script(outpoint, script.clone())],
-    };
-    let block_at_256 = Block {
-        header: header(),
-        txs: vec![tx_with_script(outpoint, script)],
-    };
-
-    let mut indexer = Indexer::new(Arc::new(MemoryStore::default()));
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_1), 1) else {
-        panic!("ingest height 1");
-    };
-    let Ok(_) = indexer.ingest_block(&consensus_bytes(&block_at_256), 256) else {
-        panic!("ingest height 256");
-    };
-
-    let Ok(rows) = indexer.iter_spending_rows(&outpoint) else {
-        panic!("iter_spending_rows");
-    };
+    let rows = indexer.iter_spending_rows(&outpoint)?;
     assert_eq!(rows.len(), 2, "two spending rows at two heights");
 
     // LE byte order: 256 before 1.
     assert_eq!(rows[0].height(), 256);
     assert_eq!(rows[1].height(), 1);
+    Ok(())
 }
