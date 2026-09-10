@@ -156,6 +156,20 @@ Owners:
   `crates/node/src/config.rs` tests `user_config_overlay_lets_set_fields_win` and
   `mining_payout_overlay_lets_the_later_address_win`.
 
+### `ARCH-05A`: Network and RPC configuration resolution
+
+  - Network selection resets network-dependent defaults before applying
+    same-layer overrides. Regtest uses RPC port `18443`, enables DNS seeds by
+    default, and clears inherited peer lists; explicit same-layer overrides,
+    including an empty peer list, win.
+  - RPC authentication gives a cookie path precedence over credentials within
+    one layer. A later layer supplying either Basic-auth field replaces cookie
+    auth; an omitted Basic-auth field falls back to `bitcoin-rs` as the password.
+  - Accepted network names are `bitcoin`/`main`, `test`/`testnet`/`testnet3`,
+    `testnet4`, `signet`, `regtest`, and `drynet4`, with surrounding whitespace
+    ignored and case folded. Unknown names are rejected, and `drynet4` maps to
+    the Mainnet consensus network.
+
 ### `ARCH-06`: Hierarchy change and exception process
 
 - Any change to workspace crate layer assignments, introduction of new workspace
