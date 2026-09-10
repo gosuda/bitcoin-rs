@@ -36,7 +36,7 @@ env:
   # backends plus the bitcoinkernel script-verification engine. cargo-deny
   # resolves metadata without compiling, so checking the full graph costs no
   # C++ toolchain here.
-  FULL_NODE_FEATURES: "rocksdb,fjall,redb,mdbx,kernel"
+  FULL_NODE_FEATURES: "rocksdb,fjall,redb,kernel"
 
 jobs:
   fmt:
@@ -142,7 +142,7 @@ jobs:
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         run: |
           cargo test --locked -p bitcoin-rs --no-fail-fast \
-            --no-default-features --features "rocksdb,fjall,redb,mdbx" \
+            --no-default-features --features "rocksdb,fjall,redb" \
             -- --exact --skip all_model_specs_check_with_apalache
       # consensus and node have kernel-enabled defaults, so the workspace
       # pass excludes them and the explicit native profiles above cover them.

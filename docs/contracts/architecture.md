@@ -83,8 +83,7 @@ Owners:
 ### `ARCH-02`: Exclusive storage engine dependency ownership
 
 - `bitcoin-rs-storage` is the sole crate in the workspace permitted to depend on
-  underlying storage engine crates (`fjall`, `redb`, `rust-rocksdb`,
-  `signet-libmdbx`).
+  underlying storage engine crates (`fjall`, `redb`, `rust-rocksdb`).
 - No crate outside `bitcoin-rs-storage` may name a storage engine dependency in
   `[dependencies]`, `[build-dependencies]`, or `[dev-dependencies]`.
 - All higher layers interact with persistent state through the `KvStore` facade
@@ -92,7 +91,7 @@ Owners:
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
-- Backend feature forwarding (`fjall`, `redb`, `rocksdb`, `mdbx`) is strictly
+- Backend feature forwarding (`fjall`, `redb`, `rocksdb`) is strictly
   confined to:
   1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
      backend selection to operators and packaging scripts.
@@ -100,6 +99,10 @@ Owners:
      package builds propagate backend selection into `bitcoin-rs-storage`.
 - Crates in Layer 0 (Core) and Layer 3 (Surface / RPC) must never define or
   forward storage backend features.
+- `fjall` is the default shipped product backend. `redb` and `rocksdb` are
+  retained shipped alternatives and independent product-matrix comparisons.
+  MDBX had only a diagnostic role and no current consumer; it is removed as a
+  complete ownership unit. Existing MDBX datadirs are not migrated or opened.
 
 ### `ARCH-04`: RPC surface independence from storage
 

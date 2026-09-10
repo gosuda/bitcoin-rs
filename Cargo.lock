@@ -505,7 +505,6 @@ dependencies = [
  "rustix",
  "serde",
  "sha2 0.11.0",
- "signet-libmdbx",
  "tempfile",
  "thiserror",
  "tracing",
@@ -636,12 +635,6 @@ dependencies = [
  "quote",
  "syn 3.0.4",
 ]
-
-[[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "byteorder-lite"
@@ -2579,30 +2572,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "signet-libmdbx"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd334ebaa7603e0ba8c9d701c883b3d264232e539860b6ff751c94aa959f6f0d"
-dependencies = [
- "bitflags 2.13.1",
- "byteorder",
- "parking_lot",
- "signet-mdbx-sys",
- "smallvec",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "signet-mdbx-sys"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1edd9fd6e430ce6243327fed2d343da022c4737c158874a632bd00f4cbd1f5f7"
-dependencies = [
- "cc",
 ]
 
 [[package]]

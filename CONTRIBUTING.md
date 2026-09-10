@@ -61,13 +61,13 @@ cargo test -p bitcoin-rs-node \
 # Run separately so another package cannot enable RPC's zmq feature
 cargo test -p bitcoin-rs-rpc --no-default-features --no-fail-fast
 
-# Binary tests with all storage backends, without kernel
+# Binary tests with all retained storage backends, without kernel
 cargo test -p bitcoin-rs --no-fail-fast \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx"
+  --no-default-features --features "rocksdb,fjall,redb"
 
 # Audit the full dependency graph, including the optional kernel
 cargo deny --workspace --no-default-features \
-  --features "rocksdb,fjall,redb,mdbx,kernel" check
+  --features "rocksdb,fjall,redb,kernel" check
 ```
 
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
@@ -97,15 +97,15 @@ dispatch. Pull-request-triggered checks are defined in
 
 ### Full-node feature set
 
-Compiles all storage engines (`fjall`, `redb`, `rocksdb`, `mdbx`) and the
+Compiles all retained storage engines (`fjall`, `redb`, `rocksdb`) and the
 `libbitcoinkernel` verification oracle (requires `cmake` and `libboost-dev`):
 
 ```sh
 cargo test -p bitcoin-rs --no-fail-fast \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel"
+  --no-default-features --features "rocksdb,fjall,redb,kernel"
 
 cargo clippy -p bitcoin-rs --all-targets \
-  --no-default-features --features "rocksdb,fjall,redb,mdbx,kernel" -- -D warnings
+  --no-default-features --features "rocksdb,fjall,redb,kernel" -- -D warnings
 
 cargo clippy -p bitcoin-rs-node --all-targets -- -D warnings
 cargo clippy -p bitcoin-rs-consensus --all-targets -- -D warnings

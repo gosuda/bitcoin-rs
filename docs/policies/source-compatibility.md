@@ -41,7 +41,7 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
 ### 3.2 Major Version Bumps
 - Upgrading a workspace dependency to a new major version requires:
   1. Audit of upstream security, performance, and API changes.
-  2. Compilation and verification across all four storage backend features (`fjall`, `rocksdb`, `mdbx`, `redb`).
+  2. Compilation and verification across all retained storage backend features (`fjall`, `rocksdb`, `redb`).
   3. Verification against the `kernel` consensus feature path.
 
 ### 3.3 Lockfile and CI Reproducibility

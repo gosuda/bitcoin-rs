@@ -476,9 +476,6 @@ fn compiled_features() -> Vec<String> {
     if cfg!(feature = "rocksdb") {
         features.push("rocksdb".to_owned());
     }
-    if cfg!(feature = "mdbx") {
-        features.push("mdbx".to_owned());
-    }
     if cfg!(feature = "kernel") {
         features.push("kernel".to_owned());
     }
@@ -536,16 +533,10 @@ fn scan_store(backend: StorageBackend, path: &Path, namespace: &str) -> Result<V
             let store = bitcoin_rs_storage::RocksDbStore::open(path).map_err(anyhow::Error::new)?;
             Ok(logical_store_owners(&store, namespace)?)
         }
-        #[cfg(feature = "mdbx")]
-        StorageBackend::Mdbx => {
-            let store = bitcoin_rs_storage::MdbxStore::open(path).map_err(anyhow::Error::new)?;
-            Ok(logical_store_owners(&store, namespace)?)
-        }
         #[cfg(any(
             not(feature = "rocksdb"),
             not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
+            not(feature = "redb")
         ))]
         other => bail!("unsupported storage backend for footprint scan: {other}"),
     }
@@ -589,22 +580,10 @@ fn scan_store_with_watermarks(
                 .map(watermark_evidence);
             Ok((owners, watermarks))
         }
-        #[cfg(feature = "mdbx")]
-        StorageBackend::Mdbx => {
-            let store =
-                Arc::new(bitcoin_rs_storage::MdbxStore::open(path).map_err(anyhow::Error::new)?);
-            let owners = logical_store_owners(&*store, "txindex")?;
-            let watermarks = Indexer::new(store)
-                .watermarks()
-                .ok()
-                .map(watermark_evidence);
-            Ok((owners, watermarks))
-        }
         #[cfg(any(
             not(feature = "rocksdb"),
             not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
+            not(feature = "redb")
         ))]
         other => bail!("unsupported storage backend for footprint scan: {other}"),
     }

@@ -27,7 +27,7 @@ The 2.0x speed gate and the 36-cell denominator live in issues #33 and
 - Backends: `fjall`, `rocksdb`, `redb`.
 - That product is exactly 36 cells. Allocator variants, scalar/AVX2
   builds, source forms, test networks, pruning experiments,
-  microbenchmarks, and `mdbx` are diagnostics. They are not cells and
+  and microbenchmarks are diagnostics. They are not cells and
   cannot replace a cell.
 - For `muhash`, the backend coordinate is how the identical committed
   state was constructed, checkpointed, reopened, and served. The live

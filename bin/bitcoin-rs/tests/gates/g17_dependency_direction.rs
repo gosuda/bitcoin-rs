@@ -3,7 +3,7 @@
 //! **G17 — Dependency direction.** The workspace crates form a one-way layer
 //! model; `cargo metadata` proves every edge points the approved way, no crate
 //! outside `bitcoin-rs-storage` names a storage-engine dependency
-//! (`rust-rocksdb`, `fjall`, `redb`, `signet-libmdbx`), and the RPC crate
+//! (`rust-rocksdb`, `fjall`, `redb`), and the RPC crate
 //! names no storage backend at all — neither as a dependency nor as a
 //! forwarded cargo feature.
 //!

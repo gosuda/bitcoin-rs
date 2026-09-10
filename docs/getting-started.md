@@ -54,7 +54,7 @@ or:
 export BITCOIN_RS_STORAGE_BACKEND=fjall
 ```
 
-Alternative backends such as RocksDB and MDBX are non-default features used for comparison and testing.
+RocksDB is a non-default backend used as a shipped alternative and comparison engine.
 
 ## Start the node
 
