@@ -15,11 +15,11 @@ pub mod types;
 pub mod writer;
 
 pub use index::{
-    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
-    IndexFormat, IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter,
-    Indexer, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits, PreparedBlock,
-    ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow,
-    TxIndexSnapshot,
+    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexFormat,
+    IndexReader, IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter,
+    Indexer, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits,
+    PreparedBlock, ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan,
+    TxIndexScanRow, TxIndexSnapshot,
 };
 pub use mempool::{MempoolRowCounts, MempoolRowWriter};
 pub use types::{

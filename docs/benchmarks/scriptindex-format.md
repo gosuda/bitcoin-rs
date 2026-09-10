@@ -327,14 +327,6 @@ default until one is.
 
 ### Versioning: per-capability format and reset
 
-The index tracks two independently versioned capabilities via
-`IndexCapability`:
-
-| Capability | Column families | Watermark key |
-|---|---|---|
-| `TxLookup` | `TxConfirmed`, `BlockHeaders` | `TX_LOOKUP_WATERMARK_KEY` |
-| `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
-
 **Per-capability format version.** The row-value format version
 (`INDEX_FORMAT_VERSION`, currently 2) is a single marker in `UtxoMeta`. It
 governs whether Funding, Spending, and TxConfirmed values carry `TxPosition`

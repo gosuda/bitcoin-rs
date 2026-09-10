@@ -832,7 +832,7 @@ fn resume_capability_reset<S: KvStore>(
             &work.next_revision,
         );
         completion.delete(ColumnFamily::UtxoMeta, INDEX_FORMAT_VERSION_KEY);
-          if store.write_durable_if(&conditions, completion)? {
+        if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
     }
@@ -1772,7 +1772,6 @@ impl<S: KvStore> Indexer<S> {
             }
         }
     }
-
 }
 
 fn pending_rows_for_block_with_header(
@@ -1875,7 +1874,6 @@ fn push_live_ops(
     rows.live_ops.extend(deletes);
     Ok(())
 }
-
 
 /// One index row together with the transaction byte range that produced it.
 ///
@@ -3295,7 +3293,6 @@ fn has_any_index_row<S: KvStore>(store: &S) -> Result<bool, IndexError> {
     }
     Ok(false)
 }
-
 
 /// Provides block lookups for resolving lossy index prefixes to full identities.
 ///

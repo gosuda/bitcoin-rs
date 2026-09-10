@@ -127,7 +127,6 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     Ok(())
 }
 
-
 /// The scan reference resolver also sorts by numeric height, agreeing with
 /// the fast resolver.
 #[test]
@@ -217,4 +216,3 @@ fn spending_rows_use_sortable_height_order() -> Result<(), Box<dyn std::error::E
     assert_eq!(rows[1].height(), 256);
     Ok(())
 }
-
