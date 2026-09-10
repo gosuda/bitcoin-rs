@@ -186,6 +186,13 @@ fn code_line(raw: &str, state: &mut LexState) -> String {
         at += 1;
     }
 
+    // An odd trailing backslash inside an ordinary string escapes the physical
+    // newline itself. `str::lines()` removes that newline, so consume the
+    // continuation here while keeping the string open for the next line.
+    if state.quoted.is_some() && state.escaped {
+        state.escaped = false;
+    }
+
     String::from_utf8(masked).expect("mask preserves UTF-8 outside literals")
 }
 
@@ -352,7 +359,11 @@ fn is_authorized_gateway_call(
 
     let normalized_path = path.replace('\\', "/");
     AUTHORIZED_GATEWAY_CALLS.iter().any(|(allowed_path, allowed_receiver)| {
-        normalized_path.ends_with(allowed_path) && receiver == *allowed_receiver
+        let path_matches = normalized_path == *allowed_path
+            || normalized_path
+                .strip_suffix(allowed_path)
+                .is_some_and(|prefix| prefix.ends_with('/'));
+        path_matches && receiver == *allowed_receiver
     })
 }
 
@@ -401,10 +412,15 @@ mod tests {
         ] {
             assert!(!authorized(MINING_HANDLER, source), "{source}");
         }
-        assert!(!authorized(
+        for path in [
             "/workspace/crates/node/src/apply.rs",
-            "ctx.mempool\n    .prioritise(txid, fee_delta)"
-        ));
+            "/workspace/fakecrates/rpc/src/handlers/mining.rs",
+        ] {
+            assert!(!authorized(
+                path,
+                "ctx.mempool\n    .prioritise(txid, fee_delta)"
+            ));
+        }
     }
 
     #[test]
@@ -425,6 +441,20 @@ const RAW: &str = r#"mempool.prioritise(txid, 2)"#;
 pub fn production() {}
 "##;
         assert!(violations(source).is_empty());
+    }
+
+    #[test]
+    fn string_continuation_does_not_hide_following_production() {
+        let source = r#"
+const TEXT: &str = "continued\
+";
+pub fn production() {
+    gateway.prioritise(txid, 9);
+}
+"#;
+        let found = violations(source);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].contains("gateway.prioritise(txid, 9)"));
     }
 
     #[test]
