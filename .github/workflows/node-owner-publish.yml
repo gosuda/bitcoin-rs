@@ -1,0 +1,41 @@
+name: node-owner-publish
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths:
+      - .github/workflows/node-owner-publish.yml
+      - .github/node-owner-plan.json
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt,clippy
+      - name: Validate exact trees and atomically publish five scope branches
+        run: |
+          cp .github/publish-node-owners.py /tmp/publish-node-owners.py
+          python /tmp/publish-node-owners.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-owner-publication
+          path: |
+            /tmp/node-owner-publication.json
+            /tmp/node-owner-validation
+          retention-days: 7
