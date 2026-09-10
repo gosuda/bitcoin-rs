@@ -29,7 +29,7 @@ jobs:
           components: rustfmt,clippy
       - name: Validate exact trees and atomically publish five scope branches
         run: |
-          cp .github/publish-node-owners.py /tmp/publish-node-owners.py
+          python .github/prepare-node-publisher.py
           python /tmp/publish-node-owners.py
       - uses: actions/upload-artifact@v4
         if: always()
