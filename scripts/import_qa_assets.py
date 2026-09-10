@@ -91,14 +91,60 @@ def _frame(selector: int, script_pubkey: bytes, witness: Sequence[bytes]) -> byt
     return b"".join(parts)
 
 
-def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: int) -> None:
-    limit = re.search(
-        r"const\s+ELEMENT_LEN_MAX\s*:\s*usize\s*=\s*([0-9_]+)\s*;",
-        harness.read_text(),
+def _split_flags(body: str) -> list[str]:
+    entries: list[str] = []
+    start = depth = 0
+    pairs = {")": "(", "]": "[", "}": "{"}
+    stack: list[str] = []
+    for index, char in enumerate(body):
+        if char in "([{":
+            stack.append(char)
+            depth += 1
+        elif char in pairs:
+            if not stack or stack.pop() != pairs[char]:
+                raise ValueError("Invalid script_eval FLAGS inventory")
+            depth -= 1
+        elif char == "," and depth == 0:
+            entry = body[start:index].strip()
+            if entry:
+                entries.append(entry)
+            start = index + 1
+    if stack:
+        raise ValueError("Invalid script_eval FLAGS inventory")
+    tail = body[start:].strip()
+    if tail:
+        entries.append(tail)
+    return entries
+
+
+def _script_contract(harness: Path) -> tuple[int, int, int]:
+    text = harness.read_text()
+    limit = re.search(r"const\s+ELEMENT_LEN_MAX\s*:\s*usize\s*=\s*([0-9_]+)\s*;", text)
+    flags = re.search(
+        r"const\s+FLAGS\s*:\s*\[VerifyFlags\s*;\s*([0-9_]+)\s*\]\s*=\s*\[(.*?)\]\s*;",
+        text, re.S,
     )
     if limit is None:
         raise ValueError("Cannot find script_eval ELEMENT_LEN_MAX")
-    element_limit = int(limit.group(1).replace("_", ""))
+    if flags is None:
+        raise ValueError("Cannot find script_eval FLAGS inventory")
+    entries = _split_flags(flags.group(2))
+    declared = int(flags.group(1).replace("_", ""))
+    if not entries or len(entries) != declared or len(entries) > 256:
+        raise ValueError("Invalid script_eval FLAGS inventory")
+    normalized = [re.sub(r"\s+", "", entry) for entry in entries]
+    try:
+        none = normalized.index("VerifyFlags::NONE")
+        taproot = normalized.index("VerifyFlags::TAPROOT")
+    except ValueError as error:
+        raise ValueError("script_eval FLAGS must contain NONE and TAPROOT exactly once") from error
+    if normalized.count("VerifyFlags::NONE") != 1 or normalized.count("VerifyFlags::TAPROOT") != 1:
+        raise ValueError("script_eval FLAGS must contain NONE and TAPROOT exactly once")
+    return int(limit.group(1).replace("_", "")), none, taproot
+
+
+def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: int) -> None:
+    element_limit, none_selector, taproot_selector = _script_contract(harness)
     # P2TR framing adds ten bytes relative to the retained source script.
     script_limit = min(element_limit, 0xffff, max_bytes - 10)
     if script_limit < 0:
@@ -108,9 +154,9 @@ def map_script(sources: Sequence[Path], harness: Path, output: Path, max_bytes: 
     for source in sources:
         for path in _seed_paths(source):
             script = _read_seed(path, script_limit)
-            _emit(output, _frame(0, script, []))
+            _emit(output, _frame(none_selector, script, []))
             if len(script) >= 32 and element_limit >= 34:
-                _emit(output, _frame(3, b"\x51\x20" + script[:32], [script[32:]]))
+                _emit(output, _frame(taproot_selector, b"\x51\x20" + script[:32], [script[32:]]))
             imported += 1
     print(f"script_eval: imported={imported} files (raw + P2TR variants)")
 

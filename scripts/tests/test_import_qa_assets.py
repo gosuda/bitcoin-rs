@@ -56,7 +56,15 @@ pub const COMMANDS: &[Command] = &[
 ];
 pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
 ''')
-        self.script_target.write_text("const ELEMENT_LEN_MAX: usize = 1_024;\n")
+        self.script_target.write_text(
+            "const FLAGS: [VerifyFlags; 4] = [\n"
+            "    VerifyFlags::NONE,\n"
+            "    VerifyFlags::MANDATORY,\n"
+            "    VerifyFlags::STANDARD,\n"
+            "    VerifyFlags::TAPROOT,\n"
+            "];\n"
+            "const ELEMENT_LEN_MAX: usize = 1_024;\n"
+        )
 
     def run_mapper(self, name, budget=BUDGET):
         with redirect_stdout(io.StringIO()):
@@ -112,14 +120,43 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
         self.assertEqual(len(list((self.output / "script_eval").iterdir())), 2)
 
     def test_script_limit_follows_the_owner_constant(self):
-        self.script_target.write_text("const ELEMENT_LEN_MAX: usize = 512;\n")
+        self.script_target.write_text(
+            self.script_target.read_text().replace("1_024", "512")
+        )
         (self.scripts / "script").write_bytes(b"Q" * 1024)
         self.run_mapper("map_script")
         self.assert_seed("script_eval", b"\0\0\0\0\x02" + b"Q" * 512 + b"\0")
 
     def test_missing_script_limit_fails_closed(self):
-        self.script_target.write_text("// no element limit\n")
+        self.script_target.write_text(
+            self.script_target.read_text().replace("const ELEMENT_LEN_MAX: usize = 1_024;\n", "")
+        )
         with self.assertRaises(ValueError):
+            self.run_mapper("map_script")
+        self.assertFalse((self.output / "script_eval").exists())
+
+
+    def test_script_selectors_follow_the_owner_inventory_order(self):
+        self.script_target.write_text(
+            "const FLAGS: [VerifyFlags; 4] = [\n"
+            "    VerifyFlags::TAPROOT,\n"
+            "    VerifyFlags::MANDATORY,\n"
+            "    VerifyFlags::NONE,\n"
+            "    VerifyFlags::STANDARD,\n"
+            "];\n"
+            "const ELEMENT_LEN_MAX: usize = 1_024;\n"
+        )
+        script = b"Q" * 64
+        (self.scripts / "script").write_bytes(script)
+        self.run_mapper("map_script")
+        raw = b"\x02\0\0\x40\0" + script + b"\0"
+        taproot = b"\x00\0\0\x22\0\x51\x20" + script[:32] + b"\x01\x20\0" + script[32:]
+        self.assert_seed("script_eval", raw)
+        self.assert_seed("script_eval", taproot)
+
+    def test_missing_script_flags_fail_closed(self):
+        self.script_target.write_text("const ELEMENT_LEN_MAX: usize = 1_024;\n")
+        with self.assertRaisesRegex(ValueError, "FLAGS"):
             self.run_mapper("map_script")
         self.assertFalse((self.output / "script_eval").exists())
 
