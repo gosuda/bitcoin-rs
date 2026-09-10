@@ -16,7 +16,7 @@ for height in "${heights[@]}"; do
   bin_path="${out_dir}/${height}.bin"
   txids_path="${out_dir}/${height}.txids.txt"
   for cache_path in "${bin_path}" "${txids_path}"; do
-    if [[ -e "${cache_path}" && ! -f "${cache_path}" ]]; then
+    if [[ -L "${cache_path}" || ( -e "${cache_path}" && ! -f "${cache_path}" ) ]]; then
       printf 'Not a regular fixture file: %s\n' "${cache_path}" >&2
       exit 1
     fi

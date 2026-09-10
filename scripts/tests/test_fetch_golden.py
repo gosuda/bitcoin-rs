@@ -8,6 +8,16 @@ and offline reuse. Heights come from the script, not a second inventory.
 Response bytes are synthetic transport fixtures, not Bitcoin validity vectors:
 expected file contents are the stub's input bytes, never downloader output.
 
+Cache-path admission contract: PR #757 requires regular cache artifacts and
+rejects directories and symbolic links, including dangling links, without
+changing them or starting HTTP/staging work:
+https://github.com/gosuda/bitcoin-rs/pull/757
+Bash -e/-f follow links, while -L tests the link itself. The independent
+reference for the filesystem predicates is:
+https://www.gnu.org/software/bash/manual/html_node/Bash-Conditional-Expressions.html
+The tests construct these path types directly rather than deriving expected
+admission decisions from the downloader.
+
 Run from the repository root: python3 -m unittest discover -s scripts/tests -v
 """
 
@@ -117,13 +127,43 @@ class FetchGoldenTests(unittest.TestCase):
                 original = path.read_bytes()
                 path.unlink()
                 path.mkdir()
-                result = self.run_fetch("offline")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(path.name, result.stderr)
-                self.assertEqual(self.requests(), [])
-                self.assertEqual(list(path.iterdir()), [])
-                path.rmdir()
-                path.write_bytes(original)
+                try:
+                    result = self.run_fetch("offline")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(path.name, result.stderr)
+                    self.assertEqual(self.requests(), [])
+                    self.assertEqual(list(path.iterdir()), [])
+                finally:
+                    path.rmdir()
+                    path.write_bytes(original)
+
+    def test_symlink_cache_entries_are_rejected_and_preserved(self):
+        self.seed_cache()
+        for target_kind in ("nonempty", "empty", "dangling"):
+            target = self.root / f"target-{target_kind}"
+            contents = b"target bytes" if target_kind == "nonempty" else b""
+            if target_kind != "dangling":
+                target.write_bytes(contents)
+            for path in (self.block_path, self.txids_path):
+                with self.subTest(path=path.name, target=target_kind):
+                    original = path.read_bytes()
+                    path.unlink()
+                    path.symlink_to(target)
+                    try:
+                        result = self.run_fetch("offline")
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(path.name, result.stderr)
+                        self.assertEqual(self.requests(), [])
+                        self.assertTrue(path.is_symlink())
+                        self.assertEqual(os.readlink(path), str(target))
+                        if target_kind == "dangling":
+                            self.assertFalse(target.exists())
+                        else:
+                            self.assertEqual(target.read_bytes(), contents)
+                    finally:
+                        path.unlink(missing_ok=True)
+                        path.write_bytes(original)
+
 
     def test_complete_cache_needs_no_staging_directory(self):
         self.seed_cache()
