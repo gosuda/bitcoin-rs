@@ -66,6 +66,7 @@
     }
   },
   "gap_paths": [
-    "headers.content-type"
+    "headers.content-type",
+    "headers.content-length"
   ]
 }
