@@ -121,7 +121,7 @@ if ! core_version_text="$("$core_binary" "-datadir=$core_probe_dir" -version 2>&
   exit 1
 fi
 core_version_line="${core_version_text%%$'\n'*}"
-if [[ "$core_version_line" != *"$core_version_output"* ]]; then
+if [[ "$core_version_line" != "$core_version_output" ]]; then
   printf 'unexpected bitcoind version: %s\n' "$core_version_line" >&2
   exit 1
 fi
