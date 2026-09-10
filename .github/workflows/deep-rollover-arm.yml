@@ -1,0 +1,233 @@
+name: deep-rollover-arm
+on:
+  push:
+    branches: [verify/deep-rollover-arm-20260910]
+    paths: [.github/workflows/deep-rollover-arm.yml]
+permissions:
+  contents: write
+concurrency:
+  group: deep-rollover-arm-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 7c6a01058ae637990c90c532b295920fd97c7ab6
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Add owner regressions to verified source
+        run: |
+          mkdir -p /tmp/rollover-evidence
+          git rev-parse HEAD | tee /tmp/rollover-evidence/base.txt
+          rustc --version --verbose | tee /tmp/rollover-evidence/toolchain.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          p = Path('crates/mempool/src/pool.rs')
+          assert subprocess.check_output(['git', 'hash-object', str(p)], text=True).strip() == '0836141ddba8457dd04f419ea78236c3711a414b'
+          text = p.read_text()
+          assert 'mod rollover_tests' not in text
+          p.write_text(text + '''
+
+          #[cfg(test)]
+          mod rollover_tests {
+              use super::*;
+
+              /// MPL-02: compare owner assignments with explicit boundary values.
+              #[test]
+              fn mutation_assignment_round_trips_rollover() {
+                  let cases = [
+                      (0, [1, 2, 3]),
+                      (u64::MAX - 2, [u64::MAX - 1, u64::MAX, 0]),
+                      (u64::MAX - 1, [u64::MAX, 0, 1]),
+                      (u64::MAX, [0, 1, 2]),
+                  ];
+                  for (before, assigned) in cases {
+                      for len in 0..=assigned.len() {
+                          let mut pool = Mempool::new(MempoolLimits::default());
+                          pool.mempool_sequence = before;
+                          let mut changes = Vec::new();
+                          for (tag, expected) in [1_u8, 2, 3].into_iter().zip(&assigned[..len]) {
+                              let txid = Txid::from(Hash256::from_le_bytes(&[tag; 32]));
+                              pool.push_change(&mut changes, txid, MutationOutcome::Accepted);
+                              assert_eq!(pool.sequence_number(), *expected);
+                          }
+                          let result = pool.finish_mutation(changes);
+                          assert_eq!(result.len(), len);
+                          assert_eq!(result.sequence_base, assigned[..len].first().copied().unwrap_or(0));
+                          for (index, expected) in assigned[..len].iter().enumerate() {
+                              assert_eq!(result.sequence_of(index), Some(*expected));
+                          }
+                          assert_eq!(result.sequence_of(len), None);
+                          assert_eq!(result.sequence_of(usize::MAX), None);
+                          assert_eq!(pool.sequence_number(), assigned[..len].last().copied().unwrap_or(before));
+                      }
+                  }
+              }
+
+              fn entry(tag: u8) -> MempoolEntry {
+                  MempoolEntry::new(Arc::new(Tx {
+                      version: 2,
+                      inputs: vec![TxIn {
+                          previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[tag; 32])), 0),
+                          script_sig: Vec::new(),
+                          sequence: u32::MAX,
+                          witness: Vec::new(),
+                      }],
+                      outputs: vec![TxOut { value: 1_000, script_pubkey: vec![0x51] }],
+                      lock_time: 0,
+                  }), 100, 1_000, 0, 0)
+              }
+
+              /// MPL-02: zero identifies a real admission and removal retires it.
+              #[test]
+              fn admission_identity_survives_sequence_rollover() -> Result<(), MempoolError> {
+                  let mut pool = Mempool::new(MempoolLimits::default());
+                  pool.mempool_sequence = u64::MAX - 1;
+                  let first = entry(1);
+                  let first_id = first.txid;
+                  let second = entry(2);
+                  let second_id = second.txid;
+                  let first_result = pool.insert_entry(first)?;
+                  let second_result = pool.insert_entry(second)?;
+                  assert_eq!(first_result.mutation().sequence_of(0), Some(u64::MAX));
+                  assert_eq!(second_result.mutation().sequence_of(0), Some(0));
+                  assert!(pool.entry_by_txid_at_sequence(&first_id, u64::MAX).is_some());
+                  assert!(pool.entry_by_txid_at_sequence(&second_id, 0).is_some());
+                  let removed = pool.clear();
+                  assert_eq!(removed.len(), 2);
+                  assert_eq!(removed.sequence_of(0), Some(1));
+                  assert_eq!(removed.sequence_of(1), Some(2));
+                  assert!(removed.changes.iter().all(|change| change.outcome == MutationOutcome::Removed(RemovalReason::Clear)));
+                  assert_eq!(pool.clear(), MutationResult::empty());
+                  assert_eq!(pool.sequence_number(), 2);
+                  let readmitted = pool.insert_entry(entry(1))?;
+                  assert_eq!(readmitted.mutation().sequence_of(0), Some(3));
+                  assert!(pool.entry_by_txid_at_sequence(&first_id, u64::MAX).is_none());
+                  assert!(pool.entry_by_txid_at_sequence(&first_id, 3).is_some());
+                  Ok(())
+              }
+
+              /// MPL-02: an ordinary multi-entry mutation can span the boundary.
+              #[test]
+              fn clear_batch_wraps_without_losing_committed_removals() -> Result<(), MempoolError> {
+                  let mut pool = Mempool::new(MempoolLimits::default());
+                  pool.mempool_sequence = u64::MAX - 3;
+                  pool.insert_entry(entry(1))?;
+                  pool.insert_entry(entry(2))?;
+                  assert_eq!(pool.sequence_number(), u64::MAX - 1);
+                  let removed = pool.clear();
+                  assert!(pool.is_empty());
+                  assert_eq!(removed.len(), 2);
+                  assert_eq!(removed.sequence_base, u64::MAX);
+                  assert_eq!(removed.sequence_of(0), Some(u64::MAX));
+                  assert_eq!(removed.sequence_of(1), Some(0));
+                  assert_eq!(removed.sequence_of(2), None);
+                  assert_eq!(pool.sequence_number(), 0);
+                  assert_eq!(pool.clear(), MutationResult::empty());
+                  assert_eq!(pool.sequence_number(), 0);
+                  Ok(())
+              }
+          }
+          ''')
+          PY
+      - name: Require the original owner to fail on arithmetic, not setup
+        run: |
+          set +e
+          cargo test --locked -p bitcoin-rs-mempool --lib rollover_tests -- --nocapture > /tmp/rollover-evidence/red.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/rollover-evidence/red.txt
+          test "$rc" -ne 0
+          grep -q 'attempt to subtract with overflow' /tmp/rollover-evidence/red.txt
+          grep -q 'test result: FAILED' /tmp/rollover-evidence/red.txt
+      - name: Repair sequence construction and its existing contract
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/mempool/src/pool.rs')
+          old = '.map_or(0, |_| self.mempool_sequence - batch_len + 1);'
+          new = '.map_or(0, |_| self.mempool_sequence.wrapping_sub(batch_len).wrapping_add(1));'
+          text = p.read_text()
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new, 1))
+          p = Path('crates/mempool/src/mutation.rs')
+          text = p.read_text()
+          old = '    /// next value. `0` when `changes` is empty.'
+          new = '    /// next value modulo 2^64. `0` when `changes` is empty; a nonempty\n    /// batch may also start at zero after rollover.'
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new, 1))
+          p = Path('docs/contracts/mempool-mutations.md')
+          text = p.read_text()
+          old = '  an empty pool assign nothing.\n'
+          new = old + ('- Assignment, batch-base construction, and in-bounds lookup use modulo-2^64\n'
+                       '  arithmetic, including `u64::MAX -> 0`. Zero is a valid committed sequence;\n'
+                       '  only an empty change list means no mutation. Out-of-bounds lookups return\n'
+                       '  `None`. Publication follows commit order, not numeric sorting across rollover.\n')
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+          old = '## Proven by\n'
+          new = old + ('\n- `crates/mempool/src/pool.rs` (`rollover_tests`):\n'
+                       '  `mutation_assignment_round_trips_rollover`,\n'
+                       '  `admission_identity_survives_sequence_rollover`,\n'
+                       '  `clear_batch_wraps_without_losing_committed_removals`.\n')
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new, 1))
+          PY
+          cargo fmt --all
+          python3 - <<'PY'
+          import subprocess
+          allowed = {'crates/mempool/src/pool.rs', 'crates/mempool/src/mutation.rs', 'docs/contracts/mempool-mutations.md'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          assert changed == allowed, ('Unexpected source changes', sorted(changed))
+          PY
+          cargo fmt --all -- --check
+          git diff --check
+      - name: Native owner and observer regressions
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs-mempool --lib --no-fail-fast 2>&1 | tee /tmp/rollover-evidence/mempool.txt
+          cargo test --locked -p bitcoin-rs-p2p --lib tx_relay 2>&1 | tee /tmp/rollover-evidence/relay.txt
+          cargo test --locked -p bitcoin-rs-rpc --lib zmq 2>&1 | tee /tmp/rollover-evidence/zmq.txt
+          cargo test --locked -p bitcoin-rs-mempool --release --lib rollover_tests 2>&1 | tee /tmp/rollover-evidence/release.txt
+      - name: All three strict native PR Clippy profiles
+        run: |
+          set -o pipefail
+          cargo clippy --locked --workspace --all-targets --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node -- -D warnings 2>&1 | tee /tmp/rollover-evidence/clippy-workspace.txt
+          cargo clippy --locked -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings 2>&1 | tee /tmp/rollover-evidence/clippy-consensus.txt
+          cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/rollover-evidence/clippy-node.txt
+      - name: Ownership and evidence schema gates
+        run: |
+          set -o pipefail
+          cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership --test overhaul_evidence --test overhaul_reference_set 2>&1 | tee /tmp/rollover-evidence/contracts.txt
+      - name: Publish the tested source only
+        run: |
+          test "$(git rev-parse HEAD)" = 7c6a01058ae637990c90c532b295920fd97c7ab6
+          test -z "$(git ls-remote --heads origin refs/heads/validated/deep-rollover-arm-20260910)"
+          git diff --exit-code -- Cargo.lock
+          cargo fmt --all -- --check
+          git diff --check
+          git add -- crates/mempool/src/pool.rs crates/mempool/src/mutation.rs docs/contracts/mempool-mutations.md
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(mempool): preserve owner-assigned sequences across rollover'
+          git diff --exit-code
+          git rev-parse HEAD | tee /tmp/rollover-evidence/head.txt
+          git show --stat --oneline HEAD | tee /tmp/rollover-evidence/scope.txt
+          git push origin HEAD:refs/heads/validated/deep-rollover-arm-20260910
+      - name: Preserve deciding output on both success and failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: deep-rollover-arm-${{ github.run_id }}
+          path: /tmp/rollover-evidence/
+          if-no-files-found: error
+          retention-days: 7
