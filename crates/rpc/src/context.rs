@@ -1198,15 +1198,10 @@ impl Context {
     ///
     /// `sendrawtransaction` and embedded `Node::broadcast` both use the
     /// gateway's [`MempoolGateway::submit_transaction`] preparation and retry
-    /// boundary. [`MempoolGateway::admit_transaction`] holds the pool write lock
-    /// across the entire mempool-dependent policy evaluation — the
-    /// already-known check, prevout-resolved fee/vsize/sigop context,
-    /// standardness policy, the live min-relay / mempool-min floor, the
-    /// caller's max-feerate cap, BIP125 replacement analysis, and package
-    /// limits — and commits the authorized
-    /// [`MempoolGateway::replace_transaction`] inside that same lock
-    /// interval, so no concurrent admission can invalidate the verdict
-    /// before it lands.
+    /// boundary. [`MempoolGateway::admit_transaction`] evaluates policy under
+    /// a pool read and verifies scripts over copied inputs outside pool locks.
+    /// Its writer rechecks chain generation, pool sequence and enforced policy
+    /// before committing through the gateway's ordered publication seam.
     ///
     /// Membership follows `POL-01` Duplicate submission in
     /// `docs/policies/mempool-policy.md`. The pool read is a best-effort

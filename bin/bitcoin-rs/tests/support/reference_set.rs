@@ -90,6 +90,12 @@ pub(crate) struct KernelIdentity {
     pub(crate) kernel_sys_crate: String,
     /// Locked version of the `-sys` crate.
     pub(crate) kernel_sys_crate_version: String,
+    /// Published `-sys` crate's `.cargo_vcs_info.json` source revision.
+    pub(crate) kernel_vendor_commit: String,
+    /// Bitcoin Core commit imported by that crate's vendored subtree.
+    pub(crate) kernel_source_commit: String,
+    /// Published `-sys` package checksum, checked against `Cargo.lock`.
+    pub(crate) kernel_sys_crate_sha256: [u8; 32],
     /// Whether a differential harness compares *values* against a running
     /// reference. `false` means no entry may claim `supported`.
     pub(crate) differential_harness: bool,
@@ -156,6 +162,12 @@ pub(crate) enum ReferenceError {
         /// The malformed digest field.
         field: &'static str,
     },
+    /// A source identity is a mutable name or malformed commit hash.
+    #[error("`{field}` must be a full 40-character lowercase hex commit")]
+    RevisionMalformed {
+        /// The malformed source revision field.
+        field: &'static str,
+    },
     /// The released product and the kernel development tree were confused.
     #[error(
         "the released product identity and the 31.99.x kernel tree identity were \
@@ -189,7 +201,7 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
     let release = ReleaseIdentity {
         core_version: required_str(release_table, "core_version")?,
         git_tag: required_str(release_table, "git_tag")?,
-        source_commit: required_str(release_table, "source_commit")?,
+        source_commit: required_commit(release_table, "source_commit")?,
         archive: required_str(release_table, "archive")?,
         archive_sha256: required_sha256(release_table, "archive_sha256")?,
         bitcoind_sha256: required_sha256(release_table, "bitcoind_sha256")?,
@@ -202,6 +214,9 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
         kernel_crate_version: required_str(reference, "kernel_crate_version")?,
         kernel_sys_crate: required_str(reference, "kernel_sys_crate")?,
         kernel_sys_crate_version: required_str(reference, "kernel_sys_crate_version")?,
+        kernel_vendor_commit: required_commit(reference, "kernel_vendor_commit")?,
+        kernel_source_commit: required_commit(reference, "kernel_source_commit")?,
+        kernel_sys_crate_sha256: required_sha256(reference, "kernel_sys_crate_sha256")?,
         differential_harness: required_bool(reference, "differential_harness")?,
     };
 
@@ -288,8 +303,21 @@ fn required_str(section: &toml::Table, field: &'static str) -> Result<String, Re
     section
         .get(field)
         .and_then(toml::Value::as_str)
+        .filter(|text| !text.trim().is_empty())
         .map(str::to_owned)
         .ok_or(ReferenceError::VersionLabelOnly { field })
+}
+
+fn required_commit(section: &toml::Table, field: &'static str) -> Result<String, ReferenceError> {
+    let text = required_str(section, field)?;
+    if text.len() != 40
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ReferenceError::RevisionMalformed { field });
+    }
+    Ok(text)
 }
 
 fn required_bool(section: &toml::Table, field: &'static str) -> Result<bool, ReferenceError> {

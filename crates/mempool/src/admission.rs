@@ -164,6 +164,127 @@ fn combine_input_facts(
 }
 
 impl MempoolGateway {
+    /// Evaluates a bounded batch through the submission evaluator without
+    /// changing membership, sequence, fee history, orphan state or observers.
+    /// Earlier offered outputs satisfy later rows, preserving the supported
+    /// independent-row preview contract. This is not atomic package admission.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep batch capture, verification and retry fencing in one auditable owner"
+    )]
+    pub fn preview_transactions(
+        &self,
+        txs: &[Tx],
+        max_feerate_sat_per_kvb: Option<u64>,
+        chain: &dyn AdmissionChain,
+    ) -> Result<crate::standardness::PackageAcceptanceFacts, SubmitError> {
+        use crate::standardness::{MAX_PACKAGE_COUNT, PackageAcceptanceFacts};
+        if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
+            return Ok(PackageAcceptanceFacts {
+                package_error: Some(AcceptanceRejectReason::PackageTooLarge),
+                results: Vec::new(),
+            });
+        }
+        'attempt: for _ in 0..MAX_ADMISSION_RETRIES {
+            let Some(generation) = self.stable_generation() else {
+                continue;
+            };
+            let (sequence, limits, policy, mempool_inputs) = {
+                let pool = self.pool.read();
+                if self.stable_generation() != Some(generation) {
+                    continue;
+                }
+                (
+                    pool.sequence_number(),
+                    pool.limits,
+                    pool.policy_snapshot(),
+                    txs.iter()
+                        .map(|tx| resolve_mempool_inputs(&pool, tx))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let mut package_outputs = HashMap::new();
+            let mut requests = Vec::with_capacity(txs.len());
+            for (tx, mempool_inputs) in txs.iter().zip(mempool_inputs) {
+                // Chain I/O never holds the pool read or lifecycle lock.
+                let snapshot = if mempool_inputs.is_some() {
+                    let Some(snapshot) = chain.snapshot(tx) else {
+                        continue 'attempt;
+                    };
+                    snapshot
+                } else {
+                    ChainAdmissionSnapshot {
+                        prevouts: Vec::new(),
+                        height: 0,
+                        locktime_cutoff: 0,
+                        confirmed: false,
+                    }
+                };
+                let mut available = snapshot.prevouts.into_iter().collect::<HashMap<_, _>>();
+                available.extend(mempool_inputs.unwrap_or_default());
+                available.extend(
+                    package_outputs
+                        .iter()
+                        .map(|(outpoint, output): (&OutPoint, &TxOut)| (*outpoint, output.clone())),
+                );
+                let (prevouts, _) = combine_input_facts(tx, &available, &HashMap::new());
+                let context = crate::accounting::prepared_context(
+                    tx,
+                    &prevouts,
+                    prevouts.len() != tx.inputs.len(),
+                );
+                requests.push(AdmissionRequest {
+                    tx: Arc::new(tx.clone()),
+                    context,
+                    prevouts,
+                    locktime_cutoff: snapshot.locktime_cutoff,
+                    max_feerate_sat_per_kvb,
+                    time: 0,
+                    height: snapshot.height,
+                    origin: AdmissionOrigin::Rpc,
+                    expected_generation: generation,
+                    expected_sequence: sequence,
+                });
+                let txid = tx.txid();
+                for (vout, output) in tx.outputs.iter().enumerate() {
+                    if let Ok(vout) = u32::try_from(vout) {
+                        package_outputs.insert(OutPoint::new(txid, vout), output.clone());
+                    }
+                }
+            }
+            let mut prepared = {
+                let pool = self.pool.read();
+                if self.stable_generation() != Some(generation)
+                    || pool.sequence_number() != sequence
+                    || pool.limits != limits
+                    || pool.policy_snapshot() != policy
+                {
+                    continue;
+                }
+                requests
+                    .iter()
+                    .map(|request| Self::prepare_admission(&pool, request))
+                    .collect::<Vec<_>>()
+            };
+            for (prepared, request) in prepared.iter_mut().zip(&requests) {
+                prepared.verify(request);
+            }
+            let pool = self.pool.read();
+            if self.stable_generation() != Some(generation)
+                || pool.sequence_number() != sequence
+                || pool.limits != limits
+                || pool.policy_snapshot() != policy
+            {
+                continue;
+            }
+            return Ok(PackageAcceptanceFacts {
+                package_error: None,
+                results: prepared.into_iter().map(|prepared| prepared.fact).collect(),
+            });
+        }
+        Err(SubmitError::RetryExhausted)
+    }
+
     /// Prepares and submits one transaction, rebuilding all facts after a
     /// transient token mismatch. Only peer-origin failures affect relay caches.
     pub fn submit_transaction(
@@ -323,6 +444,20 @@ impl MempoolGateway {
             });
         }
         results
+    }
+
+    /// Applies the orphan retention policy to one snapshot of live connections.
+    ///
+    /// Expiry and peer-disconnect cleanup are mempool-owned transitions. The node
+    /// supplies only the current P2P connection tokens; a same-address replacement
+    /// has a different token and cannot retain its predecessor's bodies.
+    pub fn maintain_orphans(
+        &self,
+        time: u64,
+        live_peers: impl IntoIterator<Item = PeerToken>,
+    ) -> usize {
+        let live_peers: hashbrown::HashSet<PeerToken> = live_peers.into_iter().collect();
+        self.lifecycle.lock().orphans.maintain(time, &live_peers)
     }
 
     /// Called for every committed connect/disconnect, including ones with no
@@ -573,7 +708,8 @@ mod tests {
 
     // MPL-04: changed pool facts must rebuild a normal chain lookup.
     #[test]
-    fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool() {
+    fn no_chain_invalid_attempt_rebuilds_after_its_parent_leaves_the_pool()
+    -> Result<(), Box<dyn std::error::Error>> {
         struct ResetPark;
         impl Drop for ResetPark {
             fn drop(&mut self) {
@@ -623,6 +759,99 @@ mod tests {
         assert!(!gateway.read().contains_txid(&txid));
         assert_eq!(gateway.orphan_count(), 0);
         assert_eq!(gateway.recent_rejects_count(), 0);
+
+        // Run all cases under this existing process-global park owner.
+        for mode in 0..3 {
+            assert_verified_admission_rebuilds_after_change(mode)?;
+        }
+        Ok(())
+    }
+
+    fn assert_verified_admission_rebuilds_after_change(
+        mode: u8,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        struct MutableCoins(Mutex<Coins>, AtomicUsize);
+        impl AdmissionChain for MutableCoins {
+            fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+                self.1.fetch_add(1, Ordering::SeqCst);
+                self.0.lock().snapshot(tx)
+            }
+        }
+        let gateway = gateway();
+        let (valid, coins) = witness_spend();
+        let chain = Arc::new(MutableCoins(Mutex::new(coins), AtomicUsize::new(0)));
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        crate::arm_admission_park(
+            std::ptr::from_ref(gateway.as_ref()).expose_provenance(),
+            parked_tx,
+            release_rx,
+        );
+        let worker_gateway = Arc::clone(&gateway);
+        let worker_chain = Arc::clone(&chain);
+        let worker_tx = Arc::clone(&valid);
+        let worker = std::thread::spawn(move || {
+            worker_gateway.submit_transaction(
+                worker_tx,
+                AdmissionOrigin::Rpc,
+                None,
+                1,
+                worker_chain.as_ref(),
+            )
+        });
+        parked_rx.recv_timeout(std::time::Duration::from_secs(5))?;
+        assert!(
+            gateway.pool.try_write().is_some(),
+            "verification retains no pool guard"
+        );
+        match mode {
+            0 => {
+                gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 100_000;
+                assert_eq!(gateway.read().sequence_number(), 0, "policy alone changed");
+            }
+            1 => {
+                let mut conflict = (*valid).clone();
+                conflict.outputs[0].value -= 1;
+                gateway.insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 1),
+                )?;
+            }
+            _ => {
+                let transition = gateway.begin_chain_change()?;
+                chain.0.lock().0.clear();
+                transition.finish()?;
+            }
+        }
+        let sequence = gateway.read().sequence_number();
+        release_tx.send(())?;
+        let result = worker.join().map_err(|_| "submission worker panicked")?;
+        match mode {
+            0 => assert_eq!(
+                result,
+                Err(SubmitError::Policy(
+                    AcceptanceRejectReason::MinRelayFeeNotMet
+                ))
+            ),
+            1 => assert!(matches!(
+                result,
+                Err(SubmitError::Policy(AcceptanceRejectReason::Replacement(_)))
+            )),
+            _ => assert_eq!(
+                result,
+                Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+            ),
+        }
+        assert_eq!(
+            chain.1.load(Ordering::SeqCst),
+            2,
+            "stale approval is prepared again"
+        );
+        assert!(!gateway.read().contains_txid(&valid.txid()));
+        assert_eq!(gateway.read().sequence_number(), sequence);
+        assert_eq!(gateway.orphan_count(), 0);
+        assert_eq!(gateway.recent_rejects_count(), 0);
+        Ok(())
     }
 
     // MPL-04: arrival resolves missing ancestry without retaining invalid outputs.
@@ -1258,6 +1487,301 @@ mod tests {
             parent.outputs[0].clone(),
         )]);
         (tx, chain)
+    }
+
+    /// POL-01 / BIP141: package prevouts retain the scripts used by accounting.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
+    #[test]
+    fn package_prevouts_preserve_sigops_without_mutating_the_pool()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::consensus_bytes;
+        let gateway = gateway();
+        let sequence = gateway.read().sequence_number();
+        let p2sh = [vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat();
+        let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
+        let p2wsh = [vec![0x00, 0x20], vec![3; 32]].concat();
+        let multisig = vec![0x52, 0xae];
+        let cases = [
+            (p2wpkh, Vec::new(), Vec::new(), 1),
+            (p2sh.clone(), vec![2, 0x52, 0xae], Vec::new(), 8),
+            (p2wsh.clone(), Vec::new(), vec![multisig.clone()], 2),
+            (p2sh, [vec![34], p2wsh].concat(), vec![multisig], 2),
+        ];
+        for (script_pubkey, script_sig, witness, input_cost) in cases {
+            let parent = Tx {
+                version: 2,
+                lock_time: 0,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0),
+                    script_sig: Vec::new(),
+                    sequence: u32::MAX,
+                    witness: Vec::new(),
+                }],
+                outputs: vec![
+                    TxOut {
+                        value: 1,
+                        script_pubkey: vec![0x51],
+                    },
+                    TxOut {
+                        value: 9_000,
+                        script_pubkey,
+                    },
+                ],
+            };
+            let child = Tx {
+                version: 2,
+                lock_time: 0,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(parent.txid(), 1),
+                    script_sig,
+                    sequence: u32::MAX,
+                    witness,
+                }],
+                outputs: vec![TxOut {
+                    value: 8_000,
+                    script_pubkey: vec![0xac],
+                }],
+            };
+            // Preparation only: no script execution or successful package
+            // acceptance is claimed. The parent's chain input is absent.
+            let oracle: bitcoin::Transaction =
+                bitcoin::consensus::deserialize(&consensus_bytes(&child))?;
+            let expected_outpoint = oracle.input[0].previous_output;
+            let oracle_output = bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(parent.outputs[1].value),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                    parent.outputs[1].script_pubkey.clone(),
+                ),
+            };
+            assert_eq!(
+                u32::try_from(oracle.total_sigop_cost(|outpoint| {
+                    (*outpoint == expected_outpoint).then(|| oracle_output.clone())
+                }))?,
+                4 + input_cost,
+                "independent rust-bitcoin oracle",
+            );
+            let vsize = child.vsize();
+            let txs = [parent, child];
+            let contexts = gateway
+                .preview_transactions(&txs, None, &Coins(vec![]))?
+                .results;
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(
+                contexts[0].reject_reason,
+                Some(AcceptanceRejectReason::MissingInputs)
+            );
+            assert_ne!(
+                contexts[1].reject_reason,
+                Some(AcceptanceRejectReason::MissingInputs)
+            );
+            assert_eq!(contexts[1].base_fee, Some(1_000));
+            assert_eq!(u64::from(contexts[1].vsize), vsize);
+            // BIP141: the legacy output CHECKSIG adds four to the input cost.
+            assert_eq!(contexts[1].sigop_cost, 4 + input_cost);
+            for vout in [2, u32::MAX] {
+                let mut missing = txs[1].clone();
+                missing.inputs[0].previous_output.vout = vout;
+                let contexts = gateway
+                    .preview_transactions(&[txs[0].clone(), missing], None, &Coins(vec![]))?
+                    .results;
+                assert_eq!(
+                    contexts[1].reject_reason,
+                    Some(AcceptanceRejectReason::MissingInputs)
+                );
+                assert_eq!(contexts[1].base_fee, Some(0));
+                assert_eq!(contexts[1].sigop_cost, 4);
+            }
+            assert_eq!(gateway.read().sequence_number(), sequence);
+            assert!(gateway.read().is_empty());
+        }
+        Ok(())
+    }
+
+    /// POL-01 / BIP141 P2WSH: the witness script must match the output's
+    /// SHA256 commitment and succeed. Core v31.1 applies `PolicyScriptChecks`
+    /// before test-accept success (validation.cpp `AcceptSingleTransaction`).
+    #[test]
+    fn preview_matches_submission_and_has_no_side_effects() -> Result<(), Box<dyn std::error::Error>>
+    {
+        struct Observer(AtomicUsize);
+        impl crate::MempoolObserver for Observer {
+            fn on_mutation(&self, _: &crate::MutationEnvelope) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let observer = Arc::new(Observer(AtomicUsize::new(0)));
+        let preview_gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
+            Some(observer.clone()),
+        ));
+        let (valid, chain) = witness_spend();
+        let mut invalid = (*valid).clone();
+        invalid.inputs[0].witness = vec![vec![0x00]];
+        let mut second = (*valid).clone();
+        second.outputs[0].value -= 1;
+        // A prior peer orphan must survive both successful and failed preview.
+        assert!(matches!(
+            preview_gateway.submit_transaction(
+                Arc::clone(&valid),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        for (tx, allowed, reason) in [
+            ((*valid).clone(), true, None),
+            (second.clone(), true, None),
+            (
+                invalid.clone(),
+                false,
+                Some(AcceptanceRejectReason::ScriptVerify),
+            ),
+        ] {
+            let facts =
+                preview_gateway.preview_transactions(core::slice::from_ref(&tx), None, &chain)?;
+            assert_eq!(facts.results[0].allowed, Some(allowed));
+            assert_eq!(facts.results[0].reject_reason, reason);
+            let fresh = gateway();
+            let submitted =
+                fresh.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, 1, &chain);
+            if allowed {
+                assert!(matches!(submitted, Ok(SubmitOutcome::Committed(_))));
+            } else {
+                assert_eq!(submitted, Err(SubmitError::Consensus));
+            }
+        }
+        assert_eq!(preview_gateway.orphan_count(), 1);
+        assert_eq!(preview_gateway.recent_rejects_count(), 0);
+        assert!(preview_gateway.read().is_empty());
+        assert_eq!(preview_gateway.read().sequence_number(), 0);
+        assert_eq!(observer.0.load(Ordering::SeqCst), 0);
+        assert_eq!(preview_gateway.read().estimator_last_decayed_height(), None);
+        // Detect hidden estimator arrivals by confirming previewed txids:
+        // two real arrivals would supply enough history for an estimate.
+        preview_gateway.remove_for_block(
+            AdmissionOrigin::Block,
+            &[valid.as_ref(), &second],
+            &[valid.txid(), second.txid()],
+            2,
+        );
+        assert_eq!(preview_gateway.read().estimate_fee_rate(2), None);
+        assert_eq!(observer.0.load(Ordering::SeqCst), 0);
+        let submitted = gateway();
+        assert!(matches!(
+            submitted.submit_transaction(Arc::clone(&valid), AdmissionOrigin::Rpc, None, 1, &chain),
+            Ok(SubmitOutcome::Committed(_))
+        ));
+        for tx in [(*valid).clone(), invalid] {
+            let facts = submitted.preview_transactions(&[tx], None, &chain)?;
+            assert_eq!(
+                facts.results[0].reject_reason,
+                Some(AcceptanceRejectReason::AlreadyInMempool)
+            );
+        }
+        assert_eq!(submitted.read().sequence_number(), 1);
+        Ok(())
+    }
+
+    /// Core applies maxfeerate only to an admission-valid result; both
+    /// entry points must report the script failure before the RPC fee guard.
+    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/node/transaction.cpp>
+    #[test]
+    fn preview_and_submission_check_scripts_before_maxfeerate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = gateway();
+        let (valid, chain) = witness_spend();
+        let mut invalid = (*valid).clone();
+        invalid.inputs[0].witness = vec![vec![0x00]];
+        for (tx, reason, submitted) in [
+            (
+                (*valid).clone(),
+                AcceptanceRejectReason::MaxFeeExceeded,
+                Err(SubmitError::Policy(AcceptanceRejectReason::MaxFeeExceeded)),
+            ),
+            (
+                invalid,
+                AcceptanceRejectReason::ScriptVerify,
+                Err(SubmitError::Consensus),
+            ),
+        ] {
+            let preview =
+                gateway.preview_transactions(core::slice::from_ref(&tx), Some(1), &chain)?;
+            assert_eq!(preview.results[0].reject_reason, Some(reason));
+            assert_eq!(
+                gateway.submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, Some(1), 1, &chain),
+                submitted
+            );
+        }
+        Ok(())
+    }
+
+    /// MPL-04: provisional preview facts are discarded after any relevant
+    /// source changes; the same four-attempt bound applies to preview.
+    #[test]
+    fn preview_retries_chain_pool_and_policy_changes() -> Result<(), Box<dyn std::error::Error>> {
+        struct ChangingRead {
+            gateway: Arc<MempoolGateway>,
+            coins: Coins,
+            reads: AtomicUsize,
+            mode: u8,
+            every_time: bool,
+        }
+        impl AdmissionChain for ChangingRead {
+            fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+                let read = self.reads.fetch_add(1, Ordering::SeqCst);
+                if read == 0 || self.every_time {
+                    match self.mode {
+                        0 => self.gateway.begin_chain_change().ok()?.finish().ok()?,
+                        1 => {
+                            let (parent, _) = parent_and_child();
+                            insert_parent(&self.gateway, parent, AdmissionOrigin::Rpc);
+                        }
+                        _ => self.gateway.pool.write().limits.min_relay_fee_sat_per_kvb = 100_000,
+                    }
+                }
+                self.coins.snapshot(tx)
+            }
+        }
+        for mode in 0..3 {
+            let gateway = gateway();
+            let (tx, coins) = witness_spend();
+            let chain = ChangingRead {
+                gateway: Arc::clone(&gateway),
+                coins,
+                reads: AtomicUsize::new(0),
+                mode,
+                every_time: false,
+            };
+            let facts = gateway.preview_transactions(&[(*tx).clone()], None, &chain)?;
+            assert_eq!(chain.reads.load(Ordering::SeqCst), 2);
+            assert_eq!(facts.results[0].allowed, Some(mode != 2));
+            if mode == 2 {
+                assert_eq!(
+                    facts.results[0].reject_reason,
+                    Some(AcceptanceRejectReason::MinRelayFeeNotMet)
+                );
+                assert_eq!(gateway.read().sequence_number(), 0);
+            }
+            assert!(!gateway.read().contains_txid(&tx.txid()));
+        }
+        let gateway = gateway();
+        let (tx, coins) = witness_spend();
+        let chain = ChangingRead {
+            gateway: Arc::clone(&gateway),
+            coins,
+            reads: AtomicUsize::new(0),
+            mode: 0,
+            every_time: true,
+        };
+        assert_eq!(
+            gateway.preview_transactions(&[(*tx).clone()], None, &chain),
+            Err(SubmitError::RetryExhausted)
+        );
+        assert_eq!(chain.reads.load(Ordering::SeqCst), MAX_ADMISSION_RETRIES);
+        assert!(gateway.read().is_empty());
+        Ok(())
     }
 
     // MPL-04: witness-scoped rejects preserve txid inventory and alternative witnesses.

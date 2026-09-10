@@ -16,22 +16,25 @@
 # `an_unlisted_method_is_method_not_found`.
 
 [reference]
-# The Bitcoin Core revision every compatibility claim in this file is made
-# against. Not a released Core version: 31.99 is Core's master convention for
-# "after 31.x, before 32.0", so this is a pre-release snapshot and a claim made
-# against it is a claim about master, not about anything an operator can install
-# from a release tarball. Said plainly because a compatibility contract that
-# quietly points at a moving target is worse than none.
+# The development version of the kernel oracle, distinct from the released
+# product identity below. The source and package digests pin this snapshot;
+# 31.99.0 by itself is only Core's development-version convention.
 core_version = "31.99.0"
-# Where that revision comes from, and what makes the pin real: the node links
-# libbitcoinkernel built from this tree, so the pin is load-bearing rather than
-# documentary. `bitcoinkernel` is the safe wrapper; `libbitcoinkernel-sys`
+# Where that revision comes from: the oracle links libbitcoinkernel built
+# from this tree. `bitcoinkernel` is the safe wrapper; `libbitcoinkernel-sys`
 # vendors the Core source under `bitcoin/`, and its `CMakeLists.txt` carries the
 # CLIENT_VERSION above.
 kernel_crate = "bitcoinkernel"
 kernel_crate_version = "0.2.1"
 kernel_sys_crate = "libbitcoinkernel-sys"
 kernel_sys_crate_version = "0.3.0"
+# Published crate custody: `.cargo_vcs_info.json` identifies the wrapper tree.
+# Its subtree squash 691b006f271c6d19565266541d7397eaf0c64944 records this
+# bitcoin/bitcoin source commit in `git-subtree-split`.
+# https://github.com/sedited/rust-bitcoinkernel/commit/691b006f271c6d19565266541d7397eaf0c64944
+kernel_vendor_commit = "4b51ffdddfa82b84a03a1fa76bbfa72a4f0b6ccf"
+kernel_source_commit = "fb0e8612d6f74071af77b3f27d915da69e0a726b"
+kernel_sys_crate_sha256 = "2906bc31f02dff7af9611fe9129c9eae021bd359f9d8e79824026fe1aaf28ab1"
 # Set when a differential harness compares *values* against a running reference
 # (#78 scope item 2). Still false, and deliberately so: the shape comparison in
 # `crates/rpc/src/compat/schema.rs` checks field names, types and optionality

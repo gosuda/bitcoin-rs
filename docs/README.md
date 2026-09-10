@@ -5,6 +5,7 @@
 | Need | Owner |
 | --- | --- |
 | Build, configure, and run a node | [Getting started](getting-started.md) |
+| Explore Bitcoin one module at a time | [Module guide](module-guide.md) |
 | Find a normative clause and its tests | [Contract index](contracts/README.md) |
 | Understand project vocabulary | [Concepts](../CONCEPTS.md) |
 | Inspect gate and evidence status | [Constraint register](../CONSTRAINTS.md) |
