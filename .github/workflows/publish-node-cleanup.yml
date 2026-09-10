@@ -1,0 +1,38 @@
+name: Publish atomic node cleanup
+
+on:
+  push:
+    branches: [automation/node-cleanup-publish-20260910]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-node-cleanup-20260910
+  cancel-in-progress: false
+
+jobs:
+  validate-and-publish:
+    if: github.repository == 'gosuda/bitcoin-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUST_BACKTRACE: 1
+      CARGO_TARGET_DIR: ${{ runner.temp }}/node-cleanup-target
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt,clippy
+      - name: Validate isolated source changes and publish non-forced branches
+        run: python3 .github/node-cleanup-publish/publish.py
