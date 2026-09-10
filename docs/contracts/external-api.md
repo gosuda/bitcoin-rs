@@ -183,7 +183,12 @@ Owners:
   Only declared backend-dialect routes exist; each backend route is marked
   as such.
 - History reads use bounded pages and cursors that preserve public
-  Esplora cursor semantics. A richer internal revision token stays
+    Esplora cursor semantics. Cursor values
+   are the exact lowercase `txid` display text: malformed, noncanonical
+   (including uppercase or prefixed), unknown, and missing cursors restart from
+   the beginning; a valid known cursor strictly excludes that transaction and
+   earlier entries.
+  A richer internal revision token stays
   internal or is a documented extension. Lag, reorg, or a disabled
   capability returns the declared unavailable response, never an empty
   successful history.
