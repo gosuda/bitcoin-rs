@@ -1,0 +1,21 @@
+name: retire-merged-pr716
+on:
+  push:
+    branches: [verify/retire-merged-pr724-run-20260910]
+    paths: [.github/workflows/retire-merged-pr716.yml]
+permissions: {}
+# PR716 is permanently merged (6a905bd); its one-shot publisher is retired.
+# Exact group verified on e99b063. Never target main or an open PR.
+concurrency:
+  group: ci-ci-refs/pull/716/merge
+  cancel-in-progress: true
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: |
+          printf '%s\n' \
+            'Retired historical CI 34414413872 for merged automation PR716.' \
+            'Head e99b063bb4e7565eeeaec85a1cdc3f467197ea28; merge 6a905bd633f6d1683e1846a821b5cfdbc66a3f73.' \
+            'Cancellation is not a pass. Current-main and live-PR gates are unchanged.'
