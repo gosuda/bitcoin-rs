@@ -46,7 +46,13 @@ available_mb() { df -Pm "$1" | awk 'NR == 2 { print $4 }'; }
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-assets.XXXXXX")"
 readonly WORKDIR
-cleanup() { rm -rf -- "${WORKDIR:?workdir unset}"; }
+PROVENANCE_TMP=""
+cleanup() {
+    if [[ -n "${PROVENANCE_TMP}" ]]; then
+        rm -f -- "${PROVENANCE_TMP}"
+    fi
+    rm -rf -- "${WORKDIR:?workdir unset}"
+}
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -73,12 +79,14 @@ git init --quiet "${WORKDIR}/qa-assets"
 git -C "${WORKDIR}/qa-assets" remote add origin "${QA_ASSETS_URL}"
 git -C "${WORKDIR}/qa-assets" fetch --depth 1 --quiet origin "${QA_ASSETS_PIN}"
 git -C "${WORKDIR}/qa-assets" checkout --quiet FETCH_HEAD
-readonly UPSTREAM_COMMIT="$(git -C "${WORKDIR}/qa-assets" rev-parse HEAD)"
+UPSTREAM_COMMIT="$(git -C "${WORKDIR}/qa-assets" rev-parse HEAD)"
+readonly UPSTREAM_COMMIT
 [ "${UPSTREAM_COMMIT}" = "${QA_ASSETS_PIN}" ] || {
     log "ABORT: fetched ${UPSTREAM_COMMIT}, expected pin ${QA_ASSETS_PIN}"
     exit 1
 }
-readonly UPSTREAM_SIZE_MB="$(du -sm "${WORKDIR}/qa-assets" | cut -f1)"
+UPSTREAM_SIZE_MB="$(du -sm "${WORKDIR}/qa-assets" | cut -f1)"
+readonly UPSTREAM_SIZE_MB
 log "clone at ${UPSTREAM_COMMIT} (${UPSTREAM_SIZE_MB} MiB actual)"
 
 readonly CORPORA="${WORKDIR}/qa-assets/fuzz_corpora"
@@ -100,8 +108,11 @@ readonly OUT_BASE="${FUZZ_DIR}/corpus"
 
 # --- 5. Provenance ------------------------------------------------------------
 readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"
-readonly IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-cat > "${PROVENANCE}" <<EOF
+IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly IMPORT_DATE
+# Stage beside the destination: failed writes leave the previous record intact.
+PROVENANCE_TMP="$(mktemp "${FUZZ_DIR}/.corpus-provenance.XXXXXX")"
+cat > "${PROVENANCE_TMP}" <<EOF
 # Fuzz corpus provenance
 
 Seeds under fuzz/corpus/ were imported from
@@ -129,6 +140,9 @@ Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the script after major decoder changes to
 refresh.
 EOF
+chmod 0644 -- "${PROVENANCE_TMP}"
+mv -T -- "${PROVENANCE_TMP}" "${PROVENANCE}"
+PROVENANCE_TMP=""
 log "provenance written to ${PROVENANCE}"
 
 # --- 6. Delete the clone (only minimized corpora are kept) --------------------
