@@ -1,0 +1,657 @@
+name: Agent native sighash integration
+
+on:
+  push:
+    branches:
+      - agent/166-native-sighash-precompute-ff965
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply focused native sighash patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # primitives: split eager precomputation by sighash family so callers
+          # can avoid work that a transaction can never consume.
+          replace_once(
+              "crates/primitives/src/sighash.rs",
+              """/// [`Self::precompute`] fills the shared BIP143/BIP341 hashes once per
+/// transaction. Cloning a filled cache is the cheap way to hand each input its
+/// own mutable checker without recomputing those midstates.
+""",
+              """/// [`Self::precompute_segwit_v0`] and [`Self::precompute_taproot`] fill
+/// only the shared hash family a transaction can consume. Cloning a filled
+/// cache is the cheap way to hand each input its own mutable checker without
+/// recomputing those midstates.
+""",
+          )
+          replace_once(
+              "crates/primitives/src/sighash.rs",
+              """    /// Fills every BIP143 and BIP341 midstate that is shared by inputs of this
+    /// transaction.
+    ///
+    /// Call this once after resolving the complete ordered prevout set. A
+    /// cloned cache can then be moved into each input checker, matching Core's
+    /// per-transaction precomputation without sharing mutable state between
+    /// parallel input checks.
+    pub fn precompute(&mut self, prevouts: &[TxOut]) {
+        let _ = self.segwit_prevouts();
+        let _ = self.segwit_sequences();
+        let _ = self.segwit_outputs();
+        let _ = self.taproot_prevouts();
+        let _ = self.taproot_sequences();
+        let _ = self.taproot_outputs();
+        if prevouts.len() == self.tx.inputs.len() {
+            let _ = self.taproot_amounts(prevouts);
+            let _ = self.taproot_scriptpubkeys(prevouts);
+        }
+    }
+""",
+              """    /// Fills the BIP143 transaction-wide hashes shared by SegWit-v0 inputs.
+    pub fn precompute_segwit_v0(&mut self) {
+        let _ = self.segwit_prevouts();
+        let _ = self.segwit_sequences();
+        let _ = self.segwit_outputs();
+    }
+
+    /// Fills the BIP341 transaction-wide hashes shared by Taproot inputs.
+    ///
+    /// Prevout-dependent hashes are filled only for the complete ordered
+    /// prevout set. A malformed set is left to the ordinary BIP341 verifier to
+    /// reject with its existing typed error instead of turning precomputation
+    /// into a second validation path.
+    pub fn precompute_taproot(&mut self, prevouts: &[TxOut]) {
+        let _ = self.taproot_prevouts();
+        let _ = self.taproot_sequences();
+        let _ = self.taproot_outputs();
+        if prevouts.len() == self.tx.inputs.len() {
+            let _ = self.taproot_amounts(prevouts);
+            let _ = self.taproot_scriptpubkeys(prevouts);
+        }
+    }
+""",
+          )
+
+          # checker: allow a prepared transaction cache to be moved into an
+          # otherwise independent per-input checker.
+          replace_once(
+              "crates/script/src/checker.rs",
+              """    pub fn new(tx: &'a Tx, input_index: usize, amount: u64, prevouts: &'a [TxOut]) -> Self {
+        Self {
+            tx,
+            input_index,
+            amount,
+            prevouts,
+            cache: SighashCache::new(tx),
+            annex: None,
+        }
+    }
+
+    /// Sets the taproot annex for BIP341 sighash commitment.
+""",
+              """    pub fn new(tx: &'a Tx, input_index: usize, amount: u64, prevouts: &'a [TxOut]) -> Self {
+        Self {
+            tx,
+            input_index,
+            amount,
+            prevouts,
+            cache: SighashCache::new(tx),
+            annex: None,
+        }
+    }
+
+    /// Builds a checker from a caller-prepared cache over the same transaction.
+    ///
+    /// The cache is moved, not shared mutably: block validation clones immutable
+    /// precomputed hash values into each input checker before parallel execution.
+    #[must_use]
+    pub fn with_cache(
+        tx: &'a Tx,
+        input_index: usize,
+        amount: u64,
+        prevouts: &'a [TxOut],
+        cache: SighashCache<'a>,
+    ) -> Self {
+        Self {
+            tx,
+            input_index,
+            amount,
+            prevouts,
+            cache,
+            annex: None,
+        }
+    }
+
+    /// Sets the taproot annex for BIP341 sighash commitment.
+""",
+          )
+
+          # interpreter: keep the existing public path as the lazy fallback and
+          # add a prepared-cache path used only when the provided script/witness
+          # bytes are the transaction's own bytes.
+          p = Path("crates/script/src/interpreter.rs")
+          text = p.read_text()
+          start = text.index("    pub fn execute_with_prevouts(")
+          marker = "\n    }\n}\n\nfn invalid(code: ScriptErrCode)"
+          end = text.index(marker, start) + len("\n    }")
+          replacement = r'''    pub fn execute_with_prevouts(
+        &self,
+        script_pubkey: &[u8],
+        script_sig: &[u8],
+        witness: &[Vec<u8>],
+        flags: VerifyFlags,
+        prevouts: &[TxOut],
+        tx: &Tx,
+        input_idx: usize,
+    ) -> Result<bool, ScriptError> {
+        self.execute_with_optional_cache(
+            script_pubkey,
+            script_sig,
+            witness,
+            flags,
+            prevouts,
+            tx,
+            input_idx,
+            None,
+        )
+    }
+
+    /// Executes a native spend with a transaction-level sighash cache whose
+    /// shared BIP143/BIP341 hashes were prepared before input fan-out.
+    ///
+    /// If a caller substitutes scriptSig or witness bytes, the prepared cache is
+    /// deliberately discarded and the ordinary lazy path is used for the
+    /// grafted transaction. This prevents a cache for `tx` from signing a
+    /// different transaction assembled by a vector/fuzz caller.
+    pub fn execute_cached<'t>(
+        &self,
+        script_pubkey: &[u8],
+        script_sig: &[u8],
+        witness: &[Vec<u8>],
+        flags: VerifyFlags,
+        prevouts: &'t [TxOut],
+        tx: &'t Tx,
+        input_idx: usize,
+        cache: SighashCache<'t>,
+    ) -> Result<bool, ScriptError> {
+        self.execute_with_optional_cache(
+            script_pubkey,
+            script_sig,
+            witness,
+            flags,
+            prevouts,
+            tx,
+            input_idx,
+            Some(cache),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "same verification boundary plus an optional prepared sighash cache"
+    )]
+    fn execute_with_optional_cache<'t>(
+        &self,
+        script_pubkey: &[u8],
+        script_sig: &[u8],
+        witness: &[Vec<u8>],
+        flags: VerifyFlags,
+        prevouts: &'t [TxOut],
+        tx: &'t Tx,
+        input_idx: usize,
+        cache: Option<SighashCache<'t>>,
+    ) -> Result<bool, ScriptError> {
+        let inputs = tx.inputs.len();
+        let input = tx
+            .inputs
+            .get(input_idx)
+            .ok_or(ScriptError::InputIndexOutOfRange {
+                index: input_idx,
+                inputs,
+            })?;
+        let prevout = if prevouts.len() == inputs {
+            prevouts
+                .get(input_idx)
+                .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
+        } else if prevouts.len() == 1 {
+            prevouts
+                .first()
+                .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
+        } else {
+            return Err(ScriptError::TaprootPrevoutsUnavailable);
+        };
+
+        let matches_tx = input.script_sig.as_slice() == script_sig
+            && input.witness.len() == witness.len()
+            && input
+                .witness
+                .iter()
+                .zip(witness.iter())
+                .all(|(stored, provided)| stored == provided);
+        let spending: Cow<'_, Tx> = if matches_tx {
+            Cow::Borrowed(tx)
+        } else {
+            let mut grafted = tx.clone();
+            let grafted_input =
+                grafted
+                    .inputs
+                    .get_mut(input_idx)
+                    .ok_or(ScriptError::InputIndexOutOfRange {
+                        index: input_idx,
+                        inputs,
+                    })?;
+            grafted_input.script_sig = script_sig.to_vec();
+            grafted_input.witness = witness.to_vec();
+            Cow::Owned(grafted)
+        };
+        let cache = if matches_tx { cache } else { None };
+
+        if is_p2tr(script_pubkey) && flags.contains(VerifyFlags::TAPROOT) {
+            return match cache {
+                Some(cache) => verify_taproot(
+                    tx,
+                    input_idx,
+                    script_pubkey,
+                    witness,
+                    prevouts,
+                    flags,
+                    Some(cache),
+                ),
+                None => verify_taproot(
+                    &spending,
+                    input_idx,
+                    script_pubkey,
+                    witness,
+                    prevouts,
+                    flags,
+                    None,
+                ),
+            };
+        }
+
+        let mut checker = match cache {
+            Some(cache) => {
+                TxSignatureChecker::with_cache(tx, input_idx, prevout.value, prevouts, cache)
+            }
+            None => TxSignatureChecker::new(&spending, input_idx, prevout.value, prevouts),
+        };
+        verify_script(
+            script_sig,
+            script_pubkey,
+            witness,
+            flags.filled(),
+            &mut checker,
+        )?;
+        Ok(true)
+    }'''
+          text = text[:start] + replacement + text[end:]
+          p.write_text(text)
+
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              """fn verify_taproot(
+    spending: &Tx,
+    input_idx: usize,
+    script_pubkey: &[u8],
+    witness: &[Vec<u8>],
+    prevouts: &[TxOut],
+    flags: VerifyFlags,
+) -> Result<bool, ScriptError> {
+""",
+              """fn verify_taproot<'t>(
+    spending: &'t Tx,
+    input_idx: usize,
+    script_pubkey: &[u8],
+    witness: &[Vec<u8>],
+    prevouts: &'t [TxOut],
+    flags: VerifyFlags,
+    cache: Option<SighashCache<'t>>,
+) -> Result<bool, ScriptError> {
+""",
+          )
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              """            annex_bytes.as_deref(),
+            prevouts,
+        )
+""",
+              """            annex_bytes.as_deref(),
+            prevouts,
+            cache,
+        )
+""",
+          )
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              """            annex_bytes,
+            prevouts,
+            flags,
+        )
+""",
+              """            annex_bytes,
+            prevouts,
+            flags,
+            cache,
+        )
+""",
+          )
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              """fn verify_taproot_keypath(
+    spending: &Tx,
+    input_idx: usize,
+    program: &[u8],
+    stack: &[Vec<u8>],
+    annex_bytes: Option<&[u8]>,
+    prevouts: &[TxOut],
+) -> Result<bool, ScriptError> {
+""",
+              """fn verify_taproot_keypath<'t>(
+    spending: &'t Tx,
+    input_idx: usize,
+    program: &[u8],
+    stack: &[Vec<u8>],
+    annex_bytes: Option<&[u8]>,
+    prevouts: &'t [TxOut],
+    cache: Option<SighashCache<'t>>,
+) -> Result<bool, ScriptError> {
+""",
+          )
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              "    let mut cache = SighashCache::new(spending);\n",
+              "    let mut cache = cache.unwrap_or_else(|| SighashCache::new(spending));\n",
+          )
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              """fn verify_taproot_scriptpath(
+    spending: &Tx,
+    input_idx: usize,
+    program: &[u8],
+    witness: &[Vec<u8>],
+    stack: &mut Vec<Vec<u8>>,
+    annex_bytes: Option<Vec<u8>>,
+    prevouts: &[TxOut],
+    flags: VerifyFlags,
+) -> Result<bool, ScriptError> {
+""",
+              """fn verify_taproot_scriptpath<'t>(
+    spending: &'t Tx,
+    input_idx: usize,
+    program: &[u8],
+    witness: &[Vec<u8>],
+    stack: &mut Vec<Vec<u8>>,
+    annex_bytes: Option<Vec<u8>>,
+    prevouts: &'t [TxOut],
+    flags: VerifyFlags,
+    cache: Option<SighashCache<'t>>,
+) -> Result<bool, ScriptError> {
+""",
+          )
+          replace_once(
+              "crates/script/src/interpreter.rs",
+              """    let mut checker = TxSignatureChecker::new(spending, input_idx, 0, prevouts);
+    checker.set_annex(annex_bytes);
+""",
+              """    let mut checker = match cache {
+        Some(cache) => TxSignatureChecker::with_cache(spending, input_idx, 0, prevouts, cache),
+        None => TxSignatureChecker::new(spending, input_idx, 0, prevouts),
+    };
+    checker.set_annex(annex_bytes);
+""",
+          )
+
+          # consensus: prepare only reusable families for multi-input native
+          # transactions and clone the filled value cache into each check.
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              "use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};\n",
+              """use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+#[cfg(not(feature = "kernel"))]
+use bitcoin_rs_primitives::SighashCache;
+""",
+          )
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """            for input_index in 0..tx.inputs.len() {
+                verify_input_script_portable(input_index, &spent_outputs, tx, flags)?;
+            }
+""",
+              """            let sighash = native_sighash_cache(tx, &spent_outputs, flags);
+            for input_index in 0..tx.inputs.len() {
+                verify_input_script_portable(
+                    input_index,
+                    &spent_outputs,
+                    tx,
+                    flags,
+                    sighash.clone(),
+                )?;
+            }
+""",
+          )
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """/// Portable per-input script verdict: the native interpreter covers every
+/// consensus spend class (legacy, P2SH, `SegWit` v0, Taproot key-path and
+/// script-path).
+#[cfg(not(feature = "kernel"))]
+fn verify_input_script_portable(
+    input_index: usize,
+    spent_outputs: &[TxOut],
+    tx: &Tx,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
+""",
+              """/// Builds the cache template cloned into native input checks.
+///
+/// Single-input and legacy transactions stay fully lazy. Multi-input spends
+/// precompute only the active sighash family that can be consumed, avoiding a
+/// blanket hashing tax on transactions that gain nothing from sharing.
+#[cfg(not(feature = "kernel"))]
+fn native_sighash_cache<'t>(
+    tx: &'t Tx,
+    spent_outputs: &[TxOut],
+    flags: VerifyFlags,
+) -> SighashCache<'t> {
+    let mut cache = SighashCache::new(tx);
+    if tx.inputs.len() <= 1 {
+        return cache;
+    }
+
+    let flags = flags.filled();
+    if flags.contains(VerifyFlags::WITNESS) {
+        let uses_segwit_v0 = tx
+            .inputs
+            .iter()
+            .zip(spent_outputs)
+            .any(|(input, prevout)| {
+                !input.witness.is_empty()
+                    && (bitcoin_rs_script::is_p2wpkh(&prevout.script_pubkey)
+                        || bitcoin_rs_script::is_p2wsh(&prevout.script_pubkey)
+                        || bitcoin_rs_script::is_p2sh(&prevout.script_pubkey))
+            });
+        if uses_segwit_v0 {
+            cache.precompute_segwit_v0();
+        }
+    }
+    if flags.contains(VerifyFlags::TAPROOT)
+        && spent_outputs
+            .iter()
+            .any(|prevout| bitcoin_rs_script::is_p2tr(&prevout.script_pubkey))
+    {
+        cache.precompute_taproot(spent_outputs);
+    }
+    cache
+}
+
+/// Portable per-input script verdict: the native interpreter covers every
+/// consensus spend class (legacy, P2SH, `SegWit` v0, Taproot key-path and
+/// script-path).
+#[cfg(not(feature = "kernel"))]
+fn verify_input_script_portable<'t>(
+    input_index: usize,
+    spent_outputs: &'t [TxOut],
+    tx: &'t Tx,
+    flags: VerifyFlags,
+    sighash: SighashCache<'t>,
+) -> Result<(), ConsensusError> {
+""",
+          )
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """    Interpreter
+        .execute_with_prevouts(
+            &prevout.script_pubkey,
+            &input.script_sig,
+            &input.witness,
+            flags,
+            spent_outputs,
+            tx,
+            input_index,
+        )
+""",
+              """    Interpreter
+        .execute_cached(
+            &prevout.script_pubkey,
+            &input.script_sig,
+            &input.witness,
+            flags,
+            spent_outputs,
+            tx,
+            input_index,
+            sighash,
+        )
+""",
+          )
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """    #[cfg(not(feature = "kernel"))]
+    spent_outputs: Vec<TxOut>,
+    pre_error: Option<ConsensusError>,
+""",
+              """    #[cfg(not(feature = "kernel"))]
+    spent_outputs: Vec<TxOut>,
+    #[cfg(not(feature = "kernel"))]
+    sighash: SighashCache<'b>,
+    pre_error: Option<ConsensusError>,
+""",
+          )
+          p = Path("crates/consensus/src/verify_tx.rs")
+          text = p.read_text()
+          needle = """                    #[cfg(not(feature = "kernel"))]
+                    spent_outputs: Vec::new(),
+"""
+          if text.count(needle) != 2:
+              raise SystemExit(f"verify_tx.rs: expected 2 empty prepared native caches, found {text.count(needle)}")
+          text = text.replace(
+              needle,
+              needle + """                    #[cfg(not(feature = "kernel"))]
+                    sighash: SighashCache::new(tx),
+""",
+          )
+          p.write_text(text)
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """        let spent_outputs: Vec<TxOut> = prep
+            .prevouts
+            .iter()
+            .map(|(_, spent)| spent.clone())
+            .collect();
+
+        let prepared_index = prepared.len();
+""",
+              """        let spent_outputs: Vec<TxOut> = prep
+            .prevouts
+            .iter()
+            .map(|(_, spent)| spent.clone())
+            .collect();
+        #[cfg(not(feature = "kernel"))]
+        let sighash = native_sighash_cache(tx, &spent_outputs, flags);
+
+        let prepared_index = prepared.len();
+""",
+          )
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """            #[cfg(not(feature = "kernel"))]
+            spent_outputs,
+            pre_error: None,
+""",
+              """            #[cfg(not(feature = "kernel"))]
+            spent_outputs,
+            #[cfg(not(feature = "kernel"))]
+            sighash,
+            pre_error: None,
+""",
+          )
+          replace_once(
+              "crates/consensus/src/verify_tx.rs",
+              """        verify_input_script_portable(check.input_index, &prep.spent_outputs, prep.tx, flags)
+""",
+              """        verify_input_script_portable(
+            check.input_index,
+            &prep.spent_outputs,
+            prep.tx,
+            flags,
+            prep.sighash.clone(),
+        )
+""",
+          )
+          PY
+
+          cargo fmt --all
+          git diff --check
+
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf '%s\n' \
+            crates/consensus/src/verify_tx.rs \
+            crates/primitives/src/sighash.rs \
+            crates/script/src/checker.rs \
+            crates/script/src/interpreter.rs | sort)"
+          test "$changed" = "$expected" || {
+            echo "Unexpected changed paths:" >&2
+            printf '%s\n' "$changed" >&2
+            exit 1
+          }
+
+      - name: Verify native cache path
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p bitcoin-rs-primitives
+          cargo test --locked -p bitcoin-rs-script --test verifier_boundaries
+          cargo test --locked -p bitcoin-rs-script --test core_vectors
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --test overhaul_prepared_inputs -- --nocapture
+          cargo clippy --locked -p bitcoin-rs-primitives -p bitcoin-rs-script -p bitcoin-rs-consensus --no-default-features --all-targets -- -D warnings
+
+      - name: Commit verified patch and remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/agent-native-sighash.yml
+          git add crates/primitives/src/sighash.rs crates/script/src/checker.rs crates/script/src/interpreter.rs crates/consensus/src/verify_tx.rs
+          git config user.name "metaphorics"
+          git config user.email "152830360+metaphorics@users.noreply.github.com"
+          git commit -m "perf(consensus): share native sighash midstates across inputs"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
