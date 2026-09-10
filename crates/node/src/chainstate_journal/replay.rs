@@ -19,8 +19,8 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoSet};
 
+use super::head::{HeadMarker, read_head_bytes};
 use super::record::{FRAME_HEADER_LEN, JournalRecord, MAX_PAYLOAD_LEN, Mutation, decode_record};
-use super::writer::{HeadMarker, read_head_bytes};
 
 /// Classification of a boot replay attempt.
 pub(crate) enum ReplayOutcome {
@@ -110,7 +110,7 @@ fn stream_committed_range(
             JournalReplayError::CommittedRangeInvalid(format!("segment entry: {error}"))
         })?;
         if let Some(generation) =
-            super::writer::parse_segment_name_pub(entry.file_name().to_string_lossy().as_ref())
+            super::segment::parse_segment_name(entry.file_name().to_string_lossy().as_ref())
             && generation >= head.start_gen
             && generation <= head.journal_gen
         {
@@ -186,7 +186,7 @@ fn stream_segment(
         JournalReplayError::CommittedRangeInvalid("frame header size overflow".to_owned())
     })?;
 
-    let name = super::writer::segment_name_pub(generation);
+    let name = super::segment::segment_name(generation);
     let file = dir.open(name.as_str()).map_err(|error| {
         JournalReplayError::CommittedRangeInvalid(format!("open segment {generation}: {error}"))
     })?;
@@ -650,8 +650,8 @@ mod tests {
         validate_replayed_head,
     };
     use crate::chainstate_journal::Coin;
+    use crate::chainstate_journal::head::HeadMarker;
     use crate::chainstate_journal::record::MAX_PAYLOAD_LEN;
-    use crate::chainstate_journal::writer::HeadMarker;
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
     type BaseState = (BlockTree, UtxoSet, CoinStats, TipSnapshot, Coin);

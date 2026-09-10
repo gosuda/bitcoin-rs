@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use bitcoin_rs_storage::KvStore;
 
 use super::record::JournalRecord;
-use super::writer::{JournalWriter, JournalWriterError};
+use super::{error::JournalWriterError, writer::JournalWriter};
 
 /// The apply-path surface of the journal writer, storage-backend-agnostic.
 pub(crate) trait JournalEmit: Send + Sync {

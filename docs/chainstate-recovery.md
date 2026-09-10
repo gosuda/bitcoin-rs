@@ -13,6 +13,21 @@ The existing codec and publication regressions live in `checkpoint/tests.rs`.
 This separation does not change checkpoint bytes, publication order, recovery
 fallbacks, or the status of the planned durable-root model below.
 
+## Current journal implementation
+
+The optional checkpoint journal keeps its framed `head.json` codec and file-size
+check in `crates/node/src/chainstate_journal/head.rs`; `segment.rs` owns the shared
+filename grammar, and `error.rs` owns the shared typed failures. Writer startup
+and replay use those owners directly. The former writer-level head paths and
+`segment_name_pub` / `parse_segment_name_pub` forwarding wrappers are removed.
+
+`writer.rs` remains the sole mutation and publication owner: storage flush,
+segment sync, temporary-head write/sync, rename, then directory sync. Moving the
+representation does not change those commit points, the existing JSON/CRC frame,
+segment-name acceptance, checkpoint fallback, or operator data. Writer regressions
+live in `writer/tests.rs`; head/segment representation controls live with their
+owners. These controls are not a power-loss or durable-root acceptance claim.
+
 ## Target model
 
 The authoritative state is one durable root containing full tip identity, a monotonic commit id, coin-state version, and committed body/undo extents. Coin updates and the new root commit atomically; body and undo bytes become durable before the root may reference them.
