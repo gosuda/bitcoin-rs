@@ -9,34 +9,24 @@ concurrency:
   group: node-owner-splits-20260910
   cancel-in-progress: true
 jobs:
-  offline-tools:
+  source-update:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      RUSTUP_TOOLCHAIN: '1.95.0'
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: d370a6c8f0ebf06e11058a67134636c5a2b4df00
+          ref: 11a85c814801346a874311438db3a9a977f9cc3b
+          fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          toolchain: '1.95.0'
-          components: rustfmt,clippy
-      - name: Populate only public dependency caches
+      - name: Export the exact concurrent commit range
         run: |
-          cargo +1.95.0 fetch --target x86_64-unknown-linux-gnu
-          mkdir -p "$RUNNER_TEMP/offline-rust"
-          cp Cargo.lock "$RUNNER_TEMP/offline-rust/Cargo.lock.resolved"
-          git diff -- Cargo.lock > "$RUNNER_TEMP/offline-rust/lock.diff"
-          tar -czf "$RUNNER_TEMP/offline-rust/toolchain.tar.gz" -C "$HOME/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu" bin lib libexec share
-          tar -czf "$RUNNER_TEMP/offline-rust/registry.tar.gz" -C "$HOME/.cargo" registry
-          tar -czf "$RUNNER_TEMP/offline-rust/git-base.tar.gz" .git
-          rustc +1.95.0 -Vv > "$RUNNER_TEMP/offline-rust/rustc.txt"
-          sha256sum "$RUNNER_TEMP/offline-rust/"*.tar.gz
+          mkdir -p "$RUNNER_TEMP/main-update"
+          git bundle create "$RUNNER_TEMP/main-update/main.bundle" d370a6c8f0ebf06e11058a67134636c5a2b4df00..HEAD
+          git diff --stat d370a6c8f0ebf06e11058a67134636c5a2b4df00 HEAD > "$RUNNER_TEMP/main-update/diff-stat.txt"
+          git log --oneline d370a6c8f0ebf06e11058a67134636c5a2b4df00..HEAD > "$RUNNER_TEMP/main-update/commits.txt"
+          sha256sum "$RUNNER_TEMP/main-update/main.bundle"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: node-offline-rust
-          path: ${{ runner.temp }}/offline-rust/
-          compression-level: 0
+          name: node-main-update
+          path: ${{ runner.temp }}/main-update/
           retention-days: 1
