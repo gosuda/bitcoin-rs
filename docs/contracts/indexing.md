@@ -153,7 +153,7 @@ remove another script's output.
     executing a long block-by-block rollback
     (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
 - **Connect walk**:
-  - The worker loads bodies from `PruneBodyStore`, constructs bounded forward
+  - The worker loads bodies from `BlockBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
     watermarks in a single atomic store batch per block or block chunk.
   - Live deletes are anchored by the block's authoritative undo scripts;

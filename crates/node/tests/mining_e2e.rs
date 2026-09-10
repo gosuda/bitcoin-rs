@@ -4,26 +4,34 @@
 //! `submitblock`) exactly like an external miner: the block is assembled from
 //! rendered template JSON fields only, then enters ordinary validation.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{Result, bail};
+
 use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
+
 use bitcoin_rs_mining::MiningControl;
+
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::encode::double_sha256;
+
 use bitcoin_rs_primitives::{
     Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    deserialize as native_deserialize,
+    deserialize as native_deserialize, encode::double_sha256,
 };
-use bitcoin_rs_rpc::Handler;
-use bitcoin_rs_rpc::context::{
-    ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
-    NetworkHandles,
+
+use bitcoin_rs_rpc::{
+    Handler,
+    context::{
+        ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
+        NetworkHandles,
+    },
 };
+
 use bitcoin_rs_utxo::UtxoSet;
+
 use parking_lot::Mutex;
+
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
+
+use std::{sync::Arc, time::Duration};
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -377,7 +385,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         state.applied_tip(),
         state.block_tree(),
         state.mempool(),
-        state.apply_handles(),
+        state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
@@ -630,7 +638,7 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
     let mined_hash = Hash256::from(block.block_hash());
 
     bitcoin_rs_node::reorg::invalidate_block(
-        &state.apply_handles(),
+        &state.chainstate(),
         &state.chain_followers(),
         mined_hash,
     )
@@ -716,7 +724,7 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
     bitcoin_rs_node::reorg::invalidate_block(
-        &state.apply_handles(),
+        &state.chainstate(),
         &state.chain_followers(),
         mined_hash,
     )
@@ -765,7 +773,7 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
     bitcoin_rs_node::reorg::invalidate_block(
-        &state.apply_handles(),
+        &state.chainstate(),
         &state.chain_followers(),
         mined_hash,
     )

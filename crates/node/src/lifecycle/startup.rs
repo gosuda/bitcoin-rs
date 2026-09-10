@@ -1,17 +1,22 @@
 //! Incremental service composition shared by the daemon and embedded node.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::Result;
+
+use crate::{
+    config::{NodeConfig, RuntimeInputs},
+    embed::Node,
+    event_loop::EventLoop,
+    state::NodeState,
+};
+
 use crossbeam_channel::bounded;
 
-use super::rpc::bind_rpc;
-use super::services::{NodeServices, StartupGuard};
-use crate::config::{NodeConfig, RuntimeInputs};
-use crate::embed::Node;
-use crate::event_loop::EventLoop;
-use crate::state::NodeState;
+use std::{sync::Arc, time::Duration};
+
+use super::{
+    rpc::bind_rpc,
+    services::{NodeServices, StartupGuard},
+};
 
 /// Boots an owned node after validation, storage open, and crash recovery.
 ///
@@ -78,7 +83,7 @@ pub(crate) fn start_node(
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
