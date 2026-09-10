@@ -31,7 +31,15 @@ class ImportFlowTests(unittest.TestCase):
         inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }];\n')
         harness = self.root / "fuzz/fuzz_targets/script_eval.rs"
         harness.parent.mkdir(parents=True)
-        harness.write_text("const ELEMENT_LEN_MAX: usize = 1_024;\n")
+        harness.write_text(
+            "const FLAGS: [VerifyFlags; 4] = [\n"
+            "    VerifyFlags::NONE,\n"
+            "    VerifyFlags::MANDATORY,\n"
+            "    VerifyFlags::STANDARD,\n"
+            "    VerifyFlags::TAPROOT,\n"
+            "];\n"
+            "const ELEMENT_LEN_MAX: usize = 1_024;\n"
+        )
         self.provenance = self.root / "fuzz/CORPUS_PROVENANCE.md"
         self.provenance.write_text("previous provenance\n")
         self.source = self.root / "upstream"
@@ -140,6 +148,7 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         self.assertEqual(result.returncode, 47, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
 
+
     def test_failed_provenance_write_preserves_previous_file(self):
         result = self.run_import("provenance_write")
         self.assertEqual(result.returncode, 51, result.stderr)
@@ -168,10 +177,12 @@ printf '%s\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list(self.provenance.iterdir()), [])
 
+
     def test_termination_cleans_staging_and_preserves_provenance(self):
         result = self.run_import("term")
         self.assertEqual(result.returncode, 143, result.stderr)
         self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+
 
 
 if __name__ == "__main__":
