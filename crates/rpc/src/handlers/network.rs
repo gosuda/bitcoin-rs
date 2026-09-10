@@ -79,17 +79,27 @@ fn epoch_seconds(time: SystemTime) -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Option<SystemTime> {
-    if absolute {
-        return UNIX_EPOCH.checked_add(Duration::from_secs(bantime));
-    }
-
-    let duration = if bantime == 0 {
-        Duration::from_secs(DEFAULT_BAN_TIME_SECS)
+/// Resolves the finite expiry requested by `setban`.
+///
+/// SETBAN-EXPIRY-01: zero relative bantime uses `DEFAULT_BAN_TIME_SECS`;
+/// absolute bantime is measured from `UNIX_EPOCH`. An unrepresentable expiry
+/// returns `RpcError::InvalidParameter` (-8) before any ban-list mutation.
+/// It must never become `BannedSubnet::banned_until = None`, which means a
+/// permanent ban. This contract does not change signed-input or past-time policy.
+fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Result<SystemTime, RpcError> {
+    let until = if absolute {
+        UNIX_EPOCH.checked_add(Duration::from_secs(bantime))
     } else {
-        Duration::from_secs(bantime)
+        let duration = if bantime == 0 {
+            Duration::from_secs(DEFAULT_BAN_TIME_SECS)
+        } else {
+            Duration::from_secs(bantime)
+        };
+        now.checked_add(duration)
     };
-    now.checked_add(duration)
+    until.ok_or_else(|| {
+        RpcError::InvalidParameter("bantime exceeds supported timestamp range".to_owned())
+    })
 }
 
 fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
@@ -320,11 +330,12 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             let now = SystemTime::now();
             let bantime = optional_u64(params, 2, 0)?;
             let absolute = optional_bool(params, 3, false)?;
+            let banned_until = ban_until(now, bantime, absolute)?;
             let mut banned = ctx.banned.write();
             banned.retain(|entry| entry.subnet != subnet);
             banned.push(BannedSubnet {
                 subnet,
-                banned_until: ban_until(now, bantime, absolute),
+                banned_until: Some(banned_until),
                 ban_created: now,
                 reason: "manual".to_owned(),
             });
