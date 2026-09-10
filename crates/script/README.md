@@ -19,5 +19,12 @@ see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-def
 
 - `rocksdb`, `fjall`, `redb`: no-op in this crate — this crate has no backend code; the names exist so the shared storage-backend features can be enabled uniformly across the workspace.
 
+## Bounded stack transfer contract
+
+`Stack::move_to` and `Stack::move_from` transfer the top `ScriptItem` by
+ownership. They check source underflow before destination capacity, leave both
+stacks unchanged on either error, and preserve the item's identity and stack
+order on success. `Stack::MAX_DEPTH` is the destination capacity bound.
+
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
