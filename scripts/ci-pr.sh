@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  echo "usage: $0 {fmt|clippy|test|deny|kernel|all}" >&2
+  echo "usage: $0 {fmt|clippy|test|deny|all}" >&2
   exit 2
 }
 
