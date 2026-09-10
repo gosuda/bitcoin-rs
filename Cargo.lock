@@ -313,7 +313,6 @@ dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-consensus",
- "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bytemuck",

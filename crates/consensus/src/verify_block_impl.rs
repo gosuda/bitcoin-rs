@@ -319,18 +319,31 @@ fn hash_avx2_parent_batches<T: Copy>(
 /// computing them here would re-serialize and re-hash every transaction on a
 /// path the node can already serve from its parse-once view.
 pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
-    block.txs.first()?.outputs.iter().rev().find(|output| {
-        output.script_pubkey.len() >= 38
-            && output.script_pubkey[..6] == WITNESS_COMMITMENT_PREFIX
-    }).map(|output| &output.script_pubkey[6..38])
+    block
+        .txs
+        .first()?
+        .outputs
+        .iter()
+        .rev()
+        .find(|output| {
+            output.script_pubkey.len() >= 38
+                && output.script_pubkey[..6] == WITNESS_COMMITMENT_PREFIX
+        })
+        .map(|output| &output.script_pubkey[6..38])
 }
 
+/// Checks the block witness commitment using precomputed transaction witness identities.
+#[must_use]
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
     let Some(commitment) = witness_commitment(block) else {
         return false;
     };
     // BIP141: coinbase witness must have exactly one 32-byte element (the reserved value).
-    let Some(input) = coinbase.inputs.first() else {
+    let Some(input) = block
+        .txs
+        .first()
+        .and_then(|coinbase| coinbase.inputs.first())
+    else {
         return false;
     };
     if input.witness.len() != 1 {

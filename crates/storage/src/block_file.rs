@@ -223,8 +223,8 @@ impl FlatFileBlockStore {
         // opens or recovers, starts at zero on rollover, and advances by the
         // exact record length after every successful write. Keep that invariant
         // instead of issuing an unconditional seek for every block.
-        let append_result = write_record(&mut writer.file, &header, body)
-            .and_then(|()| writer.file.flush());
+        let append_result =
+            write_record(&mut writer.file, &header, body).and_then(|()| writer.file.flush());
         if let Err(append_error) = append_result {
             writer.rollback_offset = Some(position.offset);
             self.usage_dirty.store(true, Ordering::Release);
@@ -858,7 +858,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        write_record, BLOCK_FILE_MAGIC, BlockFilePosition, FlatFileBlockStore, RECORD_HEADER_LEN_U64,
+        BLOCK_FILE_MAGIC, BlockFilePosition, FlatFileBlockStore, RECORD_HEADER_LEN_U64,
+        write_record,
     };
 
     fn hash(byte: u8) -> [u8; 32] {
@@ -903,13 +904,13 @@ mod tests {
     }
 
     #[test]
-    fn write_record_handles_short_interrupted_and_zero_writes() {
+    fn write_record_handles_short_interrupted_and_zero_writes() -> io::Result<()> {
         let mut writer = VectoredTestWriter {
             bytes: Vec::new(),
             max_write: 1,
             interrupt_once: true,
         };
-        write_record(&mut writer, b"header", b"body").expect("short writes must be retried");
+        write_record(&mut writer, b"header", b"body")?;
         assert_eq!(writer.bytes, b"headerbody");
 
         let mut writer = VectoredTestWriter {
@@ -917,8 +918,11 @@ mod tests {
             max_write: 0,
             interrupt_once: false,
         };
-        let error = write_record(&mut writer, b"header", b"body").expect_err("zero write");
+        let Err(error) = write_record(&mut writer, b"header", b"body") else {
+            return Err(io::Error::other("a zero write must fail"));
+        };
         assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        Ok(())
     }
 
     /// `disk_usage` reports bytes that are there, and stops reporting them when
