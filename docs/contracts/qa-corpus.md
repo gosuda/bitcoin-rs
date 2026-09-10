@@ -19,6 +19,13 @@ end-state evidence roles.
 - Provenance rows must be updated in the same commit as any corpus re-import via
   `scripts/import-qa-assets.sh`.
 
+### `QAC-04`: Published seed-file permissions
+
+- Published corpus seed files created by the importer use repository-readable
+  mode `0644`, independent of the caller's umask.
+- This mode is a publication contract for shared checkouts; it does not claim
+  crash durability or define permissions for unrelated generated files.
+
 ### `QAC-02`: End-state evidence roles
 
 - G0 pins: the pinned `rust-bitcoin/qa-assets` commit and the minimized seed
