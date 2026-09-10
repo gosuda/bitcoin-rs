@@ -18,8 +18,8 @@ A version label alone is never custody.
 - The `[reference]` record in `docs/api/core-compat.toml` is the
   machine-readable authority for reference identity values.
 - `bin/bitcoin-rs/tests/support/reference_set.rs` is the typed parser that
-  enforces required identities, digest formats, corpus presence, and product
-  versus kernel-tree separation.
+  enforces required identities, digest formats, unique corpus ids and stop-hash
+  syntax, corpus presence, and product versus kernel-tree separation.
 - `docs/contracts/reference-set.md` is a readable projection. It does not
   override the manifest values or parser validation on conflict.
 - A version label alone is never custody. A reference must carry source and
@@ -55,13 +55,17 @@ carried by the scalar keys of `[reference]` itself:
 
 This identity is used only for differential evidence. It is not a policy pin,
 it is not a stable release, and it must never be read as the `REF-02` product
-reference.
+reference. The parser requires the development-tree version to have the
+`31.99.x` shape with a numeric patch component; being merely different from the
+release version is insufficient.
 
 ### `REF-04`: Corpus identities
 
 The product corpora are defined in
 [`campaign-corpora.md`](campaign-corpora.md) and recorded as
-`[[reference.corpora]]` rows pinned by `id`, `stop_height`, and `stop_hash`:
+`[[reference.corpora]]` rows pinned by `id`, `stop_height`, and `stop_hash`.
+Corpus ids are unique, and each `stop_hash` is exactly 64 lowercase hexadecimal
+characters:
 
 - `C150`: mainnet blocks `0 .. 150,000`; stop hash
   `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`;
@@ -115,7 +119,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
 - `bin/bitcoin-rs/tests/support/reference_set.rs`: typed parsing and custody
   validation for those values.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only and
-  digest-mismatch identities, and pins `corpus_custody()` honesty.
+  malformed-digest identities, duplicate corpus ids, malformed corpus stop
+  hashes, and non-`31.99.x` kernel identities, and pins `corpus_custody()`
+  honesty.
 
 ## Vocabulary
 

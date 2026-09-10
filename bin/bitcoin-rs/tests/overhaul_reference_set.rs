@@ -191,6 +191,22 @@ fn the_kernel_tree_written_as_the_release_is_identity_confusion() {
     );
 }
 
+/// REF-03: an oracle tree must be the 31.99.x development shape, not merely
+/// a version string different from the released product.
+#[test]
+fn kernel_identity_requires_the_31_99_development_shape() {
+    let target = "core_version = \"31.99.0\"\nkernel_crate = ";
+    for invalid in ["32.0.0", "31.98.0", "31.99.x", "31.99.0.1"] {
+        let replacement = format!("core_version = \"{invalid}\"\nkernel_crate = ");
+        let edited = edit_manifest(target, &replacement);
+        assert_eq!(
+            load_reference_set(&edited),
+            Err(ReferenceError::IdentityConfusion),
+            "kernel version {invalid:?} must not load as development-tree evidence"
+        );
+    }
+}
+
 /// A corpus dropped from the manifest is reported by its id, not silently
 /// forgiven.
 #[test]
@@ -209,6 +225,39 @@ fn a_missing_corpus_is_named_by_id() {
         load_reference_set(&edited),
         Err(ReferenceError::MissingCorpus {
             id: "Cmodern".to_owned()
+        })
+    );
+}
+
+/// REF-04: a well-formed stop identity needs a canonical block-hash string.
+#[test]
+fn malformed_corpus_stop_hash_is_rejected() {
+    let target = "stop_hash = \"0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b\"";
+    for invalid in [
+        "0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884",
+        "g000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b",
+        "0000000000000A3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b",
+    ] {
+        let edited = edit_manifest(target, &format!("stop_hash = \"{invalid}\""));
+        assert_eq!(
+            load_reference_set(&edited),
+            Err(ReferenceError::DigestMalformed { field: "stop_hash" }),
+            "stop hash {invalid:?} must be rejected"
+        );
+    }
+}
+
+/// REF-04: corpus presence cannot be satisfied twice by one identifier.
+#[test]
+fn duplicate_corpus_identifier_is_rejected_before_presence_accounting() {
+    let edited = edit_manifest(
+        "id = \"Cmodern\"\nstop_height = 709635",
+        "id = \"C150\"\nstop_height = 709635",
+    );
+    assert_eq!(
+        load_reference_set(&edited),
+        Err(ReferenceError::DuplicateCorpus {
+            id: "C150".to_owned()
         })
     );
 }

@@ -1,6 +1,8 @@
 //! Reference identities and validation used by the process and formal gates.
 //! The production RPC module owns the embedded manifest, not test orchestration.
 
+use std::collections::BTreeSet;
+
 use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
 
 /// The corpus identifiers every reference set must carry.
@@ -169,6 +171,12 @@ pub(crate) enum ReferenceError {
         /// The corpus identifier that is missing.
         id: String,
     },
+    /// A corpus identifier appears more than once in the reference set.
+    #[error("the `{id}` corpus appears more than once in the reference set")]
+    DuplicateCorpus {
+        /// The duplicated corpus identifier.
+        id: String,
+    },
 }
 
 /// Parses the `[reference]` record out of a compatibility manifest.
@@ -232,13 +240,18 @@ fn corpora(reference: &toml::Table) -> Result<Vec<CorpusPin>, ReferenceError> {
         })?;
 
     let mut corpora = Vec::with_capacity(array.len());
+    let mut ids = BTreeSet::new();
     for value in array {
         let entry = value
             .as_table()
             .ok_or(ReferenceError::VersionLabelOnly { field: "corpora" })?;
         let id = required_str(entry, "id")?;
+        if !ids.insert(id.clone()) {
+            return Err(ReferenceError::DuplicateCorpus { id });
+        }
         let stop_height = required_u64(entry, "stop_height")?;
         let stop_hash = required_str(entry, "stop_hash")?;
+        parse_sha256("stop_hash", &stop_hash)?;
         let manifest_sha256 = match entry.get("manifest_sha256") {
             None => None,
             Some(toml::Value::String(text)) => Some(parse_sha256("manifest_sha256", text)?),
@@ -345,7 +358,14 @@ fn check_identity_confusion(release: &str, kernel: &str) -> Result<(), Reference
         && release
             .split('.')
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
-    if release == kernel || !released {
+    let mut kernel_parts = kernel.split('.');
+    let development_tree = kernel_parts.next() == Some("31")
+        && kernel_parts.next() == Some("99")
+        && kernel_parts.next().is_some_and(|patch| {
+            !patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && kernel_parts.next().is_none();
+    if release == kernel || !released || !development_tree {
         return Err(ReferenceError::IdentityConfusion);
     }
     Ok(())
