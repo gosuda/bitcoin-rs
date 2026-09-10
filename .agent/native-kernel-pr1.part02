@@ -1,0 +1,145 @@
++        Err(ConsensusError::Script {
++            input_index: INPUT,
++            ..
++        })
++    ));
++}
++
++#[test]
++fn published_bip143_digest_and_signature_anchor_reference() {
++    let (tx, oracle) = fixture(2);
++    let script = hex(SCRIPT_CODE);
++    let expected = hex("c37af31116d1b27caf68aae9e3ac82f1477929014d5b917657d0eb49478cb670");
++    assert_eq!(
++        reference_bip143(&oracle, INPUT, &script, VALUE, 1).as_slice(),
++        expected,
++    );
++    let mut cache = SighashCache::new(&tx);
++    assert_eq!(
++        cache
++            .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, 1)
++            .expect("BIP143 digest")
++            .as_byte_array()
++            .as_slice(),
++        expected,
++    );
++    let witness = vec![
++        hex(concat!(
++            "304402203609e17b84f6a7d30c80bfa610b5b4542f32a8a0d5447a12fb1366d7f01cc44a",
++            "0220573a954c4518331561406f90300e8f3358f51928d43c212a8caed02de67eebee01",
++        )),
++        hex("025476c2e83188368da1ff3e292e7acafcdb3566bb0ad253f62fc70f07aeee6357"),
++    ];
++    assert_eq!(
++        verify_witness(&tx, &p2wpkh_prevout(), &witness, VerifyFlags::MANDATORY),
++        Ok(true),
++    );
++}
++
++#[test]
++fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
++    let key = test_key();
++    let pubkey = PublicKey::from_secret_key(SECP256K1, &key)
++        .serialize()
++        .to_vec();
++    let script = hex(SCRIPT_CODE);
++    let prevout = p2wpkh_prevout();
++    for output_count in [1, 2] {
++        // input 1 has no matching output in the one-output fixture. SINGLE
++        // must still hash a complete BIP143 preimage and allow a valid signature.
++        let (tx, oracle) = fixture(output_count);
++        let mut cache = SighashCache::new(&tx);
++        for byte in 0_u8..=u8::MAX {
++            let raw = u32::from(byte);
++            let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
++            assert_eq!(
++                cache
++                    .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, raw)
++                    .expect("raw BIP143 digest")
++                    .as_byte_array(),
++                &expected,
++                "outputs={output_count}, raw={raw:#x}",
++            );
++            let message = Message::from_digest(expected);
++            let mut signature = SECP256K1
++                .sign_ecdsa(&message, &key)
++                .serialize_der()
++                .to_vec();
++            signature.push(byte);
++            let witness = vec![signature, pubkey.clone()];
++            assert_eq!(
++                verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
++                Ok(true),
++                "consensus: outputs={output_count}, raw={raw:#x}",
++            );
++            let mut wrong_amount = prevout.clone();
++            wrong_amount.value += 1;
++            assert_eq!(
++                verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
++                Err(ScriptError::Invalid {
++                    code: ScriptErrCode::EvalFalse,
++                }),
++                "amount commitment: outputs={output_count}, raw={raw:#x}",
++            );
++            #[cfg(feature = "kernel")]
++            kernel_witness_parity(&tx, &prevout, &witness);
++            let strict = VerifyFlags::MANDATORY.union(VerifyFlags::STRICTENC);
++            let result = verify_witness(&tx, &prevout, &witness, strict);
++            if matches!(byte, 1 | 2 | 3 | 0x81 | 0x82 | 0x83) {
++                assert_eq!(result, Ok(true));
++            } else {
++                assert_eq!(
++                    result,
++                    Err(ScriptError::Invalid {
++                        code: ScriptErrCode::SigHashtype,
++                    }),
++                );
++            }
++        }
++    }
++}
++
++#[test]
++fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
++    let script = hex(SCRIPT_CODE);
++    for output_count in [1, 2] {
++        let (tx, oracle) = fixture(output_count);
++        let mut cache = SighashCache::new(&tx);
++        for raw in [0x100, 0x101, 0x1234_5682, 0x8000_0083, u32::MAX] {
++            let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
++            let actual = cache
++                .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, raw)
++                .expect("raw u32 digest");
++            assert_eq!(actual.as_byte_array(), &expected);
++            assert_ne!(
++                actual.as_byte_array(),
++                &reference_bip143(&oracle, INPUT, &script, VALUE, raw & 0xff),
++            );
++        }
++        assert_eq!(
++            cache.segwit_v0_signature_hash_raw(tx.inputs.len(), &script, VALUE, 0),
++            Err(SighashError::InputOutOfRange {
++                index: tx.inputs.len(),
++                total: tx.inputs.len(),
++            }),
++        );
++    }
++}
++
++#[test]
++fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
++    let script = hex(SCRIPT_CODE);
++    let modes = [
++        (Sighash::All, 1),
++        (Sighash::None, 2),
++        (Sighash::Single, 3),
++        (Sighash::AllAnyoneCanPay, 0x81),
++        (Sighash::NoneAnyoneCanPay, 0x82),
++        (Sighash::SingleAnyoneCanPay, 0x83),
++    ];
++    for output_count in [1, 2] {
++        let (tx, oracle) = fixture(output_count);
++        let mut cache = SighashCache::new(&tx);
++        for (mode, raw) in modes {
++            assert_eq!(
++                cache
