@@ -652,7 +652,10 @@ impl<S: KvStore> JournalWriter<S> {
             Ok(frontier) => frontier,
             Err(error) => return self.fail_append(record.height, error),
         };
-        let bytes = encode_record(record);
+        let bytes = match encode_record(record) {
+            Ok(bytes) => bytes,
+            Err(error) => return self.fail_append(record.height, error.into()),
+        };
         let next_offset = self.append_record_bytes(record.height, &bytes)?;
 
         self.segment_offset = next_offset;
@@ -1826,7 +1829,7 @@ mod tests {
         let mut writer = open_fresh("rotation", Arc::clone(&store))?;
         // Rotate exactly once, before the second append.
         let first = sample_record(1);
-        writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+        writer.rotate_bytes = u64::try_from(encode_record(&first)?.len())?;
         writer.append(&first)?;
         writer.append(&sample_record(2))?;
         assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
@@ -2044,7 +2047,7 @@ mod tests {
         {
             let mut writer = open_fresh("rotation-crash", Arc::clone(&store))?;
             let first = sample_record(1);
-            writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+            writer.rotate_bytes = u64::try_from(encode_record(&first)?.len())?;
             writer.append(&first)?;
             writer.flush_to(1)?;
             writer.inject_failpoint(JournalWriterFailpoint::HeadTempWrite);

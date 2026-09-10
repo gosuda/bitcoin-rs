@@ -59,7 +59,7 @@ fn an_expired_batch_deadline_does_not_wait_for_a_wake() {
 fn a_queued_wake_interrupts_the_wait_without_replacing_the_deadline() {
     let (sender, receiver) = crossbeam_channel::bounded(1);
     let runtime = TxIndexRuntime::new(sender);
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     runtime.wake();
     assert_eq!(
         wait_for_batch_deadline(&runtime, &receiver, deadline),

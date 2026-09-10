@@ -366,7 +366,8 @@ pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
         }
         other => {
             let envelope = other.envelope();
-            bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut std::io::sink())?
+            bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut bitcoin::io::sink())
+                .map_err(encode::Error::from)?
         }
     };
     HEADER_LEN

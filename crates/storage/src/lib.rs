@@ -3,8 +3,41 @@
 
 extern crate alloc;
 
-use core::fmt;
-use core::str::FromStr;
+use core::{fmt, str::FromStr};
+
+pub use block_file::{
+    BLOCK_FILE_DIRECTORY, BLOCK_FILE_MAGIC, BLOCK_FILE_MAX_BYTES, BlockFilePosition,
+    FlatFileBlockReader, FlatFileBlockStore, block_file_max_height_key, complete_framed_stats,
+    decode_block_file_max_height, encode_block_file_max_height, is_block_file_name,
+};
+
+pub use cache_budget::{CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget};
+
+pub use column_families::ColumnFamily;
+
+pub use error::StorageError;
+
+pub use footprint::{
+    DataDirAnchor, FootprintError, LogicalLedger, LogicalOwner, PhysicalCategory, PhysicalLedger,
+    PhysicalNamespace, PhysicalObservationKind, dir_has_entries, logical_column_family,
+    logical_store_owners, measure_physical_tree, opened_fd_path,
+};
+
+pub use trait_::{
+    KvIter, KvPair, KvSnapshot, KvStore, PersistBoundary, PersistFault, PersistFaultSlot,
+    PrefixScan, PrefixScanLimit, WriteBatch, WriteCondition,
+};
+
+pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
+
+#[cfg(feature = "fjall")]
+pub use fjall_impl::FjallStore;
+
+#[cfg(feature = "redb")]
+pub use redb_impl::{RedbStore, open_redb_tx_index_store, open_redb_tx_index_store_with_cache};
+
+#[cfg(feature = "rocksdb")]
+pub use rocksdb_impl::RocksDbStore;
 
 /// Selectable storage backend.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -58,6 +91,8 @@ impl fmt::Display for StorageBackend {
     }
 }
 
+/// Indexed authoritative block bodies and read sessions.
+pub mod block_body;
 /// Append-only flat files for immutable block bodies.
 pub mod block_file;
 /// Process cache-budget division shared by the storage backends.
@@ -81,32 +116,6 @@ mod fjall_impl;
 mod redb_impl;
 #[cfg(feature = "rocksdb")]
 mod rocksdb_impl;
-
-pub use block_file::{
-    BLOCK_FILE_DIRECTORY, BLOCK_FILE_MAGIC, BLOCK_FILE_MAX_BYTES, BlockFilePosition,
-    FlatFileBlockReader, FlatFileBlockStore, block_file_max_height_key, complete_framed_stats,
-    decode_block_file_max_height, encode_block_file_max_height, is_block_file_name,
-};
-pub use cache_budget::{CacheBudgetShare, clamp_dbcache_bytes, split_cache_budget};
-pub use column_families::ColumnFamily;
-pub use error::StorageError;
-pub use footprint::{
-    DataDirAnchor, FootprintError, LogicalLedger, LogicalOwner, PhysicalCategory, PhysicalLedger,
-    PhysicalNamespace, PhysicalObservationKind, dir_has_entries, logical_column_family,
-    logical_store_owners, measure_physical_tree, opened_fd_path,
-};
-pub use trait_::{
-    KvIter, KvPair, KvSnapshot, KvStore, PersistBoundary, PersistFault, PersistFaultSlot,
-    PrefixScan, PrefixScanLimit, WriteBatch, WriteCondition,
-};
-pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
-
-#[cfg(feature = "fjall")]
-pub use fjall_impl::FjallStore;
-#[cfg(feature = "redb")]
-pub use redb_impl::{RedbStore, open_redb_tx_index_store, open_redb_tx_index_store_with_cache};
-#[cfg(feature = "rocksdb")]
-pub use rocksdb_impl::RocksDbStore;
 
 /// Converts a `u64` byte count to an `f64` metric value.
 ///

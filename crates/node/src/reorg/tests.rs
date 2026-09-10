@@ -1,11 +1,12 @@
-use std::sync::atomic::Ordering;
-
 use bitcoin_rs_primitives::{Hash256, Network};
+
 use bitcoin_rs_storage::{DisconnectMarker, DisconnectPhase};
 
+use crate::{ApplyError, NodeConfig, state::NodeState};
+
+use std::sync::atomic::Ordering;
+
 use super::{ReorgError, settle_reorg_transition};
-use crate::state::NodeState;
-use crate::{ApplyError, NodeConfig};
 
 fn regtest_state() -> anyhow::Result<(tempfile::TempDir, NodeState)> {
     let dir = tempfile::tempdir()?;
@@ -34,7 +35,7 @@ fn connect_failure(source: ApplyError) -> ReorgError {
 fn utxo_commit_failure_preserves_odd_generation_and_disconnect_debt() -> anyhow::Result<()> {
     for move_generation in [false, true] {
         let (_dir, state) = regtest_state()?;
-        let handles = state.apply_handles();
+        let handles = state.chainstate();
         assert!(handles.checkpoint_publisher.is_some());
         let marker = DisconnectMarker {
             hash: Hash256::from_le_bytes(&[0x68; 32]),
@@ -99,7 +100,7 @@ fn utxo_commit_failure_preserves_odd_generation_and_disconnect_debt() -> anyhow:
 #[test]
 fn successful_reorg_with_failed_finish_closes_admission() -> anyhow::Result<()> {
     let (_dir, state) = regtest_state()?;
-    let handles = state.apply_handles();
+    let handles = state.chainstate();
     let transition = handles.begin_transition()?;
     handles
         .mempool_gateway
@@ -129,7 +130,7 @@ fn successful_reorg_with_failed_finish_closes_admission() -> anyhow::Result<()> 
 #[test]
 fn refused_reorg_with_failed_finish_preserves_original_progress() -> anyhow::Result<()> {
     let (_dir, state) = regtest_state()?;
-    let handles = state.apply_handles();
+    let handles = state.chainstate();
     let transition = handles.begin_transition()?;
     handles
         .mempool_gateway

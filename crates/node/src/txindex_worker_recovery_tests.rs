@@ -5,25 +5,34 @@
 //! durable watermarks, the published `ReconcilePhase`, and the rollback
 //! evidence (`WarningStore` plus `chain-rollback-event.json`).
 
-use hashbrown::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
 use arc_swap::ArcSwapOption;
+
 use bitcoin::{
     Amount, Block, BlockHash, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Witness,
-    block::Header as BlockHeader, block::Version, consensus::encode::serialize, hashes::Hash as _,
-    pow::CompactTarget, script::Builder,
+    block::{Header as BlockHeader, Version},
+    consensus::encode::serialize,
+    hashes::Hash as _,
+    pow::CompactTarget,
+    script::Builder,
 };
+
 use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+
 use bitcoin_rs_index::IndexCapabilities;
+
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_storage::{FjallStore, StorageError};
+
+use bitcoin_rs_storage::{FjallStore, StorageError, block_body::BlockBodyStore};
+
+use crate::recovery_evidence::{RollbackEventKind, WarningStore, read_marker};
+
+use hashbrown::HashMap;
+
 use parking_lot::{Mutex, RwLock};
 
+use std::{sync::Arc, time::Duration};
+
 use super::*;
-use crate::apply::PruneBodyStore;
-use crate::recovery_evidence::{RollbackEventKind, WarningStore, read_marker};
 
 type BodyMap = HashMap<(u32, [u8; 32]), Vec<u8>>;
 
@@ -31,7 +40,7 @@ struct MapBodyStore {
     bodies: Mutex<BodyMap>,
 }
 
-impl PruneBodyStore for MapBodyStore {
+impl BlockBodyStore for MapBodyStore {
     fn persist_block_body(
         &self,
         height: u32,
@@ -191,7 +200,7 @@ impl Harness {
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
         let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
         let (reporter, warnings) = test_recovery_reporter(evidence_dir.path());
-        let body_store: Arc<dyn PruneBodyStore> = fixture.bodies.clone();
+        let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
         let utxo = enabled
             .script_live
             .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
