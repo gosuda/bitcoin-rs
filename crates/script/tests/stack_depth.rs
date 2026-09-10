@@ -1,4 +1,9 @@
 //! Checked depth arithmetic and mutation boundaries of the public script stack.
+//!
+//! Contract: [`Stack::peek_at`], [`Stack::remove_at`], and [`Stack::roll`] in
+//! `crates/script/src/stack.rs` define depth zero as the top item and require
+//! out-of-range depths to return [`StackError::Underflow`] without mutation.
+//! The assertions below are the regression fixture for that contract.
 use bitcoin_rs_script::{ScriptItem, Stack, StackError};
 
 #[test]
