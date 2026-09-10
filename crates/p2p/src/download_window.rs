@@ -21,21 +21,27 @@ use crate::PeerInfo;
 
 /// Time after which a pending getdata is considered stuck and re-requestable.
 pub const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
-/// A deeper single-peer IBD window; fan-out still stripes at the per-peer cap.
+/// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
 /// run at this window was 1.52× the 128-block control. Fan-out still stripes
 /// at [`MAX_BLOCKS_IN_TRANSIT_PER_PEER`] once [`MIN_PEERS_FOR_FANOUT`] eligible
 /// peers exist, so a full outbound set does not deepen per-peer pipelines.
 pub const PENDING_BUDGET: usize = 256;
+
 /// Time after which a received out-of-order block is discarded.
 pub const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// Maximum number of received blocks waiting for their predecessor.
 pub const RECEIVED_BLOCK_BUDGET: usize = 256;
+
 /// Mainnet-oriented block-size estimate for sizing the in-flight request window.
 pub const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
+
 /// Maximum estimated bytes in the in-flight request window.
 pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
+
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
 ///
 /// Defined as [`PENDING_BYTE_BUDGET`] so the in-flight and staged byte bounds
@@ -44,6 +50,7 @@ pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIM
 /// without eviction. At the 150k acceptance window this bound rarely binds —
 /// blocks there are far below the per-slot estimate.
 pub const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
+
 /// Consensus-maximum serialized block size in bytes: a witness-serialized
 /// block cannot exceed its 4,000,000 weight, so no valid block is larger.
 pub const MAX_SERIALIZED_BLOCK_SIZE: usize = 4_000_000;
@@ -61,10 +68,12 @@ const _: () = assert!(
     RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,
     "staged byte budget must admit half the staged count window at max block size"
 );
+
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`,
 /// sized from the same byte budget that bounds retained staged blocks.
 pub const INBOUND_BLOCK_STAGE_CHUNK: usize =
     at_least_one(RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE);
+
 /// Maximum block requests one peer may own at once outside fan-out.
 ///
 /// Keep the fallback per-peer cap equal to the global cap so the bounded
@@ -72,6 +81,7 @@ pub const INBOUND_BLOCK_STAGE_CHUNK: usize =
 /// the shipped single-peer behavior and stays bit-identical when fewer than
 /// [`MIN_PEERS_FOR_FANOUT`] eligible peers exist.
 pub const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
+
 /// Per-peer in-flight cap while fan-out is active.
 ///
 /// Mirrors Bitcoin Core's `MAX_BLOCKS_IN_TRANSIT_PER_PEER` (16,
@@ -81,6 +91,7 @@ pub const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 /// by a live-tested and reverted attempt (commit 5608279, recoverable from
 /// git history).
 pub const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
+
 /// Minimum eligible peers before fan-out stripes.
 ///
 /// Matches the default outbound target. Below this count, one healthy peer's
@@ -90,7 +101,17 @@ pub const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
 /// with [`PENDING_BUDGET`]: `PENDING_BUDGET / 16` would be 16, and fan-out
 /// would never engage at the 8-outbound default.
 pub const DEFAULT_OUTBOUND_PEER_TARGET: usize = 8;
-  pub const MIN_PEERS_FOR_FANOUT: usize = DEFAULT_OUTBOUND_PEER_TARGET;
+
+/// Minimum eligible peers before fan-out stripes.
+///
+/// Matches the default outbound target. Below this count, one healthy peer's
+/// deep sequential pipeline fills [`PENDING_BUDGET`]. At the threshold, each
+/// peer is capped at [`MAX_BLOCKS_IN_TRANSIT_PER_PEER`] so a full outbound set
+/// does not reproduce the recorded head-of-line collapse. Do not scale this
+/// with [`PENDING_BUDGET`]: `PENDING_BUDGET / 16` would be 16, and fan-out
+/// would never engage at the 8-outbound default.
+pub const MIN_PEERS_FOR_FANOUT: usize = DEFAULT_OUTBOUND_PEER_TARGET;
+
 /// Initial window-blocked stalling threshold.
 ///
 /// Mirrors Bitcoin Core's `BLOCK_STALLING_TIMEOUT_DEFAULT` (2s,
@@ -99,6 +120,7 @@ pub const DEFAULT_OUTBOUND_PEER_TARGET: usize = 8;
 /// progress possible, that peer is disconnected and its blocks re-queued
 /// (R8).
 pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Adaptive ceiling for the stalling threshold.
 ///
 /// Mirrors Core's `BLOCK_STALLING_TIMEOUT_MAX` (64s): the threshold doubles
@@ -107,6 +129,7 @@ pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
 /// window-front arrival (never snapping back) so the elevation survives a
 /// peer rotation.
 pub const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
+
 /// How long a disconnected staller stays excluded from fan-out eligibility
 /// and non-last-resort block requests.
 ///
@@ -122,7 +145,14 @@ pub const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
 // budget; a drift would silently spill every cached run to the heap. The
 // byte-budget pair needs no twin assertion: `RECEIVED_BLOCK_BYTE_BUDGET` is
 // `PENDING_BYTE_BUDGET` by definition.
+
+// The apply-side cache horizon (`expected_apply_horizon`) stays within the
+// inline capacity below only because the staging budget equals the in-flight
+// budget; a drift would silently spill every cached run to the heap. The
+// byte-budget pair needs no twin assertion: `RECEIVED_BLOCK_BYTE_BUDGET` is
+// `PENDING_BYTE_BUDGET` by definition.
 const _: () = assert!(PENDING_BUDGET == RECEIVED_BLOCK_BUDGET);
+
 const _: () = assert!(
     MIN_PEERS_FOR_FANOUT * MAX_BLOCKS_IN_TRANSIT_PER_PEER <= PENDING_BUDGET,
     "fan-out at the outbound target must not exceed the download window"
@@ -150,7 +180,7 @@ pub struct SyncPeer {
     /// Peer network address.
     pub addr: SocketAddr,
     /// Best known block height the peer advertises.
-    pub start_height: i32,
+    pub best_known_height: i32,
 }
 
 /// The set of peers chosen for the current sync cycle.
@@ -388,6 +418,7 @@ struct StallEpisode {
     /// [`STALL_EPISODE_LOG_AGE`]; see [`DownloadWindow::observe_stall`]).
     info_logged: bool,
 }
+
 #[derive(Clone, Copy, Debug)]
 enum ColdFrontState {
     Waiting {
@@ -401,6 +432,7 @@ enum ColdFrontState {
         hash: Hash256,
     },
 }
+
 #[derive(Debug)]
 struct PrefixProbe {
     owner: SocketAddr,
@@ -416,17 +448,25 @@ struct PrefixProbe {
 /// clearing rule zeroed the clock, and what the front-cadence EWMA (the
 /// threshold's falsifier) was while the episode ran.
 const STALL_EPISODE_LOG_AGE: Duration = Duration::from_secs(1);
+
 /// Maximum distinct cold-start front blocks hedged before the cadence EWMA
 /// seeds. Two advances are sufficient to produce the first cadence sample.
 const MAX_COLD_FRONT_HEDGES: usize = 2;
+
 /// One-shot duplicate prefix used to select a responsive deep-window peer.
 const PREFIX_PROBE_BLOCK_LIMIT: usize = 8;
+
 /// A peer must deliver the first four accepted prefix blocks to win.
 const PREFIX_PROBE_WIN_BLOCKS: usize = 4;
+
 const _: () = assert!(PREFIX_PROBE_WIN_BLOCKS > 0);
+
 const _: () = assert!(PREFIX_PROBE_WIN_BLOCKS <= PREFIX_PROBE_BLOCK_LIMIT);
+
 const _: () = assert!(PREFIX_PROBE_BLOCK_LIMIT <= 8);
+
 const PREFIX_PROBE_WIN_MASK: u8 = (1_u8 << PREFIX_PROBE_WIN_BLOCKS) - 1;
+
 /// Estimated duplicate bytes per alternate during the one-shot probe.
 const PREFIX_PROBE_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
 
@@ -4179,3 +4219,4 @@ mod tests {
         Hash256::from_le_bytes(&[byte; 32])
     }
 }
+// weave: run 'weave explain crates/p2p/src/download_window.rs' for per-hunk detail, 'weave check' to verify your resolution
