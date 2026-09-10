@@ -10,9 +10,16 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "fetch-golden.sh"
-HEIGHTS = (0, 1, 170, 91722, 91812, 91842, 91880, 173818, 363731,
-           481823, 481824, 624455, 709632, 800000, 880000)
+SCRIPT_DIR = Path(__file__).resolve().parents[1]
+SCRIPT = SCRIPT_DIR / "fetch-golden.sh"
+CONTRACT = Path(__file__).resolve().parents[2] / "docs/golden-fixtures-contract.md"
+HEIGHTS = tuple(int(line) for line in (SCRIPT_DIR / "golden-fixture-heights.txt").read_text().splitlines() if line)
+
+# Normative expectations are defined in CONTRACT (v1), sections 2 and 3.
+assert CONTRACT.exists(), f"missing downloader contract: {CONTRACT}"
+CONTRACT_TEXT = CONTRACT.read_text(encoding="utf-8")
+assert "## 2. Successful publication and caching" in CONTRACT_TEXT
+assert "## 3. Network request contract" in CONTRACT_TEXT
 TXID = "ab" * 32
 CURL_STUB = r'''#!/usr/bin/env bash
 set -eu

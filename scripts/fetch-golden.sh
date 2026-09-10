@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-heights=(0 1 170 91722 91812 91842 91880 173818 363731 481823 481824 624455 709632 800000 880000)
+heights=()
+while IFS= read -r height; do
+  [[ -n "${height}" ]] && heights+=("${height}")
+done < "$(dirname "${BASH_SOURCE[0]}")/golden-fixture-heights.txt"
 out_dir="crates/primitives/tests/testdata"
 mkdir -p "${out_dir}"
 
