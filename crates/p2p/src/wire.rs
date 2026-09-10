@@ -349,7 +349,29 @@ pub fn read_message<R: Read>(
 /// Admission accounts this exact count and `write_message` returns it for
 /// release, so budget accounting and wire emission charge identical bytes.
 pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
-    Ok(HEADER_LEN + encode_payload(message)?.len())
+    let payload_len = match message {
+        Message::Tx(tx) => tx.total_size(),
+        Message::Block(block) => block.total_size(),
+        Message::Headers(headers) => {
+            let count = u64::try_from(headers.len())
+                .map_err(|_| PeerError::PayloadTooLarge(headers.len()))?;
+            let count_len = bitcoin_rs_primitives::varint::encode(count).len();
+            let entries_len = headers
+                .len()
+                .checked_mul(81)
+                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?;
+            count_len
+                .checked_add(entries_len)
+                .ok_or(PeerError::PayloadTooLarge(usize::MAX))?
+        }
+        other => {
+            let envelope = other.envelope();
+            bitcoin::consensus::Encodable::consensus_encode(&envelope, &mut std::io::sink())?
+        }
+    };
+    HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or(PeerError::PayloadTooLarge(usize::MAX))
 }
 
 /// Encode only a message payload.
