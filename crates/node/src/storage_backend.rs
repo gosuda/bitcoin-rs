@@ -147,7 +147,7 @@ mod tests {
         (
             "txindex_worker.rs",
             include_str!("txindex_worker.rs"),
-            Some("mod body_reader_tests {"),
+            Some("mod body_reader_tests;"),
         ),
     ];
 
