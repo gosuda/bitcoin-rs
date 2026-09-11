@@ -1,3 +1,7 @@
+//! Difficulty-adjustment behavior is governed by
+//! `docs/contracts/consensus-difficulty.md` (`DAA-01`), against the pinned
+//! Bitcoin Core 31.1 reference (`docs/contracts/reference-set.md`, `REF-02`).
+
 use super::*;
 
 #[test]
