@@ -1,0 +1,54 @@
+name: Native node responsibility splits
+on:
+  push:
+    branches: [automation/node-splits-finish-20260911]
+    paths:
+      - .github/node-splits/**
+      - .github/workflows/node-splits-native.yml
+permissions:
+  contents: read
+concurrency:
+  group: node-splits-finish-20260911
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'gosuda/bitcoin-rs'
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [apply, sync, mining]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.98.1'
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: node-splits-native-1.98.1
+      - name: Install pinned Rust syntax parser
+        run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+      - name: Validate the exact source tree and publish only a passing commit
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: python3 .github/node-splits/validate.py '${{ matrix.group }}'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: node-split-${{ matrix.group }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/node-splits-${{ matrix.group }}/
+          retention-days: 7
+          if-no-files-found: warn
