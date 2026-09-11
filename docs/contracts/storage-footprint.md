@@ -131,12 +131,19 @@ Owners:
   - `symlink_is_rejected`;
   - `high_water_below_snapshot_is_rejected`;
   - `ledgers_are_not_summed_by_the_physical_total`.
-- `crates/node/src/storage_footprint.rs` existing tests:
+- `crates/node/src/storage_footprint/tests.rs` contract tests (see the clause map at the top of that module):
   - `default_regtest_record_is_inapplicable_to_the_mainnet_budget`;
   - `conservative_high_water_can_pass_the_default_mainnet_budget`;
   - `snapshot_of_default_mainnet_is_insufficient_for_the_peak_gate`;
   - `high_water_above_budget_fails_the_default_mainnet_gate`;
-  - `empty_chainstate_directory_is_not_created_as_a_store`.
+  - `empty_chainstate_directory_is_not_created_as_a_store`;
+    - `unpinned_high_water_is_tip_unpinned_not_pass`;
+    - `stop_height_without_hash_is_rejected`;
+    - `stop_hash_without_height_is_rejected`;
+    - `invalid_stop_hash_is_rejected`;
+    - `oversized_current_witness_falls_back_to_prev`;
+    - `identity_names_the_txindex_lane`;
+    - `logical_chainstate_rows_are_named_owners`.
 
 ## Vocabulary
 
