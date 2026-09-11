@@ -121,11 +121,11 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         result = self.run_import()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(),
-                         ["p2p_message", "block_decode", "tx_decode", "script_eval"])
+                         ["p2p_message", "block_validate", "tx_validate", "script_eval"])
         self.assertIn(self.pin, self.provenance.read_text())
         self.assertIn("2000-01-01T00:00:00Z", self.provenance.read_text())
         self.assertEqual(stat.S_IMODE(self.provenance.stat().st_mode), 0o644)
-        for target in ("block_decode", "tx_decode"):
+        for target in ("block_validate", "tx_validate"):
             self.assertEqual((self.root / "fuzz/corpus" / target / "seed").read_bytes(), b"Q")
 
     def test_missing_source_stops_before_minimization_or_provenance(self):

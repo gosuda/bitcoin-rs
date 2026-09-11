@@ -226,7 +226,7 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_seed("p2p_message", b"\x01payload")
         self.assert_seed("script_eval", b"\0\0\0\x01\0Q\0")
-        for target in ("block_decode", "tx_decode"):
+        for target in ("block_validate", "tx_validate"):
             self.assertEqual((self.output / target / "seed").read_bytes(), b"direct")
 
 
