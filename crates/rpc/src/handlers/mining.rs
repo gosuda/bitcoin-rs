@@ -1535,6 +1535,7 @@ mod tests {
         let entry = pool
             .entry_by_txid(&txid)
             .expect("entry remains after prioritise");
+        // fee_delta overlay is additive across calls: 500 then 600.
         assert_eq!(entry.fee_delta, 1_100);
         assert_eq!(entry.fee, 1_000);
     }
