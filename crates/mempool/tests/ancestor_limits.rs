@@ -9,7 +9,9 @@ use alloc::sync::Arc;
 use std::error::Error;
 
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolError, MempoolLimits, PolicyError};
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 
 #[test]
 fn chain_of_twenty_six_unconfirmed_transactions_rejects_twenty_sixth() -> Result<(), Box<dyn Error>>
@@ -187,21 +189,22 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), Box<dyn Error
 fn multi_output_tx(label: u8, outputs: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint(label, 0),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: (0..outputs)
             .map(|vout| TxOut {
-                value: 1_000,
+                value: Amount::from_sat(1_000),
                 script_pubkey: vec![
                     0x51,
                     label,
                     u8::try_from(vout).expect("fixture vout fits u8"),
-                ],
+                ]
+                .into(),
             })
             .collect(),
     }
@@ -210,16 +213,16 @@ fn multi_output_tx(label: u8, outputs: u32) -> Tx {
 fn chained_tx(label: u8, previous_output: OutPoint) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output,
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x51, label].into(),
         }],
     }
 }
