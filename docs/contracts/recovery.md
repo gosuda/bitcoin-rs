@@ -55,14 +55,6 @@ struct DurableHead {
 The durable head, coins, and `refs` are committed in one atomic named-family
 batch. `commit_id` is monotonic on disconnect as well as on connect.
 
-### `RCV-06`: Chain transaction count recovery
-
-The in-memory chain transaction count uses zero as the durable-compatible
-sentinel for unknown. Legacy datadirs that predate the counter, rewinds that
-would underflow, and additions that would overflow must preserve or restore
-zero; they must never clamp or wrap into a plausible known total. A known
-count advances and rewinds by the exact transaction delta.
-
 ## Clauses
 
 ### `RCV-01`: Authority and identity
@@ -260,6 +252,24 @@ tests.
 - A missing or unknown owner-local version does not fail node startup.
   The affected owner degrades to a typed, logged state and rebuilds from
   canonical or seeded data.
+
+### `RCV-12`: Recovery evidence warning and marker ordering
+
+- `RecoveryReporter` is evidence publication, not chainstate authority. It
+  reports a recovery fact only after the restored authoritative position is
+  known; neither the warning store nor the marker may move chainstate.
+- For checkpoint fallback and index-watermark-ahead evidence, the reporter
+  first renders/logs the warning and updates the process-visible
+  `WarningStore`, then attempts the atomic durable marker write.
+- Marker persistence failure is returned to the caller and keeps the warning
+  visible for the lifetime of that process. Callers that require durable
+  evidence fail closed rather than pretending the marker succeeded.
+- Marker and applied-tip-witness payloads are checked against `MAX_FILE_BYTES` after being read; marker publication uses
+  the owner-local atomic write/rename/directory-sync protocol. Corrupt or
+  mismatched evidence is rejected instead of silently becoming authority.
+- Tests for recovery evidence must cite this clause (and `RCV-04` where they
+  exercise crash/failure behavior) so extracted test modules do not become an
+  independent specification.
 
 ## Proven by
 
