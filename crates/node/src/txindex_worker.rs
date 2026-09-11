@@ -54,9 +54,9 @@ use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
 
 use parking_lot::{Mutex, RwLock};
 
+use startup::open_tx_index_store_on_worker;
 #[cfg(test)]
 use startup::{fail_worker, open_tx_index_on_worker, open_tx_index_with_timeout};
-use startup::open_tx_index_store_on_worker;
 
 #[cfg(test)]
 use std::path::Path;
