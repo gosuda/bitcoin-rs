@@ -84,7 +84,7 @@ fn active_commitment_without_reserved_value_is_rejected() {
     let block = block(coinbase(false, true));
     assert_eq!(
         verify_block_rules(&block),
-        Err(ConsensusError::WitnessCommitment)
+        Err(ConsensusError::WitnessNonceSize)
     );
 }
 
@@ -99,7 +99,7 @@ fn preactivation_witness_without_commitment_is_rejected() {
     let block = block(coinbase(true, false));
     assert_eq!(
         verify_with_activation(&block, false),
-        Err(ConsensusError::WitnessCommitment)
+        Err(ConsensusError::UnexpectedWitness)
     );
 }
 
@@ -108,7 +108,7 @@ fn preactivation_commitment_like_output_does_not_authorize_witness() {
     let block = block(coinbase(true, true));
     assert_eq!(
         verify_with_activation(&block, false),
-        Err(ConsensusError::WitnessCommitment)
+        Err(ConsensusError::UnexpectedWitness)
     );
 }
 
@@ -123,6 +123,6 @@ fn active_witness_without_commitment_is_rejected() {
     let block = block(coinbase(true, false));
     assert_eq!(
         verify_block_rules(&block),
-        Err(ConsensusError::WitnessCommitment)
+        Err(ConsensusError::UnexpectedWitness)
     );
 }

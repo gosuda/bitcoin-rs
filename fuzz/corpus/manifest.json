@@ -1,6 +1,6 @@
 {
   "_contract": "QAC-05 (docs/contracts/qa-corpus.md): expected decoder verdict per seed; regenerate with CORPUS_MANIFEST_WRITE=1 cargo test -p bitcoin-rs-primitives",
-  "block_decode": {
+  "block_validate": {
     "0393b8acae2686b81b0e5260bb769a12c48bdef4": "accepted",
     "03fc882d1829411c9fc1c5658a06759a42326ef0": "rejected:end_of_data",
     "079055e574e44fefe9ffde24631594f417e75fd9": "rejected:end_of_data",
@@ -180,7 +180,7 @@
     "ff30265ba5d81628196b88b1954f5e53a163fd84": "rejected:end_of_data",
     "ffac4e9bc9bbd5ee37cf3381e50ad62f53f8acae": "rejected:end_of_data"
   },
-  "tx_decode": {
+  "tx_validate": {
     "0164873c245983f0c0fcc5b943ced4e3efba3cb1": "rejected:trailing_bytes",
     "030620d1a12726c6abbd1144d1bd0daeab5ca556": "rejected:end_of_data",
     "035b1593968f0d8dd894025383773df588083bcd": "rejected:end_of_data",
