@@ -22,6 +22,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
+const MAX_REQUEST: usize = 16 * 1024 * 1024;
 const MAX_TRANSCRIPT: u64 = 64 * 1024 * 1024;
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
 const MOCK_TIME: u64 = 1_780_000_000;
@@ -144,6 +145,7 @@ pub(crate) struct ProcessNode {
     _datadir: TempDir,
     addr: SocketAddr,
     binary: NodeBinary,
+    pub(crate) p2p_addr: SocketAddr,
     pub(crate) clock: ClockControl,
     pub(crate) evidence: PathBuf,
     journal: File,
@@ -191,19 +193,35 @@ fn executable(binary: NodeBinary) -> Result<PathBuf, HarnessError> {
     }
 }
 
+// Select distinct ephemeral addresses while both probe sockets are held.
+// The real children, not this helper, own their eventual listener binds.
+fn loopback_addresses() -> Result<(SocketAddr, SocketAddr), HarnessError> {
+    let rpc = TcpListener::bind("127.0.0.1:0")?;
+    let p2p = TcpListener::bind("127.0.0.1:0")?;
+    Ok((rpc.local_addr()?, p2p.local_addr()?))
+}
+
 fn launch(
     binary: NodeBinary,
     datadir: &Path,
     addr: SocketAddr,
+    p2p_addr: SocketAddr,
 ) -> Result<(Command, ClockControl), HarnessError> {
     let mut command = Command::new(executable(binary)?);
+    // Host configuration must not replace this isolated regtest profile.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("BITCOIN_RS_") {
+            command.env_remove(key);
+        }
+    }
     let clock = match binary {
         NodeBinary::ReferenceCore => {
             command
                 .args([
                     "-regtest",
                     "-server",
-                    "-listen=0",
+                    "-listen=1",
+                    "-listenonion=0",
                     "-connect=0",
                     "-dnsseed=0",
                     "-disablewallet",
@@ -211,19 +229,23 @@ fn launch(
                     "-rpcpassword=parity",
                 ])
                 .arg(format!("-datadir={}", datadir.display()))
+                .arg(format!("-bind={p2p_addr}"))
                 .arg(format!("-rpcport={}", addr.port()))
                 .arg(format!("-mocktime={MOCK_TIME}"));
             ClockControl::Mock(MOCK_TIME)
         }
         NodeBinary::BitcoinRs => {
             let config_path = datadir.join("node.toml");
-            fs::write(&config_path, "p2p_listen = []\ndns_seeds_enabled = false\n")?;
+            fs::write(
+                &config_path,
+                format!(
+                    "network = \"regtest\"\np2p_listen = [\"{p2p_addr}\"]\ndns_seeds_enabled = false\n"
+                ),
+            )?;
             command
                 .arg("--config")
                 .arg(config_path)
                 .args([
-                    "--network",
-                    "regtest",
                     "--storage-backend",
                     "fjall",
                     "--rpc-user",
@@ -232,6 +254,8 @@ fn launch(
                     "parity",
                     "--dbcache-mb",
                     "64",
+                    "--txindex",
+                    "true",
                 ])
                 .arg("--data-dir")
                 .arg(datadir.join("node"))
@@ -262,13 +286,11 @@ impl ProcessNode {
             .prefix("run-")
             .tempdir_in(evidence_root)?
             .keep();
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let addr = listener.local_addr()?;
-        drop(listener);
+        let (addr, p2p_addr) = loopback_addresses()?;
         let journal = File::create(evidence.join("transcript.jsonl"))?;
         let stdout = File::create(evidence.join("stdout.log"))?;
         let stderr = File::create(evidence.join("stderr.log"))?;
-        let (mut command, clock) = launch(binary, datadir.path(), addr)?;
+        let (mut command, clock) = launch(binary, datadir.path(), addr, p2p_addr)?;
         command.args(extra_args);
         let executable = Path::new(command.get_program());
         let mut engine = sha256::Hash::engine();
@@ -292,6 +314,7 @@ impl ProcessNode {
                 "config": config,
                 "datadir": datadir.path(),
                 "rpc_address": addr.to_string(),
+                "p2p_address": p2p_addr.to_string(),
                 "clock": format!("{clock:?}"),
                 "startup_timeout_ms": timeout.as_millis(),
                 "request_timeout_ms": REQUEST_TIMEOUT.as_millis(),
@@ -313,6 +336,7 @@ impl ProcessNode {
             _datadir: datadir,
             addr,
             binary,
+            p2p_addr,
             clock,
             evidence,
             journal,
@@ -365,6 +389,17 @@ impl ProcessNode {
         self.rpc_until(method, params, Instant::now() + REQUEST_TIMEOUT)
     }
 
+    pub(crate) fn http_get_json(&mut self, path: &str) -> Result<Value, HarnessError> {
+        let response = exchange_http(self.addr, None, path, Instant::now() + REQUEST_TIMEOUT);
+        self.record_response(&json!({"http_method": "GET", "path": path}), &response)?;
+        response
+    }
+
+    /// Common monotonic clock for RPC, explorer, and P2P evidence.
+    pub(crate) const fn evidence_clock(&self) -> Instant {
+        self.started
+    }
+
     fn rpc_until(
         &mut self,
         method: &str,
@@ -374,7 +409,34 @@ impl ProcessNode {
         let request =
             json!({"jsonrpc": "1.0", "id": "process-harness", "method": method, "params": params});
         let response = exchange(self.addr, &request, deadline);
-        let reply = match &response {
+        self.record_response(&request, &response)?;
+        let reply = response?;
+        if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+            return Err(HarnessError::Rpc {
+                method: method.to_owned(),
+                code: error.get("code").and_then(Value::as_i64).ok_or_else(|| {
+                    HarnessError::Protocol("RPC error lacks a numeric code".into())
+                })?,
+                message: error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| HarnessError::Protocol("RPC error lacks a message".into()))?
+                    .to_owned(),
+                evidence: self.evidence.clone(),
+            });
+        }
+        reply
+            .get("result")
+            .cloned()
+            .ok_or_else(|| HarnessError::Protocol("missing RPC result".into()))
+    }
+
+    fn record_response(
+        &mut self,
+        request: &Value,
+        response: &Result<Value, HarnessError>,
+    ) -> Result<(), HarnessError> {
+        let reply = match response {
             Ok(reply) => reply.clone(),
             Err(error) => json!({"transport_error": error.to_string()}),
         };
@@ -398,25 +460,7 @@ impl ProcessNode {
         self.journal.write_all(b"\n")?;
         self.journal.flush()?;
         self.journal_bytes = next_size;
-        let reply = response?;
-        if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
-            return Err(HarnessError::Rpc {
-                method: method.to_owned(),
-                code: error.get("code").and_then(Value::as_i64).ok_or_else(|| {
-                    HarnessError::Protocol("RPC error lacks a numeric code".into())
-                })?,
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| HarnessError::Protocol("RPC error lacks a message".into()))?
-                    .to_owned(),
-                evidence: self.evidence.clone(),
-            });
-        }
-        reply
-            .get("result")
-            .cloned()
-            .ok_or_else(|| HarnessError::Protocol("missing RPC result".into()))
+        Ok(())
     }
 
     fn finish_output(&mut self) -> Result<(), HarnessError> {
@@ -534,22 +578,58 @@ pub(crate) fn exchange(
     request: &Value,
     deadline: Instant,
 ) -> Result<Value, HarnessError> {
+    exchange_http(addr, Some(request), "/", deadline)
+}
+
+fn exchange_http(
+    addr: SocketAddr,
+    request: Option<&Value>,
+    path: &str,
+    deadline: Instant,
+) -> Result<Value, HarnessError> {
     let remaining = || {
         deadline
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
             .ok_or_else(|| HarnessError::Protocol("RPC deadline reached".into()))
     };
-    let mut stream = TcpStream::connect_timeout(&addr, remaining()?.min(Duration::from_secs(1)))?;
-    stream.set_write_timeout(Some(remaining()?))?;
-    let body = serde_json::to_vec(request)?;
+    let mut wire = Vec::new();
+    let body = request
+        .map(serde_json::to_vec)
+        .transpose()?
+        .unwrap_or_default();
     // Fixed test-only credentials avoid another authentication implementation.
-    write!(
-        stream,
-        "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Basic cGFyaXR5OnBhcml0eQ==\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(&body)?;
+    if request.is_some() {
+        write!(
+            wire,
+            "POST / HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Basic cGFyaXR5OnBhcml0eQ==\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )?;
+    } else {
+        if !path.starts_with("/api/") || path.bytes().any(|byte| byte <= b' ' || byte == 127) {
+            return Err(HarnessError::Protocol("invalid explorer HTTP path".into()));
+        }
+        write!(
+            wire,
+            "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )?;
+    }
+    wire.extend_from_slice(&body);
+    if wire.len() > MAX_REQUEST {
+        return Err(HarnessError::Protocol("HTTP request byte limit".into()));
+    }
+    let mut stream = TcpStream::connect_timeout(&addr, remaining()?.min(Duration::from_secs(1)))?;
+    let mut pending = wire.as_slice();
+    while !pending.is_empty() {
+        stream.set_write_timeout(Some(remaining()?))?;
+        let written = stream.write(pending)?;
+        if written == 0 {
+            return Err(HarnessError::Protocol("closed HTTP writer".into()));
+        }
+        pending = pending
+            .get(written..)
+            .ok_or_else(|| HarnessError::Protocol("invalid write size".into()))?;
+    }
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
@@ -567,6 +647,10 @@ pub(crate) fn exchange(
                 .ok_or_else(|| HarnessError::Protocol("invalid read size".into()))?,
         );
     }
+    parse_http_reply(&bytes, request.is_none())
+}
+
+fn parse_http_reply(bytes: &[u8], require_success: bool) -> Result<Value, HarnessError> {
     let split = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -575,8 +659,10 @@ pub(crate) fn exchange(
         .map_err(|error| HarnessError::Protocol(format!("invalid HTTP headers: {error}")))?;
     let mut lines = headers.split("\r\n");
     let mut status = lines.next().unwrap_or_default().split_whitespace();
-    if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1"))
-        || !status.next().is_some_and(|code| {
+    let version = status.next();
+    let code = status.next();
+    if !matches!(version, Some("HTTP/1.0" | "HTTP/1.1"))
+        || !code.is_some_and(|code| {
             code.len() == 3
                 && code
                     .parse::<u16>()
@@ -584,6 +670,11 @@ pub(crate) fn exchange(
         })
     {
         return Err(HarnessError::Protocol("invalid HTTP status line".into()));
+    }
+    if require_success && code != Some("200") {
+        return Err(HarnessError::Protocol(
+            "explorer HTTP response was not 200".into(),
+        ));
     }
     let mut content_length = None;
     for line in lines {

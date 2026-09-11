@@ -44,6 +44,24 @@ fn start(binary: NodeBinary) -> ProcessNode {
     ProcessNode::start(binary).expect("public process must start")
 }
 
+/// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.
+#[test]
+fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
+    for binary in [NodeBinary::BitcoinRs, NodeBinary::ReferenceCore] {
+        let node = start(binary);
+        let pid = node.pid();
+        assert!(node.p2p_addr.ip().is_loopback());
+        let peer = support::process_peer::connect_loopback(
+            node.p2p_addr,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("normal startup must expose its configured P2P listener");
+        drop(peer);
+        node.stop().expect("stop after public P2P connection");
+        assert_reaped(pid);
+    }
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -424,6 +442,100 @@ fn malformed_http_and_json_replies_are_transport_failures() {
             Err(HarnessError::Protocol(_) | HarnessError::Json(_))
         ));
     }
+}
+
+/// REF-07c: a readable socket must not renew the total response deadline.
+#[test]
+fn dribbled_http_response_cannot_renew_the_request_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback responder");
+    let addr = listener.local_addr().expect("loopback address");
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).expect("bounded accept");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "client must connect");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bounded read");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .expect("bounded write");
+        let mut request = [0_u8; 4096];
+        assert!(stream.read(&mut request).expect("request") > 0);
+        for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}" {
+            if stream.write_all(&[*byte]).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    });
+    let start = Instant::now();
+    let result = exchange(
+        addr,
+        &json!({"method": "getblockcount"}),
+        start + Duration::from_millis(100),
+    );
+    let elapsed = start.elapsed();
+    server.join().expect("dribbling responder joins");
+    assert!(
+        result.is_err(),
+        "a reply arriving after the deadline is not evidence"
+    );
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "response renewed its deadline: {elapsed:?}"
+    );
+}
+
+/// REF-07c: a slow request reader cannot renew the upload deadline.
+#[test]
+fn slow_http_request_reader_obeys_one_total_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback fixture");
+    let addr = listener.local_addr().expect("fixture address");
+    listener.set_nonblocking(true).expect("bounded accept");
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            if let Ok((stream, _)) = listener.accept() {
+                break stream;
+            }
+            assert!(Instant::now() < deadline, "client never connected");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("bounded read");
+        let mut bytes = [0; 4096];
+        while Instant::now() < deadline {
+            match stream.read(&mut bytes) {
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) => {}
+                Ok(0) | Err(_) => break,
+                Ok(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+    });
+    let request = json!({"data": "x".repeat(12 * 1024 * 1024)});
+    let start = Instant::now();
+    let result = exchange(addr, &request, start + Duration::from_millis(500));
+    let elapsed = start.elapsed();
+    server.join().expect("slow request reader joins");
+    assert!(result.is_err(), "slow upload must not complete");
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "upload renewed deadline: {elapsed:?}"
+    );
 }
 
 /// REF-07c: each reference request obeys its fixed deadline.
