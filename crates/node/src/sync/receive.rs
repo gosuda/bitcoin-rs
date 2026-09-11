@@ -18,11 +18,11 @@ impl BlockSync {
         let mut blocks = Vec::with_capacity(INBOUND_BLOCK_STAGE_CHUNK);
         let mut received = 0_usize;
         let mut receiver_empty = false;
-        let saw_block = false;
+        let mut saw_block = false;
         while !receiver_empty {
             receiver_empty = self.fill_inbound_block_chunk(
                 &mut blocks,
-                saw_block,
+                &mut saw_block,
                 &mut next_expected_hash,
                 &mut apply_head_check,
             );
@@ -78,7 +78,7 @@ impl BlockSync {
     pub(super) fn fill_inbound_block_chunk(
         &self,
         blocks: &mut Vec<InboundBlock>,
-        saw_block: bool,
+        saw_block: &mut bool,
         next_expected_hash: &mut Option<Hash256>,
         apply_head_check: &mut Option<Hash256>,
     ) -> bool {
@@ -87,7 +87,7 @@ impl BlockSync {
             let Ok(inbound) = receiver.try_recv() else {
                 return true;
             };
-            if !saw_block {
+            if !*saw_block {
                 *next_expected_hash = self.next_expected_block_hash();
                 *apply_head_check = next_expected_hash
                     .as_ref()
@@ -95,6 +95,7 @@ impl BlockSync {
                     .filter(|hash| *hash != Hash256::from(inbound.block.block_hash()));
             }
             blocks.push(inbound);
+            *saw_block = true;
         }
         false
     }

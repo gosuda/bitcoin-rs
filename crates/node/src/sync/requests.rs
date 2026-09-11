@@ -28,6 +28,7 @@ impl BlockSync {
         let Some((owner, hashes, required_height)) = window.prefix_probe_plan() else {
             return;
         };
+        drop(window);
         let candidates = probe_peers.iter().filter(|peer| {
             peer.addr != owner
                 && u32::try_from(peer.best_known_height)
@@ -55,6 +56,7 @@ impl BlockSync {
             return;
         }
         let block_count = hashes.len();
+        let mut window = self.download_window.lock();
         window.confirm_prefix_probe(owner, hashes, &successful, now);
         metrics::counter!("node.sync.prefix_probe_peers")
             .increment(u64::try_from(successful.len()).unwrap_or(u64::MAX));
@@ -96,6 +98,7 @@ impl BlockSync {
         let Some(request) = request else {
             return GetdataRequestOutcome::default();
         };
+        drop(window);
 
         let count = request.len();
         let mut inventory = Vec::with_capacity(count);
@@ -134,7 +137,7 @@ impl BlockSync {
         let still_current = self.peer_table.with_current(source, || {
             send_ok = tx.send(msg).is_ok();
             if send_ok {
-                has_request_capacity = window.mark_requested(&request, now);
+                has_request_capacity = self.download_window.lock().mark_requested(&request, now);
             }
         });
         if !still_current {
