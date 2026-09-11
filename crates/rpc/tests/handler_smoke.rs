@@ -863,6 +863,9 @@ impl Fixture {
         let txid = ctx.add_transaction(tx.clone());
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
         ctx.mempool.pool().write().insert_entry(entry)?;
+        // Smoke tests run on Regtest: mainnet `getblocktemplate` refuses to
+        // build a template while disconnected (landed gate 64a3215e).
+        ctx.chain_network = Network::Regtest;
         Ok(Self {
             ctx: Arc::new(ctx),
             tx,

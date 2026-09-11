@@ -370,9 +370,13 @@ impl MiningControl for CompatMiningControl {
 
 #[test]
 fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
-    let handler = Handler::new(Arc::new(
-        Context::new().with_mining_control(Arc::new(CompatMiningControl)),
-    ));
+    // Mainnet contexts refuse `getblocktemplate` while disconnected (the
+    // landed gate in `handlers/mining.rs::ensure_template_ready`); this wire
+    // contract is network-independent, so run it on Regtest like the other
+    // dispatch tests do.
+    let mut context = Context::new().with_mining_control(Arc::new(CompatMiningControl));
+    context.chain_network = Network::Regtest;
+    let handler = Handler::new(Arc::new(context));
 
     let template: corepc_types::v31::GetBlockTemplate =
         typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
