@@ -60,6 +60,9 @@ fn open_generic<C>(
 where
     C: StoreConsumer,
 {
+    // The fallback arm below is the only reader; builds with every backend
+    // feature compiled in cfg it away, so consume the label here.
+    let _ = namespace;
     match backend {
         #[cfg(feature = "rocksdb")]
         StorageBackend::RocksDb => consumer.consume(Arc::new(match cache_bytes {

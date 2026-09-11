@@ -37,7 +37,7 @@ criterion.workspace = true
 # `cfg(test)`, so the cross-crate admission park seam must arrive through the
 # `test-seam` feature, the same way `bitcoin-rs-node` and `bitcoin-rs-rpc`
 # opt in.
-bitcoin-rs-mempool = { path = ".", features = ["test-seam"] }
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
 name = "pareto"
