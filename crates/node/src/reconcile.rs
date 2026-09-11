@@ -13,62 +13,17 @@ use crate::state::ChainSnapshot;
 /// Durable cursor length, owned by the index subsystem.
 pub const CURSOR_BYTE_LEN: usize = index_reconcile::CURSOR_BYTE_LEN;
 
-/// Node-facing cursor shape for callers that consume [`ChainSnapshot`].
-///
-/// Durable representation and reconciliation semantics are owned by
-/// [`bitcoin_rs_index::reconcile::ConsumerCursor`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ConsumerCursor {
-    /// Process epoch the consumed events belong to.
-    pub epoch: u64,
-    /// Commit-counter value of the last consumed event.
-    pub sequence: u64,
-    /// Height of the mirrored tip.
-    pub height: u32,
-    /// Hash of the mirrored tip.
-    pub hash: Hash256,
-}
+/// Canonical durable cursor owned by the index subsystem.
+pub use index_reconcile::ConsumerCursor;
 
-impl ConsumerCursor {
-    /// Builds a cursor from one coherent node snapshot.
-    #[must_use]
-    pub const fn from_snapshot(snapshot: &ChainSnapshot) -> Self {
-        Self {
-            epoch: snapshot.epoch,
-            sequence: snapshot.sequence,
-            height: snapshot.tip_height,
-            hash: snapshot.tip_hash,
-        }
-    }
-
-    /// Encodes the index-owned durable representation.
-    #[must_use]
-    pub fn to_bytes(&self) -> [u8; CURSOR_BYTE_LEN] {
-        self.as_index_cursor().to_bytes()
-    }
-
-    /// Decodes the index-owned durable representation.
-    #[must_use]
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        index_reconcile::ConsumerCursor::from_bytes(bytes).map(Self::from_index_cursor)
-    }
-
-    const fn as_index_cursor(self) -> index_reconcile::ConsumerCursor {
-        index_reconcile::ConsumerCursor {
-            epoch: self.epoch,
-            sequence: self.sequence,
-            height: self.height,
-            hash: self.hash,
-        }
-    }
-
-    const fn from_index_cursor(cursor: index_reconcile::ConsumerCursor) -> Self {
-        Self {
-            epoch: cursor.epoch,
-            sequence: cursor.sequence,
-            height: cursor.height,
-            hash: cursor.hash,
-        }
+/// Builds the canonical cursor from one coherent node snapshot.
+#[must_use]
+pub const fn cursor_from_snapshot(snapshot: &ChainSnapshot) -> ConsumerCursor {
+    ConsumerCursor {
+        epoch: snapshot.epoch,
+        sequence: snapshot.sequence,
+        height: snapshot.tip_height,
+        hash: snapshot.tip_hash,
     }
 }
 
@@ -125,7 +80,7 @@ pub fn plan(cursor: &ConsumerCursor, target_tip: &TipSnapshot, tree: &BlockTree)
         tree,
         active_tip: target_tip.tip_id,
     };
-    index_reconcile::plan(&cursor.as_index_cursor(), target(target_tip), &chain)
+    index_reconcile::plan(cursor, target(target_tip), &chain)
 }
 
 /// Plans from a coherent node snapshot through index-owned policy.
@@ -140,12 +95,7 @@ pub fn plan_from_snapshot(
         tree,
         active_tip: target_tip.tip_id,
     };
-    index_reconcile::plan_from_identity(
-        &cursor.as_index_cursor(),
-        &identity(snapshot),
-        target(target_tip),
-        &chain,
-    )
+    index_reconcile::plan_from_identity(cursor, &identity(snapshot), target(target_tip), &chain)
 }
 
 /// Height of the newest block shared by `position` and `active_tip`.

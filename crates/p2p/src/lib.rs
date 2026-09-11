@@ -68,7 +68,6 @@ pub use service::{
     P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
     apply_network_active,
 };
-pub use socket::configure_peer_stream;
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,

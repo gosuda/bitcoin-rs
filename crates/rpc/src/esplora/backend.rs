@@ -15,6 +15,7 @@ use super::projection::Projection;
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
 use crate::context::Context;
 use crate::handlers::Handler;
+use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
 use sonic_rs::json as sonic_json;
 
@@ -224,8 +225,10 @@ fn internal_outspend(
 }
 
 fn block_template(handler: &Handler) -> Response {
+    let rules = required_gbt_rules(handler.context().chain_network);
+    let request = sonic_json!([{"rules": rules}]);
     handler
-        .dispatch("getblocktemplate", &sonic_json!([]))
+        .dispatch("getblocktemplate", &request)
         .map_or_else(dispatch_error, json_response)
 }
 

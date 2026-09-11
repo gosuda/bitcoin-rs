@@ -1213,6 +1213,8 @@ mod compat_manifest_tests {
     }
 
     #[test]
+    // Allow: end-to-end fan-out coverage in one readable sequence; splitting
+    // would scatter the arrange-act-assert across helpers with no reuse.
     #[allow(clippy::too_many_lines)]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{

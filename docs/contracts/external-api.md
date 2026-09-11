@@ -8,6 +8,7 @@ own wire format. `API-07` is the recorded Core reference used by the RPC
 fixture replay gate. `API-11` is the BIP22/BIP23
 `getblocktemplate` extras the pinned corepc type does not model.
 `API-12` is mainnet template operational gates. `API-13` is `submitheader`.
+`API-14` is GBT client-rule negotiation.
 
 ## Clauses
 
@@ -110,6 +111,9 @@ fixture replay gate. `API-11` is the BIP22/BIP23
 - The method takes the block-tree read lock, then loads one applied-tip
   snapshot. Height checks and the hash-rate walk use that snapshot and that
   locked tree, not a second tip load.
+- The hash-rate window is Core's parent walk: `lookup` parent pointers from
+  the resolved start node, min/max header time, `chainwork` delta. It does not
+  re-resolve each height through `node_at_height_from`.
 - `nblocks` (`lookup`) must be a positive count or `-1` (since the last
   difficulty retarget). Otherwise the RPC is Core `-8`
   (`RpcError::InvalidParameter`) with
@@ -207,9 +211,6 @@ fixture replay gate. `API-11` is the BIP22/BIP23
 - Broadcast failures map to the Esplora error dialect: a rejected
   transaction is a 400 with the reject reason, not a retryable 503.
 
-The wallet-facing subset of this surface is owned by
-[wallet-facing.md](wallet-facing.md).
-
 ### `API-11`: BIP22/BIP23 template extras
 
 - **Owner**: `MiningCoordinator::template_from_candidate` in
@@ -221,6 +222,7 @@ The wallet-facing subset of this surface is owned by
   is not emitted.
 - On signet, the template carries `signet` in `rules` (mandatory) and
   `signet_challenge`. Other networks omit `signet_challenge`.
+  - Malformed `longpollid` values, including invalid UTF-8 split boundaries, are rejected without panicking.
 
 ### `API-13`: `submitheader`
 
@@ -236,6 +238,22 @@ The wallet-facing subset of this surface is owned by
   reasons (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`).
 - Success is JSON `null`. Header-only admission does not apply the block or
   publish a mining generation.
+
+### `API-14`: GBT client-rule negotiation
+
+- **Owner**: `ensure_client_rules_for_template` and
+  `ensure_client_supports_mandatory_rules` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Template mode requires the client to list `segwit`. On signet it also
+  requires `signet`. Failures are Core `-8` with Core's exact messages:
+  `getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})`
+  and
+  `getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})`.
+  Signet is checked first, matching Core v31.0 `src/rpc/mining.cpp`.
+- These checks run before template assembly. Proposal mode skips them.
+- After assembly, any remaining mandatory template rule the client omitted
+  is Core `-8`: `Support for 'NAME' rule requires explicit client support`.
+
 ## Proven by
 
 - `API-07`: `crates/rpc/tests/core_parity.rs` test
@@ -315,9 +333,16 @@ The wallet-facing subset of this surface is owned by
     - Core reference: Bitcoin Core v30.0 `src/rpc/mining.cpp` (`submitheader`)
       and `src/validation.cpp` header reject reasons (tag `v30.0`).
 
+- `API-14`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_requires_signet_rule_on_signet`,
+    `getblocktemplate_rejects_template_mandatory_rule_without_client_support`,
+    `getblocktemplate_rejects_missing_segwit_rule`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`
+
 ## Vocabulary
 
 [ReadStamp](../../CONCEPTS.md),
 [MempoolGateway](../../CONCEPTS.md),
 [CapabilityState](../../CONCEPTS.md),
 [Esplora dialects](../../CONCEPTS.md).
+

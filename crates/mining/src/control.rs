@@ -111,6 +111,8 @@ pub struct BlockTemplate {
     pub submit_old: Option<bool>,
     /// Signet challenge, present only on signet.
     pub signet: Option<SignetMiningInfo>,
+    /// Opaque server work identity when the producer requires one on submission.
+    pub work_id: Option<CompactString>,
 }
 
 /// BIP22 validation vocabulary shared by proposal and solved-block submission.
