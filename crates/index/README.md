@@ -6,9 +6,11 @@ rows to an exact active-chain prefix. `ScriptLive` is the compact reverse view
 of the authoritative UTXO set: each row stores an empty value and a complete
 outpoint after an eight-byte script-hash prefix.
 
-`Indexer<S: KvStore>` walks a serialized block once (`ingest_block`) and writes txid,
-script-funding, previous-outpoint spending, and live-outpoint rows (counted by
-`IndexRowCounts`); `iter_funding_rows` and `iter_live_outpoints` scan a
+`IndexWriter` is the sole mutation owner: it walks a serialized block once
+(`prepare_block` / `prepare_block_with_spent_scripts`) and commits bounded
+`PreparedBatch` writes of txid, script-funding, previous-outpoint spending,
+and live-outpoint rows (counted by `IndexRowCounts`). `Indexer<S: KvStore>`
+is the read side over the same store. `iter_funding_rows` and `iter_live_outpoints` scan a
 scripthash prefix, and `resolve_script_history` exact-resolves
 the lossy 8-byte prefix against a `BlockSource` that fetches block bytes by height and
 range. `PreparedBlock`/`PreparedBatch` under `PreparedBatchLimits` bound one atomic
@@ -22,11 +24,19 @@ store opens. Around the rows sit the stable types (`ScriptHash`, `HashPrefixRow`
 `HeaderRow`, `TxidRow`, `SpendingPrefixRow`), `MempoolRowWriter` for unconfirmed rows
 and generic script-history resolution.
 
+## Implementation boundaries
+
+`index.rs` is the public facade. Its private modules separate block preparation
+(`block`, `prepared`), canonical row mutation (`rows`), durable writes (`write`),
+and coherent fences/reset recovery (`state`). Read-side scans (`reader`,
+`snapshot`) and exact resolution (`resolve`) remain separate from mutations;
+`capability`, `format`, and `error` own shared representations and typed outcomes.
+Public paths and on-disk encodings do not depend on this layout.
+
 ## Features
 - `rocksdb`: enables the `RocksDB` backend in `bitcoin-rs-storage`
 - `fjall`: enables the fjall backend in `bitcoin-rs-storage`
 - `redb`: enables the redb backend in `bitcoin-rs-storage`
-- `mdbx`: enables the MDBX backend in `bitcoin-rs-storage`
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
