@@ -1,0 +1,80 @@
+name: publish-verified-node
+
+on:
+  push:
+    branches: [agent/node-finish-publication-20260911]
+    paths:
+      - .github/publish-verified-node.py
+      - .github/workflows/publish-verified-node.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-remaining-checked
+          run-id: 34602393344
+          github-token: ${{ github.token }}
+          path: /tmp/node-original-validation
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt,clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: node-finish-${{ runner.os }}-rust195-${{ hashFiles('Cargo.lock') }}
+      - name: Verify native evidence and current source references
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/publish-verified-node.py /tmp/publish-verified-node.py
+          python /tmp/publish-verified-node.py prepare /tmp/node-original-validation /tmp/node-final-validation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-publication-verified
+          path: /tmp/node-final-validation/
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-publication-verified
+          path: /tmp/node-final-validation
+      - name: Publish complete stages without exceeding repository limits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/publish-verified-node.py publish /tmp/node-final-validation
