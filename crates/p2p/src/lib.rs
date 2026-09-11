@@ -5,6 +5,8 @@
 pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
+/// Out-of-order inbound block staging bounded by the download window budget.
+pub mod block_stager;
 /// Active-chain `getheaders` / `getdata` serving.
 pub mod chain_query;
 /// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
@@ -35,8 +37,14 @@ pub mod peer_info;
 pub mod peer_table;
 /// Runtime owner for P2P control state and workers.
 pub mod service;
+/// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
+pub mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
+/// Download planner: window, staging, and conviction policy.
+pub mod sync_planner;
+/// Bounded transaction announcements and their peer relay worker.
+pub mod tx_relay;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
@@ -48,6 +56,7 @@ pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerSta
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
+pub use inv::request_missing_parents;
 pub use listener::{ListenerExtras, spawn_outbound_connection};
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
@@ -62,9 +71,15 @@ pub use service::{
     apply_network_active,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
+pub use tx_relay::{
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
+    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+};
 pub use wire::{Message, PeerError};
 
+pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
 pub use download_window::{
     DownloadWindow, FanoutCandidate, SyncBudget, SyncPeer, SyncPeerSelection,
     configure_request_mode, default_sync_budget, statically_fanout_eligible,
 };
+pub use sync_planner::{ColdFrontHedge, SyncAction, SyncDisconnectReason, SyncPlanner};
