@@ -159,7 +159,10 @@ fn is_op_return(script: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx,
+        TxIn, TxOut, Txid, Witness,
+    };
     use bitcoin_rs_utxo::{UndoBatch, UtxoAdd, UtxoSet};
 
     use super::{OutputSource, WindowOverlay};
@@ -188,7 +191,7 @@ mod tests {
         let found = overlay.get_entry(&OutPoint::new(txid, 0));
         assert_eq!(
             found.map(|entry| (entry.height, entry.coinbase, entry.txout.value)),
-            Some((HEIGHT, true, 500)),
+            Some((HEIGHT, true, Amount::from_sat(500))),
             "the created output must carry the height and coinbase flag the committed set would record"
         );
         Ok(())
@@ -380,8 +383,8 @@ mod tests {
         batch.restore(UtxoAdd::new(
             outpoint,
             TxOut {
-                value,
-                script_pubkey: op_true(),
+                value: Amount::from_sat(value),
+                script_pubkey: op_true().into(),
             },
             false,
             1,
@@ -400,16 +403,16 @@ mod tests {
     fn coinbase() -> Tx {
         Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x00, 0x01],
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: vec![0x00, 0x01].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: op_true(),
+                value: Amount::from_sat(1),
+                script_pubkey: op_true().into(),
             }],
         }
     }
@@ -418,8 +421,8 @@ mod tests {
     fn paying_tx(script_pubkey: Vec<u8>, value: u64) -> Tx {
         let mut tx = coinbase();
         tx.outputs = vec![TxOut {
-            value,
-            script_pubkey,
+            value: Amount::from_sat(value),
+            script_pubkey: script_pubkey.into(),
         }];
         tx
     }
@@ -427,16 +430,16 @@ mod tests {
     fn spending_tx(previous_output: OutPoint) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output,
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: op_true(),
+                value: Amount::from_sat(1),
+                script_pubkey: op_true().into(),
             }],
         }
     }
@@ -448,7 +451,7 @@ mod tests {
                 prev_blockhash: bitcoin_rs_primitives::BlockHash(Hash256::from_le_bytes(&[0; 32])),
                 merkle_root: Hash256::from_le_bytes(&[0; 32]),
                 time: 0,
-                bits: 0x2100_ffff,
+                bits: CompactTarget::from_consensus(0x2100_ffff),
                 nonce: 0,
             },
             txs,

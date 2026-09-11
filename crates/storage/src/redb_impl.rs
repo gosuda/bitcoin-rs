@@ -35,6 +35,7 @@ const REDB_DEFAULT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 /// redb-backed key-value store.
 pub struct RedbStore {
     db: Database,
+    faults: crate::PersistFaultSlot,
 }
 
 impl RedbStore {
@@ -69,7 +70,10 @@ impl RedbStore {
             drop(table);
         }
         write_txn.commit().map_err(StorageError::backend)?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            faults: crate::PersistFaultSlot::default(),
+        })
     }
 
     fn write_with_durability(
@@ -87,6 +91,35 @@ impl RedbStore {
             .increment(1);
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+
+        // Apply boundary: the atomic transaction commit.
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
+            if fault == crate::PersistFault::PartialApply {
+                // A strict prefix of the batch is staged into a
+                // transaction that is dropped uncommitted: no family
+                // observes a partial batch.
+                let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
+                apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
+                drop(write_txn);
+            }
+            return Err(fault.injected_error());
+        }
+
+        // Sync boundary: the durability tier of the commit.
+        if matches!(durability, Durability::Immediate) {
+            if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Sync) {
+                // The batch commits at the deferred tier; completion then
+                // faults or is lost.
+                let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
+                write_txn
+                    .set_durability(Durability::None)
+                    .map_err(StorageError::backend)?;
+                apply_redb_ops(&write_txn, batch.ops.into_iter())?;
+                write_txn.commit().map_err(StorageError::backend)?;
+                return Err(fault.injected_error());
+            }
+        }
+
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         write_txn
             .set_durability(durability)
@@ -188,17 +221,43 @@ impl KvStore for RedbStore {
                 return Ok(false);
             }
         }
+        // Seam: the apply and sync boundaries of this commit. Condition
+        // evaluation precedes both, so a mismatch never consumes a fault.
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
+            if fault == crate::PersistFault::PartialApply {
+                apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
+                drop(write_txn);
+            }
+            return Err(fault.injected_error());
+        }
+        let sync_fault = self.faults.take_at(crate::PersistBoundary::Sync);
+        let durability = if sync_fault.is_some() {
+            // The commit runs at the deferred tier; the completion fault or
+            // loss is reported after the batch applies.
+            Durability::None
+        } else {
+            Durability::Immediate
+        };
+        write_txn
+            .set_durability(durability)
+            .map_err(StorageError::backend)?;
         apply_redb_ops(&write_txn, batch.ops.into_iter())?;
         write_txn.commit().map_err(StorageError::backend)?;
         metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => "durable")
             .increment(1);
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+        if let Some(fault) = sync_fault {
+            return Err(fault.injected_error());
+        }
         Ok(true)
     }
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "redb").increment(1);
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
+            return Err(fault.injected_error());
+        }
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         // An empty Immediate commit makes all earlier None commits durable.
         write_txn
@@ -212,11 +271,24 @@ impl KvStore for RedbStore {
             read_txn: self.db.begin_read().map_err(StorageError::backend)?,
         }))
     }
+
+    fn arm_persist_fault(&self, fault: crate::PersistFault) {
+        self.faults.arm(fault);
+    }
 }
 
 /// redb-backed transaction-index store using fixed-width physical tables.
 struct RedbTxIndexStore {
     db: Database,
+    faults: crate::PersistFaultSlot,
+}
+
+/// A strict non-empty prefix of `ops` for the partial-apply fault.
+fn prefix_ops(ops: Vec<BatchOp>) -> std::vec::IntoIter<BatchOp> {
+    let mut ops = ops;
+    let split = ops.len().div_ceil(2).max(1).min(ops.len());
+    ops.truncate(split);
+    ops.into_iter()
 }
 
 impl RedbTxIndexStore {
@@ -280,7 +352,10 @@ impl RedbTxIndexStore {
                 .map_err(StorageError::backend)?,
         );
         write_txn.commit().map_err(StorageError::backend)?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            faults: crate::PersistFaultSlot::default(),
+        })
     }
 
     fn write_with_durability(
@@ -297,12 +372,39 @@ impl RedbTxIndexStore {
             .increment(1);
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+
+        // Same seam discipline as the main store: apply faults precede the
+        // transaction, sync faults downgrade the commit tier.
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
+            if fault == crate::PersistFault::PartialApply {
+                let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
+                apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;
+                drop(write_txn);
+            }
+            return Err(fault.injected_error());
+        }
+        let sync_fault = if matches!(durability, Durability::Immediate) {
+            self.faults.take_at(crate::PersistBoundary::Sync)
+        } else {
+            None
+        };
+        let effective_durability = if sync_fault.is_some() {
+            // The commit runs at the deferred tier; the completion fault or
+            // loss is reported after the batch applies.
+            Durability::None
+        } else {
+            durability
+        };
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         write_txn
-            .set_durability(durability)
+            .set_durability(effective_durability)
             .map_err(StorageError::backend)?;
         apply_txindex_ops(&write_txn, batch.ops.into_iter())?;
-        write_txn.commit().map_err(StorageError::backend)
+        write_txn.commit().map_err(StorageError::backend)?;
+        if let Some(fault) = sync_fault {
+            return Err(fault.injected_error());
+        }
+        Ok(())
     }
 }
 
@@ -390,17 +492,43 @@ impl KvStore for RedbTxIndexStore {
                 return Ok(false);
             }
         }
+        // Seam: the apply and sync boundaries of this commit, after every
+        // condition matched. A mismatch consumes no fault.
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
+            if fault == crate::PersistFault::PartialApply {
+                apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;
+                drop(write_txn);
+            }
+            return Err(fault.injected_error());
+        }
+        let sync_fault = self.faults.take_at(crate::PersistBoundary::Sync);
+        let durability = if sync_fault.is_some() {
+            // The commit runs at the deferred tier; the completion fault or
+            // loss is reported after the batch applies.
+            Durability::None
+        } else {
+            Durability::Immediate
+        };
+        write_txn
+            .set_durability(durability)
+            .map_err(StorageError::backend)?;
         apply_txindex_ops(&write_txn, batch.ops.into_iter())?;
         write_txn.commit().map_err(StorageError::backend)?;
         metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => "durable")
             .increment(1);
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+        if let Some(fault) = sync_fault {
+            return Err(fault.injected_error());
+        }
         Ok(true)
     }
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "redb-txindex").increment(1);
+        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
+            return Err(fault.injected_error());
+        }
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         write_txn
             .set_durability(Durability::Immediate)
@@ -412,6 +540,10 @@ impl KvStore for RedbTxIndexStore {
         Ok(Box::new(RedbTxIndexSnapshot {
             read_txn: self.db.begin_read().map_err(StorageError::backend)?,
         }))
+    }
+
+    fn arm_persist_fault(&self, fault: crate::PersistFault) {
+        self.faults.arm(fault);
     }
 }
 
@@ -736,6 +868,7 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
         ColumnFamily::BlockBodies => TableDefinition::new("block_bodies"),
         ColumnFamily::UndoData => TableDefinition::new("undo_data"),
         ColumnFamily::ScriptLive => TableDefinition::new("script_live"),
+        ColumnFamily::CoinRecords => TableDefinition::new("coin_records"),
     }
 }
 

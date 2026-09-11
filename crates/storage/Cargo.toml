@@ -16,7 +16,6 @@ default = ["fjall"]
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
 redb = ["dep:redb"]
-mdbx = ["dep:signet-libmdbx"]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true
@@ -34,7 +33,6 @@ tracing.workspace = true
 rust-rocksdb = { workspace = true, optional = true }
 fjall = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
-signet-libmdbx = { workspace = true, optional = true }
 
 [dev-dependencies]
 rustix.workspace = true

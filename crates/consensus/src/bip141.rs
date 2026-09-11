@@ -24,7 +24,7 @@ pub fn check_bip141(tx: &Tx) -> Result<(), ConsensusError> {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut};
 
     use super::check_bip141;
 
@@ -43,16 +43,16 @@ mod tests {
     fn transaction_with_witness(witness: Vec<Vec<u8>>) -> Tx {
         Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness,
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: witness.into(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
         }
     }
