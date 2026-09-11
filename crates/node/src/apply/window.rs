@@ -30,6 +30,21 @@ pub(super) fn apply_window_admitted(
     serialized: &[bytes::Bytes],
     proof: &ChainChangeProof<'_>,
 ) -> core::result::Result<Vec<ConnectOutcome>, WindowApplyError> {
+    if blocks.len() != serialized.len() {
+        return Err(WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
+                format!(
+                    "window has {} blocks but {} serialized bodies",
+                    blocks.len(),
+                    serialized.len()
+                ),
+            )),
+            disposition: WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        });
+    }
     let mut proven = prove_window(handles, blocks, serialized).into_iter();
     let mut committed = Vec::with_capacity(blocks.len());
     for (block, raw) in blocks.iter().zip(serialized) {
@@ -43,7 +58,9 @@ pub(super) fn apply_window_admitted(
         ) {
             Ok(outcome) => committed.push(outcome),
             Err(source) => {
-                let disposition = if is_permanent_apply_error(&source) {
+                let disposition = if matches!(source, ApplyError::UtxoCommit(_)) {
+                    WindowApplyDisposition::Fatal
+                } else if is_permanent_apply_error(&source) {
                     WindowApplyDisposition::Permanent
                 } else {
                     WindowApplyDisposition::Operational
