@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::Duration;
@@ -104,12 +104,15 @@ impl RpcServer {
         Ok(())
     }
 
-    fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+    fn handle_accept(&self, active: &Arc<Mutex<usize>>, stream: TcpStream) -> io::Result<()> {
         // Connection-local: a nodelay failure must not stop the accept loop.
-        if let Err(error) = configure_rpc_stream(&stream) {
-            debug!(%error, "rpc connection dropped: nodelay");
-            return Ok(());
-        }
+        let mut stream = match prepare_http_socket(stream) {
+            Ok(stream) => stream,
+            Err(error) => {
+                debug!(%error, "rpc connection dropped: nodelay");
+                return Ok(());
+            }
+        };
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
@@ -578,8 +581,8 @@ fn write_status(
         keep_alive,
         cors_policy: CorsPolicy::Disabled,
     };
-    write_headers(stream, &head)?;
-    stream.write_all(body)?;
+    let header = render_response_head(&head);
+    write_all_vectored(stream, header.as_bytes(), body)?;
     stream.flush()
 }
 
@@ -708,11 +711,72 @@ fn write_response(
         keep_alive,
         cors_policy,
     };
-    write_headers(stream, &head)?;
-    stream.write_all(&response.body)?;
+    let header = render_response_head(&head);
+    write_all_vectored(stream, header.as_bytes(), &response.body)?;
     stream.flush()
 }
 
+/// Applies the HTTP socket contract: disable Nagle once, before any bytes move.
+fn prepare_http_socket(stream: TcpStream) -> io::Result<TcpStream> {
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+fn write_all_vectored(stream: &mut impl Write, header: &[u8], body: &[u8]) -> io::Result<()> {
+    let mut slices: &mut [IoSlice<'_>] = &mut [IoSlice::new(header), IoSlice::new(body)];
+    while !slices.is_empty() {
+        match stream.write_vectored(slices) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write http response",
+                ));
+            }
+            Ok(written) => IoSlice::advance_slices(&mut slices, written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Renders one HTTP response head as a string so it can share a single
+/// vectored write with its body. Same header bytes `write_headers` streams,
+/// materialized for the one-syscall emission path.
+fn render_response_head(head: &ResponseHead<'_>) -> String {
+    let connection = if head.keep_alive {
+        "keep-alive"
+    } else {
+        "close"
+    };
+    let mut header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
+        head.status, head.reason, head.content_type
+    );
+    if let CorsPolicy::Public {
+        methods,
+        headers,
+        expose,
+    } = head.cors_policy
+    {
+        header.push_str("Access-Control-Allow-Origin: *\r\n");
+        for (name, values) in [
+            ("Access-Control-Allow-Methods", methods),
+            ("Access-Control-Allow-Headers", headers),
+            ("Access-Control-Expose-Headers", expose),
+        ] {
+            header.push_str(name);
+            header.push_str(": ");
+            header.push_str(&values.join(", "));
+            header.push_str("\r\n");
+        }
+    }
+    if head.status != 204 {
+        header.push_str(&format!("Content-Length: {}\r\n", head.content_length));
+    }
+    header.push_str(&format!("Connection: {connection}\r\n\r\n"));
+    header
+}
 struct ResponseHead<'a> {
     status: u16,
     reason: &'a str,
@@ -720,45 +784,6 @@ struct ResponseHead<'a> {
     content_length: usize,
     keep_alive: bool,
     cors_policy: CorsPolicy,
-}
-
-fn write_headers(stream: &mut TcpStream, head: &ResponseHead<'_>) -> io::Result<()> {
-    let connection = if head.keep_alive {
-        "keep-alive"
-    } else {
-        "close"
-    };
-    write!(
-        stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
-        head.status, head.reason, head.content_type
-    )?;
-    if let CorsPolicy::Public {
-        methods,
-        headers,
-        expose,
-    } = head.cors_policy
-    {
-        write!(stream, "Access-Control-Allow-Origin: *\r\n")?;
-        write_header_list(stream, "Access-Control-Allow-Methods", methods)?;
-        write_header_list(stream, "Access-Control-Allow-Headers", headers)?;
-        write_header_list(stream, "Access-Control-Expose-Headers", expose)?;
-    }
-    if head.status != 204 {
-        write!(stream, "Content-Length: {}\r\n", head.content_length)?;
-    }
-    write!(stream, "Connection: {connection}\r\n\r\n")
-}
-
-fn write_header_list(stream: &mut TcpStream, name: &str, values: &[&str]) -> io::Result<()> {
-    write!(stream, "{name}: ")?;
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            write!(stream, ", ")?;
-        }
-        write!(stream, "{value}")?;
-    }
-    write!(stream, "\r\n")
 }
 
 #[cfg(test)]
