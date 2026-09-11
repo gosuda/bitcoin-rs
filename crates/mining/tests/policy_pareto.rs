@@ -397,6 +397,7 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+// Contract MIN-01: snapshot topology is trusted during package assembly.
 fn missing_ancestors_fail_assembly_without_rechecking_the_dag() {
     let missing = MempoolMiningSnapshot {
         sequence: 1,
