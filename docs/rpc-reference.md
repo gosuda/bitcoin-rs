@@ -72,7 +72,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
 | `submitblock` | 0.4.0 |  |
-| `submitheader` | 0.4.0 | Header-only admission through the same tree path as inbound P2P headers. Decode failures are -22; missing previous or invalid headers are -25. |
+| `submitheader` | 0.4.0 | See API-13 in docs/contracts/external-api.md for submitheader behavior. |
 | `prioritisetransaction` | 0.4.0 |  |
 | `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. |
 | `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag. |

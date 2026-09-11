@@ -661,7 +661,7 @@ fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let genesis = Network::Regtest.genesis_block();
     let mut child = mined_child(genesis.block_hash())?;
-    child.header.bits = 0x207f_fffe;
+    child.header.bits = CompactTarget::from_consensus(0x207f_fffe);
     mine_block_to_regtest_target(&mut child)?;
     match mining.submit_header(child.header) {
         Err(MiningControlError::Rejected(reason)) => {
@@ -1310,6 +1310,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
     Ok(())
 }
 
+/// CONTRACT: API-06 — getmininginfo's networkhashps mirrors the default
+/// getnetworkhashps window.
 #[test]
 fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let state = open_regtest()?;

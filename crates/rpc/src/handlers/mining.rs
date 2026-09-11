@@ -122,6 +122,7 @@ pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         .mining_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    ensure_at_most_params(params, 1)?;
     let hex = required_str(params, 0, "header hex is required")?;
     let header = decode_block_header(hex)?;
     match control.submit_header(header) {

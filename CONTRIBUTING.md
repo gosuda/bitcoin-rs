@@ -142,19 +142,37 @@ CI builds and runs all five targets: `p2p_message`, `block_decode`, `tx_decode`,
 `script_eval`, and `utxo_snapshot`. See [`fuzz/README.md`](fuzz/README.md) for
 local fuzzing and corpus guidance.
 
-### Minimal-versions check
+### Dependency-range check
+
+Prove the declared ranges, not only the committed lockfile
+(`docs/contracts/dependency-range.md`):
 
 This lane changes `Cargo.lock`. Run it in a disposable checkout, with nightly
 and kernel build dependencies installed:
 
 ```sh
-cargo +nightly update -Zdirect-minimal-versions
-cargo +nightly check --workspace --all-targets
+# Oldest allowed direct-dependency versions (nightly, mutates Cargo.lock)
+scripts/check-dep-range.sh minimal
+
+# Newest versions still inside each declared range (mutates Cargo.lock)
+scripts/check-dep-range.sh maximum
 ```
 
-The main workflow also checks individual features with `cargo-hack` (its
-`feature-combinations` job). The full-feature dependency audit runs in the
-`deny` job of `ci.yml` on every push to `main`.
+The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
+Each lane also runs G20 against the mutated lockfile. Optional native
+storage backends are owned by the named feature matrix, not this script.
+
+### Feature combinations
+
+The supported combinations are the rows in
+`scripts/feature-matrix.tsv`, not a feature powerset:
+
+```sh
+scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for kernel)
+scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
+```
+
+## Architecture and crate hierarchy
 
 ## Architecture and contribution scope
 

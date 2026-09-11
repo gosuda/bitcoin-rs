@@ -5,23 +5,9 @@ Target contract for the node's external surface: JSON-RPC, REST, ZMQ, and
 the two Esplora dialects. One manifest owns the inventory. Every dialect
 projects the same coherent node state and maps typed owner results to its
 own wire format. `API-07` is the recorded Core reference used by the RPC
-fixture replay gate. `API-11` is the BIP22/BIP23 `getblocktemplate` extras the pinned
-corepc type does not model. `API-12` is mainnet template operational
-gates. `API-13` is `submitheader`.
-
-Owners:
-
-- `crates/rpc/src/manifest.rs`: the single `MANIFEST` registry for RPC,
-  REST, and ZMQ surfaces.
-- `crates/rpc/src/error.rs`: the typed `RpcError` envelope and the Core
-  code mapping.
-- `crates/rpc/src/rest.rs`: the REST dialect.
-- `crates/rpc/src/esplora.rs` with `esplora/{public,backend,projection}.rs`:
-  the public `/api` dialect and the `/esplora` backend superset.
-- `crates/rpc/src/zmq.rs`: ZMQ topics, sequence bytes, and
-  bounded delivery.
-- `crates/mempool/src/gateway.rs`: the admission owner behind every
-  broadcast and preview entry point.
+fixture replay gate. `API-11` is the BIP22/BIP23
+`getblocktemplate` extras the pinned corepc type does not model.
+`API-12` is mainnet template operational gates. `API-13` is `submitheader`.
 
 ## Clauses
 
@@ -159,17 +145,6 @@ Owners:
   not retrieve or authenticate the referenced evidence. Reviewing evidence
   from the selected Core build is a maintainer responsibility outside this
   automated gate.
-### `API-11`: BIP22/BIP23 template extras
-
-- **Owner**: `MiningCoordinator::template_from_candidate` in
-  `crates/node/src/mining.rs`; JSON projection in
-  `crates/rpc/src/handlers/mining.rs` `render_block_template`.
-- Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
-  Client-advertised names are not echoed.
-- `submitold` is present after a long-poll wait and omitted otherwise. `workid`
-  is not emitted.
-- On signet, the template carries `signet` in `rules` (mandatory) and
-  `signet_challenge`. Other networks omit `signet_challenge`.
 
 ### `API-12`: Mainnet template operational gates
 
@@ -180,25 +155,6 @@ Owners:
   (`bitcoin-rs is in initial sync and waiting for blocks...`).
 - Proposal mode does not apply these gates. Networks other than mainnet skip
   them, matching Core `IsTestChain()`.
-
-### `API-13`: `submitheader`
-
-- **Owner**: `MiningCoordinator::submit_header` in `crates/node/src/mining.rs`.
-  RPC decodes the hex and projects the result; it does not admit headers.
-- Decode failures (invalid hex, fewer than 80 bytes) are Core `-22`
-  (`Block header decode failed`). Extra bytes after an 80-byte header are
-  ignored, matching Core `DecodeHexBlockHeader`.
-- The previous header must already be in the block tree. Otherwise the RPC
-  returns `-25` (`Must submit previous header (HASH) first`).
-- Admission uses `accept_headers`, the same consensus gate as inbound P2P
-  headers. Duplicates succeed. Invalid headers return `-25` with Core reject
-  reasons (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`).
-- Success is JSON `null`. Header-only admission does not apply the block or
-  publish a mining generation.
-
-The wallet-facing subset of this surface — tip, fees, address/script
-queries, and broadcast over Esplora, plus the key-free node RPCs — is
-owned by [wallet-facing.md](wallet-facing.md).
 
 ## Live gaps
 
@@ -257,6 +213,32 @@ owned by [wallet-facing.md](wallet-facing.md).
 The wallet-facing subset of this surface is owned by
 [wallet-facing.md](wallet-facing.md).
 
+### `API-11`: BIP22/BIP23 template extras
+
+- **Owner**: `MiningCoordinator::template_from_candidate` in
+  `crates/node/src/mining.rs`; JSON projection in
+  `crates/rpc/src/handlers/mining.rs` `render_block_template`.
+- Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
+  Client-advertised names are not echoed.
+- `submitold` is present after a long-poll wait and omitted otherwise. `workid`
+  is not emitted.
+- On signet, the template carries `signet` in `rules` (mandatory) and
+  `signet_challenge`. Other networks omit `signet_challenge`.
+
+### `API-13`: `submitheader`
+
+- **Owner**: `MiningCoordinator::submit_header` in `crates/node/src/mining.rs`.
+  RPC decodes the hex and projects the result; it does not admit headers.
+- Decode failures (invalid hex, fewer than 80 bytes) are Core `-22`
+  (`Block header decode failed`). Extra bytes after an 80-byte header are
+  ignored, matching Core `DecodeHexBlockHeader`.
+- The previous header must already be in the block tree. Otherwise the RPC
+  returns `-25` (`Must submit previous header (HASH) first`).
+- Admission uses `accept_headers`, the same consensus gate as inbound P2P
+  headers. Duplicates succeed. Invalid headers return `-25` with Core reject
+  reasons (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`).
+- Success is JSON `null`. Header-only admission does not apply the block or
+  publish a mining generation.
 ## Proven by
 
 - `API-07`: `crates/rpc/tests/core_parity.rs` test
@@ -309,12 +291,6 @@ The wallet-facing subset of this surface is owned by
   `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`.
 
-## Vocabulary
-
-[ReadStamp](../../CONCEPTS.md),
-[MempoolGateway](../../CONCEPTS.md),
-[CapabilityState](../../CONCEPTS.md),
-[Esplora dialects](../../CONCEPTS.md).
 - `API-11`:
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
     `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
@@ -322,6 +298,7 @@ The wallet-facing subset of this surface is owned by
   - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
   - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
     `signet_template_includes_challenge_and_signet_rule`
+
 - `API-12`:
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
     `getblocktemplate_rejects_mainnet_during_ibd`,
@@ -336,3 +313,15 @@ The wallet-facing subset of this surface is owned by
     `submit_header_rejects_time_too_new`
   - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
     `nbits_mismatch_is_bad_diffbits`
+    - Execution evidence: `cargo test -p bitcoin-rs-node header_reject_tests` and
+      `cargo test -p bitcoin-rs-rpc submitheader` (CI job `test`, commit `adc8e37`).
+    - Core reference: Bitcoin Core v30.0 `src/rpc/mining.cpp` (`submitheader`)
+      and `src/validation.cpp` header reject reasons (tag `v30.0`).
+
+## Vocabulary
+
+[ReadStamp](../../CONCEPTS.md),
+[MempoolGateway](../../CONCEPTS.md),
+[CapabilityState](../../CONCEPTS.md),
+[Esplora dialects](../../CONCEPTS.md).
+
