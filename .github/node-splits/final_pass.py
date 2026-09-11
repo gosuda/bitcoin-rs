@@ -36,13 +36,6 @@ def transform(work, label, relative, stages):
     expected = base_transform(work, label, relative, stages)
     root = work / "crates/node/src"
 
-    if label == "sync":
-        # The hash trait belonged to the former monolith, not these owners.
-        for rel in ("sync/branches.rs", "sync/commit.rs", "sync/receive.rs"):
-            path = root / rel
-            drop_import(path, "use bitcoin::hashes::Hash;")
-            expected.add(path)
-
     if label == "apply":
         # The fixture remains kernel-only after moving to its own module.
         fixture_root = root / "apply/consensus_rule_tests.rs"
@@ -57,24 +50,38 @@ def transform(work, label, relative, stages):
         ensure_import(validation, "use bitcoin_rs_chain::NodeId;")
         expected.add(validation)
 
-        # Compiler diagnostics from the previous pass identify imports whose
-        # owner moved away. Remove only those exact bindings; keep imports that
-        # are still required by prepare/window code.
+        # Exact unused bindings reported by the previous all-target compiler
+        # pass. Keep the root Rayon prelude: root-level tests still call
+        # `par_iter` after the production responsibilities move out.
         unused = {
-            "apply.rs": ["use rayon::prelude::*;"],
+            "apply.rs": [
+                "use bitcoin_rs_chain::ChainWork;",
+                "use bitcoin_rs_primitives::ConsensusEncode;",
+            ],
             "apply/connect.rs": [
+                "use super::block_txids;",
                 "use bitcoin_rs_consensus::rust_path::UtxoView;",
                 "use bitcoin_rs_storage::block_body::BlockBodyStore;",
                 "use rayon::prelude::*;",
             ],
             "apply/contextual.rs": [
                 "use bitcoin_rs_consensus::rust_path::UtxoView;",
+                "use bitcoin_rs_primitives::CompactTarget;",
                 "use rayon::prelude::*;",
             ],
             "apply/disconnect.rs": ["use rayon::prelude::*;"],
-            "apply/entrypoints.rs": ["use rayon::prelude::*;"],
+            "apply/entrypoints.rs": [
+                "use bitcoin_rs_consensus::rust_path::UtxoView;",
+                "use bitcoin_rs_primitives::ConsensusEncode;",
+                "use bitcoin_rs_storage::block_body::BlockBodyStore;",
+                "use bitcoin_rs_utxo::connect::SpentOutputLookup;",
+                "use rayon::prelude::*;",
+            ],
             "apply/publication.rs": ["use rayon::prelude::*;"],
-            "apply/window.rs": ["use bitcoin_rs_consensus::rust_path::UtxoView;"],
+            "apply/window.rs": [
+                "use bitcoin_rs_consensus::rust_path::UtxoView;",
+                "use bitcoin_rs_primitives::Script;",
+            ],
         }
         for rel, lines in unused.items():
             path = root / rel
@@ -85,8 +92,8 @@ def transform(work, label, relative, stages):
     if label == "txindex":
         lifecycle = root / "txindex_worker/lifecycle.rs"
         # These names are used only by the test-only `spawn` seam. Marking the
-        # imports test-only prevents `cargo fix` from deleting them while
-        # compiling the production library before all-target test compilation.
+        # imports test-only prevents the production build from treating them as
+        # stale while all-target test compilation still sees the seam.
         for line in (
             "use super::FORWARD_BATCH_DELAY;",
             "use super::REVISION_QUIET_PERIOD;",
@@ -111,15 +118,51 @@ def transform(work, label, relative, stages):
         root_file = root / "txindex_worker.rs"
         for line in (
             "use bitcoin_rs_index::ScriptLiveScan;",
+            "use bitcoin_rs_index::TxIndexSnapshot;",
             "use bitcoin_rs_index::types::TxPosition;",
             "use bitcoin_rs_index::types::TxPositionValue;",
             "use bitcoin_rs_primitives::OutPoint;",
             "use bitcoin_rs_primitives::Tx;",
             "use bitcoin_rs_rpc::context::ScriptHistoryRecord;",
+            "use rayon::prelude::*;",
             "use std::thread;",
         ):
             drop_import(root_file, line)
         expected.add(root_file)
+
+        # Exact module-local unused bindings from the previous all-target
+        # compiler pass. These are former monolith-wide imports, not API shims.
+        unused = {
+            "txindex_worker/reconciliation.rs": ["use rayon::prelude::*;"],
+            "txindex_worker/query_transaction.rs": ["use rayon::prelude::*;"],
+            "txindex_worker/query_snapshot.rs": [
+                "use bitcoin_rs_storage::block_body::BlockBodyStore;",
+                "use rayon::prelude::*;",
+            ],
+            "txindex_worker/query_script.rs": ["use rayon::prelude::*;"],
+            "txindex_worker/query_protocol.rs": ["use rayon::prelude::*;"],
+            "txindex_worker/rollback.rs": [
+                "use bitcoin_rs_storage::block_body::BlockBodyReader;",
+                "use bitcoin_rs_storage::block_body::BlockBodyStore;",
+                "use rayon::prelude::*;",
+            ],
+            "txindex_worker/lifecycle.rs": ["use rayon::prelude::*;"],
+            "txindex_worker/catch_up.rs": [
+                "use bitcoin_rs_index::TxIndexSnapshot;",
+                "use bitcoin_rs_storage::block_body::BlockBodyStore;",
+            ],
+            "txindex_worker/cursor.rs": [
+                "use bitcoin_rs_index::IndexReader;",
+                "use bitcoin_rs_index::TxIndexSnapshot;",
+                "use bitcoin_rs_storage::block_body::BlockBodyStore;",
+                "use rayon::prelude::*;",
+            ],
+        }
+        for rel, lines in unused.items():
+            path = root / rel
+            for line in lines:
+                drop_import(path, line)
+            expected.add(path)
 
     return expected
 
@@ -127,43 +170,16 @@ def transform(work, label, relative, stages):
 f.transform = transform
 m.transform = transform
 
+# Every still-unpublished group must pass the original exact test-token gate;
+# sync has already passed and been published as #928.
+m.validate = base_validate
 
-def name_counts(inventory):
-    result = Counter()
-    for (name, _tokens), count in inventory.items():
-        result[name] += count
-    return result
-
-
-def validate(work, artifacts, label, expected, before, filters):
-    if label not in ("sync",):
-        return base_validate(work, artifacts, label, expected, before, filters)
-
-    # The sync splitter moves permanent tests several module levels. A direct
-    # diff confirms exactly 212 function names move out and the same 212 names
-    # move back in. Require exact global names/multiplicities, then let rustc,
-    # strict Clippy, and the focused suite validate scope and behavior instead
-    # of treating deliberate `super` rebasing as semantic test drift.
-    actual = m.inventory(work / "crates/node/src")
-    if name_counts(actual) != name_counts(before):
-        raise RuntimeError(f"{label} test names or multiplicities changed")
-    changed_variants = sum((actual - before).values()) + sum((before - actual).values())
-    print(label.upper().replace('-', '_') + "_TOKEN_VARIANTS", changed_variants, flush=True)
-    original_inventory = m.inventory
-    try:
-        m.inventory = lambda _root: before
-        return base_validate(work, artifacts, label, expected, before, filters)
-    finally:
-        m.inventory = original_inventory
-
-
-m.validate = validate
-
-# These groups are already native-validated and published. Never overwrite
-# their source branches from a retry; only work on still-unpublished groups.
+# Already published groups are immutable. Work only on apply/txindex/reorg.
 m.GROUPS = [
     g for g in m.GROUPS
-    if g[0] not in ("checkpoint", "import", "storage-footprint", "journal")
+    if g[0] not in (
+        "checkpoint", "import", "storage-footprint", "journal", "sync"
+    )
 ]
 
 if __name__ == "__main__":
