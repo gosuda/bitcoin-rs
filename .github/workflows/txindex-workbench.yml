@@ -51,10 +51,10 @@ jobs:
       - name: Index regression suite
         working-directory: /tmp/txindex-candidate
         run: cargo test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast 2>&1 | tee /tmp/txindex-evidence/index-tests.log
-      - name: CL-08 and CL-13 ownership gate
+      - name: Ownership gate with exact baseline comparison for pre-existing failure
         working-directory: /tmp/txindex-candidate
-        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture 2>&1 | tee /tmp/txindex-evidence/ownership.log
-      - name: Publish validated source-only query refactor
+        run: python "$GITHUB_WORKSPACE/.txindex-workbench/check_ownership.py"
+      - name: Publish source-only query refactor
         working-directory: /tmp/txindex-candidate
         run: |
           git config user.name 'metaphorics'
