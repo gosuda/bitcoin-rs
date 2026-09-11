@@ -32,6 +32,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/evidence"
           cp -r "$RUNNER_TEMP/owner-tools" "$RUNNER_TEMP/evidence/tools"
           python "$RUNNER_TEMP/owner-tools/patch_tools.py"
+          python "$RUNNER_TEMP/owner-tools/cfg_guards.py"
           python -m compileall -q "$RUNNER_TEMP/owner-tools"
           pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
