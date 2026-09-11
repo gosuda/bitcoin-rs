@@ -3,6 +3,21 @@ use crate::Network;
 use bitcoin_rs_storage::measure_physical_tree;
 use tempfile::tempdir;
 
+// Contract coverage: docs/contracts/storage-footprint.md FP-01 (ledger and
+// evidence shape), FP-02 (custody and witness handling), FP-03 (measurement
+// command and stop identity), and FP-04 (default-lane budget verdicts). The
+// individual assertions below are intentionally kept with this contract map:
+// - default_regtest_record_is_inapplicable_to_the_mainnet_budget: FP-01, FP-03, FP-04
+// - conservative_high_water_can_pass_the_default_mainnet_budget: FP-02, FP-04
+// - unpinned_high_water_is_tip_unpinned_not_pass: FP-04
+// - stop_height_without_hash_is_rejected, stop_hash_without_height_is_rejected,
+//   invalid_stop_hash_is_rejected: FP-03
+// - oversized_current_witness_falls_back_to_prev: FP-02
+// - snapshot_of_default_mainnet_is_insufficient_for_the_peak_gate,
+//   high_water_above_budget_fails_the_default_mainnet_gate: FP-04
+// - identity_names_the_txindex_lane: FP-03, FP-04
+// - empty_chainstate_directory_is_not_created_as_a_store: FP-03
+// - logical_chainstate_rows_are_named_owners: FP-01, FP-03
 #[test]
 fn default_regtest_record_is_inapplicable_to_the_mainnet_budget() -> Result<()> {
     let dir = tempdir()?;
