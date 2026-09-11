@@ -416,6 +416,9 @@ fn manual_prune_removes_pruned_block_transactions_from_cache() -> anyhow::Result
     let Some(service) = state.prune_service() else {
         anyhow::bail!("prune service should exist when prune_target_mb > 0");
     };
+    state
+        .durable_tip_height
+        .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
     service
         .prune_to_height(11)
         .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;

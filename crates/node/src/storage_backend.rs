@@ -142,7 +142,7 @@ mod tests {
         (
             "storage_footprint.rs",
             include_str!("storage_footprint.rs"),
-            Some("mod tests {"),
+            Some("mod tests;"),
         ),
         (
             "txindex_worker.rs",
