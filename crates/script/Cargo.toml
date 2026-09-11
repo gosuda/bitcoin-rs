@@ -13,6 +13,10 @@ workspace = true
 
 [features]
 default = []
+rocksdb = []
+fjall = []
+redb = []
+kernel = ["bitcoin-rs-consensus/kernel"]
 
 
 [dependencies]

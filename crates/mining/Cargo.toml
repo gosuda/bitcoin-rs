@@ -22,6 +22,9 @@ thiserror.workspace = true
 
 [features]
 default = []
+rocksdb = []
+fjall = []
+redb = []
 
 
 [dev-dependencies]
