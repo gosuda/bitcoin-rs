@@ -14,16 +14,20 @@ crates that do not own storage are not combinations.
 - Each row is one combination CI must `cargo check` independently.
   `lane=pure` is fjall/redb/zmq with the native interpreter.
   `lane=native` needs cmake/libboost (kernel) and/or C storage engines.
+  `bitcoin-rs-node`'s crate default (`fjall,kernel,zmq`) is a native row.
 - Adding a Cargo feature is not enough to support a combination. Add a
   row here in the same commit, or do not add the feature.
 
 ### `FEAT-02`: Backend forwarding follows `ARCH-03`
 
-Backend feature ownership and forwarding are governed by the normative
-`ARCH-03` contract in [architecture.md](architecture.md). In particular,
-layer 0 and RPC, as well as `mempool` and `mining`, must not define backend
-feature names; forwarding is limited to storage and the approved service
-adapters and operator-facing entry points. G17 enforces this constraint.
+- **Owner**: `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`;
+  the validator it calls lives in `bin/bitcoin-rs/tests/support/dependency_graph.rs`.
+- Backend feature ownership and forwarding are governed by the normative
+  `ARCH-03` contract in [architecture.md](architecture.md). In particular,
+  layer 0 and RPC, as well as `mempool` and `mining`, must not define backend
+  feature names; forwarding is limited to storage and the approved service
+  adapters and operator-facing entry points. G17 enforces this constraint.
+- Empty backend markers are not combinations; the matrix lists none.
 
 ## Proven by
 

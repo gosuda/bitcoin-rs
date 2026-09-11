@@ -17,12 +17,19 @@ bitcoin-rs-consensus.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-mempool.workspace = true
+hashbrown.workspace = true
 compact_str.workspace = true
 thiserror.workspace = true
 
 [features]
 default = []
 
+
 [dev-dependencies]
 proptest.workspace = true
 bitcoin.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "candidate"
+harness = false
