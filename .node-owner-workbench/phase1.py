@@ -17,7 +17,6 @@ def run():
     imports = r.canonical_imports(source, 'reorg', {'tests'})
     r.write(path, dedup_imports(imports + '\nuse super::*;\nuse super::bodies::*;\nuse super::execution::*;\nuse super::error::*;\n' + body))
     r.migrate_paths()
-
     owner = 'chainstate/consensus_rule_tests'
     groups = assign({}, {
         'undo': 'RejectingUndoStore CompleteRejectingUndoStore FailingUndoPersist',
@@ -33,7 +32,6 @@ def run():
         text += '\nuse ' + group + '::*;\n'
     r.write(path, text)
     r.migrate_paths()
-
     root = r.ROOT / 'chainstate.rs'
     text = root.read_text()
     declarations = []
@@ -84,3 +82,11 @@ around one mutation handle. Reorganization separates branch-body loading from
 transition execution. The old source files and public forwarding exports are
 removed, and callers and ownership-gate paths migrate with the implementation.
 ''', first=True)
+
+
+def after_fix():
+    path = r.ROOT / 'chainstate/assume_valid.rs'
+    text = path.read_text()
+    if 'use arc_swap::ArcSwap;' not in text:
+        text = text.replace('//! Assume valid for chainstate.\n', '')
+        path.write_text('#[cfg(test)]\nuse arc_swap::ArcSwap;\n' + text)
