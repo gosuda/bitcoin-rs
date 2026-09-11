@@ -40,12 +40,12 @@ jobs:
       - name: Refactor and validate independent source groups
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/node-split-target
-        run: python3 .github/node-splits/continue.py
+        run: python3 .github/node-splits/repair.py
       - name: Publish only commits that passed native validation
         if: always()
         env:
           NODE_SPLIT_PUBLISH_TOKEN: ${{ github.token }}
-        run: python3 .github/node-splits/continue.py publish
+        run: python3 .github/node-splits/repair.py publish
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
