@@ -1,4 +1,54 @@
-# P2P loopback comparator contract
+# P2P loopback lanes
+
+This document owns the loopback P2P lanes of the target node (gate G7): deterministic multi-peer handshake, headers, block download and serving, transaction ingress and egress, discovery, fee-filter relay, compact-block reconstruction with full-block fallback, and the optional v2 transport and compact filters when enabled. No lane contacts public nodes. The comparator `tools/benchmark-campaign/p2p_loopback.py` (contract `p2p-loopback-config-v1`, result `p2p-loopback-result-v2`) is retained; its description below is prior contract text, and no completed campaign is claimed.
+
+## Cells it owns
+
+| Cell | Owner | Metric | Status |
+|---|---|---|---|
+| `replay.live_ibd_loopback` | `P2pService` download window plus commit spine | wall to pinned stop, blocks/s, peak RSS, versus Core `v31.1` fed identical frames | `planned_not_executed` |
+| `propagation.block` | `p2p` | announce to validated publication on the receiving node, with and without compact-block reconstruction | `planned_not_executed` |
+| `propagation.tx` | `p2p`, `mempool` | accepted-and-retained transaction reaches an eligible second peer, never the source; fee filter, relay flag and wtxid negotiation honored | `planned_not_executed` |
+| `p2p.requeue_exactness` | `P2pService`, `PeerTable` | on disconnect the requeued set equals the freed set; stale-session completion is a typed no-op | `planned_not_executed` |
+| `p2p.control_under_pressure` | `p2p` | control class serviced within bounded work while bulk queues saturate; drops accounted | `planned_not_executed` |
+| `p2p.optional_off` | `p2p` | with `bip324` and compact filters disabled: no service bits, no negotiation messages, validation identical (`g19` agrees) | `planned_not_executed` |
+
+Every lane runs the same artifact under both `--features fjall` and `--features fjall,bip324` where the lane concerns transport; the two states must agree on validation. Disconnect classes, payload bounds and handshake exceptions are compared against the pinned Core contract in `crates/p2p/tests/core_compat.rs`.
+
+```bash
+cargo test --locked -p bitcoin-rs-p2p --test overhaul_download_owner -- --nocapture
+cargo test --locked -p bitcoin-rs-p2p --test overhaul_compact_blocks -- --nocapture
+cargo test --locked -p bitcoin-rs-p2p --test overhaul_optional_protocols -- --nocapture
+```
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (comparator contract before the rewrite)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
 
 Harness: `tools/benchmark-campaign/p2p_loopback.py`. Tests:
 `tools/benchmark-campaign/test_p2p_loopback.py`. Addresses issue #35.
@@ -10,7 +60,7 @@ parameters — and only then compares externally observed wall time. Each node
 keeps its own internal scheduler; the harness never reaches inside it. A ratio
 is computed only after every custody and correctness gate passes.
 
-## What is held identical
+### What is held identical
 
 One `p2p-loopback-config-v1` document binds every arm of a campaign:
 
@@ -47,7 +97,7 @@ blocks are recorded separately and must be equal across every arm of the
 campaign (they are, by construction, one config — and the comparator asserts
 the per-arm transcript digests against them anyway).
 
-## Execution model
+### Execution model
 
 - One run binds a listener on `127.0.0.1` at an ephemeral port, starts the
   peer thread, and only then spawns the child by direct argv substitution —
@@ -142,7 +192,7 @@ the per-arm transcript digests against them anyway).
   run bitcoin-rs first, so first-peer advantage alternates. Each pair consumes
   the same config object; nothing is regenerated between arms.
 
-## Correctness gates, in order
+### Correctness gates, in order
 
 `_require_comparable` runs before any statistics:
 
@@ -167,7 +217,7 @@ any failure (Linux required; no name-based fallback). There is no
 partial-result shape.
 
 
-## Statistics
+### Statistics
 
 Wall time per arm covers the supervised lifecycle: spawn until the
 leader has been reaped, the peer worker has finished its contract, and
@@ -178,7 +228,7 @@ the nearest-rank percentile over each role's seven samples: `p50`,
 `p95`, `p99`, `max`. The only ratio emitted is
 `candidate_over_core_p50_ratio`, and only on the gated path.
 
-## Result contract
+### Result contract
 
 `p2p-loopback-result-v2` binds: config canonical hash, the custody block
 (network magic, protocol version, services, corpus/schedule/peer/lifecycle
@@ -208,7 +258,7 @@ command-field removal; every other field kept its v1 meaning.
 
 
 
-## Standalone usage
+### Standalone usage
 
 ```
 python3 tools/benchmark-campaign/p2p_loopback.py --config <config.json> --output <result.json>
@@ -219,7 +269,7 @@ The tool is standalone: tests use real loopback sockets and deterministic
 fixture nodes (tiny Python scripts that connect, echo, read the exact corpus
 length, and write state files).
 
-## Limits
+### Limits
 
 Loopback isolates protocol-facing overhead (framing, handshake handling,
 message processing under identical stimulus). It does not measure
