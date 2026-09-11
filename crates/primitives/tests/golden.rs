@@ -2,7 +2,7 @@
 //! blockstream-recorded values.
 use std::str::FromStr;
 
-use bitcoin_rs_primitives::{Block as PrimitiveBlock, BlockHash, Txid, deserialize};
+use bitcoin_rs_primitives::{Block as PrimitiveBlock, BlockHash, Txid, Wtxid, deserialize};
 const HEIGHTS: &[(u32, &str)] = &[
     (
         0,
@@ -72,6 +72,8 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn st
         let block_bytes = read_fixture(*height, "bin")?;
         let txid_text = String::from_utf8(read_fixture(*height, "txids.txt")?)?;
         let expected_txids = parse_txids(&txid_text)?;
+        let wtxid_text = String::from_utf8(read_fixture(*height, "wtxids.txt")?)?;
+        let expected_wtxids = parse_wtxids(&wtxid_text)?;
         let block = deserialize::<PrimitiveBlock>(&block_bytes)?;
         let expected_block_hash = expected_hash.parse::<BlockHash>()?;
 
@@ -86,12 +88,33 @@ fn golden_blocks_decode_and_hash_to_blockstream_txids() -> Result<(), Box<dyn st
             "height {height} tx count"
         );
 
+        assert_eq!(
+            expected_wtxids.len(),
+            expected_txids.len(),
+            "height {height} wtxid golden count"
+        );
         for (index, (tx, expected_txid)) in block.txs.iter().zip(expected_txids.iter()).enumerate()
         {
             assert_eq!(
                 tx.txid(),
                 *expected_txid,
                 "height {height} tx index {index}"
+            );
+            // BIP141: the wtxid of a transaction without witness data equals its
+            // txid; with witness data it is the double SHA-256 of the full
+            // serialization. Both sides come from independent derivations.
+            let expected_wtxid = expected_wtxids[index];
+            if !tx.has_witness() {
+                assert_eq!(
+                    tx.wtxid().0,
+                    tx.txid().0,
+                    "height {height} tx index {index}: pre-segwit wtxid must equal txid"
+                );
+            }
+            assert_eq!(
+                tx.wtxid(),
+                expected_wtxid,
+                "height {height} tx index {index}: golden wtxid"
             );
         }
         assert_eq!(
@@ -112,6 +135,14 @@ fn read_fixture(height: u32, extension: &str) -> Result<Vec<u8>, Box<dyn std::er
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn parse_wtxids(wtxid_text: &str) -> Result<Vec<Wtxid>, Box<dyn std::error::Error>> {
+    wtxid_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| Wtxid::from_str(line).map_err(Into::into))
+        .collect()
 }
 
 fn parse_txids(txid_text: &str) -> Result<Vec<Txid>, bitcoin_rs_primitives::HashError> {
