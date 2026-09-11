@@ -15,7 +15,7 @@ use corepc_types::v31;
 use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{ensure_at_most_params, params_array, required_i64, required_str, required_u64};
+use crate::handlers::{ensure_at_most_params, params_array, required_str, required_u64};
 
 static SERVER_START: OnceLock<Instant> = OnceLock::new();
 
@@ -130,15 +130,24 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
 pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     // CONTRACT: docs/contracts/external-api.md#API-26
     ensure_at_most_params(params, 2)?;
-    let conf_target = required_i64(params, 0, "conf_target is required")?;
-    if !(1_i64..=ESTIMATE_SMART_FEE_MAX_TARGET_I64).contains(&conf_target) {
+    // Validate the optional mode's JSON type before semantic target validation.
+    validate_estimate_mode_type(params)?;
+    let conf_target = params_array(params)?
+        .get(0)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| value.as_u64().map(i128::from))
+        })
+        .ok_or(RpcError::InvalidParams("conf_target is required"))?;
+    if !(1_i128..=i128::from(ESTIMATE_SMART_FEE_MAX_TARGET_I64)).contains(&conf_target) {
         return Err(RpcError::InvalidParameter(
             ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned(),
         ));
     }
     parse_estimate_mode(params)?;
-    let conf_target = u64::try_from(conf_target)
-        .map_err(|_| RpcError::InvalidParameter(ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned()))?;
+    let conf_target = u64::try_from(conf_target).expect("validated confirmation target");
     let blocks = conf_target_blocks(conf_target);
     let pool = ctx.mempool.read();
     match pool.estimate_fee_rate(blocks) {
@@ -155,6 +164,19 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
             blocks,
         }),
     }
+}
+
+fn validate_estimate_mode_type(params: &Value) -> Result<(), RpcError> {
+    let Some(array) = params.as_array() else {
+        return Ok(());
+    };
+    let Some(value) = array.get(1) else {
+        return Ok(());
+    };
+    if !value.is_null() && value.as_str().is_none() {
+        return Err(RpcError::InvalidType("parameter must be a string"));
+    }
+    Ok(())
 }
 
 fn parse_estimate_mode(params: &Value) -> Result<(), RpcError> {
