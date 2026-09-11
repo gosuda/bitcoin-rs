@@ -284,3 +284,12 @@ Owners:
   and `crates/node/tests/config_layered.rs` test
   `mining_payout_address_decodes_after_all_layers`: watch-only mining payout is
   decoded once after overlay, against the resolved network (`ARCH-05`).
+
+### Synchronization implementation ownership
+
+`crates/node/src/sync.rs` owns the orchestrator state and tick composition.
+Its private modules separate header acquisition (`headers`), body admission
+(`receive`), expected-chain cache (`expected`), ordered apply/reorg handoff
+(`apply`), peer scheduling (`peers`), and metric projection (`observability`).
+Expected-run and pending-header representations live with their interpreters;
+none of these modules creates another chain-mutation authority.
