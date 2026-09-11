@@ -29,7 +29,8 @@
 //! - The engine rule is the storage-boundary rule: only the storage crate may
 //!   name a backend engine. Everything above talks to the `KvStore` facade.
 //! - Backend *feature* forwarding is confined to the operator-facing tiers
-//!   (node, binary) and the services-tier adapters; rpc forwards none.
+//!   (node, binary) and the services-tier adapters that actually select an
+//!   engine; rpc, consensus, script, mempool, and mining define none.
 //!
 //! The gate fails loudly, naming the offending edge, when any assertion does
 //! not hold.

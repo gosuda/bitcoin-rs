@@ -16,7 +16,7 @@
 # Mutates Cargo.lock. CI checks out a throwaway tree. Locally, the original
 # lockfile is restored on exit unless KEEP_LOCK=1.
 #
-# Optional native storage engines (rocksdb, mdbx) and the named feature
+# Optional native storage engines (rocksdb) and the named feature
 # matrix are owned by FEAT-01 / scripts/check-feature-matrix.sh, not this
 # script: DEP-01 proves the default workspace graph at each range endpoint.
 #
