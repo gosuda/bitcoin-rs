@@ -1,10 +1,14 @@
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
 
 const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
 const MIN_COINBASE_SCRIPT_SIG_LEN: usize = 2;
 const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
+/// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
+const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Consensus witness reserved value used when constructing a BIP141 commitment.
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
@@ -30,12 +34,6 @@ pub enum MiningError {
         entry: usize,
         /// Invalid ancestor position.
         ancestor: u32,
-    },
-    /// The immutable snapshot's dependency graph contains a cycle.
-    #[error("snapshot dependency graph contains a cycle at entry {entry}")]
-    DependencyCycle {
-        /// Snapshot position at which the cycle was detected.
-        entry: usize,
     },
     /// A selected fee sum exceeded the satoshi range.
     #[error("selected transaction fees overflow the satoshi range")]
@@ -65,24 +63,24 @@ pub(crate) fn build_coinbase(
     height: u32,
     subsidy_halving_interval: u32,
     fees: u64,
-    payout: Vec<u8>,
+    payout: &[u8],
     witness_commitment: Option<&Hash256>,
 ) -> Result<Tx, MiningError> {
     let value = bitcoin_rs_consensus::block_subsidy(height, subsidy_halving_interval)
         .checked_add(fees)
         .ok_or(MiningError::CoinbaseValueOverflow)?;
 
-    let mut witness = Vec::new();
+    let mut witness = Witness::new();
     let mut outputs = vec![TxOut {
-        value,
-        script_pubkey: payout,
+        value: Amount::from_sat(value),
+        script_pubkey: payout.to_vec().into(),
     }];
 
     if let Some(commitment) = witness_commitment {
         witness.push(WITNESS_RESERVED_VALUE.to_vec());
         outputs.push(TxOut {
-            value: 0,
-            script_pubkey: witness_commitment_script(commitment),
+            value: Amount::ZERO,
+            script_pubkey: witness_commitment_script(commitment).into(),
         });
     }
 
@@ -90,12 +88,12 @@ pub(crate) fn build_coinbase(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0xffff_ffff),
-            script_sig: coinbase_script_sig(height)?,
-            sequence: 0xffff_ffff,
+            script_sig: coinbase_script_sig(height)?.into(),
+            sequence: Sequence::MAX,
             witness,
         }],
         outputs,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     })
 }
 
@@ -107,6 +105,36 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     script.extend_from_slice(&WITNESS_COMMITMENT_TAG);
     script.extend_from_slice(commitment.as_byte_array());
     script
+}
+
+/// Core `UpdateUncommittedBlockStructures`: if the block already carries a
+/// BIP141 commitment but the coinbase has no witness, insert the reserved nonce.
+///
+/// `submitblock` calls this before admission. Proposal mode does not.
+pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {
+    if !segwit_active {
+        return;
+    }
+    let Some(coinbase) = block.txs.first_mut() else {
+        return;
+    };
+    if !coinbase_has_witness_commitment(coinbase) {
+        return;
+    }
+    let Some(input) = coinbase.inputs.first_mut() else {
+        return;
+    };
+    if !input.witness.is_empty() {
+        return;
+    }
+    input.witness.push(WITNESS_RESERVED_VALUE.to_vec());
+}
+
+fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
+    tx.outputs.iter().any(|output| {
+        output.script_pubkey.len() >= 38
+            && output.script_pubkey.starts_with(&WITNESS_COMMITMENT_PREFIX)
+    })
 }
 
 fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
@@ -127,4 +155,79 @@ fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
         });
     }
     Ok(script)
+}
+
+#[cfg(test)]
+mod uncommitted_witness_tests {
+    use super::{
+        WITNESS_RESERVED_VALUE, update_uncommitted_block_structures, witness_commitment_script,
+    };
+    use bitcoin_rs_primitives::{
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
+
+    fn commitment_block(witness: Vec<Vec<u8>>, with_commitment: bool) -> Block {
+        let mut outputs = vec![TxOut {
+            value: Amount::from_sat(50),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }];
+        if with_commitment {
+            outputs.push(TxOut {
+                value: Amount::ZERO,
+                script_pubkey: witness_commitment_script(&Hash256::from_le_bytes(&[0xab; 32]))
+                    .into(),
+            });
+        }
+        Block {
+            header: Header {
+                version: 0x2000_0000,
+                prev_blockhash: BlockHash::default(),
+                merkle_root: Hash256::default(),
+                time: 1,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            },
+            txs: vec![Tx {
+                version: 2,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                    script_sig: Script::from_bytes(vec![0x51, 0x00]),
+                    sequence: Sequence::MAX,
+                    witness: witness.into(),
+                }],
+                outputs,
+                lock_time: LockTime::ZERO,
+            }],
+        }
+    }
+
+    #[test]
+    fn fills_reserved_nonce_when_commitment_present_and_witness_empty() {
+        let mut block = commitment_block(Vec::new(), true);
+        update_uncommitted_block_structures(&mut block, true);
+        assert_eq!(
+            block.txs[0].inputs[0].witness,
+            Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
+        );
+    }
+
+    #[test]
+    fn leaves_an_existing_coinbase_witness_alone() {
+        let custom = vec![vec![0x11; 32]];
+        let mut block = commitment_block(custom.clone(), true);
+        update_uncommitted_block_structures(&mut block, true);
+        assert_eq!(block.txs[0].inputs[0].witness, Witness::from_stack(custom));
+    }
+
+    #[test]
+    fn skips_without_commitment_or_when_segwit_is_inactive() {
+        let mut no_commitment = commitment_block(Vec::new(), false);
+        update_uncommitted_block_structures(&mut no_commitment, true);
+        assert!(no_commitment.txs[0].inputs[0].witness.is_empty());
+
+        let mut pre_segwit = commitment_block(Vec::new(), true);
+        update_uncommitted_block_structures(&mut pre_segwit, false);
+        assert!(pre_segwit.txs[0].inputs[0].witness.is_empty());
+    }
 }

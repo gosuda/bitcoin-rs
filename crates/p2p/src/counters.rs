@@ -5,7 +5,7 @@
 //! operator reads to tell a peer that is feeding the node from one that is
 //! merely connected to it.
 
-use std::io::{IoSlice, Read, Result as IoResult, Write};
+use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -94,17 +94,37 @@ fn now_seconds() -> u64 {
 /// loop, and the writer thread that owns a cloned socket -- so a counter added
 /// at any one of them would report a fraction of the traffic as though it were
 /// all of it.
+///
+/// Reads are buffered so a kernel delivery that holds more than one message
+/// does not cost a syscall per `read_exact` of the 24-byte header. Large
+/// caller buffers (block payloads) bypass the cache and read into the
+/// destination. The writer-side `try_clone` starts with an empty read cache.
 #[derive(Debug)]
 pub struct CountingStream<S> {
     inner: S,
     counters: Arc<PeerCounters>,
+    read_buf: Vec<u8>,
+    read_pos: usize,
+    read_end: usize,
 }
+
+/// Matches `std::io::BufReader`'s default. Unauthenticated inbound
+/// connections allocate this on the first small read; a 256 KiB cache would
+/// let a flood of half-open handshakes pin large RSS. Payloads whose caller
+/// buffer is already this size or larger bypass the cache.
+const INBOUND_READ_BUFFER: usize = 8 * 1024;
 
 impl<S> CountingStream<S> {
     /// Wraps `inner`, counting into `counters`.
     #[must_use]
     pub const fn new(inner: S, counters: Arc<PeerCounters>) -> Self {
-        Self { inner, counters }
+        Self {
+            inner,
+            counters,
+            read_buf: Vec::new(),
+            read_pos: 0,
+            read_end: 0,
+        }
     }
 
     /// The counters this stream feeds.
@@ -115,7 +135,7 @@ impl<S> CountingStream<S> {
 }
 
 impl CountingStream<std::net::TcpStream> {
-    /// Takes a connected TCP stream and applies the P2P socket contract.
+    /// Takes a connected TCP stream and applies the P2P-04 socket contract.
     ///
     /// Disables Nagle so pipelined control messages (`inv`, `getdata`, `ping`)
     /// are not held for a delayed ACK. Handshake and the message loop still
@@ -150,10 +170,10 @@ impl CountingStream<std::net::TcpStream> {
     ///
     /// Returns the error `TcpStream::try_clone` returned.
     pub fn try_clone(&self) -> IoResult<Self> {
-        Ok(Self {
-            inner: self.inner.try_clone()?,
-            counters: Arc::clone(&self.counters),
-        })
+        Ok(Self::new(
+            self.inner.try_clone()?,
+            Arc::clone(&self.counters),
+        ))
     }
 
     /// Applies a read timeout to the wrapped socket.
@@ -184,14 +204,58 @@ impl CountingStream<std::net::TcpStream> {
     }
 }
 
+impl<S: Read> CountingStream<S> {
+    fn take_leftover(&mut self, buffer: &mut [u8]) -> Option<usize> {
+        if self.read_pos >= self.read_end {
+            return None;
+        }
+        let take = (self.read_end - self.read_pos).min(buffer.len());
+        buffer[..take].copy_from_slice(&self.read_buf[self.read_pos..self.read_pos + take]);
+        self.read_pos += take;
+        Some(take)
+    }
+
+    fn fill_read_buf(&mut self) -> IoResult<()> {
+        if self.read_buf.len() < INBOUND_READ_BUFFER {
+            self.read_buf.resize(INBOUND_READ_BUFFER, 0);
+        }
+        // Indices move only after a successful read. Resetting `read_pos`
+        // first would make a timeout revive already-consumed leftover bytes;
+        // the handshake and message loops retry TimedOut/WouldBlock.
+        let filled = self.inner.read(&mut self.read_buf)?;
+        self.read_pos = 0;
+        self.read_end = filled;
+        Ok(())
+    }
+
+    fn read_buffered(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+        if let Some(take) = self.take_leftover(buffer) {
+            return Ok(take);
+        }
+        if buffer.len() >= INBOUND_READ_BUFFER {
+            return self.inner.read(buffer);
+        }
+        self.fill_read_buf()?;
+        Ok(self.take_leftover(buffer).unwrap_or(0))
+    }
+}
+
 impl<S: Read> Read for CountingStream<S> {
     fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
-        let read = self.inner.read(buffer)?;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let read = self.read_buffered(buffer)?;
+        self.counters.record_recv(read);
+        Ok(read)
+    }
+
+    fn read_vectored(&mut self, buffers: &mut [IoSliceMut<'_>]) -> IoResult<usize> {
+        let read = self.inner.read_vectored(buffers)?;
         self.counters.record_recv(read);
         Ok(read)
     }
 }
-
 impl<S: Write> Write for CountingStream<S> {
     fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
         let written = self.inner.write(buffer)?;
@@ -199,6 +263,10 @@ impl<S: Write> Write for CountingStream<S> {
         Ok(written)
     }
 
+    /// Production `write_message` emits the 24-byte header and payload as
+    /// one `write_vectored` call. The default `Write` adapter would write
+    /// only the first slice, splitting that into two syscalls and counting
+    /// only the header if the caller treated the return as a full write.
     fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
         let written = self.inner.write_vectored(buffers)?;
         self.counters.record_sent(written);
@@ -259,6 +327,157 @@ mod tests {
         assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
     }
 
+    /// One kernel delivery can contain the next message. The wrapper must
+    /// keep those leftover bytes instead of asking the socket again.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn leftover_bytes_do_not_revisit_the_socket() {
+        struct OneShot {
+            remaining: Vec<u8>,
+            reads: u8,
+        }
+        impl Read for OneShot {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                self.reads = self.reads.saturating_add(1);
+                if self.reads > 1 {
+                    return Err(std::io::Error::other("socket read more than once"));
+                }
+                let take = self.remaining.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.remaining[..take]);
+                self.remaining.drain(..take);
+                Ok(take)
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            OneShot {
+                remaining: vec![1, 2, 3, 4, 5],
+                reads: 0,
+            },
+            Arc::clone(&counters),
+        );
+        let mut first = [0_u8; 2];
+        let read = stream
+            .read(&mut first)
+            .unwrap_or_else(|error| panic!("first read failed: {error}"));
+        assert_eq!(read, 2);
+        assert_eq!(first, [1, 2]);
+        let mut second = [0_u8; 3];
+        let read = stream
+            .read(&mut second)
+            .unwrap_or_else(|error| panic!("leftover read failed: {error}"));
+        assert_eq!(read, 3);
+        assert_eq!(second, [3, 4, 5]);
+        assert_eq!(counters.bytes_recv(), 5);
+    }
+
+    /// Handshake and message loops retry `TimedOut`. A refill that fails
+    /// after leftover bytes were consumed must not revive those bytes.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn a_timed_out_refill_does_not_replay_consumed_bytes() {
+        struct TimeoutAfterFirst {
+            remaining: Vec<u8>,
+            reads: u8,
+        }
+        impl Read for TimeoutAfterFirst {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                self.reads = self.reads.saturating_add(1);
+                if self.reads > 1 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                }
+                let take = self.remaining.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.remaining[..take]);
+                self.remaining.drain(..take);
+                Ok(take)
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            TimeoutAfterFirst {
+                remaining: vec![1, 2, 3],
+                reads: 0,
+            },
+            Arc::clone(&counters),
+        );
+        let mut first = [0_u8; 3];
+        let read = stream
+            .read(&mut first)
+            .unwrap_or_else(|error| panic!("first read failed: {error}"));
+        assert_eq!(read, 3);
+        assert_eq!(first, [1, 2, 3]);
+
+        let mut retry = [0_u8; 3];
+        let error = match stream.read(&mut retry) {
+            Ok(n) => panic!("refill must time out, got {n} bytes"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let error = match stream.read(&mut retry) {
+            Ok(n) => panic!("retry after timeout must not replay, got {n} bytes"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(counters.bytes_recv(), 3);
+    }
+
+    /// Two framed pings delivered in one inner read must both decode without
+    /// a second socket read — the IBD headers path between small messages.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn two_wire_messages_decode_from_one_socket_read() {
+        struct OneShot {
+            remaining: Vec<u8>,
+            reads: u8,
+        }
+        impl Read for OneShot {
+            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+                self.reads = self.reads.saturating_add(1);
+                if self.reads > 1 {
+                    return Err(std::io::Error::other("socket read more than once"));
+                }
+                let take = self.remaining.len().min(buffer.len());
+                buffer[..take].copy_from_slice(&self.remaining[..take]);
+                self.remaining.drain(..take);
+                Ok(take)
+            }
+        }
+
+        let mut frames = Vec::new();
+        crate::wire::write_message(
+            &mut frames,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(1),
+        )
+        .unwrap_or_else(|error| panic!("encode ping 1: {error}"));
+        crate::wire::write_message(
+            &mut frames,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(2),
+        )
+        .unwrap_or_else(|error| panic!("encode ping 2: {error}"));
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(
+            OneShot {
+                remaining: frames,
+                reads: 0,
+            },
+            counters,
+        );
+        let (first, _) = crate::wire::read_message(&mut stream, bitcoin::p2p::Magic::BITCOIN)
+            .unwrap_or_else(|error| panic!("decode ping 1: {error}"));
+        let (second, _) = crate::wire::read_message(&mut stream, bitcoin::p2p::Magic::BITCOIN)
+            .unwrap_or_else(|error| panic!("decode ping 2: {error}"));
+        assert_eq!(first, crate::wire::Message::Ping(1));
+        assert_eq!(second, crate::wire::Message::Ping(2));
+    }
+
     /// A read that moves nothing is not activity.
     ///
     /// Asserted against a *fresh* counter rather than against a timestamp taken
@@ -280,7 +499,9 @@ mod tests {
         assert_eq!(counters.last_recv(), 0, "an empty read is not activity");
     }
 
-    /// Vectored writes count every slice, not only the first.
+    /// CONTRACT: P2P-04. Vectored writes count every slice, not only the first.
+    ///
+    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     ///
     /// `write_message` emits header and payload as two `IoSlice`s. The default
     /// `Write::write_vectored` would take only the header and leave the payload
@@ -330,6 +551,8 @@ mod tests {
     }
 
     /// `write_message` through this wrapper still issues one vectored write.
+    ///
+    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     #[test]
     fn write_message_through_the_wrapper_is_one_vectored_write() {
         use bitcoin::p2p::Magic;
@@ -375,6 +598,8 @@ mod tests {
     }
 
     /// `from_connected` is the socket-posture owner: Nagle is off.
+    ///
+    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     #[test]
     fn from_connected_disables_nagle() {
         use std::net::{TcpListener, TcpStream};
@@ -450,6 +675,48 @@ mod tests {
         let _accepted = accepting.join();
     }
 
+    /// getpeerinfo byte accounting (module header, Core `CNode` parity):
+    /// a vectored header+payload write counts every byte exactly once and
+    /// forwards as one inner `write_vectored` call. The default `Write` impl
+    /// would split the coalescing this wrapper exists to preserve.
+    #[test]
+    fn a_vectored_write_counts_every_slice_in_one_inner_call() {
+        struct RecordingWriter {
+            writes: usize,
+            vectored: usize,
+        }
+        impl Write for RecordingWriter {
+            fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
+                self.writes += 1;
+                Ok(buffer.len())
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.vectored += 1;
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let inner = RecordingWriter {
+            writes: 0,
+            vectored: 0,
+        };
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(inner, Arc::clone(&counters));
+        let header = [0_u8; 24];
+        let payload = [1_u8; 8];
+        let written = stream
+            .write_vectored(&[IoSlice::new(&header), IoSlice::new(&payload)])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 32);
+        assert_eq!(counters.bytes_sent(), 32);
+        assert_eq!(stream.inner.vectored, 1);
+        assert_eq!(stream.inner.writes, 0);
+    }
+
     /// Nothing sent means no timestamp, which is what Core reports as zero.
     #[test]
     fn an_untouched_connection_reports_no_activity() {
@@ -457,5 +724,125 @@ mod tests {
         assert_eq!(counters.bytes_sent(), 0);
         assert_eq!(counters.last_send(), 0);
         assert_eq!(counters.last_recv(), 0);
+    }
+
+    /// Default `Write::write_vectored` writes only the first non-empty slice.
+    /// Production `write_message` emits header + payload through that method,
+    /// so the wrapper must forward both slices and count every byte taken.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn a_vectored_write_counts_every_slice_the_socket_took() {
+        struct VectoredWriter;
+        impl Write for VectoredWriter {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_vectored must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(VectoredWriter, Arc::clone(&counters));
+        let written = stream
+            .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 10);
+        assert_eq!(counters.bytes_sent(), 10);
+    }
+
+    /// A short vectored write still counts only the bytes the inner writer
+    /// accepted, matching the scalar `write` contract.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
+    #[test]
+    fn a_short_vectored_write_counts_what_the_socket_took() {
+        struct ShortVectoredWriter;
+        impl Write for ShortVectoredWriter {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_vectored must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                Ok(buffers
+                    .iter()
+                    .map(|buffer| buffer.len())
+                    .sum::<usize>()
+                    .min(3))
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let mut stream = CountingStream::new(ShortVectoredWriter, Arc::clone(&counters));
+        let written = stream
+            .write_vectored(&[IoSlice::new(&[1_u8; 4]), IoSlice::new(&[2_u8; 6])])
+            .unwrap_or_else(|error| panic!("write_vectored failed: {error}"));
+
+        assert_eq!(written, 3);
+        assert_eq!(counters.bytes_sent(), 3);
+    }
+
+    /// `write_message` must reach the inner `write_vectored` through this
+    /// wrapper. Falling back to `write` would split header and payload into
+    /// two syscalls and under-count if the first slice were taken as the whole
+    /// message.
+    ///
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`. Syscall shape is the
+    /// named invariant; elapsed time is `crates/p2p/benches/write_message.rs`.
+    #[test]
+    fn write_message_through_counting_stream_stays_vectored() {
+        struct FailOnUnvectored {
+            calls: Arc<AtomicU64>,
+        }
+        impl Write for FailOnUnvectored {
+            fn write(&mut self, _buffer: &[u8]) -> IoResult<usize> {
+                Err(std::io::Error::other(
+                    "write_message must not fall back to write",
+                ))
+            }
+            fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> IoResult<usize> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(buffers.iter().map(|buffer| buffer.len()).sum())
+            }
+            fn flush(&mut self) -> IoResult<()> {
+                Ok(())
+            }
+        }
+
+        let counters = Arc::new(PeerCounters::default());
+        let calls = Arc::new(AtomicU64::new(0));
+        let mut stream = CountingStream::new(
+            FailOnUnvectored {
+                calls: Arc::clone(&calls),
+            },
+            Arc::clone(&counters),
+        );
+        let written = crate::wire::write_message(
+            &mut stream,
+            bitcoin::p2p::Magic::BITCOIN,
+            &crate::wire::Message::Ping(42),
+        )
+        .unwrap_or_else(|error| panic!("write_message failed: {error}"));
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "header and payload in one writev"
+        );
+        assert_eq!(
+            counters.bytes_sent(),
+            u64::try_from(written).unwrap_or(u64::MAX)
+        );
     }
 }

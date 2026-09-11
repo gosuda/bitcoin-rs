@@ -76,10 +76,11 @@ pub struct SignallingDeployment {
 const NAMED_DEPLOYMENTS: [(&str, u32); 2] =
     [("csv", CSV_DEPLOYMENT_ID), ("segwit", SEGWIT_DEPLOYMENT_ID)];
 
-/// Deployments a GBT caller must see in `vbavailable` / `vbrequired`.
+/// Deployments a GBT caller must see in `vbavailable`.
 ///
 /// Only `Started` and `LockedIn` states are signalling. Active and failed
-/// deployments are not negotiated as version bits.
+/// deployments are not negotiated as version bits. Core v31 `vbrequired` is
+/// always 0 and is not derived from this list.
 #[must_use]
 pub fn signalling_deployments(
     tree: &BlockTree,
@@ -188,7 +189,7 @@ fn cached_deployment_state(
 mod tests {
     use crate::node::NodeStatus;
     use bitcoin_rs_consensus::DeploymentContext;
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     use super::{DeploymentView, softfork_state};
     use crate::BlockTree;
@@ -203,7 +204,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         }
     }

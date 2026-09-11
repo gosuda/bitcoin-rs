@@ -4,7 +4,7 @@
 //! production-shaped flat-file fixture.
 //!
 //! Blocks are served from a **real `FlatFileBlockStore`**, the same path
-//! production takes through `FlatFilePruneBodyStore`: open, `fstat`, seek, read.
+//! production takes through `IndexedBlockBodyStore`: open, `fstat`, seek, read.
 //! An earlier revision served them from an in-memory map, which left the syscall
 //! sequence out entirely and reported ratios roughly an order of magnitude too
 //! large — a whole-body read and a 250-byte range read differ by only about 2x
@@ -18,30 +18,37 @@
 // and confined to fixture setup and the timed calls' error arms.
 #![allow(clippy::expect_used)]
 
-use std::hint::black_box;
-use std::sync::Arc;
-
 use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
+
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
     deserialize,
 };
-use bitcoin_rs_storage::RocksDbStore;
-use bitcoin_rs_storage::block_file::{BlockFilePosition, FlatFileBlockStore};
+
+use bitcoin_rs_storage::{
+    RocksDbStore,
+    block_file::{BlockFilePosition, FlatFileBlockStore},
+};
+
 use criterion::{Criterion, criterion_group, criterion_main};
+
 use hashbrown::HashMap;
+
+use std::{hint::black_box, sync::Arc};
 
 /// Filler transactions per block for the ~250 KB shape.
 const TXS_PER_BLOCK_250K: usize = 2_200;
+
 /// Filler transactions per block for the ~1 MB shape.
 const TXS_PER_BLOCK_1M: usize = 9_000;
+
 /// First height a fixture block is placed at. Sequential `commit_block`
 /// requires a contiguous watermark from height 0.
 const BASE_HEIGHT: u32 = 0;
 
 /// Block source over a real flat-file store.
 ///
-/// Mirrors `FlatFilePruneBodyStore`: a position lookup, then
+/// Mirrors `IndexedBlockBodyStore`: a position lookup, then
 /// `FlatFileBlockStore::load` for a whole body or `load_range` for a slice. Both
 /// pay the real open/`fstat`/seek/read sequence, so the ratio this harness
 /// reports is one a node can actually see.
@@ -324,6 +331,34 @@ fn bench_fixture(c: &mut Criterion, label: &str, fixture: &Fixture) {
     outpoint.finish();
 }
 
+/// End-to-end caller-observable query flow: resolve history, then resolve the
+/// planted transaction and outpoint from the same position-backed fixture.
+fn end_to_end_resolve(c: &mut Criterion) {
+    let fixture = build_fixture(8, TXS_PER_BLOCK_250K);
+    let Fixture {
+        indexer,
+        source,
+        target,
+        target_txid,
+        target_outpoint,
+        ..
+    } = fixture;
+    c.bench_function("end_to_end/indexed_history_transaction_outpoint", |b| {
+        b.iter(|| {
+            let history = indexer
+                .resolve_script_history(black_box(target), &source)
+                .expect("resolve history");
+            let transaction = indexer
+                .resolve_transaction(black_box(target_txid), &source)
+                .expect("resolve transaction");
+            let value = indexer
+                .resolve_outpoint_value(black_box(target_outpoint), &source)
+                .expect("resolve outpoint");
+            black_box((history, transaction, value));
+        });
+    });
+}
+
 fn history_resolve(c: &mut Criterion) {
     // Height sweep at the ~250 KB block shape: isolates the per-row cost, which
     // is what the position index removes.
@@ -344,6 +379,6 @@ criterion_group! {
     // Criterion default of 100 samples would put a single group in the tens of
     // seconds. 20 is enough to separate arms that differ by more than 1.05x.
     config = Criterion::default().sample_size(20);
-    targets = history_resolve
+    targets = history_resolve, end_to_end_resolve
 }
 criterion_main!(benches);
