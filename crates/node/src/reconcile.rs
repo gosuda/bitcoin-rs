@@ -95,7 +95,9 @@ impl index_reconcile::ActiveChainView for BlockTreeActiveChain<'_> {
 
     fn common_ancestor_height(&self, position: Hash256) -> Option<u32> {
         let position_id = self.tree.lookup(position)?;
-        let ancestor = self.tree.find_common_ancestor(position_id, self.active_tip)?;
+        let ancestor = self
+            .tree
+            .find_common_ancestor(position_id, self.active_tip)?;
         self.tree.node(ancestor).ok().map(|node| node.height)
     }
 }
