@@ -1,0 +1,73 @@
+name: Replay validated txindex split on current main
+on:
+  push:
+    branches: [automation/txindex-current-replay-20260911]
+permissions:
+  contents: write
+concurrency:
+  group: txindex-current-replay-20260911
+  cancel-in-progress: true
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/txindex-current-target
+          key: txindex-current-stable-${{ github.run_id }}
+          restore-keys: txindex-current-stable-
+      - name: Replay exact validated split, validate, and publish non-forced branch
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/txindex-current-target
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse origin/main)"
+          work="$RUNNER_TEMP/txindex-current-product"
+          product="refactor/node-split-current-txindex-20260911"
+          source_commit="312493827abb3c0f9ca67817604d040ff97eaa70"
+          git worktree add --detach "$work" "$base"
+          cd "$work"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git cherry-pick "$source_commit"
+          cargo fmt -p bitcoin-rs-node
+          if ! git diff --quiet; then
+            git add crates/node/src
+            git commit --amend --no-edit
+          fi
+          cargo fmt -p bitcoin-rs-node -- --check
+          git diff --check "$base" HEAD
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib txindex_worker:: -- --test-threads=1
+          if git ls-remote --exit-code --heads origin "refs/heads/$product" >/dev/null 2>&1; then
+            remote="$(git ls-remote --heads origin "refs/heads/$product" | cut -f1)"
+            git fetch origin "$remote"
+            test "$(git rev-parse "$remote^{tree}")" = "$(git rev-parse HEAD^{tree})"
+          else
+            git push origin "HEAD:refs/heads/$product"
+          fi
+          echo "PUBLISHED $product $(git rev-parse HEAD) BASE $base"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/txindex-current-target
+          key: txindex-current-stable-${{ github.run_id }}
