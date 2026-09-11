@@ -26,7 +26,6 @@ use bitcoin_rs_index::PreparedBatchLimits;
 use bitcoin_rs_index::recovery::open_writer;
 use bitcoin_rs_index::writer::TxIndexWriter;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use compact_str::CompactString;
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use std::path::Path;
@@ -133,16 +132,11 @@ pub(super) fn fail_worker(
     reason: &str,
 ) {
     runtime.publish_failed(reason);
-    if generation.is_revoked() {
-        return;
-    }
-    let reason = CompactString::from(reason);
-    lifecycle.rcu(|current| {
-        if generation.is_revoked() {
-            return Arc::clone(current);
-        }
-        Arc::new(TxIndexLifecycle::Failed(reason.clone()))
-    });
+    publish_lifecycle(
+        lifecycle,
+        generation,
+        TxIndexLifecycle::Failed(reason.into()),
+    );
 }
 
 /// Publishes a lifecycle transition with generation-checked `rcu`.

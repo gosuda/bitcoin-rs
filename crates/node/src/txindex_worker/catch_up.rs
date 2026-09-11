@@ -193,15 +193,7 @@ impl Worker {
                 }
                 Ok(None) => {
                     if !state.batch.is_empty() {
-                        let replacement = PendingForward {
-                            fence: state.fence,
-                            watermarks: state.watermarks,
-                            capabilities: state.capabilities,
-                            durable: state.durable,
-                            batch: PreparedBatch::new(self.batch_limits),
-                            deadline: state.deadline,
-                        };
-                        *pending = Some(std::mem::replace(state, replacement));
+                        *pending = Some(state.take(self.batch_limits));
                     }
                     return Ok(ChunkAction::Stalled);
                 }
@@ -272,16 +264,8 @@ impl Worker {
                 });
             }
             if state.batch.try_push(prepared).is_err() {
-                let replacement = PendingForward {
-                    fence: state.fence,
-                    watermarks: state.watermarks,
-                    capabilities: state.capabilities,
-                    durable: state.durable,
-                    batch: PreparedBatch::new(self.batch_limits),
-                    deadline: state.deadline,
-                };
                 return if self
-                    .sync_and_commit(std::mem::replace(state, replacement))?
+                    .sync_and_commit(state.take(self.batch_limits))?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -290,16 +274,8 @@ impl Worker {
                 };
             }
             if state.batch.is_full() {
-                let replacement = PendingForward {
-                    fence: state.fence,
-                    watermarks: state.watermarks,
-                    capabilities: state.capabilities,
-                    durable: state.durable,
-                    batch: PreparedBatch::new(self.batch_limits),
-                    deadline: state.deadline,
-                };
                 return if self
-                    .sync_and_commit(std::mem::replace(state, replacement))?
+                    .sync_and_commit(state.take(self.batch_limits))?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)

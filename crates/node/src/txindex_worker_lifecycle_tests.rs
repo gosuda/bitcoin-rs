@@ -115,3 +115,20 @@ fn generation_clone_shares_revocation() {
     generation_tok.revoke();
     assert!(gen_clone.is_revoked(), "clone must see revocation");
 }
+
+/// IDX-07: revocation fences publication, not this worker's failure signal.
+#[test]
+fn revoked_failure_stops_runtime_without_replacing_lifecycle_snapshot() {
+    let lifecycle = Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+    let before = lifecycle.load_full();
+    let generation = Generation::new(1);
+    let runtime = TxIndexRuntime::new(crossbeam_channel::bounded(1).0);
+    generation.revoke();
+    fail_worker(&runtime, &lifecycle, &generation, "detached failure");
+    assert!(runtime.should_stop());
+    assert_eq!(
+        runtime.failure_message().as_deref(),
+        Some("detached failure")
+    );
+    assert!(Arc::ptr_eq(&before, &lifecycle.load_full()));
+}
