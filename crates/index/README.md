@@ -24,6 +24,15 @@ store opens. Around the rows sit the stable types (`ScriptHash`, `HashPrefixRow`
 `HeaderRow`, `TxidRow`, `SpendingPrefixRow`), `MempoolRowWriter` for unconfirmed rows
 and generic script-history resolution.
 
+## Implementation boundaries
+
+`index.rs` is the public facade. Its private modules separate block preparation
+(`block`, `prepared`), canonical row mutation (`rows`), durable writes (`write`),
+and coherent fences/reset recovery (`state`). Read-side scans (`reader`,
+`snapshot`) and exact resolution (`resolve`) remain separate from mutations;
+`capability`, `format`, and `error` own shared representations and typed outcomes.
+Public paths and on-disk encodings do not depend on this layout.
+
 ## Features
 - `rocksdb`: enables the `RocksDB` backend in `bitcoin-rs-storage`
 - `fjall`: enables the fjall backend in `bitcoin-rs-storage`
