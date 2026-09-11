@@ -4,7 +4,10 @@ from pathlib import Path
 root = Path(__file__).resolve().parent
 path = root / 'refactor_patched.py'
 source = path.read_text()
-source = source.replace('    defined = {}\n', "    defined = {}\n    test_symbols = {name_of(source, node) for node, raw in parsed if is_test(raw)}\n")
+# A cfg(test) definition may have a cfg(not(test)) counterpart with the same
+# name. Such symbols remain available in production and must not be gated at
+# their import site. Only exclusively test-owned definitions receive a guard.
+source = source.replace('    defined = {}\n', "    defined = {}\n    test_symbols = {name_of(source, node) for node, raw in parsed if is_test(raw)} - {name_of(source, node) for node, raw in parsed if not is_test(raw)}\n")
 old = "guard = '#[cfg(test)]\\n' if owning_group == 'fixtures' and group != 'fixtures' else ''"
 new = "guard = '#[cfg(test)]\\n' if (owning_group == 'fixtures' or symbol in test_symbols) and group != 'fixtures' else ''"
 assert old in source
