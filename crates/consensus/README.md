@@ -25,8 +25,6 @@ variants.
 ## Features
 - `kernel` (default): routes script verification through
   [bitcoinkernel](../../CONCEPTS.md#bitcoinkernel)
-- `rocksdb`, `fjall`, `redb`: empty in this crate, accepted so workspace-wide feature
-  selection does not fail here
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
