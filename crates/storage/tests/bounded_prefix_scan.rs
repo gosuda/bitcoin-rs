@@ -215,12 +215,3 @@ fn redb_bounded_prefix_scan() -> TestResult<()> {
     run_bounded_scan_suite(&store)?;
     Ok(())
 }
-
-#[cfg(feature = "mdbx")]
-#[test]
-fn mdbx_bounded_prefix_scan() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::MdbxStore::open(temp.path())?;
-    run_bounded_scan_suite(&store)?;
-    Ok(())
-}

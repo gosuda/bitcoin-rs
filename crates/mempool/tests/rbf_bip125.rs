@@ -15,7 +15,9 @@ use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolStats, PolicyError, RbfError,
     ReplacementCandidate,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 
 #[derive(Clone, Copy)]
 struct OriginalSpec {
@@ -255,7 +257,7 @@ fn package_acceptance_surfaces_bip125_replacement_boundaries() -> Result<(), Box
         // P2WPKH scriptPubKey: OP_0 PUSHBYTES_20 <20-byte hash>
         let mut script = vec![0x00, 0x14];
         script.extend([0x02; 20]);
-        script
+        script.into()
     };
 
     let policy = StandardnessPolicy {
@@ -350,20 +352,20 @@ fn pool_with_conflict(
 fn tx_from_inputs(label: u8, inputs: &[(OutPoint, u32)], outputs: usize) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: inputs
             .iter()
             .map(|(previous_output, sequence)| TxIn {
                 previous_output: *previous_output,
-                script_sig: Vec::new(),
-                sequence: *sequence,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(*sequence),
+                witness: Witness::new(),
             })
             .collect(),
         outputs: (0..outputs)
             .map(|i| TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label, u8::try_from(i).unwrap_or(0)],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label, u8::try_from(i).unwrap_or(0)].into(),
             })
             .collect(),
     }
