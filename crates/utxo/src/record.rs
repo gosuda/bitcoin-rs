@@ -503,6 +503,12 @@ impl UtxoRecord {
         Ok(Self { buf })
     }
 
+    /// Reloads a record from its stored canonical bytes. A rejected row is
+    /// typed corruption, never a partially trusted record.
+    pub(crate) fn from_stored_bytes(bytes: &[u8]) -> Result<Self, UtxoError> {
+        Self::from_encoded(ThinRecordBuf::from_slice(bytes)?)
+    }
+
     /// Builds a record from snapshot-owned outputs in their serialized order.
     ///
     /// This is a snapshot/untrusted boundary, so the encoded payload is
@@ -911,7 +917,8 @@ impl UtxoRecord {
         true
     }
 
-    #[cfg(test)]
+    /// The canonical encoded bytes of this record: before/after images for
+    /// the persistence layer; reload goes through [`Self::from_stored_bytes`].
     pub(crate) fn encoded_bytes(&self) -> &[u8] {
         self.buf.as_bytes()
     }

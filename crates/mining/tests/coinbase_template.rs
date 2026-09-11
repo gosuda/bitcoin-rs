@@ -12,7 +12,10 @@ use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_mining::{
     CandidateContext, MiningError, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
 };
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, Wtxid,
+};
 
 #[test]
 fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), Box<dyn Error>> {
@@ -141,12 +144,115 @@ fn fee_overflow_is_reported_instead_of_wrapping() {
     assert_eq!(err, MiningError::FeeOverflow);
 }
 
+/// The reserved reorg batch must store resolved BIP141 cost all the way
+/// through the real gateway and mining snapshot; template selection consumes it.
+#[test]
+fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box<dyn Error>> {
+    use bitcoin::hashes::{hash160, sha256};
+    use bitcoin_rs_mempool::reconsider::DisconnectedCandidates;
+    use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits};
+
+    // Both scripts succeed without signatures. Sigops in an unexecuted branch
+    // are still counted: one legacy CHECKSIG costs 4, two-key witness multisig 2.
+    let redeem = vec![0x00, 0x63, 0xac, 0x68, 0x51];
+    let witness_script = vec![0x00, 0x63, 0x52, 0xae, 0x68, 0x51];
+    let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x44; 32])), 0);
+    let confirmed = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(
+            [
+                vec![0xa9, 0x14],
+                hash160::Hash::hash(&redeem).to_byte_array().to_vec(),
+                vec![0x87],
+            ]
+            .concat(),
+        ),
+    };
+    let parent = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: funding,
+            script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&redeem)),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(9_000),
+            script_pubkey: Script::from_bytes(
+                [
+                    vec![0x00, 0x20],
+                    sha256::Hash::hash(&witness_script).to_byte_array().to_vec(),
+                ]
+                .concat(),
+            ),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent.txid(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::from_stack(vec![witness_script]),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(8_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let mut batch = DisconnectedCandidates::new(0, 100);
+    assert!(batch.offer(&parent, |outpoint| {
+        (*outpoint == funding).then(|| confirmed.clone())
+    }));
+    assert!(batch.offer(&child, |_| None));
+    let gateway = MempoolGateway::shared(Arc::new(Mempool::new(MempoolLimits::default()).into()));
+    let transition = gateway.begin_chain_change()?;
+    assert!(gateway.stable_generation().is_none());
+    let changes = gateway.reconsider_disconnected(AdmissionOrigin::Reorg, batch.into_entries());
+    assert_eq!(changes.len(), 2);
+    transition.finish()?;
+    let snapshot = gateway.read().mining_snapshot();
+    assert_eq!(snapshot.entries.len(), 2);
+    assert_eq!(
+        snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.txid == parent.txid())
+            .ok_or("parent entry")?
+            .sigop_cost,
+        4
+    );
+    assert_eq!(
+        snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.txid == child.txid())
+            .ok_or("child entry")?
+            .sigop_cost,
+        2
+    );
+
+    let mut limited = context(101, true);
+    limited.max_sigops = 5;
+    let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
+    assert_eq!(candidate.transactions.len(), 1);
+    assert_eq!(candidate.transactions[0].txid, parent.txid());
+    assert_eq!(candidate.sigop_cost, 4);
+    limited.max_sigops = 6;
+    let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
+    assert_eq!(candidate.transactions.len(), 2);
+    assert_eq!(candidate.sigop_cost, 6);
+    Ok(())
+}
+
 fn context(height: u32, segwit_active: bool) -> CandidateContext {
     CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
         height,
         version: 0x2000_0000,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1_700_000_001,
         current_time: 1_700_000_600,
         locktime_cutoff: 1_700_000_000,
@@ -219,14 +325,14 @@ fn tx_with_witness(label: u8, value: u64, parent: Option<Txid>) -> Tx {
                 parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&bytes))),
                 0,
             ),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![vec![label; 32]],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: vec![vec![label; 32]].into(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
