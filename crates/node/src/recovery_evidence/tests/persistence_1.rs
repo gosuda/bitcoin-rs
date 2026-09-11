@@ -1,3 +1,5 @@
+// CONTRACT: `docs/contracts/recovery.md#RCV-12` owns bounded evidence I/O,
+// atomic marker publication, and warning-before-marker failure semantics.
 use super::*;
 
 // -----------------------------------------------------------------------
