@@ -98,11 +98,11 @@ impl MutationResult {
     /// The sequence assigned to `changes[index]`, when in bounds.
     #[must_use]
     pub fn sequence_of(&self, index: usize) -> Option<u64> {
-        if self.changes.is_empty() {
+        if index >= self.changes.len() {
             return None;
         }
         let offset = u64::try_from(index).ok()?;
-        self.sequence_base.checked_add(offset)
+        Some(self.sequence_base.wrapping_add(offset))
     }
 
     /// The txid of every change that left the pool, in commit order.
@@ -209,4 +209,50 @@ pub struct MutationEnvelope {
     pub origin: AdmissionOrigin,
     /// The committed mutation, in commit order.
     pub result: MutationResult,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // MPL-02 (docs/contracts/mempool-mutations.md): each emitted change owns
+    // one sequence; a position beyond that batch owns none.
+    #[test]
+    fn sequence_of_only_returns_sequences_for_committed_changes() {
+        let result = MutationResult {
+            changes: vec![change(&Txid::default(), MutationOutcome::Accepted); 3],
+            sequence_base: 41,
+        };
+        assert_eq!(result.sequence_of(0), Some(41));
+        assert_eq!(result.sequence_of(1), Some(42));
+        assert_eq!(result.sequence_of(2), Some(43));
+        for index in [result.len(), result.len() + 1, usize::MAX] {
+            assert_eq!(
+                result.sequence_of(index),
+                None,
+                "out-of-bounds index {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn sequence_of_wraps_for_an_in_bounds_change() {
+        let result = MutationResult {
+            changes: vec![change(&Txid::default(), MutationOutcome::Accepted); 2],
+            sequence_base: u64::MAX,
+        };
+        assert_eq!(result.sequence_of(0), Some(u64::MAX));
+        assert_eq!(result.sequence_of(1), Some(0));
+        assert_eq!(result.sequence_of(2), None);
+    }
+
+    // MPL-02 (docs/contracts/mempool-mutations.md): an empty mutation assigns
+    // no sequence, including at index zero.
+    #[test]
+    fn empty_mutation_has_no_sequence_at_any_index() {
+        let result = MutationResult::empty();
+        for index in [0, 1, usize::MAX] {
+            assert_eq!(result.sequence_of(index), None);
+        }
+    }
 }

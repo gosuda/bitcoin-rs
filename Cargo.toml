@@ -22,7 +22,7 @@ edition      = "2024"
 rust-version = "1.95.0"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/gosuda/bitcoin-rs"
-version      = "0.4.0"
+version      = "0.5.0"
 authors      = ["metaphorics"]
 
 # ============================================================================
@@ -35,19 +35,19 @@ authors      = ["metaphorics"]
 
 # Internal crates — `version` must match `[workspace.package].version` (gate g15).
 # Cargo cannot inherit `version` into `[workspace.dependencies]`; bump both together.
-bitcoin-rs-primitives = { path = "crates/primitives", version = "0.4.0" }
-bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.4.0", default-features = false }
-bitcoin-rs-script     = { path = "crates/script",     version = "0.4.0", default-features = false }
-bitcoin-rs-storage    = { path = "crates/storage",    version = "0.4.0", default-features = false }
-bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.4.0" }
-bitcoin-rs-chain      = { path = "crates/chain",      version = "0.4.0" }
-bitcoin-rs-index      = { path = "crates/index",      version = "0.4.0" }
+bitcoin-rs-primitives = { path = "crates/primitives", version = "0.5.0" }
+bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.5.0", default-features = false }
+bitcoin-rs-script     = { path = "crates/script",     version = "0.5.0", default-features = false }
+bitcoin-rs-storage    = { path = "crates/storage",    version = "0.5.0", default-features = false }
+bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.5.0" }
+bitcoin-rs-chain      = { path = "crates/chain",      version = "0.5.0" }
+bitcoin-rs-index      = { path = "crates/index",      version = "0.5.0" }
 
-bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.4.0" }
-bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.4.0" }
-bitcoin-rs-mining     = { path = "crates/mining",     version = "0.4.0" }
-bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.4.0" }
-bitcoin-rs-node       = { path = "crates/node",       version = "0.4.0", default-features = false }
+bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.5.0" }
+bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.5.0" }
+bitcoin-rs-mining     = { path = "crates/mining",     version = "0.5.0" }
+bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.5.0" }
+bitcoin-rs-node       = { path = "crates/node",       version = "0.5.0", default-features = false }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
@@ -78,7 +78,7 @@ secp256k1 = { version = ">=0.29.1, <0.30", default-features = false, features = 
 
 # sha2 0.11: default features are alloc+oid; no std/asm feature is exposed.
 sha2 = { version = ">=0.11, <0.12", default-features = false }
-bitcoin_hashes = { version = "0.14", default-features = false, features = [
+bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features = [
     "alloc", "std",
 ] }
 cap-std = "=4.0.2"
@@ -172,8 +172,6 @@ rust-rocksdb = { version = ">=0.50, <0.51", default-features = false, features =
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
-# MDBX via init4tech fork — no features exposed.
-signet-libmdbx = { version = ">=0.8.3, <0.9", default-features = false }
 
 # fjall 3.x line.
 fjall = { version = ">=3.1.4, <4", default-features = false, features = ["lz4"] }

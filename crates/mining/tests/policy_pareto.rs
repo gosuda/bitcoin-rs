@@ -8,7 +8,10 @@ use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot, SnapshotEntry,
 };
 use bitcoin_rs_mining::{CandidateContext, MiningError, assemble_candidate};
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness,
+};
 use proptest::prelude::*;
 
 #[test]
@@ -180,7 +183,7 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
 fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Error>> {
     let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
     let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
-    child_tx.inputs[0].sequence = 1;
+    child_tx.inputs[0].sequence = Sequence::from_consensus(1);
     let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
     let snapshot = MempoolMiningSnapshot {
         sequence: 12,
@@ -196,7 +199,7 @@ fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Err
 fn bip68_unmet_lock_is_ignored_when_csv_is_inactive() -> Result<(), Box<dyn Error>> {
     let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
     let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
-    child_tx.inputs[0].sequence = 1;
+    child_tx.inputs[0].sequence = Sequence::from_consensus(1);
     let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
     let snapshot = MempoolMiningSnapshot {
         sequence: 13,
@@ -374,11 +377,11 @@ fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<()
 #[test]
 fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
     let mut final_tx = independent_tx(1);
-    final_tx.lock_time = 0;
+    final_tx.lock_time = LockTime::ZERO;
     let mut non_final = independent_tx(2);
-    non_final.lock_time = 500_000_100;
+    non_final.lock_time = LockTime::from_consensus(500_000_100);
     for input in &mut non_final.inputs {
-        input.sequence = 0;
+        input.sequence = Sequence::ZERO;
     }
 
     let snapshot = MempoolMiningSnapshot {
@@ -434,7 +437,7 @@ fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Erro
     // limits so parent alone and parent+child both overflow, while `other` fits.
     let parent = snapshot_entry(Arc::new(independent_tx(1)), 100, 0, 99_600, 100, 0, vec![]);
     let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
-    child_tx.lock_time = 0;
+    child_tx.lock_time = LockTime::ZERO;
     let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 20_000, 100, 0, vec![1]);
     let other = snapshot_entry(Arc::new(independent_tx(3)), 1_000, 0, 400, 100, 0, vec![]);
 
@@ -501,7 +504,7 @@ fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext 
         previous_block_hash: Hash256::from_le_bytes(&[0xcd; 32]),
         height: 100,
         version: 0x2000_0000,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1,
         current_time: 2,
         locktime_cutoff: 1,
@@ -548,15 +551,15 @@ fn independent_tx(label: u8) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: outpoint(label),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -565,15 +568,15 @@ fn chained_tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent.unwrap_or_else(|| outpoint(label).txid), 0),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 

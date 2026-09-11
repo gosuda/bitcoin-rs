@@ -1,8 +1,13 @@
 # Indexing contract
 
+**Contract version: 1.1** (2025-02-14)
+
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
 rebuilds.
+
+This version adds the scheduling requirements in `IDX-08`; changes to those
+requirements must update this clause and its executable proof together.
 
 Owners:
 - `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
@@ -13,6 +18,20 @@ Owners:
   status enum.
 
 ## Clauses
+
+### `IDX-08`: Worker wake scheduling
+
+- A wake increments the runtime revision, while wake notifications are
+  coalesced: at most one notification need be queued, and a quiet wait observes
+  the latest revision rather than the number of notifications.
+- A shutdown request takes precedence over a quiet wait or an already-expired
+  batch deadline and returns the stopped result without waiting for a wake.
+- An expired batch deadline returns the deadline result without waiting for a
+  wake. A queued wake interrupts a non-expired wait and returns the woken
+  result without changing the deadline.
+
+These are behavioral requirements, not timing guarantees; test durations are
+only scheduling mechanics.
 
 ### `IDX-01`: Capability configuration and internal enablement
 
@@ -59,7 +78,7 @@ remove another script's output.
 ### `IDX-03`: Query gating and snapshot consistency
 
 - **Ready invariant**: `ready ⇔ cursor == applied_tip on active chain`.
-- `TxIndexQueryEngine::with_snapshot` and `index_info_internal` gate every read:
+- `TxIndexQueryEngine::with_snapshot` and `index_info` gate every read:
   1. The worker runtime must be healthy (neither `failed` nor `shutdown`).
   2. The applied tip loaded before snapshot creation must match the durable
      capability watermark (`IndexWatermark { height, hash }`) for every consumed
@@ -102,12 +121,40 @@ remove another script's output.
   `ConsumerCursor`).
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
+  `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
+  version, and the one recorded predecessor (format 3, spending keys without
+  positions) by resetting only `ScriptHistory` for rebuild (`IDX-04`); every
+  other version is `IndexError::UnsupportedTxIndexFormatVersion`.
 - On node startup, index workers read their persisted watermarks and reconcile
   against `NodeState::active_chain_snapshot()`:
   - If the watermark is an ancestor of the restored tip, the worker connects
     forward.
   - If the watermark is on an abandoned branch, the worker rolls back to the
     common ancestor and connects forward to the active tip.
+
+### `IDX-08`: Atomic commit durability and recovery
+
+- `IndexWriter` is the sole owner of index mutations. `commit_block` prepares
+  all rows and commits them together with the capability watermark in one
+  store batch; its successful return is the commit point and implies the rows
+  and watermark are durable according to the store's atomic-write guarantee.
+- A failed commit must be treated as ambiguous by callers: callers must not
+  retry blindly or mutate index column families themselves. The index worker
+  re-reads the persisted watermark and either retries from the last confirmed
+  contiguous height or resets and rebuilds the affected capability. Storage
+  errors are non-retriable by the indexing worker after supervision marks it
+  failed; recovery/rebuild owns the reset decision.
+- A crash before the atomic batch is visible leaves the previous watermark and
+  rows intact; a crash after visibility leaves both the rows and watermark.
+  Partial rows without the corresponding watermark are not queryable and are
+  reconciled on restart.
+
+### `IDX-09`: Canonical electrs row cardinality
+
+- A committed block emits the canonical electrs rows: one header row, one
+  transaction row per indexed transaction, and funding/spending rows for each
+  applicable output/input. The golden-row test is the retained contract test
+  for these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint and, when enabled,
   replays the journal's committed suffix (`docs/chainstate-recovery.md`) before
   `NodeState::start_index_workers()` spawns worker threads
@@ -130,7 +177,7 @@ remove another script's output.
     executing a long block-by-block rollback
     (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
 - **Connect walk**:
-  - The worker loads bodies from `PruneBodyStore`, constructs bounded forward
+  - The worker loads bodies from `BlockBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
     watermarks in a single atomic store batch per block or block chunk.
   - Live deletes are anchored by the block's authoritative undo scripts;
@@ -169,6 +216,9 @@ remove another script's output.
 - **Deep reorg memory bounding**: Disconnect planning preloads branch block bodies into memory; streaming bounded-memory disconnect is tracked under #206 (open).
 ## Proven by
 
+- `crates/index/tests/index_roundtrip.rs`
+  `commit_golden_blocks_writes_expected_electrs_rows`: electrs family
+  occupancy after one atomic `IndexWriter::commit_block` (`IDX-06`).
 - `crates/node/src/txindex_worker_recovery_tests.rs`:
   - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
   - `absent_tip_rewinds_index_to_empty`
