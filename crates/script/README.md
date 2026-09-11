@@ -24,9 +24,5 @@ leaves both stacks unchanged. A successful transfer preserves item identity
 and stack order without duplicating the item. This is an ownership and
 correctness contract, not a product performance claim.
 
-## Features
-
-- `rocksdb`, `fjall`, `redb`: no-op in this crate — this crate has no backend code; the names exist so the shared storage-backend features can be enabled uniformly across the workspace.
-
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
