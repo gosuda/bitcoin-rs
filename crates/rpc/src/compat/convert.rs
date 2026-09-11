@@ -65,16 +65,22 @@ pub(crate) fn sat_to_btc(sats: u64) -> f64 {
     signed_sat_to_btc(i128::from(sats))
 }
 
-/// Signed counterpart for fee fields that carry deltas.
+/// Saturates a signed satoshi value to the range of Core's `CAmount`.
 #[must_use]
-pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
-    let clamped = i64::try_from(sats).unwrap_or_else(|_| {
+pub(crate) fn signed_sat_to_i64(sats: i128) -> i64 {
+    i64::try_from(sats).unwrap_or_else(|_| {
         if sats.is_negative() {
             i64::MIN
         } else {
             i64::MAX
         }
-    });
+    })
+}
+
+/// Signed counterpart for fee fields that carry deltas.
+#[must_use]
+pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
+    let clamped = signed_sat_to_i64(sats);
     let magnitude = clamped.unsigned_abs();
     let high = u32::try_from(magnitude >> 32).unwrap_or(u32::MAX);
     let low = u32::try_from(magnitude & 0xffff_ffff).unwrap_or(u32::MAX);

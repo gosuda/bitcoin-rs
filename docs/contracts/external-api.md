@@ -18,7 +18,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 `prioritisetransaction` dust-output refusal. `API-25` is
 `getmininginfo` omitting unset optional fields. `API-26` is
 `estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-27` is
-`generateblock` txid and raw-tx parse errors.
+`generateblock` txid and raw-tx parse errors. `API-28` is
+`getprioritisedtransactions` `modified_fee` in satoshis.
 
 ## Clauses
 
@@ -432,6 +433,16 @@ owned by [wallet-facing.md](wallet-facing.md).
   `Transaction decode failed for {str}. Make sure the tx has at least one
   input.`
 
+
+### `API-28`: `getprioritisedtransactions` `modified_fee` is satoshis
+
+- **Owner**: `getprioritisedtransactions` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Core mining RPCs use satoshi amounts, not BTC. `fee_delta` is already
+  an integer satoshi overlay. `modified_fee` (actual fee plus delta,
+  present only when `in_mempool`) is the same unit: a JSON number in
+  satoshis, matching Core `CAmount`.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -597,5 +608,9 @@ owned by [wallet-facing.md](wallet-facing.md).
     `generateblock_rejects_unknown_mempool_txid_like_core`,
     `generateblock_rejects_undecodable_raw_tx_like_core`,
     `generateblock_keeps_raw_transactions`
+
+- `API-28`:
+  - `crates/rpc/src/handlers/mining.rs` test
+    `getprioritisedtransactions_projects_the_overlay`
 
 ## Vocabulary

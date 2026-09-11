@@ -143,7 +143,7 @@ declare_rows! {
     "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
     "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "See API-27 (docs/contracts/external-api.md) for transaction parsing and error semantics.", "0.4.0", Some(mining::generateblock);
     "getnetworkhashps", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
-    "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled.", "0.4.0", Some(mining::getprioritisedtransactions);
+    "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#API-28 for modified_fee units.", "0.4.0", Some(mining::getprioritisedtransactions);
 
     // -- JSON-RPC: bitcoin-rs extension ------------------------------
     "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/rpc/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
