@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::vec::Vec;
 
-use bitcoin_rs_primitives::{Block, BlockHash, Network, Tx, Txid};
+use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::Candidate;
@@ -105,7 +105,12 @@ pub struct BlockTemplate {
     /// Candidate fields the solver may mutate.
     pub mutable: Vec<TemplateMutation>,
     /// Whether work derived from the request's prior generation remains valid.
+    ///
+    /// Present after a long-poll wait. `true` means the previous template's
+    /// parent is still the applied tip (BIP23 `submitold`).
     pub submit_old: Option<bool>,
+    /// Signet challenge, present only on signet.
+    pub signet: Option<SignetMiningInfo>,
     /// Opaque server work identity when the producer requires one on submission.
     pub work_id: Option<CompactString>,
 }
@@ -160,7 +165,7 @@ pub struct MiningInfo {
     /// Most recently assembled candidate facts.
     pub last_candidate: Option<LastCandidateInfo>,
     /// Compact target bits of the applied tip.
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Difficulty represented by `bits`.
     pub difficulty: f64,
     /// Estimated network hashes per second.
@@ -170,7 +175,7 @@ pub struct MiningInfo {
     /// Active consensus network.
     pub network: Network,
     /// Compact target bits for the next candidate.
-    pub next_bits: u32,
+    pub next_bits: CompactTarget,
     /// Difficulty represented by `next_bits`.
     pub next_difficulty: f64,
     /// Configured minimum mining feerate in satoshis per kvB.
@@ -193,6 +198,11 @@ pub enum MiningControlError {
     /// Candidate construction, validation, or application failed operationally.
     #[error("{0}")]
     Failed(CompactString),
+    /// Consensus or contextual verification rejected the input.
+    ///
+    /// RPC projects this as Bitcoin Core `RPC_VERIFY_ERROR` (-25).
+    #[error("{0}")]
+    Rejected(CompactString),
 }
 
 /// One `generateblock` body transaction: a mempool txid or a decoded raw tx.
@@ -263,6 +273,12 @@ pub trait MiningControl: Send + Sync {
     /// Synchronously validates and applies a solved block.
     fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError>;
 
+    /// Admits a header through the same tree path as inbound P2P headers.
+    ///
+    /// The previous header must already be in the tree. Duplicates succeed.
+    /// Failures are [`MiningControlError::Rejected`] with Core reject reasons.
+    fn submit_header(&self, header: Header) -> Result<(), MiningControlError>;
+
     /// Publishes a completed authoritative mutation to template waiters.
     fn publish_generation(&self);
 
@@ -285,7 +301,8 @@ pub trait MiningControl: Send + Sync {
 
 /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
 #[must_use]
-pub fn difficulty_for_bits(consensus_bits: u32) -> f64 {
+pub fn difficulty_for_bits(consensus_bits: CompactTarget) -> f64 {
+    let consensus_bits = consensus_bits.to_consensus();
     let mantissa = consensus_bits & 0x00ff_ffff;
     if mantissa == 0 {
         return 0.0;
@@ -309,7 +326,9 @@ mod tests {
 
     #[test]
     fn difficulty_one_is_the_difficulty_1_target() {
-        let difficulty = difficulty_for_bits(0x1d00_ffff);
+        let difficulty = difficulty_for_bits(bitcoin_rs_primitives::CompactTarget::from_consensus(
+            0x1d00_ffff,
+        ));
         assert!(
             (difficulty - 1.0).abs() < f64::EPSILON,
             "0x1d00ffff must be difficulty 1, got {difficulty}"

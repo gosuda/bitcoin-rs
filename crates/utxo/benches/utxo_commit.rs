@@ -12,7 +12,7 @@ static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::hint::black_box;
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
@@ -73,8 +73,8 @@ fn txout(seed: u64) -> TxOut {
     script.extend_from_slice(&[0x00, 0x20]);
     script.extend_from_slice(&txid(seed).to_le_bytes());
     TxOut {
-        value: 5_000 + seed,
-        script_pubkey: script,
+        value: Amount::from_sat(5_000 + seed),
+        script_pubkey: script.into(),
     }
 }
 
@@ -140,15 +140,15 @@ fn synthetic_case(seed: u64, shape: ShardShape) -> (UtxoSet, BlockChanges) {
 
 fn spend_proxy_coinbase_txout() -> TxOut {
     TxOut {
-        value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-        script_pubkey: vec![0x51],
+        value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+        script_pubkey: vec![0x51].into(),
     }
 }
 
 fn spend_proxy_spend_txout() -> TxOut {
     TxOut {
-        value: SPEND_PROXY_SPEND_OUTPUT_VALUE,
-        script_pubkey: vec![0x51],
+        value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+        script_pubkey: vec![0x51].into(),
     }
 }
 

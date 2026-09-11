@@ -5,15 +5,21 @@
 pub mod index;
 /// Unconfirmed transaction row writing over the workspace key-value store.
 pub mod mempool;
+/// Derived-index reconciliation phase and exact capability watermark alignment.
+pub mod reconcile;
+/// Open-time recovery for disposable derived index storage.
+pub mod recovery;
 /// Stable electrs-shaped row types.
 pub mod types;
+/// Object-safe, fenced access to the durable index writer.
+pub mod writer;
 
 pub use index::{
     BlockSource, ConsumerCursorUpdate, INDEX_FORMAT_VERSION, IndexCapabilities, IndexCapability,
     IndexError, IndexFormat, IndexReader, IndexRowCounts, IndexWatermark, IndexWatermarks,
-    IndexWriteFence, IndexWriter, Indexer, IndexerLike, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts,
-    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHistoryEntry, ScriptLiveScan,
-    SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    IndexWriteFence, IndexWriter, Indexer, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch,
+    PreparedBatchLimits, PreparedBlock, ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts,
+    TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
 };
 pub use mempool::{MempoolRowCounts, MempoolRowWriter};
 pub use types::{
