@@ -3,8 +3,11 @@
 //! Reads the shared chainstate facade, peer table, and inbound channels
 //! and, when a peer reports a longer chain, sends `getheaders` toward
 //! that peer. Inbound `headers` batches are drained into the shared
-//! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
-//! [`crate::apply::apply_block`].
+//! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are staged in the
+//! P2P [`bitcoin_rs_p2p::BlockStager`] and applied through
+//! [`crate::apply::apply_block`]. The download window and staging policy live
+//! in `bitcoin-rs-p2p`; this module is the coordinator that routes peer
+//! events into that policy and committed blocks into chainstate.
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -15,7 +18,10 @@ use bitcoin::{
 
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
 
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
+use bitcoin_rs_p2p::{
+    BlockStager, DrainedBlock, InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource,
+    PeerTable, StagedBlock,
+};
 
 use bitcoin_rs_primitives::{Block, Hash256};
 
@@ -26,8 +32,6 @@ use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
 
 use parking_lot::Mutex;
-
-use self::stage::{BlockStager, DrainedBlock, StagedBlock};
 
 use smallvec::SmallVec;
 
@@ -51,8 +55,6 @@ pub use bitcoin_rs_p2p::download_window::{SyncBudget, default_sync_budget};
 #[cfg(test)]
 pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
 
-mod stage;
-
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
 
@@ -66,9 +68,10 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 
 /// Block download orchestrator.
 ///
-/// Owns the production [`DownloadWindow`]. Session identity stays on the
-/// shared [`PeerTable`]; this orchestrator calls identity-checked table
-/// methods. The P2P service does not hold a second window.
+/// Drives the P2P-owned [`DownloadWindow`] and [`BlockStager`]. Session
+/// identity stays on the shared [`PeerTable`]; this orchestrator calls
+/// identity-checked table methods. The P2P service does not hold a second
+/// window.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     followers: crate::chain_effects::ChainFollowers,
@@ -1888,27 +1891,14 @@ mod tests {
     use arc_swap::ArcSwapOption;
     // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_chain::BlockTree;
-    use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_chain::TipSnapshot;
-    use bitcoin_rs_mempool::Mempool;
-    use bitcoin_rs_mempool::MempoolLimits;
-    use bitcoin_rs_p2p::PeerInfo;
-    use bitcoin_rs_p2p::PeerLease;
-    use bitcoin_rs_p2p::PeerSource;
-    use bitcoin_rs_p2p::PeerTable;
-    use bitcoin_rs_primitives::Block;
-    use bitcoin_rs_primitives::BlockHash;
-    use bitcoin_rs_primitives::Hash256;
-    use bitcoin_rs_primitives::Header;
-    use bitcoin_rs_primitives::Network;
-    use bitcoin_rs_primitives::OutPoint;
-    use bitcoin_rs_primitives::Tx;
-    use bitcoin_rs_primitives::TxIn;
-    use bitcoin_rs_primitives::TxOut;
-    use bitcoin_rs_primitives::Txid;
-    use bitcoin_rs_primitives::consensus_bytes;
+    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
+    use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+    use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerSource, PeerTable, StagedBlock};
     use bitcoin_rs_primitives::encode::double_sha256;
+    use bitcoin_rs_primitives::{
+        Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
+        consensus_bytes,
+    };
     use bitcoin_rs_script::push_int;
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_utxo::UtxoSet;
@@ -3982,7 +3972,7 @@ mod tests {
             .block_stager
             .lock()
             .insert(hash, None, block, serialized, received_at);
-        let super::StagedBlock::Memory { bytes, .. } = staged else {
+        let StagedBlock::Memory { bytes, .. } = staged else {
             return Err(std::io::Error::other("test block should stage in memory").into());
         };
         sync.download_window
@@ -5846,43 +5836,6 @@ mod tests {
             return Err(std::io::Error::other("expected getdata").into());
         };
         assert_eq!(witness_block_inventory(inventory)?, alloc::vec![expected]);
-        Ok(())
-    }
-
-    #[test]
-    fn stager_evicts_same_height_fork_before_expected_hash()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let expected_hash = Hash256::from_le_bytes(&[0x11; 32]);
-        let fork_hash = Hash256::from_le_bytes(&[0x22; 32]);
-        let mut stager = super::BlockStager::new(super::SyncBudget {
-            max_received_blocks: 1,
-            max_received_bytes: usize::MAX,
-            ..super::default_sync_budget()
-        });
-        let now = Instant::now();
-        let block = Network::Regtest.genesis_block();
-        let serialized = bytes::Bytes::from(consensus_bytes(&block));
-
-        let super::StagedBlock::Memory { dropped, .. } = stager.insert(
-            fork_hash,
-            Some(expected_hash),
-            block.clone(),
-            serialized.clone(),
-            now,
-        ) else {
-            return Err(std::io::Error::other("fork block should stage").into());
-        };
-        assert!(dropped.is_empty());
-
-        let super::StagedBlock::Memory { dropped, .. } =
-            stager.insert(expected_hash, Some(expected_hash), block, serialized, now)
-        else {
-            return Err(std::io::Error::other("expected block should stage").into());
-        };
-        assert_eq!(dropped.len(), 1);
-        assert_eq!(dropped[0].hash, fork_hash);
-        assert_eq!(stager.received_len(), 1);
-        assert!(stager.contains(&expected_hash));
         Ok(())
     }
 
