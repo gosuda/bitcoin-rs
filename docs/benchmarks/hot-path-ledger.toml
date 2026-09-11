@@ -213,7 +213,7 @@ name = "frozen optional index posture"
 parent = "apply.commit"
 concurrency_group = "index-async"
 domains = ["offline", "p2p"]
-seams = ["crates/node/src/txindex/worker.rs", "crates/node/src/txindex/query.rs", "crates/index/src/index.rs"]
+seams = ["crates/node/src/txindex/reconciliation.rs", "crates/node/src/txindex/query.rs", "crates/index/src/index.rs"]
 disposition = "blocked"
 evidence = "Index posture is part of the product cell, owned with #46. Overlaps apply via index-async. Unmeasured."
 

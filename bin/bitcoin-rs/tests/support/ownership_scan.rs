@@ -21,9 +21,14 @@ const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
     // Mining RPC prioritisation through the handler's gateway view.
     ("crates/rpc/src/handlers/mining.rs", "ctx.mempool"),
     // Block apply evicts the block's transactions through the generation
-    // guarded gateway; this is the node's only production mutation site.
+    // guarded gateway, without introducing raw pool mutation.
     (
         "crates/node/src/apply/connect.rs",
+        "handles.mempool_gateway",
+    ),
+    // Reorg transaction reconsideration uses the same typed gateway owner.
+    (
+        "crates/node/src/reorg/execution.rs",
         "handles.mempool_gateway",
     ),
 ];
@@ -39,6 +44,7 @@ pub(crate) const MUTATING_METHODS: &[&str] = &[
     "insert_entry(",
     "replace_transaction(",
     "remove_for_block(",
+    "reconsider_disconnected(",
     "enforce_size_limit(",
     "evict_below_fee_rate(",
     "prioritise(",
@@ -348,26 +354,6 @@ fn is_authorized_gateway_call(
     lines: &[String],
     line_index: usize,
 ) -> bool {
-    if line[..method_pos].contains(".write(") {
-        return false;
-    }
-
-    let before = &line[..method_pos];
-    let receiver = match before.rfind('.') {
-        Some(dot_pos) => before[..dot_pos].trim(),
-        None => before.trim(),
-    };
-    let receiver = if receiver.is_empty() {
-        lines[..line_index]
-            .iter()
-            .rev()
-            .map(|previous| previous.trim())
-            .find(|previous| !previous.is_empty())
-            .unwrap_or("")
-    } else {
-        receiver
-    };
-
     let normalized_path = path.replace('\\', "/");
     AUTHORIZED_GATEWAY_CALLS
         .iter()
@@ -376,7 +362,31 @@ fn is_authorized_gateway_call(
                 || normalized_path
                     .strip_suffix(allowed_path)
                     .is_some_and(|prefix| prefix.ends_with('/'));
-            path_matches && receiver == *allowed_receiver
+            if !path_matches {
+                return false;
+            }
+
+            // Rustfmt can split both field access and the method call across
+            // lines. Read the masked code backwards, skipping only whitespace,
+            // and require the entire audited receiver rather than a suffix.
+            let mut before = line[..method_pos]
+                .chars()
+                .rev()
+                .chain(
+                    lines[..line_index]
+                        .iter()
+                        .rev()
+                        .flat_map(|previous| previous.chars().rev()),
+                )
+                .filter(|ch| !ch.is_whitespace());
+            before.next() == Some('.')
+                && allowed_receiver
+                    .chars()
+                    .rev()
+                    .all(|expected| before.next() == Some(expected))
+                && before
+                    .next()
+                    .is_none_or(|ch| ch != '.' && ch != '_' && ch.is_ascii_punctuation())
         })
 }
 
@@ -445,6 +455,51 @@ mod tests {
                 owner,
                 "handles.mempool_gateway.remove_for_block(origin, txs, txids, height);",
                 0,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "handles.mempool_gateway.reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());",
+                0,
+            ),
+            (
+                NON_OWNER,
+                "handles.mempool_gateway.reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());",
+                1,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "let _ = handles\n    .mempool_gateway\n    .reconsider_disconnected(origin, candidates);",
+                0,
+            ),
+            (
+                NON_OWNER,
+                "let _ = handles\n    .mempool_gateway\n    .reconsider_disconnected(origin, candidates);",
+                1,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "let _ = other\n    .mempool_gateway\n    .reconsider_disconnected(origin, candidates);",
+                1,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "other.handles\n    .mempool_gateway\n    .reconsider_disconnected(origin, candidates);",
+                1,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "other\u{301}handles.mempool_gateway.reconsider_disconnected(origin, candidates);",
+                1,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "handles.mempool_gateway.write()\n    .reconsider_disconnected(origin, candidates);",
+                1,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "other.mempool_gateway /* handles.mempool_gateway */\n    .reconsider_disconnected(origin, candidates);",
+                1,
             ),
             (
                 NON_OWNER,

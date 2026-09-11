@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.2** (2025-02-14)
+**Contract version: 1.1** (2025-02-14)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
@@ -10,18 +10,20 @@ This version adds the scheduling requirements in `IDX-08`; changes to those
 requirements must update this clause and its executable proof together.
 
 Owners:
-- `TxIndexRuntime` in `crates/node/src/txindex/runtime.rs` owns the process-local
-  revision, health, phase, and nonblocking wake signal.
-- `TxIndexQueryEngine` and the single-snapshot outer adapter in
-  `crates/node/src/txindex/query.rs` own query gating and the shared work budget;
-  `query/transactions.rs` and `query/scripts.rs` implement the bounded queries.
-- `Worker` in `crates/node/src/txindex/worker.rs` owns reconciliation execution;
-  `worker/reconcile.rs`, `worker/commit.rs`, and `forward.rs` keep rollback,
-  cursor/commit fences, and bounded forward preparation separate. Positional
-  reconciliation policy remains in `bitcoin_rs_index::reconcile`.
+- `TxIndexRuntime` in `crates/node/src/txindex/runtime.rs` and worker state in
+  `crates/node/src/txindex.rs`;
+  reconciliation, cursor commits, bounded preparation, and rollback in its
+  `reconciliation.rs`, `cursor.rs`, `catch_up.rs`, and `rollback.rs` modules.
+- `TxIndexQueryEngine` in `crates/node/src/txindex/query.rs` owns the shared
+  snapshot gate and public query entrypoints. Its `query/transactions.rs`,
+  `query/scripts.rs`, `query/block_source.rs`, and `query/budget.rs` modules own
+  exact transaction resolution, script traversal, block identity, and aggregate
+  work accounting respectively.
+- Worker supervision and backend opening in `txindex/lifecycle.rs` and
+  `txindex/startup.rs`; startup owns generation-checked publication.
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
 - Capability status: worker-owned `TxIndexLifecycle` in
-  `crates/node/src/txindex/lifecycle.rs` mapped by `TxIndexCapability` onto the
+  `crates/node/src/txindex.rs` mapped by `TxIndexCapability` onto the
   RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
   status enum.
 
@@ -40,14 +42,6 @@ Owners:
 
 These are behavioral requirements, not timing guarantees; test durations are
 only scheduling mechanics.
-
-### `IDX-10`: Block-body reader session
-
-- A forward reconciliation pass opens one `BlockBodyReader` session and uses
-  that session to prefetch and load each body it processes. It must not fall
-  back to direct `BlockBodyStore::load_block_body` calls during the pass.
-  The session may be reused across bounded batches, but each requested body
-  is prefetched and loaded exactly once.
 
 ### `IDX-01`: Capability configuration and internal enablement
 
@@ -253,3 +247,24 @@ remove another script's output.
 - `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
   `attached_source_is_the_worker_row`: `getcapabilities` advertises one
   txindex row from `txindex_status` (`IDX-02`).
+
+### Query-budget regression evidence
+
+`crates/node/src/txindex/query/budget/tests.rs` exercises the shared
+historical/live byte budget, independent row/scan/body-read admission limits,
+rejection of truncated scans, and non-consuming rejection of over-budget work
+(`IDX-03`, `CL-14`). No query limit or persisted representation changes.
+
+### Store-open cancellation evidence
+
+The store-open wait polls node shutdown, runtime stop, and generation revocation
+at bounded intervals. Once the helper has started, cancellation and timeout are
+typed abandoned-open outcomes: startup poisons the namespace before releasing
+the worker's claim. Cancellation before helper creation may release normally.
+These paths do not cancel the underlying storage-engine call.
+
+Evidence for `IDX-07` abandonment and `IDX-08` shutdown:
+`crates/node/src/txindex/startup/open_wait/tests.rs` covers bounded
+cancellation, deadline precedence, disconnection, and backend error propagation;
+`crates/node/src/txindex/startup/tests.rs` covers namespace poisoning and
+clean release. The query-budget limits and on-disk formats are unchanged.

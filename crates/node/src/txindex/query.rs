@@ -1,133 +1,25 @@
-//! Snapshot-gated queries and their shared bounded work budget.
+//! One snapshot gate for transaction, history, and live-view queries.
+//! Resolution and script traversal stay in private child modules; all public
+//! entrypoints retain health, revision, watermark, and chain-transition checks.
 
+use super::{
+    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, Hash256,
+    IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES,
+    Mutex, Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT,
+    QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, RwLock, ScriptHash, ScriptHistoryRecord,
+    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
+    TipSnapshot, Tx, TxIndexInfo, TxIndexQuery, TxIndexRuntime, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
+    record_at_height,
+};
+
+mod block_source;
+mod budget;
 mod scripts;
 mod transactions;
 
-use super::{lifecycle::TxIndexLifecycle, runtime::TxIndexRuntime, source::IndexBlockSource};
-use arc_swap::ArcSwap;
-use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
-use bitcoin_rs_index::{
-    IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, ScriptHash, TxIndexScan,
-    TxIndexScanRow, TxIndexSnapshot,
-};
-use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
-use bitcoin_rs_rpc::{
-    context::ScriptIndexQuery, context::ScriptIndexRecord, context::ScriptIndexSnapshot,
-    context::SpendingRecord, context::TxIndexInfo, context::TxIndexQuery, context::TxQueryError,
-};
-use bitcoin_rs_storage::PrefixScanLimit;
-use parking_lot::{Mutex, RwLock};
-use std::{sync::Arc, sync::atomic::Ordering};
-
-/// Stable outer query adapter constructed before backend open and before RPC
-/// context construction. Each method loads exactly one `ArcSwap` snapshot,
-/// holds that `Arc` for the complete request, and delegates to the captured
-/// query engine if a payload exists. It never reads lifecycle state and query
-/// payload from separate loads.
-#[derive(Clone)]
-pub(crate) struct TxIndexQueryAdapter {
-    lifecycle: Arc<ArcSwap<TxIndexLifecycle>>,
-}
-
-impl TxIndexQueryAdapter {
-    pub(crate) fn new(lifecycle: Arc<ArcSwap<TxIndexLifecycle>>) -> Self {
-        Self { lifecycle }
-    }
-
-    pub(super) fn load_engine(&self) -> Result<Arc<TxIndexQueryEngine>, TxQueryError> {
-        let snapshot = self.lifecycle.load_full();
-        match snapshot.query_payload() {
-            Some(engine) => Ok(Arc::clone(engine)),
-            None => Err(TxQueryError::Unavailable(
-                snapshot.unavailable_reason().into(),
-            )),
-        }
-    }
-}
-
-/// Bounded scan limits used by the query engine.
-///
-/// These are query-side safety limits, not the writer batch limits.
-const QUERY_SCAN_ROW_LIMIT: usize = 1_000_000;
-
-const QUERY_SCAN_BYTE_LIMIT: usize = 64 << 20;
-
-pub(super) const QUERY_SCAN_COUNT_LIMIT: usize = 4_096;
-
-const QUERY_BODY_READ_LIMIT: usize = 4_096;
-
-const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
-
-/// Aggregate work budget shared by every operation in one public query.
-pub(super) struct QueryBudget {
-    pub(super) remaining_rows: usize,
-    pub(super) remaining_bytes: usize,
-    pub(super) remaining_scans: usize,
-    pub(super) remaining_body_reads: usize,
-}
-
-impl QueryBudget {
-    pub(super) const fn new() -> Self {
-        Self {
-            remaining_rows: QUERY_SCAN_ROW_LIMIT,
-            remaining_bytes: QUERY_SCAN_BYTE_LIMIT,
-            remaining_scans: QUERY_SCAN_COUNT_LIMIT,
-            remaining_body_reads: QUERY_BODY_READ_LIMIT,
-        }
-    }
-
-    pub(super) fn next_scan_limit(&mut self) -> Result<PrefixScanLimit, TxQueryError> {
-        if self.remaining_scans == 0 || self.remaining_rows == 0 || self.remaining_bytes == 0 {
-            return Err(TxQueryError::Unavailable(
-                "txindex query work budget exhausted".into(),
-            ));
-        }
-        self.remaining_scans -= 1;
-        Ok(PrefixScanLimit {
-            max_rows: self.remaining_rows,
-            max_bytes: self.remaining_bytes,
-        })
-    }
-
-    pub(super) fn accept_scan(
-        &mut self,
-        scan: TxIndexScan,
-    ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
-        if !scan.complete {
-            return Err(TxQueryError::Unavailable(
-                "txindex prefix scan truncated".into(),
-            ));
-        }
-        if scan.rows.len() > self.remaining_rows || scan.encoded_bytes > self.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query work budget exceeded".into(),
-            ));
-        }
-        self.remaining_rows -= scan.rows.len();
-        self.remaining_bytes -= scan.encoded_bytes;
-        Ok(scan.rows)
-    }
-
-    pub(super) fn reserve_body_read(&mut self, max_bytes: usize) -> Result<(), TxQueryError> {
-        if self.remaining_body_reads == 0 || max_bytes > self.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query body budget exhausted".into(),
-            ));
-        }
-        self.remaining_body_reads -= 1;
-        Ok(())
-    }
-
-    pub(super) fn charge_body_bytes(&mut self, bytes: usize) -> Result<(), TxQueryError> {
-        if bytes > self.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query body budget exceeded".into(),
-            ));
-        }
-        self.remaining_bytes -= bytes;
-        Ok(())
-    }
-}
+pub(crate) use block_source::IndexBlockSource;
+use budget::QueryBudget;
 
 /// Authoritative Live query sources: capability selection, the UTXO set, and
 /// the chain-transition lock Live composition requires.
@@ -146,15 +38,15 @@ pub(crate) struct QueryEngineLive {
 /// `Retry`/`Unavailable` when the answer cannot be proven.
 #[derive(Clone)]
 pub(crate) struct TxIndexQueryEngine {
-    pub(super) runtime: Arc<TxIndexRuntime>,
-    pub(super) reader: Arc<dyn IndexReader>,
-    pub(super) block_source: IndexBlockSource,
-    pub(super) block_tree: Arc<RwLock<BlockTree>>,
-    pub(super) applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
-    pub(super) body_source: Option<Arc<dyn BlockBodySource>>,
-    pub(super) utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
-    pub(super) chain_transition: Option<Arc<Mutex<()>>>,
-    pub(super) enabled: IndexCapabilities,
+    runtime: Arc<TxIndexRuntime>,
+    reader: Arc<dyn IndexReader>,
+    block_source: IndexBlockSource,
+    block_tree: Arc<RwLock<BlockTree>>,
+    applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
+    body_source: Option<Arc<dyn BlockBodySource>>,
+    utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    chain_transition: Option<Arc<Mutex<()>>>,
+    enabled: IndexCapabilities,
 }
 
 impl core::fmt::Debug for TxIndexQueryEngine {
@@ -188,7 +80,7 @@ impl TxIndexQueryEngine {
         }
     }
 
-    pub(super) fn query_health(&self) -> Result<(), TxQueryError> {
+    fn query_health(&self) -> Result<(), TxQueryError> {
         if self.runtime.failed.load(Ordering::Acquire) {
             return Err(TxQueryError::Unavailable(
                 self.runtime
@@ -202,7 +94,7 @@ impl TxIndexQueryEngine {
         Ok(())
     }
 
-    pub(super) fn require_enabled(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
+    fn require_enabled(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
         if required.tx_lookup && !self.enabled.tx_lookup {
             return Err(TxQueryError::Unavailable("txindex is disabled".into()));
         }
@@ -217,11 +109,7 @@ impl TxIndexQueryEngine {
         Ok(())
     }
 
-    pub(super) fn with_snapshot<F, T>(
-        &self,
-        required: IndexCapabilities,
-        f: F,
-    ) -> Result<T, TxQueryError>
+    fn with_snapshot<F, T>(&self, required: IndexCapabilities, f: F) -> Result<T, TxQueryError>
     where
         F: for<'s> FnOnce(
             &'s dyn TxIndexSnapshot,
@@ -449,50 +337,5 @@ impl ScriptIndexQuery for TxIndexQueryEngine {
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget| self.spender_for(snapshot, tip, budget, &outpoint),
         )
-    }
-}
-
-impl TxIndexQuery for TxIndexQueryAdapter {
-    fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.transaction(txid)
-    }
-
-    fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.outpoint_value(outpoint)
-    }
-
-    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.transaction_height(txid)
-    }
-
-    fn index_info(&self) -> Result<TxIndexInfo, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.index_info()
-    }
-}
-
-impl ScriptIndexQuery for TxIndexQueryAdapter {
-    fn history_snapshot(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.history_snapshot(scripthash)
-    }
-
-    fn unspent_outputs(
-        &self,
-        scripthash: ScriptHash,
-    ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.unspent_outputs(scripthash)
-    }
-
-    fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
-        let engine = self.load_engine()?;
-        engine.spender(outpoint)
     }
 }

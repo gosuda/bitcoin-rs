@@ -1,10 +1,16 @@
-//! Shared revision, phase, health, and coalesced worker wakes.
+//! Revision, health, and bounded wake state shared with committed chain followers.
 
-use bitcoin_rs_index::{IndexCapabilities, reconcile::ReconcileLeg, reconcile::ReconcilePhase};
+use bitcoin_rs_index::{
+    IndexCapabilities,
+    reconcile::{ReconcileLeg, ReconcilePhase},
+};
 use compact_str::CompactString;
 use crossbeam_channel::Sender;
 use parking_lot::RwLock;
-use std::{sync::Arc, sync::atomic::AtomicBool, sync::atomic::AtomicU64, sync::atomic::Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
 /// `Chainstate`, the worker thread, and the query engine.
@@ -17,7 +23,6 @@ pub struct TxIndexRuntime {
     failure_message: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
-
 impl TxIndexRuntime {
     /// Creates a runtime attached to `wake_tx`.
     #[must_use]

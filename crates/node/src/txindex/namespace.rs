@@ -3,8 +3,9 @@
 //! An abandoned open permanently poisons its namespace. Only the matching
 //! generation may release or poison an active claim.
 
+use std::path::{Path, PathBuf};
+
 use hashbrown::HashMap;
-use std::{path::Path, path::PathBuf};
 
 /// Process-global namespace ownership state.
 #[derive(Debug)]

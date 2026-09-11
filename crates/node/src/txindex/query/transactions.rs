@@ -1,16 +1,13 @@
-//! Canonical block/transaction lookups sharing the query's work budget.
+//! Exact-identity block reads and transaction position verification.
 
-use super::{MAX_SERIALIZED_BLOCK_BYTES, QueryBudget, TxIndexQueryEngine};
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_index::{
-    TxIndexSnapshot,
-    types::{TxPosition, TxPositionValue},
+use super::{
+    Block, BlockHash, BlockTree, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint, QueryBudget,
+    TipSnapshot, Tx, TxIndexQueryEngine, TxIndexSnapshot, TxPosition, TxPositionValue,
+    TxQueryError, Txid, deserialize,
 };
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
-use bitcoin_rs_rpc::context::TxQueryError;
 
 impl TxIndexQueryEngine {
-    pub(in crate::txindex) fn resolve_hash_at_height(
+    pub(super) fn resolve_hash_at_height(
         &self,
         height: u32,
         tip: &TipSnapshot,
@@ -19,7 +16,7 @@ impl TxIndexQueryEngine {
         Self::hash_at_height(&tree, tip.tip_id, height).ok_or(TxQueryError::Retry)
     }
 
-    pub(in crate::txindex) fn hash_at_height(
+    fn hash_at_height(
         tree: &BlockTree,
         tip_id: bitcoin_rs_chain::NodeId,
         height: u32,
@@ -28,7 +25,7 @@ impl TxIndexQueryEngine {
         tree.node(node_id).ok().map(|n| n.hash)
     }
 
-    pub(in crate::txindex) fn resolve_block(
+    pub(super) fn resolve_block(
         &self,
         budget: &mut QueryBudget,
         height: u32,
@@ -40,7 +37,7 @@ impl TxIndexQueryEngine {
         Self::verify_block(&bytes, height, hash)
     }
 
-    pub(in crate::txindex) fn resolve_block_body_bytes(
+    fn resolve_block_body_bytes(
         &self,
         height: u32,
         hash: BlockHash,
@@ -59,11 +56,7 @@ impl TxIndexQueryEngine {
             })
     }
 
-    pub(in crate::txindex) fn verify_block(
-        bytes: &[u8],
-        height: u32,
-        hash: Hash256,
-    ) -> Result<Block, TxQueryError> {
+    fn verify_block(bytes: &[u8], height: u32, hash: Hash256) -> Result<Block, TxQueryError> {
         let block = deserialize::<Block>(bytes).map_err(|_| {
             TxQueryError::Storage(format!("corrupt serialized block at height {height}").into())
         })?;
@@ -76,7 +69,7 @@ impl TxIndexQueryEngine {
         Ok(block)
     }
 
-    pub(in crate::txindex) fn validated_positions(value: &[u8]) -> Option<&[TxPosition]> {
+    pub(super) fn validated_positions(value: &[u8]) -> Option<&[TxPosition]> {
         let positions = TxPositionValue::decode(value)?;
         let mut previous: Option<TxPosition> = None;
         for &position in positions {
@@ -95,7 +88,7 @@ impl TxIndexQueryEngine {
         Some(positions)
     }
 
-    pub(in crate::txindex) fn resolve_positioned_transaction(
+    pub(super) fn resolve_positioned_transaction(
         &self,
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
@@ -124,7 +117,7 @@ impl TxIndexQueryEngine {
         Ok(deserialize::<Tx>(&bytes).ok())
     }
 
-    pub(in crate::txindex) fn transaction_from_full_block(
+    fn transaction_from_full_block(
         &self,
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
@@ -139,7 +132,7 @@ impl TxIndexQueryEngine {
             .find(|transaction| transaction.txid() == *txid))
     }
 
-    pub(in crate::txindex) fn transaction_for(
+    pub(super) fn transaction_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         tip: &TipSnapshot,
@@ -159,7 +152,7 @@ impl TxIndexQueryEngine {
     /// not use, which is the price of not answering with an unverified row: a
     /// row surviving from a reorged block would otherwise name a height whose
     /// block never held the transaction.
-    pub(in crate::txindex) fn locate_transaction_for(
+    pub(super) fn locate_transaction_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         tip: &TipSnapshot,
@@ -202,7 +195,7 @@ impl TxIndexQueryEngine {
         Ok(None)
     }
 
-    pub(in crate::txindex) fn outpoint_value_for(
+    pub(super) fn outpoint_value_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         tip: &TipSnapshot,

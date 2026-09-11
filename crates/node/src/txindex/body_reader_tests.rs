@@ -1,8 +1,14 @@
-use super::*;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_primitives::{Network, consensus_bytes};
-use bitcoin_rs_storage::{StorageError, block_body::BlockBodyReader, block_body::BlockBodyStore};
-use std::{sync::atomic::AtomicUsize, sync::atomic::Ordering};
+use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::consensus_bytes;
+use bitcoin_rs_storage::StorageError;
+
+use super::*;
+use bitcoin_rs_storage::block_body::BlockBodyReader;
+use bitcoin_rs_storage::block_body::BlockBodyStore;
 
 struct SessionBodyStore {
     height: u32,
@@ -85,8 +91,6 @@ impl BlockBodyStore for SessionBodyStore {
     }
 }
 
-// Contract: docs/contracts/indexing.md, v1.2, IDX-10. A forward pass owns one
-// reader session, prefetches and loads each body once, and performs no direct loads.
 #[test]
 fn catch_up_uses_one_body_reader_session() -> Result<(), Box<dyn std::error::Error>> {
     let block = Network::Regtest.genesis_block();

@@ -161,11 +161,15 @@ mod tests {
         ),
         ("txindex.rs", include_str!("txindex.rs"), None),
         (
+            "txindex/startup.rs",
+            include_str!("txindex/startup.rs"),
+            None,
+        ),
+        (
             "txindex/lifecycle.rs",
             include_str!("txindex/lifecycle.rs"),
             None,
         ),
-        ("txindex/worker.rs", include_str!("txindex/worker.rs"), None),
         ("txindex/query.rs", include_str!("txindex/query.rs"), None),
     ];
 

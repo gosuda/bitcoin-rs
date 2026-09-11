@@ -1,15 +1,13 @@
-//! Bounded script history, live outputs, and spending projections.
+//! Script history, spending, and live-view reads under the shared snapshot gate.
 
-use super::{QueryBudget, TxIndexQueryEngine};
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_index::{ScriptHash, ScriptLiveScan, TxIndexScanRow, TxIndexSnapshot};
-use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
-use bitcoin_rs_rpc::context::{
-    ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError,
+use super::{
+    OutPoint, QueryBudget, ScriptHash, ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot,
+    ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexQueryEngine, TxIndexScanRow,
+    TxIndexSnapshot, TxQueryError, Txid,
 };
 
 impl TxIndexQueryEngine {
-    pub(in crate::txindex) fn scan_funding_rows(
+    fn scan_funding_rows(
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
@@ -21,7 +19,7 @@ impl TxIndexQueryEngine {
         budget.accept_scan(scan)
     }
 
-    pub(in crate::txindex) fn scan_spending_rows(
+    fn scan_spending_rows(
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
@@ -33,7 +31,7 @@ impl TxIndexQueryEngine {
         budget.accept_scan(scan)
     }
 
-    pub(in crate::txindex) fn scan_live_rows(
+    fn scan_live_rows(
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
@@ -42,22 +40,10 @@ impl TxIndexQueryEngine {
         let scan: ScriptLiveScan = snapshot
             .live_rows(scripthash, limit)
             .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
-        if !scan.complete {
-            return Err(TxQueryError::Unavailable(
-                "txindex live prefix scan truncated".into(),
-            ));
-        }
-        if scan.rows.len() > budget.remaining_rows || scan.encoded_bytes > budget.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query work budget exceeded".into(),
-            ));
-        }
-        budget.remaining_rows -= scan.rows.len();
-        budget.remaining_bytes -= scan.encoded_bytes;
-        Ok(scan.rows)
+        budget.accept_live_scan(scan)
     }
 
-    pub(in crate::txindex) fn collect_funding_outputs(
+    fn collect_funding_outputs(
         transaction: &Tx,
         height: u32,
         scripthash: ScriptHash,
@@ -76,7 +62,7 @@ impl TxIndexQueryEngine {
         Ok(outputs.len() != before)
     }
 
-    pub(in crate::txindex) fn funding_outputs_for(
+    fn funding_outputs_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         tip: &TipSnapshot,
@@ -124,7 +110,7 @@ impl TxIndexQueryEngine {
         Ok(outputs)
     }
 
-    pub(in crate::txindex) fn spender_for(
+    pub(super) fn spender_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         tip: &TipSnapshot,
@@ -162,7 +148,7 @@ impl TxIndexQueryEngine {
         Ok(None)
     }
 
-    pub(in crate::txindex) fn spending_input(
+    fn spending_input(
         transaction: &Tx,
         height: u32,
         outpoint: &OutPoint,
@@ -181,7 +167,7 @@ impl TxIndexQueryEngine {
         }))
     }
 
-    pub(in crate::txindex) fn history_snapshot_for(
+    pub(super) fn history_snapshot_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         tip: &TipSnapshot,
@@ -222,7 +208,7 @@ impl TxIndexQueryEngine {
         Ok(ScriptIndexSnapshot { history, funding })
     }
 
-    pub(in crate::txindex) fn unspent_outputs_for(
+    pub(super) fn unspent_outputs_for(
         &self,
         snapshot: &dyn TxIndexSnapshot,
         _tip: &TipSnapshot,

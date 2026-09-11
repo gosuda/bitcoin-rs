@@ -1,9 +1,9 @@
 //! Observable progress while a node-owned storage open is blocked.
 
-use std::{
-    sync::Arc, sync::atomic::AtomicBool, sync::atomic::Ordering, thread, thread::JoinHandle,
-    time::Duration, time::Instant,
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Heartbeat helper: emits a log line every 30 seconds while the worker's
 /// backend open is blocked. Observability only — not a timeout.

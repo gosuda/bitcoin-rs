@@ -1,12 +1,14 @@
-//! Durable rollback, live anchors, and cursor commit points.
+//! Fenced row/cursor commits and retained forward-batch settlement.
 
-use super::{CursorCommit, PendingForward, TxIndexWorkerError, Worker};
-use crate::txindex::forward::UndoScripts;
-use bitcoin_rs_index::{
-    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
-    IndexWriteFence, NoSpentScripts,
-};
-use bitcoin_rs_primitives::Hash256;
+use super::CursorCommit;
+use super::PendingForward;
+use super::TxIndexWorkerError;
+use super::Worker;
+use bitcoin_rs_index::ConsumerCursorUpdate;
+use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_index::IndexError;
+use bitcoin_rs_index::IndexWatermark;
+use bitcoin_rs_index::IndexWatermarks;
 
 impl Worker {
     /// Persists the consumer cursor once the rows provably mirror the live
@@ -58,97 +60,8 @@ impl Worker {
             Err(error) => Err(TxIndexWorkerError::Index(error)),
         }
     }
-    /// Rolls back one complete block for every selected capability.
-    pub(in crate::txindex) fn rollback_one(
-        &self,
-        fence: IndexWriteFence,
-        watermarks: IndexWatermarks,
-        capabilities: IndexCapabilities,
-        watermark: IndexWatermark,
-    ) -> Result<Option<IndexWatermark>, TxIndexWorkerError> {
-        let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
-        let body = self.load_body(watermark.height, watermark_hash)?;
-        let anchor = capabilities
-            .script_live
-            .then(|| self.live_anchor(watermark.height, watermark.hash))
-            .transpose()?;
 
-        let spent: &dyn bitcoin_rs_index::SpentCoinScripts =
-            anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
-
-        let prev = if watermark.height == 0 {
-            None
-        } else {
-            let prepared = self
-                .writer
-                .prepare_block_with_spent_scripts(
-                    capabilities,
-                    watermark.height,
-                    watermark.hash,
-                    &body,
-                    spent,
-                )
-                .map_err(TxIndexWorkerError::Index)?;
-            Some(IndexWatermark {
-                height: watermark.height.saturating_sub(1),
-                hash: prepared.parent_hash,
-            })
-        };
-
-        if self.runtime.should_stop() {
-            return Err(TxIndexWorkerError::Stopped);
-        }
-        let cursor = self.cursor_for_result(capabilities, prev, watermarks);
-        let cursor = cursor
-            .as_ref()
-            .map_or(ConsumerCursorUpdate::Clear, |bytes| {
-                ConsumerCursorUpdate::Set(bytes.as_slice())
-            });
-        self.writer
-            .commit_rollback_one_for_with_cursor_with_spent_scripts(
-                fence,
-                capabilities,
-                prev,
-                &body,
-                cursor,
-                spent,
-            )
-            .map_err(TxIndexWorkerError::Index)?;
-        Ok(prev)
-    }
-
-    pub(in crate::txindex) fn load_body(
-        &self,
-        height: u32,
-        hash: Hash256,
-    ) -> Result<Vec<u8>, TxIndexWorkerError> {
-        let Some(store) = self.body_store.as_ref() else {
-            return Err(TxIndexWorkerError::NoBodyStore);
-        };
-        store
-            .load_block_body(height, hash)
-            .map_err(TxIndexWorkerError::Storage)?
-            .ok_or(TxIndexWorkerError::MissingBody { height, hash })
-    }
-
-    pub(in crate::txindex) fn live_anchor(
-        &self,
-        height: u32,
-        hash_bytes: [u8; 32],
-    ) -> Result<UndoScripts, TxIndexWorkerError> {
-        let hash = Hash256::from_le_bytes(&hash_bytes);
-        let Some(store) = self.body_store.as_ref() else {
-            return Err(TxIndexWorkerError::NoBodyStore);
-        };
-        let bytes = store
-            .undo_record(height, hash)
-            .map_err(TxIndexWorkerError::Storage)?
-            .ok_or(TxIndexWorkerError::UndoUnavailable { height, hash })?;
-        UndoScripts::from_undo_bytes(&bytes, hash)
-            .map_err(|_| TxIndexWorkerError::UndoUnavailable { height, hash })
-    }
-
-    pub(in crate::txindex) fn sync_and_commit(
+    pub(super) fn sync_and_commit(
         &self,
         state: PendingForward,
     ) -> Result<Option<IndexWatermark>, TxIndexWorkerError> {
@@ -196,7 +109,7 @@ impl Worker {
         Ok(Some(watermark))
     }
 
-    pub(in crate::txindex) fn cursor_for_result(
+    pub(super) fn cursor_for_result(
         &self,
         capabilities: IndexCapabilities,
         result: Option<IndexWatermark>,
@@ -222,7 +135,7 @@ impl Worker {
         aligned.then(|| crate::reconcile::cursor_from_snapshot(&snapshot).to_bytes())
     }
 
-    pub(in crate::txindex) fn commit_pending(
+    pub(super) fn commit_pending(
         &self,
         pending: &mut Option<PendingForward>,
     ) -> Result<bool, TxIndexWorkerError> {

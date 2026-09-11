@@ -1,14 +1,12 @@
-//! Canonical index block-source adaptation.
+//! Resolve block bodies against captured chain identity, never height alone.
 
-use bitcoin_rs_chain::{BlockBodySource, BlockTree};
-use bitcoin_rs_index::BlockSource;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, deserialize};
-use bitcoin_rs_rpc::{context::BlockLog, context::record_at_height};
-use parking_lot::RwLock;
-use std::sync::Arc;
+use super::{
+    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, Hash256, RwLock,
+    deserialize, record_at_height,
+};
 
-/// Node adapter for the index-owned `BlockSource` contract: active-chain
-/// identity from the tree and bodies from the chain body store.
+/// Private index-side `BlockSource`: active-chain identity from the tree,
+/// bodies from the chain body store. Not a node-owned concept.
 #[derive(Clone)]
 pub(crate) struct IndexBlockSource {
     blocks: Arc<RwLock<BlockLog>>,

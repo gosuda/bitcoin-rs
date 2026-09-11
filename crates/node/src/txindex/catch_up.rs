@@ -1,102 +1,33 @@
-//! Bounded body preparation and contiguous forward-batch admission.
+//! Bounded body-reader sessions, parallel preparation, and ordered batch admission.
 
-use super::{
-    worker::PendingForward, worker::ReconcileAction, worker::TxIndexWorkerError, worker::Worker,
-};
+use super::BlockIdentity;
+use super::ChunkAction;
+use super::IDENTITY_CHUNK_BLOCKS;
+use super::POSITION_PREFETCH_BLOCKS;
+use super::PREPARE_CHUNK_BLOCKS;
+use super::PREPARE_CHUNK_BYTES;
+use super::PendingForward;
+use super::ReconcileAction;
+use super::TxIndexWorkerError;
+use super::Worker;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_index::{
-    IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks, IndexWriteFence,
-    NoSpentScripts, PreparedBatch, PreparedBlock,
-};
+use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_index::IndexError;
+use bitcoin_rs_index::IndexWatermark;
+use bitcoin_rs_index::IndexWatermarks;
+use bitcoin_rs_index::IndexWriteFence;
+use bitcoin_rs_index::NoSpentScripts;
+use bitcoin_rs_index::PreparedBatch;
+use bitcoin_rs_index::PreparedBlock;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::block_body::BlockBodyReader;
 use rayon::prelude::*;
 use std::time::Instant;
 
-/// Exact spent-coin script anchor decoded from one block's undo record.
-///
-/// The undo restores are precisely the external coins spent by the block and
-/// carry their full `script_pubkey`. Intra-block spends are absent because
-/// those outputs never entered the committed UTXO set.
-pub(crate) struct UndoScripts {
-    scripts: hashbrown::HashMap<([u8; 32], u32), Vec<u8>>,
-}
-
-impl UndoScripts {
-    pub(crate) fn from_undo_bytes(
-        bytes: &[u8],
-        hash: Hash256,
-    ) -> Result<Self, bitcoin_rs_utxo::undo_codec::UndoCodecError> {
-        let batch = bitcoin_rs_utxo::undo_codec::decode(bytes, hash)?;
-        let mut scripts = hashbrown::HashMap::with_capacity(batch.restores().len());
-        for add in batch.restores() {
-            scripts.insert(
-                (add.outpoint.txid.0.to_le_bytes(), add.outpoint.vout),
-                add.txout.script_pubkey.as_bytes().to_vec(),
-            );
-        }
-        Ok(Self { scripts })
-    }
-}
-
-impl bitcoin_rs_index::SpentCoinScripts for UndoScripts {
-    fn script_bytes(&self, txid: &[u8; 32], vout: u32) -> Option<&[u8]> {
-        self.scripts.get(&(*txid, vout)).map(Vec::as_slice)
-    }
-}
-
 impl Worker {
-    pub(super) fn forward_selection(
-        &self,
-        watermarks: IndexWatermarks,
-        target: &TipSnapshot,
-    ) -> Option<(IndexCapabilities, Option<IndexWatermark>)> {
-        let tx = self.enabled.tx_lookup.then_some(watermarks.tx_lookup);
-        let script_index = self
-            .enabled
-            .script_history
-            .then_some(watermarks.script_history);
-        let script_live = self.enabled.script_live.then_some(watermarks.script_live);
-        let needs_forward = |watermark: Option<IndexWatermark>| {
-            watermark.is_none_or(|watermark| watermark.height < target.height)
-        };
-        let start_height = |watermark: Option<IndexWatermark>| {
-            watermark.map_or(0, |watermark| watermark.height.saturating_add(1))
-        };
-        let selected_start = [tx, script_index, script_live]
-            .into_iter()
-            .flatten()
-            .filter(|watermark| needs_forward(*watermark))
-            .map(start_height)
-            .min()?;
-        let selected_watermark = if selected_start == 0 {
-            None
-        } else {
-            let height = selected_start - 1;
-            [tx, script_index, script_live]
-                .into_iter()
-                .flatten()
-                .flatten()
-                .find(|watermark| watermark.height == height)
-        };
-        Some((
-            IndexCapabilities {
-                tx_lookup: tx.is_some_and(|watermark| {
-                    needs_forward(watermark) && start_height(watermark) == selected_start
-                }),
-                script_history: script_index.is_some_and(|watermark| {
-                    needs_forward(watermark) && start_height(watermark) == selected_start
-                }),
-                script_live: script_live.is_some_and(|watermark| {
-                    needs_forward(watermark) && start_height(watermark) == selected_start
-                }),
-            },
-            selected_watermark,
-        ))
-    }
     /// Copies one bounded chunk of active-chain identities under one short
     /// read lock.
-    fn collect_target_chain(
+    pub(super) fn collect_target_chain(
         &self,
         target: &TipSnapshot,
         start_height: u32,
@@ -228,7 +159,7 @@ impl Worker {
     /// was requested, `Progressed` if the batch filled and was committed, or
     /// `Continue` to keep processing.
     #[allow(clippy::too_many_lines)]
-    fn prepare_and_admit_chunk(
+    pub(super) fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],
         body_reader: &mut Box<dyn BlockBodyReader + '_>,
@@ -262,15 +193,7 @@ impl Worker {
                 }
                 Ok(None) => {
                     if !state.batch.is_empty() {
-                        let replacement = PendingForward {
-                            fence: state.fence,
-                            watermarks: state.watermarks,
-                            capabilities: state.capabilities,
-                            durable: state.durable,
-                            batch: PreparedBatch::new(self.batch_limits),
-                            deadline: state.deadline,
-                        };
-                        *pending = Some(std::mem::replace(state, replacement));
+                        *pending = Some(state.take(self.batch_limits));
                     }
                     return Ok(ChunkAction::Stalled);
                 }
@@ -341,16 +264,8 @@ impl Worker {
                 });
             }
             if state.batch.try_push(prepared).is_err() {
-                let replacement = PendingForward {
-                    fence: state.fence,
-                    watermarks: state.watermarks,
-                    capabilities: state.capabilities,
-                    durable: state.durable,
-                    batch: PreparedBatch::new(self.batch_limits),
-                    deadline: state.deadline,
-                };
                 return if self
-                    .sync_and_commit(std::mem::replace(state, replacement))?
+                    .sync_and_commit(state.take(self.batch_limits))?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -359,16 +274,8 @@ impl Worker {
                 };
             }
             if state.batch.is_full() {
-                let replacement = PendingForward {
-                    fence: state.fence,
-                    watermarks: state.watermarks,
-                    capabilities: state.capabilities,
-                    durable: state.durable,
-                    batch: PreparedBatch::new(self.batch_limits),
-                    deadline: state.deadline,
-                };
                 return if self
-                    .sync_and_commit(std::mem::replace(state, replacement))?
+                    .sync_and_commit(state.take(self.batch_limits))?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -380,6 +287,7 @@ impl Worker {
         *identities = &identities[loaded..];
         Ok(ChunkAction::Continue)
     }
+
     pub(super) fn finish_catch_up(
         &self,
         state: PendingForward,
@@ -414,35 +322,4 @@ impl Worker {
             Ok(ReconcileAction::Stalled)
         }
     }
-}
-
-const IDENTITY_CHUNK_BLOCKS: u32 = 65_536;
-
-const POSITION_PREFETCH_BLOCKS: usize = 65_536;
-
-/// In-memory parallel-prepare cap owned by this worker. 256 matches the IBD
-/// download window so a filled staging set can prepare in one pass when bodies
-/// are small; catch-up also prepares already-stored bodies, so this is not
-/// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
-const PREPARE_CHUNK_BLOCKS: usize = 256;
-
-/// Serialized-body budget for one parallel prepare step. Later bodies are not
-/// retained once this bound would be exceeded. Stops a 1 MiB-class window from
-/// holding 256 bodies in RAM while still packing early-chain blocks up to the
-/// count cap.
-const PREPARE_CHUNK_BYTES: usize = 32 << 20;
-
-/// Identity of one block on the active chain, captured under a short tree lock.
-#[derive(Clone, Copy, Debug)]
-struct BlockIdentity {
-    height: u32,
-    hash: [u8; 32],
-    parent_hash: [u8; 32],
-}
-
-/// Outcome of one sub-chunk prepare-and-admit step.
-enum ChunkAction {
-    Continue,
-    Stalled,
-    Progressed,
 }
