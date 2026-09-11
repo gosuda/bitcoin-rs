@@ -81,6 +81,7 @@ impl GenerationKey {
 #[derive(Debug)]
 struct InFlight {
     key: GenerationKey,
+    id: u64,
     result: Option<Result<Arc<Candidate>, MiningControlError>>,
 }
 
@@ -93,6 +94,8 @@ struct CoordinatorState {
     cache_order: VecDeque<TemplateId>,
     /// Single in-flight assembly, if any.
     in_flight: Option<InFlight>,
+    /// Monotonically increasing identity for each installed flight.
+    next_flight_id: u64,
     /// Facts from the most recently assembled candidate.
     last_candidate: Option<LastCandidateInfo>,
 }
@@ -104,6 +107,7 @@ impl CoordinatorState {
             cache: HashMap::new(),
             cache_order: VecDeque::new(),
             in_flight: None,
+            next_flight_id: 0,
             last_candidate: None,
         }
     }

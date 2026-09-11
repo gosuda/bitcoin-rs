@@ -115,10 +115,11 @@ impl MempoolSequenceWake for MiningCoordinator {
 }
 
 pub(super) fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
-    if id.len() < 65 {
+    let hash_hex = id.get(..64)?;
+    let sequence = id.get(64..)?;
+    if sequence.is_empty() {
         return None;
     }
-    let (hash_hex, sequence) = id.split_at(64);
     let tip_hash = Hash256::from_str_be(hash_hex).ok()?;
     let mempool_sequence = sequence.parse().ok()?;
     Some(GenerationKey {

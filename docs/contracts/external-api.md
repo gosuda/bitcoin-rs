@@ -224,6 +224,7 @@ The wallet-facing subset of this surface is owned by
   is not emitted.
 - On signet, the template carries `signet` in `rules` (mandatory) and
   `signet_challenge`. Other networks omit `signet_challenge`.
+  - Malformed `longpollid` values, including invalid UTF-8 split boundaries, are rejected without panicking.
 
 ### `API-13`: `submitheader`
 
