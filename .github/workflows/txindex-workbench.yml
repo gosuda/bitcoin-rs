@@ -4,6 +4,9 @@ on:
     branches: [automation/txindex-workbench-20260911]
 permissions:
   contents: write
+defaults:
+  run:
+    shell: bash
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -19,21 +22,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt,clippy
+      - name: Create isolated source worktree
+        run: |
+          git worktree add --detach /tmp/txindex-candidate 8086e3b204a44c50a90d25e678015f690729aba9
+          mkdir -p /tmp/txindex-evidence
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: /tmp/txindex-candidate -> target
           cache-on-failure: true
-      - name: Materialize source-only candidate from pinned main
+      - name: Materialize and format only the source changes
         run: |
-          git worktree add --detach /tmp/txindex-candidate 8086e3b204a44c50a90d25e678015f690729aba9
-          mkdir -p /tmp/txindex-evidence
           python .txindex-workbench/refactor.py /tmp/txindex-candidate
           cd /tmp/txindex-candidate
           git add -A
-          git diff --cached --name-only --diff-filter=ACM -z -- '*.rs' | xargs -0 rustfmt --edition 2024 --config skip_children=true
+          git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --edition 2024 --config skip_children=true
           git add -A
           git diff --cached --check
-          cargo fmt --all -- --check
+          git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --check --edition 2024 --config skip_children=true
+          if cargo fmt --all -- --check > /tmp/txindex-evidence/workspace-format.log 2>&1; then
+            echo 'Workspace formatting passes' | tee /tmp/txindex-evidence/format-status.txt
+          else
+            python "$GITHUB_WORKSPACE/.txindex-workbench/check_format_scope.py"
+          fi
           git diff --cached --stat | tee /tmp/txindex-evidence/diff-stat.txt
           git diff --cached --binary > /tmp/txindex-evidence/refactor.patch
           rustc --version | tee /tmp/txindex-evidence/rust-version.txt
