@@ -1,11 +1,11 @@
-name: Integrate validated reorg split with current apply
+name: Integrate validated reorg split with current main
 on:
   push:
     branches: [automation/reorg-current-apply-20260911]
 permissions:
   contents: write
 concurrency:
-  group: reorg-current-apply-20260911
+  group: reorg-current-main-20260911
   cancel-in-progress: true
 jobs:
   validate-and-update:
@@ -23,48 +23,47 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          toolchain: '1.95.0'
+          toolchain: stable
           components: rustfmt,clippy
       - uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ${{ runner.temp }}/reorg-current-target
-          key: reorg-current-rust195-${{ github.run_id }}
-          restore-keys: reorg-current-rust195-
-      - name: Merge current apply head, validate exact stack, and fast-forward reorg branch
+          key: reorg-current-stable-${{ github.run_id }}
+          restore-keys: reorg-current-stable-
+      - name: Merge current main, validate exact integration, and fast-forward reorg branch
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/reorg-current-target
         shell: bash
         run: |
           set -euo pipefail
-          base=refactor/node-split-c4dd58-apply
           product=refactor/node-split-c4dd58-reorg
-          git fetch origin "$base" "$product"
+          git fetch origin main "$product"
           work="$RUNNER_TEMP/reorg-current-product"
           git worktree add --detach "$work" "origin/$product"
           cd "$work"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           old="$(git rev-parse HEAD)"
-          git merge --no-ff --no-edit "origin/$base"
-          cargo +1.95.0 fmt -p bitcoin-rs-node
+          git merge --no-ff --no-edit origin/main
+          cargo fmt -p bitcoin-rs-node
           if ! git diff --quiet; then
-            git add crates/node/src
+            git add crates/node/src docs/contracts
             git commit --amend --no-edit
           fi
-          cargo +1.95.0 fmt -p bitcoin-rs-node -- --check
-          git diff --check "origin/$base" HEAD
-          cargo +1.95.0 clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
-          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib reorg:: -- --test-threads=1
-          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib apply:: -- --test-threads=1
+          cargo fmt -p bitcoin-rs-node -- --check
+          git diff --check origin/main HEAD
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib reorg:: -- --test-threads=1
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib apply:: -- --test-threads=1
           git merge-base --is-ancestor "$old" HEAD
           git push origin "HEAD:refs/heads/$product"
-          echo "UPDATED $product $(git rev-parse HEAD) FROM $old BASE $(git rev-parse origin/$base)"
+          echo "UPDATED $product $(git rev-parse HEAD) FROM $old MAIN $(git rev-parse origin/main)"
       - uses: actions/cache/save@v4
         if: always()
         with:
           path: |
             ~/.cargo/registry
             ${{ runner.temp }}/reorg-current-target
-          key: reorg-current-rust195-${{ github.run_id }}
+          key: reorg-current-stable-${{ github.run_id }}
