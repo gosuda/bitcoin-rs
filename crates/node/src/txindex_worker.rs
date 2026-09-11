@@ -510,6 +510,19 @@ impl PendingForward {
         };
         watermark
     }
+
+    /// Transfers retained rows without changing their fence or flush deadline.
+    fn take(&mut self, limits: PreparedBatchLimits) -> Self {
+        let replacement = Self {
+            fence: self.fence,
+            watermarks: self.watermarks,
+            capabilities: self.capabilities,
+            durable: self.durable,
+            batch: PreparedBatch::new(limits),
+            deadline: self.deadline,
+        };
+        std::mem::replace(self, replacement)
+    }
 }
 
 /// Identity of one block on the active chain, captured under a short tree lock.
