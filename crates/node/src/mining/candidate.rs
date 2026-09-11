@@ -10,6 +10,7 @@ use super::MAX_BLOCK_WEIGHT;
 use super::MiningCoordinator;
 use super::control::signet_info;
 use super::hex_encode;
+use super::submission::test_block_validity_error;
 use alloc::sync::Arc;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
@@ -31,6 +32,8 @@ use bitcoin_rs_mining::MiningRule;
 use bitcoin_rs_mining::TemplateMutation;
 use bitcoin_rs_mining::assemble_candidate;
 use bitcoin_rs_mining::assemble_ordered_candidate;
+use bitcoin_rs_mining::solve_block;
+use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::consensus_bytes;
@@ -273,14 +276,17 @@ impl MiningCoordinator {
 
     /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
     ///
-    /// Each submitted block is applied through `apply::apply_block` before the
-    /// next iteration; that is the commit point (`ARCH-07`). Failure after *N*
-    /// accepted submissions leaves those *N* blocks durable at the applied tip.
-    /// `submit = false` dry-validates through `apply::validate_block` and does
-    /// not persist. The result vector grows one block at a time, so `count` cannot
-    /// force a large allocation up front. Callers own retry after inspecting the
-    /// tip. [`MiningControlError::InvalidRequest`] is not retriable without
-    /// changing the request; `Unavailable` and `Failed` may be retried.
+    /// `generateblock` (`GenerateSelection::Ordered`) runs Core's
+    /// `TestBlockValidity` before the nonce search (`API-30`).
+    /// `generatetoaddress` (`Mempool`) does not. Each submitted block is
+    /// applied through `apply::apply_block` before the next iteration; that
+    /// is the commit point (`ARCH-07`). Failure after *N* accepted submissions
+    /// leaves those *N* blocks durable at the applied tip. `submit = false`
+    /// dry-validates through `apply::validate_block` and does not persist.
+    /// The result vector grows one block at a time, so `count` cannot force a
+    /// large allocation up front. Callers own retry after inspecting the tip.
+    /// [`MiningControlError::InvalidRequest`] is not retriable without changing
+    /// the request; `Unavailable` and `Failed` may be retried.
     pub(super) fn generate_blocks(
         &self,
         request: &GenerateRequest,
@@ -301,7 +307,12 @@ impl MiningCoordinator {
                 )));
             }
             let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
-            let block = candidate.solve(request.max_tries).map_err(|error| {
+            let mut block = candidate.into_unsolved_block();
+            if matches!(request.selection, GenerateSelection::Ordered(_)) {
+                // CONTRACT: docs/contracts/external-api.md#API-30
+                self.test_generateblock_validity(&block)?;
+            }
+            solve_block(&mut block, request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
             if request.submit {
@@ -327,6 +338,19 @@ impl MiningCoordinator {
             });
         }
         Ok(generated)
+    }
+
+    /// Core `generateblock` `TestBlockValidity` before `GenerateBlock`.
+    ///
+    /// `ApplyIntent::Propose` already skips hash-meets-target. This path does
+    /// not use [`Self::propose`], which owns GBT `LookupBlockIndex` duplicate
+    /// vocabulary (`API-18`).
+    /// CONTRACT: docs/contracts/external-api.md#API-30
+    fn test_generateblock_validity(&self, block: &Block) -> Result<(), MiningControlError> {
+        match self.apply_handles.validate_block(block) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(test_block_validity_error(error)),
+        }
     }
 
     pub(super) fn template_from_candidate(
