@@ -13,8 +13,16 @@ use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
+
 const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
+
 const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
+
+const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
+
+const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
+
+const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
@@ -97,6 +105,11 @@ impl RpcServer {
     }
 
     fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+        // Connection-local: a nodelay failure must not stop the accept loop.
+        if let Err(error) = configure_rpc_stream(&stream) {
+            debug!(%error, "rpc connection dropped: nodelay");
+            return Ok(());
+        }
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
@@ -129,6 +142,12 @@ impl RpcServer {
     }
 }
 
+/// Applies HTTP-session socket policy: `TCP_NODELAY` so a small response is
+/// not delayed by Nagle after the status line.
+fn configure_rpc_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)
+}
+
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
@@ -136,6 +155,7 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
 ) -> io::Result<()> {
+    configure_rpc_stream(&stream)?;
     stream.set_read_timeout(Some(idle_timeout))?;
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(stream);
@@ -152,54 +172,69 @@ fn serve_connection(
             }
         };
         let keep_alive = request.keep_alive;
-        match classify(&request.method, &request.path) {
-            HttpRoute::Rest { path, query } => {
-                let response = crate::rest::route(handler.context(), path, query, rest_enabled);
-                write_response(reader.get_mut(), &response, keep_alive)?;
-            }
-            HttpRoute::EsploraGet { path, query } => {
-                let response = crate::esplora::route(handler, path, query);
-                write_response(reader.get_mut(), &response, keep_alive)?;
-            }
-            HttpRoute::EsploraPost { path } => {
-                match crate::esplora::route_post(handler, path, &request.body) {
-                    Some(response) => {
-                        write_response(reader.get_mut(), &response, keep_alive)?;
-                    }
-                    None => {
-                        write_status(reader.get_mut(), 404, "Not Found", b"not found", keep_alive)?;
-                    }
-                }
-            }
-            HttpRoute::JsonRpc => {
-                if !auth.validate_header(request.authorization.as_deref()) {
-                    write_status(
-                        reader.get_mut(),
-                        401,
-                        "Unauthorized",
-                        b"unauthorized",
-                        false,
-                    )?;
-                    return Ok(());
-                }
-                let response = handle_json(handler, &request.body);
-                if let Some(body) = response.body.as_ref() {
-                    write_json(
-                        reader.get_mut(),
-                        response.status,
-                        response.reason,
-                        body,
-                        keep_alive,
-                    )?;
-                } else {
-                    write_status(reader.get_mut(), 204, "No Content", b"", keep_alive)?;
-                }
-            }
+        if dispatch_http_request(reader.get_mut(), &request, auth, handler, rest_enabled)? {
+            return Ok(());
         }
         if !keep_alive {
             return Ok(());
         }
     }
+}
+
+fn dispatch_http_request(
+    stream: &mut TcpStream,
+    request: &HttpRequest,
+    auth: &Auth,
+    handler: &Handler,
+    rest_enabled: bool,
+) -> io::Result<bool> {
+    let keep_alive = request.keep_alive;
+    match classify(&request.method, &request.path) {
+        HttpRoute::Rest { path, query } => {
+            let response = crate::rest::route(handler.context(), path, query, rest_enabled);
+            write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
+        }
+        HttpRoute::EsploraGet {
+            surface,
+            path,
+            query,
+        } => {
+            let esplora_surface = esplora_surface(surface);
+            let response = crate::esplora::route(handler, esplora_surface, path, query);
+            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+        }
+        HttpRoute::EsploraPost { surface, path } => {
+            let esplora_surface = esplora_surface(surface);
+            let response =
+                crate::esplora::route_post(handler, esplora_surface, path, &request.body);
+            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+        }
+        HttpRoute::Preflight { surface } => {
+            let response = crate::rest::Response {
+                status: 204,
+                reason: "No Content",
+                content_type: "text/plain",
+                body: Vec::new(),
+            };
+            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+        }
+        HttpRoute::NotFound => {
+            write_not_found(stream, keep_alive)?;
+        }
+        HttpRoute::JsonRpc => {
+            if !auth.validate_header(request.authorization.as_deref()) {
+                write_status(stream, 401, "Unauthorized", b"unauthorized", false)?;
+                return Ok(true);
+            }
+            let response = handle_json(handler, &request.body);
+            if let Some(body) = response.body.as_ref() {
+                write_json(stream, response.status, response.reason, body, keep_alive)?;
+            } else {
+                write_status(stream, 204, "No Content", b"", keep_alive)?;
+            }
+        }
+    }
+    Ok(false)
 }
 
 struct HttpRequest {
@@ -208,6 +243,54 @@ struct HttpRequest {
     authorization: Option<String>,
     keep_alive: bool,
     body: Vec<u8>,
+}
+
+/// Reads header lines until the blank terminator, enforcing the header size
+/// ceiling and capturing the three headers the demux consumes.
+fn read_headers(
+    reader: &mut BufReader<TcpStream>,
+    mut header_bytes: usize,
+) -> io::Result<(usize, Option<usize>, Option<String>, bool)> {
+    let mut content_length = None;
+    let mut authorization = None;
+    let mut keep_alive = false;
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "headers ended early",
+            ));
+        }
+        header_bytes = header_bytes.saturating_add(line.len());
+        if header_bytes > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "headers too large",
+            ));
+        }
+        if line == "\r\n" {
+            return Ok((header_bytes, content_length, authorization, keep_alive));
+        }
+        let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            let parsed = value.parse::<usize>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
+            })?;
+            if parsed > MAX_BODY_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
+            }
+            content_length = Some(parsed);
+        } else if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("connection") {
+            keep_alive = value.eq_ignore_ascii_case("keep-alive");
+        }
+    }
 }
 
 fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequest>> {
@@ -237,63 +320,46 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
+    if method.is_empty()
+        || !method.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
         ));
     }
-    let mut header_bytes = request_line.len();
-    let mut content_length = None;
-    let mut authorization = None;
-    let mut keep_alive = false;
-    loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "headers ended early",
-            ));
-        }
-        header_bytes = header_bytes.saturating_add(line.len());
-        if header_bytes > MAX_HEADER_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
-        }
-        if line == "\r\n" {
-            break;
-        }
-        let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
-        };
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            let parsed = value.parse::<usize>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
-            })?;
-            if parsed > MAX_BODY_BYTES {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
-            }
-            content_length = Some(parsed);
-        } else if name.eq_ignore_ascii_case("authorization") {
-            authorization = Some(value.to_owned());
-        } else if name.eq_ignore_ascii_case("connection") {
-            keep_alive = value.eq_ignore_ascii_case("keep-alive");
-        }
-    }
+    let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
 
+    // A POST without Content-Length is a framing error: the JSON-RPC path is
+    // body-carrying by definition. Other methods reach the demux and 404 there.
     let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
-        (_, Some(length)) => length,
-        (_, None) => {
+        ("POST", None) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "missing content-length",
             ));
         }
+        (_, Some(len)) => len,
+        (_, None) => 0,
     };
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
@@ -504,12 +570,15 @@ fn write_status(
     body: &[u8],
     keep_alive: bool,
 ) -> io::Result<()> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
-        body.len()
-    )?;
+    let head = ResponseHead {
+        status,
+        reason,
+        content_type: "application/json",
+        content_length: body.len(),
+        keep_alive,
+        cors_policy: CorsPolicy::Disabled,
+    };
+    write_headers(stream, &head)?;
     stream.write_all(body)?;
     stream.flush()
 }
@@ -519,42 +588,176 @@ fn split_path_query(path: &str) -> (&str, &str) {
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
-/// Listener directories. JSON-RPC owns `/`; Esplora owns `/api` and `/esplora`;
-/// Core REST owns `/rest/`.
+/// Listener directories; see `docs/contracts/wallet-facing.md` WF-02.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
-    Rest { path: &'a str, query: &'a str },
-    EsploraGet { path: &'a str, query: &'a str },
-    EsploraPost { path: &'a str },
+    Rest {
+        path: &'a str,
+        query: &'a str,
+    },
+    EsploraGet {
+        surface: HttpSurface,
+        path: &'a str,
+        query: &'a str,
+    },
+    EsploraPost {
+        surface: HttpSurface,
+        path: &'a str,
+    },
+    Preflight {
+        surface: HttpSurface,
+    },
+    NotFound,
     JsonRpc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpSurface {
+    EsploraPublic,
+    EsploraBackend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CorsPolicy {
+    Disabled,
+    Public {
+        methods: &'static [&'static str],
+        headers: &'static [&'static str],
+        expose: &'static [&'static str],
+    },
+}
+
+impl HttpSurface {
+    const fn cors_policy(self) -> CorsPolicy {
+        match self {
+            Self::EsploraPublic => CorsPolicy::Public {
+                methods: PUBLIC_ESPLORA_METHODS,
+                headers: PUBLIC_ESPLORA_HEADERS,
+                expose: PUBLIC_ESPLORA_EXPOSE_HEADERS,
+            },
+            Self::EsploraBackend => CorsPolicy::Disabled,
+        }
+    }
 }
 
 fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
-    match method {
-        "GET" if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
-        "GET" => HttpRoute::EsploraGet { path, query },
-        _ if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraPost { path },
-        _ => HttpRoute::JsonRpc,
+    if path.starts_with("/rest/") {
+        return if method == "GET" {
+            HttpRoute::Rest { path, query }
+        } else {
+            HttpRoute::NotFound
+        };
     }
+    if let Some((surface, rest)) = crate::esplora::namespace(path) {
+        let surface = match surface {
+            crate::esplora::Surface::Public => HttpSurface::EsploraPublic,
+            crate::esplora::Surface::Backend => HttpSurface::EsploraBackend,
+        };
+        let path = if rest.is_empty() { "/" } else { rest };
+        match method {
+            "GET" => HttpRoute::EsploraGet {
+                surface,
+                path,
+                query,
+            },
+            "POST" => HttpRoute::EsploraPost { surface, path },
+            "OPTIONS" if surface == HttpSurface::EsploraPublic => HttpRoute::Preflight { surface },
+            _ => HttpRoute::NotFound,
+        }
+    } else {
+        match method {
+            "POST" => HttpRoute::JsonRpc,
+            _ => HttpRoute::NotFound,
+        }
+    }
+}
+fn esplora_surface(surface: HttpSurface) -> crate::esplora::Surface {
+    match surface {
+        HttpSurface::EsploraPublic => crate::esplora::Surface::Public,
+        HttpSurface::EsploraBackend => crate::esplora::Surface::Backend,
+    }
+}
+
+fn write_not_found(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
+    write_response(
+        stream,
+        &crate::rest::Response {
+            status: 404,
+            reason: "Not Found",
+            content_type: "text/plain",
+            body: b"not found".to_vec(),
+        },
+        keep_alive,
+        CorsPolicy::Disabled,
+    )
 }
 
 fn write_response(
     stream: &mut TcpStream,
     response: &crate::rest::Response,
     keep_alive: bool,
+    cors_policy: CorsPolicy,
 ) -> io::Result<()> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    write!(
-        stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
-        response.status,
-        response.reason,
-        response.content_type,
-        response.body.len()
-    )?;
+    let head = ResponseHead {
+        status: response.status,
+        reason: response.reason,
+        content_type: response.content_type,
+        content_length: response.body.len(),
+        keep_alive,
+        cors_policy,
+    };
+    write_headers(stream, &head)?;
     stream.write_all(&response.body)?;
     stream.flush()
+}
+
+struct ResponseHead<'a> {
+    status: u16,
+    reason: &'a str,
+    content_type: &'a str,
+    content_length: usize,
+    keep_alive: bool,
+    cors_policy: CorsPolicy,
+}
+
+fn write_headers(stream: &mut TcpStream, head: &ResponseHead<'_>) -> io::Result<()> {
+    let connection = if head.keep_alive {
+        "keep-alive"
+    } else {
+        "close"
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
+        head.status, head.reason, head.content_type
+    )?;
+    if let CorsPolicy::Public {
+        methods,
+        headers,
+        expose,
+    } = head.cors_policy
+    {
+        write!(stream, "Access-Control-Allow-Origin: *\r\n")?;
+        write_header_list(stream, "Access-Control-Allow-Methods", methods)?;
+        write_header_list(stream, "Access-Control-Allow-Headers", headers)?;
+        write_header_list(stream, "Access-Control-Expose-Headers", expose)?;
+    }
+    if head.status != 204 {
+        write!(stream, "Content-Length: {}\r\n", head.content_length)?;
+    }
+    write!(stream, "Connection: {connection}\r\n\r\n")
+}
+
+fn write_header_list(stream: &mut TcpStream, name: &str, values: &[&str]) -> io::Result<()> {
+    write!(stream, "{name}: ")?;
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            write!(stream, ", ")?;
+        }
+        write!(stream, "{value}")?;
+    }
+    write!(stream, "\r\n")
 }
 
 #[cfg(test)]
@@ -564,6 +767,19 @@ mod tests {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::context::Context;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    #[test]
+    fn configure_rpc_stream_disables_nagle() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        configure_rpc_stream(&client).expect("configure client");
+        configure_rpc_stream(&server).expect("configure server");
+        assert!(client.nodelay().expect("client nodelay"));
+        assert!(server.nodelay().expect("server nodelay"));
+    }
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -599,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_splits_rest_esplora_and_json_rpc() {
+    fn wf_02_classify_splits_rest_esplora_and_json_rpc() {
         assert_eq!(
             classify("GET", "/rest/chaininfo.json"),
             HttpRoute::Rest {
@@ -610,36 +826,202 @@ mod tests {
         assert_eq!(
             classify("GET", "/api/blocks/tip/height"),
             HttpRoute::EsploraGet {
-                path: "/api/blocks/tip/height",
+                surface: HttpSurface::EsploraPublic,
+                path: "/blocks/tip/height",
                 query: ""
             }
         );
         assert_eq!(
             classify("GET", "/esplora/internal/mempool/txs?max_txs=1"),
             HttpRoute::EsploraGet {
-                path: "/esplora/internal/mempool/txs",
+                surface: HttpSurface::EsploraBackend,
+                path: "/internal/mempool/txs",
                 query: "max_txs=1"
             }
         );
         assert_eq!(
             classify("POST", "/api/tx"),
-            HttpRoute::EsploraPost { path: "/api/tx" }
+            HttpRoute::EsploraPost {
+                surface: HttpSurface::EsploraPublic,
+                path: "/tx"
+            }
         );
         assert_eq!(
             classify("POST", "/esplora/internal/txs"),
             HttpRoute::EsploraPost {
-                path: "/esplora/internal/txs"
+                surface: HttpSurface::EsploraBackend,
+                path: "/internal/txs"
             }
         );
-        assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
-        assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
         assert_eq!(
             classify("GET", "/blocks/tip/height"),
+            HttpRoute::NotFound,
+            "unprefixed GET is not Esplora"
+        );
+        assert_eq!(
+            classify("HEAD", "/api/tx"),
+            HttpRoute::NotFound,
+            "HEAD /api/tx must not run POST /tx"
+        );
+        assert_eq!(
+            classify("PUT", "/"),
+            HttpRoute::NotFound,
+            "non-POST methods are not JSON-RPC"
+        );
+        assert_eq!(
+            classify("GET", "/api/v1/block-height/0"),
             HttpRoute::EsploraGet {
-                path: "/blocks/tip/height",
+                surface: HttpSurface::EsploraPublic,
+                path: "/v1/block-height/0",
                 query: ""
+            },
+            "GET /api/v1 stays in the closed /api directory (404 inside Esplora)"
+        );
+        assert_eq!(
+            classify("POST", "/api/v1/tx"),
+            HttpRoute::EsploraPost {
+                surface: HttpSurface::EsploraPublic,
+                path: "/v1/tx"
             }
         );
+        assert_eq!(
+            classify("OPTIONS", "/api/blocks/tip/height"),
+            HttpRoute::Preflight {
+                surface: HttpSurface::EsploraPublic
+            }
+        );
+        assert_eq!(
+            classify("OPTIONS", "/esplora/internal/txs"),
+            HttpRoute::NotFound
+        );
+        assert_eq!(
+            classify("OPTIONS", "/rest/chaininfo.json"),
+            HttpRoute::NotFound
+        );
+        assert_eq!(classify("OPTIONS", "/"), HttpRoute::NotFound);
+        assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
+        assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
+        assert_eq!(classify("GET", "/blocks/tip/height"), HttpRoute::NotFound);
+    }
+
+    /// WF-02: a body-carrying POST without Content-Length is a framing
+    /// error, not an empty JSON-RPC request.
+    #[test]
+    fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            4,
+            core::time::Duration::from_millis(500),
+            false,
+        )?;
+        let addr = server.listener.local_addr()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+
+        let mut stream = TcpStream::connect(addr)?;
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )?;
+        stream.flush()?;
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf)?;
+        let text = String::from_utf8_lossy(&buf);
+        let code: u16 = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|token| token.parse().ok())
+            .expect("HTTP status");
+        // The connection-level framing error surfaces as a bad-request-class
+        // response before any JSON-RPC authentication or parsing runs.
+        assert!(
+            (400..500).contains(&code) && code != 401,
+            "expected a framing error status, got {code}"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        drop(handle.join().expect("server thread"));
+        Ok(())
+    }
+
+    #[test]
+    fn listener_directory_table_is_closed_over_http() -> std::io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            4,
+            core::time::Duration::from_millis(500),
+            false,
+        )?;
+        let addr = server.listener.local_addr()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+
+        let status = |method: &str, path: &str| -> std::io::Result<u16> {
+            let mut stream = TcpStream::connect(addr)?;
+            write!(
+                stream,
+                "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )?;
+            stream.flush()?;
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf)?;
+            let text = String::from_utf8_lossy(&buf);
+            let code = text
+                .split_whitespace()
+                .nth(1)
+                .and_then(|token| token.parse().ok())
+                .expect("HTTP status");
+            Ok(code)
+        };
+
+        assert_eq!(status("GET", "/blocks/tip/height")?, 404);
+        assert_eq!(status("HEAD", "/api/tx")?, 404);
+        assert_eq!(status("PUT", "/")?, 404);
+        assert_eq!(status("POST", "/")?, 401);
+        assert_eq!(status("GET", "/api/blocks/tip/height")?, 200);
+
+        shutdown.store(true, Ordering::Release);
+        handle.join().expect("join serve thread")?;
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_method_is_404_at_listener() -> std::io::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            serve_connection(
+                stream,
+                &auth,
+                &handler,
+                false,
+                core::time::Duration::from_secs(1),
+            )
+        });
+
+        let mut client = TcpStream::connect(address)?;
+        client.write_all(b"HEAD /api/tx HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        thread
+            .join()
+            .expect("listener thread")
+            .expect("serve request");
+        Ok(())
     }
 
     #[test]
