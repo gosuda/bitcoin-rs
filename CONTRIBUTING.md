@@ -162,9 +162,15 @@ The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
 Each lane also runs G20 against the mutated lockfile. Optional native
 storage backends are owned by the named feature matrix, not this script.
 
-The main workflow also checks individual features with `cargo-hack` (its
-`feature-combinations` job). The full-feature dependency audit runs in the
-`deny` job of `ci.yml` on every push to `main`.
+### Feature combinations
+
+The supported combinations are the rows in
+`scripts/feature-matrix.tsv`, not a feature powerset:
+
+```sh
+scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for kernel)
+scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
+```
 
 ## Architecture and crate hierarchy
 
