@@ -33,6 +33,7 @@ jobs:
       - name: Materialize and format only the source changes
         run: |
           python .txindex-workbench/refactor.py /tmp/txindex-candidate
+          python .txindex-workbench/finalize.py /tmp/txindex-candidate
           cd /tmp/txindex-candidate
           git add -A
           git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --edition 2024 --config skip_children=true
