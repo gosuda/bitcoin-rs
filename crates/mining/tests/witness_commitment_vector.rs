@@ -18,7 +18,10 @@ use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_mining::{
     CandidateContext, WITNESS_RESERVED_VALUE, assemble_candidate, witness_commitment_script,
 };
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, consensus_bytes,
+};
 use bitcoin_rs_script::count_tx_legacy;
 
 /// Pinned commitment bytes for the vector below, derived by piping
@@ -102,7 +105,7 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         .iter()
         .find(|output| output.script_pubkey == script)
         .ok_or("coinbase must carry the commitment output script")?;
-    assert_eq!(commitment_output.value, 0);
+    assert_eq!(commitment_output.value, Amount::ZERO);
     assert_eq!(
         candidate.coinbase.inputs[0].witness,
         vec![WITNESS_RESERVED_VALUE.to_vec()],
@@ -134,7 +137,7 @@ fn vector_context(segwit_active: bool) -> CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
         height: 1,
         version: 0x2000_0000,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1_700_000_001,
         current_time: 1_700_000_600,
         locktime_cutoff: 1_700_000_000,
@@ -163,15 +166,15 @@ fn witnessed_tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
                 }),
                 0,
             ),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: vec![vec![label; 32]],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: vec![vec![label; 32]].into(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 

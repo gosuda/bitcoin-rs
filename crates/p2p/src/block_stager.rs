@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bitcoin_rs_primitives::{Block, Hash256, consensus_bytes};
+use bitcoin_rs_primitives::{Block, Hash256};
 use hashbrown::{HashMap, hash_map::Entry};
 
 use crate::SyncBudget;
@@ -118,7 +118,7 @@ impl BlockStager {
         self.received_blocks_high_water
     }
 
-    /// Highest staged-byte total ever observed this run.
+    /// Highest staged-byte total observed; feeds the high-water gauge.
     #[must_use]
     pub const fn received_bytes_high_water(&self) -> usize {
         self.received_bytes_high_water
@@ -408,13 +408,14 @@ fn received_deadline(received_at: Instant, timeout: Duration) -> Instant {
 }
 
 fn block_size(block: &Block) -> usize {
-    consensus_bytes(block).len()
+    block.total_size()
 }
 
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{
-        Block, Hash256, Network, OutPoint, Tx, TxIn, TxOut, consensus_bytes,
+        Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+        Witness, consensus_bytes,
     };
     use std::time::{Duration, Instant};
 
@@ -769,15 +770,15 @@ mod tests {
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::default(),
-                    script_sig: vec![0_u8; script_len],
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: vec![0_u8; script_len].into(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 }],
                 outputs: vec![TxOut {
-                    value: 0,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(0),
+                    script_pubkey: Script::new(),
                 }],
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
             }],
         }
     }
@@ -798,11 +799,11 @@ mod tests {
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
         let window_slots = budget.max_received_blocks;
-        assert!(u8::try_from(window_slots).is_ok());
 
         for index in 0..window_slots {
             let mut raw = [0xee_u8; 32];
-            raw[0] = u8::try_from(index).unwrap_or_else(|_| panic!("window exceeds u8 range"));
+            let index_bytes = index.to_le_bytes();
+            raw[..index_bytes.len()].copy_from_slice(&index_bytes);
             let hash = Hash256::from_le_bytes(&raw);
             match stager.insert(hash, None, block.clone(), serialized.clone(), now) {
                 super::StagedBlock::Memory { dropped, .. } => {
