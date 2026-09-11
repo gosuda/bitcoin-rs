@@ -82,6 +82,7 @@ impl MiningControl for SmokeMiningControl {
             mutable: Vec::new(),
             submit_old: None,
             signet: None,
+            work_id: None,
         }))
     }
 
@@ -171,7 +172,7 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         // manifest gap), and invalidateblock requires a chain control, which
         // the dedicated invalidateblock tests wire themselves.
         ("getmininginfo", json!([])),
-        ("getblocktemplate", json!([{}])),
+        ("getblocktemplate", json!([{"rules": ["segwit"]}])),
         ("submitblock", json!([raw_tx.as_str()])),
     ];
 
@@ -818,9 +819,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let mut ctx = Context::new();
-        ctx.chain_network = Network::Regtest;
-        let mut ctx = ctx.with_mining_control(Arc::new(SmokeMiningControl::new()));
+        let mut ctx = Context::new().with_mining_control(Arc::new(SmokeMiningControl::new()));
         let tx = tx(1, vec![0x51]);
         let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
         let block = Block {
