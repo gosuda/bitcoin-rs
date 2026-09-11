@@ -1,0 +1,132 @@
+name: sync-speed-workbench
+on:
+  push:
+    branches: [automation/sync-speed-20260911]
+permissions:
+  contents: write
+concurrency:
+  group: sync-speed-workbench-20260911
+  cancel-in-progress: false
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+  RUST_BACKTRACE: 1
+  BASE: e6c5eae02738260b5b7240738323098afd6d7c5b
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+      - name: Isolate tooling from the source candidate
+        run: |
+          mkdir -p "$RUNNER_TEMP/sync-speed-evidence" "$RUNNER_TEMP/sync-speed-tools"
+          cp tools/automation/sync-speed/*.py "$RUNNER_TEMP/sync-speed-tools/"
+          git checkout --detach "$BASE"
+          test "$(git rev-parse HEAD)" = "$BASE"
+          git status --short
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: sync-speed-native-195
+      - name: Record immutable baseline and hardware
+        run: |
+          E="$RUNNER_TEMP/sync-speed-evidence"
+          { git rev-parse HEAD; git rev-parse HEAD^{tree}; rustc +1.95.0 -Vv; cargo +1.95.0 -V; sha256sum Cargo.lock; uname -a; lscpu; } | tee "$E/identity.txt"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Test baseline with the new differential matrix
+        run: |
+          python3 "$RUNNER_TEMP/sync-speed-tools/prepare.py" --control
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib indexed_sync_frontiers_match_parent_plans -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/control-regression.log"
+      - name: Build the original production code with workbench probe
+        run: |
+          python3 "$RUNNER_TEMP/sync-speed-tools/measure.py"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --release --lib --no-run --message-format=json > "$RUNNER_TEMP/sync-speed-evidence/control-build.jsonl"
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])/'sync-speed-evidence'
+          artifacts = [json.loads(x) for x in (root/'control-build.jsonl').read_text().splitlines() if x.startswith('{')]
+          executables = [x['executable'] for x in artifacts if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='bitcoin_rs_node']
+          assert len(executables)==1, executables
+          shutil.copy2(executables[0], root/'control-probe')
+          PY
+          git restore --source="$BASE" -- crates/node/src/sync.rs
+      - name: Prepare and freeze the source-only candidate
+        run: |
+          python3 "$RUNNER_TEMP/sync-speed-tools/prepare.py"
+          rustfmt +1.95.0 --edition 2024 --config skip_children=true crates/node/src/sync.rs
+          test "$(git diff --name-only)" = 'crates/node/src/sync.rs'
+          git diff --check
+          git diff --stat
+          git diff > "$RUNNER_TEMP/sync-speed-evidence/candidate.patch"
+          git add crates/node/src/sync.rs
+          git commit -m 'perf(sync): avoid full reorg plans on the linear IBD frontier'
+          { git rev-parse HEAD; git rev-parse HEAD^{tree}; git ls-tree HEAD crates/node/src/sync.rs; sha256sum Cargo.lock; } | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-identity.txt"
+      - name: Strict native node Clippy
+        run: |
+          cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-clippy.log"
+      - name: Complete native node unit suite and sync integration
+        run: |
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-tests.log"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test sync_smoke -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-sync-smoke.log"
+          git diff --exit-code
+      - name: Build candidate with identical workbench-only probe
+        run: |
+          python3 "$RUNNER_TEMP/sync-speed-tools/measure.py"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --release --lib --no-run --message-format=json > "$RUNNER_TEMP/sync-speed-evidence/candidate-build.jsonl"
+          python3 - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])/'sync-speed-evidence'
+          artifacts = [json.loads(x) for x in (root/'candidate-build.jsonl').read_text().splitlines() if x.startswith('{')]
+          executables = [x['executable'] for x in artifacts if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='bitcoin_rs_node']
+          assert len(executables)==1, executables
+          shutil.copy2(executables[0], root/'candidate-probe')
+          PY
+          git restore --source=HEAD -- crates/node/src/sync.rs
+          git diff --exit-code
+      - name: Measure original and candidate in AB BA AB order
+        run: |
+          python3 "$RUNNER_TEMP/sync-speed-tools/compare.py" "$RUNNER_TEMP/sync-speed-evidence" | tee "$RUNNER_TEMP/sync-speed-evidence/paired-summary.log"
+      - name: Record remaining constraint-gate outcomes without waiving them
+        run: |
+          E="$RUNNER_TEMP/sync-speed-evidence"
+          set +e
+          for gate in overhaul_resource_bounds overhaul_evidence; do
+            cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test "$gate" -- --nocapture > "$E/$gate.log" 2>&1
+            code=$?
+            printf '%s exit=%s\n' "$gate" "$code" | tee -a "$E/constraint-exits.txt"
+          done
+          exit 0
+      - name: Publish only the verified source commit to a new feature branch
+        run: |
+          branch=perf/sync-indexed-linear-frontier-20260911
+          set +e
+          git ls-remote --exit-code --heads origin "refs/heads/$branch"
+          code=$?
+          set -e
+          test "$code" = 2
+          test "$(git diff --name-only "$BASE" HEAD)" = 'crates/node/src/sync.rs'
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --exit-code
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'PUBLISHED_SOURCE %s %s\n' "$branch" "$(git rev-parse HEAD)"
+      - name: Preserve evidence, including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: sync-speed-evidence-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sync-speed-evidence/*.txt
+            ${{ runner.temp }}/sync-speed-evidence/*.log
+            ${{ runner.temp }}/sync-speed-evidence/*.json
+            ${{ runner.temp }}/sync-speed-evidence/*.patch
+            ${{ runner.temp }}/sync-speed-tools/*.py
+          if-no-files-found: error
+          retention-days: 7
