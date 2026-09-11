@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Live Bitcoin Core P2P interop for the 4b compatibility contract (#113).
+# Live Bitcoin Core differential for observable node behavior (#174).
 #
 # Starts Bitcoin Core (regtest) and a bitcoin-rs node, connects them over the
 # P2P v1 transport, verifies header/block sync in both the initial-sync and a
-# post-handshake catch-up round, records Core's view of the bitcoin-rs peer
-# (services bits, user agent) into an evidence JSON, then runs the ignored
-# verifier test `crates/p2p/tests/core_interop_live.rs` against it.
+# post-handshake catch-up round, then diffs Core vs bitcoin-rs chain identity
+# RPCs (height, best block hash, chain name). Records Core's view of the
+# bitcoin-rs peer into an evidence JSON and runs
+# `crates/p2p/tests/core_interop_live.rs` against it.
 #
 # usage: run-p2p-core-interop.sh --bitcoind-command <command>
 #            [--bitcoin-rs-command <command>] [--workdir <dir>] [--evidence <path>]
 #            [--blocks <n>] [--catchup-blocks <n>] [--timeout-seconds <n>]
 #            [--skip-verifier] [--keep]
 #
-# The script is the g14-style driver for the `#[ignore]`d test; it is never run
-# in CI (no bitcoind on CI hosts).
+# CI installs the pinned bitcoind with scripts/install-bitcoind.sh and runs
+# this driver on main. Locally:
+#   scripts/run-p2p-core-interop.sh --bitcoind-command "$(scripts/install-bitcoind.sh)"
+
 set -euo pipefail
 
 usage() {
@@ -116,7 +119,10 @@ RS_LOG="${WORKDIR}/bitcoin-rs.log"
 CORE_LOG="${WORKDIR}/bitcoind.log"
 RS_RPC_USER="interop"
 RS_RPC_PASSWORD="interop"
-EVIDENCE_SCHEMA="bitcoin-rs-p2p-core-interop-v1"
+# Sole producer-side owner of the evidence schema identifier; the verifier
+# (crates/p2p/tests/core_interop_live.rs SCHEMA) consumes the value recorded
+# in the evidence. Do not add a second definition in this script.
+EVIDENCE_SCHEMA="bitcoin-rs-core-differential-v1"
 
 BITCOIN_RS_PID=""
 CORE_COOKIE_FILE="${CORE_DATADIR}/regtest/.cookie"
@@ -128,7 +134,10 @@ core_rpc() {
   local cookie params=""
   cookie=$(cat "${CORE_COOKIE_FILE}")
   if (($# > 0)); then
-    params=,"\"params\":[$*]"
+    # $* must join as a JSON array (commas), not on the default IFS space;
+    # each argument is already a raw JSON literal.
+    local IFS=,
+    params=,"\"params\":[${*}]"
   fi
   curl -sS --max-time 10 --user "${cookie}" -H 'content-type: text/plain' \
     --data "{\"jsonrpc\":\"1.0\",\"id\":\"interop\",\"method\":\"${method}\"${params}}" \
@@ -145,7 +154,8 @@ rs_rpc() {
   shift
   local params=""
   if (($# > 0)); then
-    params=,"\"params\":[$*]"
+    local IFS=,
+    params=,"\"params\":[${*}]"
   fi
   curl -sS --max-time 10 --user "${RS_RPC_USER}:${RS_RPC_PASSWORD}" \
     -H 'content-type: text/plain' \
@@ -219,7 +229,7 @@ fi
 echo "==> creating wallet and mining ${BLOCKS} initial blocks"
 core_rpc createwallet '"interop"' >/dev/null
 MINING_ADDRESS=$(core_result getnewaddress)
-core_result generatetoaddress "${BLOCKS}" "\"${MINING_ADDRESS}\"" >/dev/null
+core_result generatetoaddress "${BLOCKS}" "${MINING_ADDRESS}" >/dev/null
 CORE_HEIGHT=$(core_result getblockcount | python3 -c 'import json, sys; print(json.load(sys.stdin))')
 echo "==> core height after initial mine: ${CORE_HEIGHT}"
 
@@ -245,11 +255,43 @@ echo "==> initial sync height: ${INITIAL_SYNC_HEIGHT}"
 
 echo "==> mining ${CATCHUP_BLOCKS} catch-up blocks on Core (post-handshake relay proof)"
 CATCHUP_FROM=${CORE_HEIGHT}
-core_result generatetoaddress "${CATCHUP_BLOCKS}" "\"${MINING_ADDRESS}\"" >/dev/null
+core_result generatetoaddress "${CATCHUP_BLOCKS}" "${MINING_ADDRESS}" >/dev/null
 CATCHUP_TO=$((CATCHUP_FROM + CATCHUP_BLOCKS))
 poll_until "catch-up sync" "${CATCHUP_TO}"
 RS_HEIGHT=$(rs_height)
 echo "==> bitcoin-rs caught up to ${RS_HEIGHT}"
+
+echo "==> comparing observable chain identity RPCs"
+json_string() {
+  python3 -c 'import json, sys; print(json.load(sys.stdin))'
+}
+json_field() {
+  local field=$1
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["'"${field}"'"])'
+}
+
+CORE_TIP=$(core_result getbestblockhash | json_string)
+RS_TIP=$(rs_rpc getbestblockhash | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"])')
+if [[ "${CORE_TIP}" != "${RS_TIP}" ]]; then
+  echo "error: getbestblockhash mismatch: core=${CORE_TIP} bitcoin-rs=${RS_TIP}" >&2
+  exit 1
+fi
+
+CORE_INFO=$(core_result getblockchaininfo)
+RS_INFO=$(rs_rpc getblockchaininfo | python3 -c 'import json, sys; print(json.dumps(json.load(sys.stdin)["result"]))')
+CORE_CHAIN=$(printf '%s' "${CORE_INFO}" | json_field chain)
+RS_CHAIN=$(printf '%s' "${RS_INFO}" | json_field chain)
+CORE_BLOCKS=$(printf '%s' "${CORE_INFO}" | json_field blocks)
+RS_BLOCKS=$(printf '%s' "${RS_INFO}" | json_field blocks)
+if [[ "${CORE_CHAIN}" != "regtest" || "${RS_CHAIN}" != "regtest" ]]; then
+  echo "error: expected regtest, core=${CORE_CHAIN} bitcoin-rs=${RS_CHAIN}" >&2
+  exit 1
+fi
+if [[ "${CORE_BLOCKS}" != "${RS_BLOCKS}" ]]; then
+  echo "error: getblockchaininfo.blocks mismatch: core=${CORE_BLOCKS} bitcoin-rs=${RS_BLOCKS}" >&2
+  exit 1
+fi
+echo "==> chain identity matches: ${RS_CHAIN} height ${RS_BLOCKS} tip ${RS_TIP}"
 
 echo "==> collecting Core's view of the bitcoin-rs peer"
 PEER_JSON=$(core_result getpeerinfo | python3 -c '
@@ -266,11 +308,15 @@ CORE_STOPPED=1
 core_rpc stop >/dev/null || true
 
 python3 - "${EVIDENCE}" "${EVIDENCE_SCHEMA}" "${CORE_SUBVERSION}" \
-  "${INITIAL_SYNC_HEIGHT}" "${CATCHUP_FROM}" "${CATCHUP_TO}" "${RS_HEIGHT}" "${PEER_JSON}" <<'PY'
+  "${INITIAL_SYNC_HEIGHT}" "${CATCHUP_FROM}" "${CATCHUP_TO}" "${RS_HEIGHT}" \
+  "${PEER_JSON}" "${CORE_TIP}" "${RS_TIP}" "${CORE_CHAIN}" "${CORE_BLOCKS}" "${RS_BLOCKS}" <<'PY'
 import json
 import sys
 
-path, schema, subversion, initial, catchup_from, catchup_to, rs_height, peer = sys.argv[1:9]
+(
+    path, schema, subversion, initial, catchup_from, catchup_to, rs_height,
+    peer, core_tip, rs_tip, chain, core_blocks, rs_blocks,
+) = sys.argv[1:14]
 evidence = {
     "schema": schema,
     "core_version": subversion,
@@ -280,6 +326,11 @@ evidence = {
     "catchup_from": int(catchup_from),
     "catchup_to": int(catchup_to),
     "bitcoin_rs_height": int(rs_height),
+    "bestblockhash": core_tip,
+    "bitcoin_rs_bestblockhash": rs_tip,
+    "chain": chain,
+    "core_blocks": int(core_blocks),
+    "bitcoin_rs_blocks": int(rs_blocks),
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(evidence, handle, indent=2)
@@ -294,4 +345,4 @@ if [[ "${SKIP_VERIFIER}" -ne 1 ]]; then
     cargo test -p bitcoin-rs-p2p --test core_interop_live -- --ignored --nocapture
 fi
 
-echo "==> P2P Core interop: PASS"
+echo "==> Core differential: PASS"

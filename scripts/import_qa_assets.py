@@ -281,8 +281,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p2p = args.corpora / "p2p_deserialize_raw_net_msg"
     scripts = [args.corpora / "bitcoin_deserialize_script",
                args.corpora / "bitcoin_script_bytes_to_asm_fmt"]
-    direct = [("bitcoin_deserialize_block", "block_decode"),
-              ("bitcoin_deserialize_transaction", "tx_decode")]
+    direct = [("bitcoin_deserialize_block", "block_validate"),
+              ("bitcoin_deserialize_transaction", "tx_validate")]
     try:
         for source in [p2p, *scripts, *(args.corpora / name for name, _ in direct)]:
             if not source.is_dir():

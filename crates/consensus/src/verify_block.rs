@@ -12,7 +12,8 @@ mod legacy {
 
 pub use legacy::{
     BlockRuleContext, block_has_witness, block_merkle_root_matches_txids,
-    block_witness_commitment_matches, compute_merkle_root, verify_merkle_root_with_txids,
+    block_witness_commitment_matches, check_witness_malleation, compute_merkle_root,
+    verify_merkle_root_with_txids,
 };
 pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 
@@ -65,20 +66,17 @@ pub fn verify_block_rules_precomputed(
         return Err(ConsensusError::MerkleMutation);
     }
 
-    // BIP141/Core select a coinbase commitment independently of witness
-    // presence. A selected commitment requires its reserved-value proof even
-    // when every input witness is empty. Without an active commitment, witness
-    // data is forbidden (including before SegWit activation).
-    let has_witness_commitment = context.segwit_active && witness_commitment(block).is_some();
-    if has_witness_commitment {
-        let Some(wtxids) = facts.wtxids() else {
-            return Err(ConsensusError::WitnessCommitment);
-        };
-        if wtxids.len() != txdata.len() || !block_witness_commitment_matches(block, wtxids) {
-            return Err(ConsensusError::WitnessCommitment);
-        }
+    // BIP141/Core witness malleation check. When `SegWit` is active and a
+    // coinbase BIP141 commitment is present, the coinbase must prove the
+    // 32-byte reserved nonce and the commitment must match the computed
+    // witness Merkle root. Witness data without an active commitment is
+    // `unexpected-witness` (before `SegWit`, or with no commitment).
+    if let Some(wtxids) = facts.wtxids() {
+        check_witness_malleation(block, context.segwit_active, wtxids)?;
+    } else if context.segwit_active && witness_commitment(block).is_some() {
+        return Err(ConsensusError::WitnessNonceSize);
     } else if facts.has_witness() {
-        return Err(ConsensusError::WitnessCommitment);
+        return Err(ConsensusError::UnexpectedWitness);
     }
 
     let weight = facts.weight();
