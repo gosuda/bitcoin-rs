@@ -19,5 +19,6 @@ BIP22/BIP23 JSON projection lives in RPC. Long-poll waiting, generate
 assemble-solve-submit, and block submission live in the node-owned
 coordinator that implements `MiningControl`.
 
+
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

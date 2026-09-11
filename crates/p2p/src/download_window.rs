@@ -149,7 +149,7 @@ pub struct SyncPeer {
     /// Peer network address.
     pub addr: SocketAddr,
     /// Best known block height the peer advertises.
-    pub start_height: i32,
+    pub best_known_height: i32,
 }
 
 /// The set of peers chosen for the current sync cycle.
