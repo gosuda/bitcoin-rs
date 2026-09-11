@@ -55,6 +55,14 @@ struct DurableHead {
 The durable head, coins, and `refs` are committed in one atomic named-family
 batch. `commit_id` is monotonic on disconnect as well as on connect.
 
+### `RCV-06`: Chain transaction count recovery
+
+The in-memory chain transaction count uses zero as the durable-compatible
+sentinel for unknown. Legacy datadirs that predate the counter, rewinds that
+would underflow, and additions that would overflow must preserve or restore
+zero; they must never clamp or wrap into a plausible known total. A known
+count advances and rewinds by the exact transaction delta.
+
 ## Clauses
 
 ### `RCV-01`: Authority and identity
