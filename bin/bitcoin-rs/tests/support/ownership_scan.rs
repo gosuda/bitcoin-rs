@@ -22,7 +22,10 @@ const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
     ("crates/rpc/src/handlers/mining.rs", "ctx.mempool"),
     // Block apply evicts the block's transactions through the generation
     // guarded gateway; this is the node's only production mutation site.
-    ("crates/node/src/apply.rs", "handles.mempool_gateway"),
+    (
+        "crates/node/src/apply/connect.rs",
+        "handles.mempool_gateway",
+    ),
 ];
 
 /// Mutating methods on `Mempool` that only the mempool owner may call from
@@ -430,6 +433,44 @@ mod tests {
                 path,
                 "ctx.mempool\n    .prioritise(txid, fee_delta)"
             ));
+        }
+    }
+
+    #[test]
+    fn only_the_current_connect_gateway_path_is_authorized() {
+        for (path, receiver, permitted) in [
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "handles.mempool_gateway",
+                true,
+            ),
+            (
+                "/workspace/crates/node/src/apply.rs",
+                "handles.mempool_gateway",
+                false,
+            ),
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "handles.mempool",
+                false,
+            ),
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "handles.mempool_gateway.pool().write()",
+                false,
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(
+                path,
+                &format!("{receiver}.remove_for_block(block_txs, block_txids, height);"),
+                &mut result,
+            );
+            assert_eq!(
+                result.violations.is_empty(),
+                permitted,
+                "{path}: {receiver}"
+            );
         }
     }
 
