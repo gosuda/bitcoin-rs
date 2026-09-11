@@ -1,25 +1,36 @@
 //! Focused behavioral tests for the node-owned mining coordinator.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningCapability,
     MiningControl, MiningControlError,
 };
+
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, NodeConfig, UserConfig, resolve,
     state::NodeState,
 };
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
+};
+
 use compact_str::CompactString;
+
 use crossbeam_channel::bounded;
+
 use parking_lot::Mutex;
-use std::str::FromStr as _;
+
+use std::{
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 fn open_regtest() -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
@@ -39,7 +50,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.applied_tip(),
         state.block_tree(),
         state.mempool(),
-        state.apply_handles(),
+        state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
@@ -121,16 +132,16 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
     let script_opcode = u8::try_from(label + 0x50)?;
     let coinbase = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![script_opcode, 0x51],
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::from_bytes(vec![script_opcode, 0x51]),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50 * 100_000_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50 * 100_000_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
     };
     let mut block = Block {
@@ -139,7 +150,7 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time: 1_296_688_603 + 600,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase],
@@ -154,14 +165,14 @@ fn excess_coinbase_child(prev: BlockHash) -> anyhow::Result<Block> {
     let Some(output) = block.txs.first_mut().and_then(|tx| tx.outputs.first_mut()) else {
         panic!("coinbase has no output");
     };
-    output.value = output.value.saturating_add(1);
+    output.value = output.value.saturating_add(Amount::from_sat(1));
     block.header.merkle_root = block_merkle_root(&block);
     mine_block_to_regtest_target(&mut block)?;
     Ok(block)
 }
 
 fn mine_block_to_regtest_target(block: &mut Block) -> anyhow::Result<()> {
-    while !pow_met(block.header.bits, &block.block_hash()) {
+    while !pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
         block.header.nonce = block
             .header
             .nonce
@@ -235,16 +246,16 @@ fn pow_met(bits: u32, hash: &BlockHash) -> bool {
 fn mempool_sequence_tx() -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(1_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
     }
 }
@@ -596,6 +607,90 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
 }
 
 #[test]
+fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    let child_hash = Hash256::from(child.block_hash());
+    mining.submit_header(child.header)?;
+    mining.submit_header(child.header)?;
+    assert!(
+        state.block_tree().read().lookup(child_hash).is_some(),
+        "submitted header must be in the tree"
+    );
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing"));
+    assert_eq!(
+        tip.hash,
+        Hash256::from(genesis.block_hash()),
+        "header submission must not apply the block"
+    );
+    Ok(())
+}
+
+#[test]
+fn submit_header_requires_the_previous_header() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let orphan = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
+    match mining.submit_header(orphan.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert!(
+                reason.starts_with("Must submit previous header ("),
+                "unexpected reason: {reason}"
+            );
+            assert!(
+                reason.contains(&orphan.header.prev_blockhash.to_string()),
+                "reason must name the missing prev hash: {reason}"
+            );
+        }
+        other => panic!("expected missing-prev rejection, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let mut child = mined_child(genesis.block_hash())?;
+    child.header.bits = CompactTarget::from_consensus(0x207f_fffe);
+    mine_block_to_regtest_target(&mut child)?;
+    match mining.submit_header(child.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert_eq!(reason.as_str(), "bad-diffbits");
+        }
+        other => panic!("expected bad-diffbits, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let mut child = mined_child(genesis.block_hash())?;
+    child.header.time = u32::MAX;
+    mine_block_to_regtest_target(&mut child)?;
+    match mining.submit_header(child.header) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert_eq!(reason.as_str(), "time-too-new");
+        }
+        other => panic!("expected time-too-new, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
@@ -604,7 +699,7 @@ fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     // Ensure PoW still valid for the mutated prev hash by remine.
     block.header.merkle_root = block_merkle_root(&block);
     block.header.nonce = 0;
-    while !pow_met(block.header.bits, &block.block_hash()) {
+    while !pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
         block.header.nonce = block
             .header
             .nonce
@@ -635,7 +730,7 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -672,7 +767,7 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -739,6 +834,8 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
         rules: Vec::new(),
         long_poll_id: None,
     })?);
+    // Bitcoin Core's getblocktemplate contract advertises server capabilities,
+    // and omits Signet metadata on networks that are not Signet.
     assert_eq!(
         template
             .capabilities
@@ -758,6 +855,8 @@ fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(template_request(None))?);
+    // Bitcoin Core's Signet getblocktemplate contract requires the signet rule
+    // and challenge metadata for Signet templates.
     assert!(template.rules.iter().any(|rule| rule.as_str() == "signet"));
     assert!(template.signet.is_some());
     Ok(())
@@ -790,7 +889,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> anyhow::Result<()> {
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let mut block = mined_child(genesis.block_hash())?;
-    while pow_met(block.header.bits, &block.block_hash()) {
+    while pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
         block.header.nonce = block
             .header
             .nonce
@@ -873,16 +972,16 @@ fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
 
     let tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(1_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
     };
     {
@@ -1075,7 +1174,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             state.shutdown(),
@@ -1150,7 +1249,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
     assert_eq!(tip.height, 2);
     assert_eq!(
         tip.hash,
-        Hash256::from(hashes.last().expect("two hashes").hash)
+        Hash256::from(hashes.last().unwrap_or_else(|| panic!("two hashes")).hash)
     );
     Ok(())
 }
@@ -1170,7 +1269,8 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
             selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
             submit: true,
         })
-        .expect_err("missing mempool txid must fail");
+        .err()
+        .unwrap_or_else(|| panic!("missing mempool txid must fail"));
     assert!(matches!(error, MiningControlError::InvalidRequest(_)));
     Ok(())
 }
@@ -1187,15 +1287,15 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x11; 32])), 0),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![],
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     };
     let error = mining
         .generate(GenerateRequest {
@@ -1205,7 +1305,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
             selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
             submit: false,
         })
-        .expect_err("invalid raw spend must fail validation, not mempool lookup");
+        .err()
+        .unwrap_or_else(|| panic!("invalid raw spend must fail validation, not mempool lookup"));
     assert!(
         matches!(error, MiningControlError::Failed(_)),
         "raw generateblock txs skip mempool membership: {error:?}"
@@ -1213,6 +1314,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
     Ok(())
 }
 
+/// CONTRACT: API-06 — getmininginfo's networkhashps mirrors the default
+/// getnetworkhashps window.
 #[test]
 fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1220,7 +1323,11 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     let rate = mining.network_hash_ps(120, -1)?;
-    assert_eq!(rate, info.network_hashes_per_second);
+    assert!(
+        (rate - info.network_hashes_per_second).abs() < f64::EPSILON,
+        "default-window hash rate must match mining info: {rate} vs {}",
+        info.network_hashes_per_second
+    );
     Ok(())
 }
 
