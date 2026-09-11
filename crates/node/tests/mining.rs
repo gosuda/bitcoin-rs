@@ -1015,6 +1015,7 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
     Ok(())
 }
 
+// CONTRACT: API-07
 #[test]
 fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1042,6 +1043,7 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
     Ok(())
 }
 
+// CONTRACT: API-07
 #[test]
 fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
     let state = open_network(Network::Signet)?;
