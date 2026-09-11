@@ -4,36 +4,39 @@ on:
     branches: [automation/node-owner-workbench-20260911]
 permissions:
   contents: read
+concurrency:
+  group: node-owner-workbench
+  cancel-in-progress: true
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: e6c5eae02738260b5b7240738323098afd6d7c5b
           persist-credentials: false
+      - name: Prepare pinned checkout
+        run: |
+          cp -r .node-owner-workbench "$RUNNER_TEMP/owner-tools"
+          git fetch --depth=1 origin e6c5eae02738260b5b7240738323098afd6d7c5b
+          git checkout --detach e6c5eae02738260b5b7240738323098afd6d7c5b
+          mkdir -p "$RUNNER_TEMP/evidence"
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
-      - name: Export compiler and dependency sources for offline validation
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Inspect owner boundaries
         run: |
-          set -eu
-          rustc --version
-          cargo --version
-          cargo fetch --locked
-          SYSROOT="$(rustc --print sysroot)"
-          tar -czf "$RUNNER_TEMP/node-owner-rust.tar.gz" -C "$SYSROOT" bin lib libexec
-          mkdir -p "$HOME/.cargo/git"
-          tar -czf "$RUNNER_TEMP/node-owner-cargo.tar.gz" -C "$HOME/.cargo" registry git
-          python3 -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/python-wheels" tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+          pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+          python "$RUNNER_TEMP/owner-tools/inspect.py" | tee "$RUNNER_TEMP/evidence/owners.txt"
+      - name: Baseline compiler checks
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/evidence/baseline-clippy.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: node-owner-build-inputs
-          path: |
-            ${{ runner.temp }}/node-owner-rust.tar.gz
-            ${{ runner.temp }}/node-owner-cargo.tar.gz
-            ${{ runner.temp }}/python-wheels
-          compression-level: 0
+          name: node-owner-evidence
+          path: ${{ runner.temp }}/evidence
           retention-days: 1
