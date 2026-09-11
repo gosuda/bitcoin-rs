@@ -1,3 +1,9 @@
+//! Contract references: these ingress tests are pinned to the current repository
+//! contracts in `docs/contracts/mempool-mutations.md` (`MPL-01`, `MPL-04`) and
+//! `docs/policies/mempool-policy.md` (`POL-02`, `POL-03`). Peer transaction
+//! delivery and relay semantics are specified in `docs/policies/p2p-compatibility.md` §5
+//! (`tx`). Update those documents and this test suite together when the contract changes.
+
 use super::*;
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
@@ -189,6 +195,8 @@ fn make_consumer(gateway: &Arc<MempoolGateway>, mining: Arc<RecordingMining>) ->
     }
 }
 
+/// Contract: `docs/contracts/mempool-mutations.md` §`MPL-01` (the origin in
+/// `MutationEnvelope`) and §`MPL-04` (peer admission identity).
 /// Test: the consumer carries the exact originating `ConnectionId` through
 /// to the admission gateway. A mutation admitted from a peer must carry
 /// the `PeerToken` with the correct `connection_id`.
@@ -249,6 +257,9 @@ fn consumer_preserves_exact_connection_id() {
     }
 }
 
+/// Contract: `docs/policies/p2p-compatibility.md` §5 (`tx`) requires relay
+/// only for accepted peer transactions; `docs/contracts/mempool-mutations.md`
+/// §`MPL-01` defines accepted mutation publication and its mining wake.
 /// Test: a rejected transaction does not relay and does not wake mining.
 #[test]
 fn rejected_tx_does_not_relay_or_wake_mining() {
@@ -274,6 +285,9 @@ fn rejected_tx_does_not_relay_or_wake_mining() {
     );
 }
 
+/// Contract: `docs/policies/mempool-policy.md` §`POL-03` (known identity)
+/// and `docs/policies/p2p-compatibility.md` §5 (`tx`) require duplicate peer
+/// submissions to avoid a new admission/relay mutation.
 /// Test: a duplicate transaction (already in mempool) does not relay
 /// and does not wake mining.
 #[test]
