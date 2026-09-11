@@ -2,13 +2,11 @@
 //!
 //! WHY-local: this worktree's `crates/rpc/Cargo.toml` cannot gain a
 //! `bitcoin-rs-script` dependency (manifest edits are out of scope for the 2a
-//! rpc migration), so the handful of classification/counting helpers the RPC
+//! rpc migration), so the handful of classification helpers the RPC
 //! projections need are mirrored here byte-for-byte from
-//! `crates/script/src/{script,sigops}.rs`. At rebase, swap these aliases for
+//! `crates/script/src/script.rs`. At rebase, swap these aliases for
 //! `bitcoin_rs_script::{...}` and delete this module; the functions are
 //! deliberately shape-identical to make that a pure import rewrite.
-
-use bitcoin_rs_primitives::Tx;
 
 /// Opcode byte constants (subset mirroring `bitcoin_rs_script::opcode`).
 pub mod opcode {
@@ -326,61 +324,4 @@ pub fn push_data(data: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(data);
     out
-}
-
-/// Counts segwit-v0 sigops for a witness program and witness stack.
-///
-/// A P2WPKH program costs exactly 1; a P2WSH program delegates to its
-/// witness script counted accurately (multisig charges its declared key
-/// count), matching the previous `Script::count_sigops` behavior.
-#[must_use]
-pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
-    if is_p2wpkh(script) {
-        return 1;
-    }
-    if !is_p2wsh(script) {
-        return 0;
-    }
-    witness
-        .last()
-        .map_or(0, |witness_script| count_script(witness_script, true))
-}
-
-/// Counts the sigop cost visible without a UTXO set: legacy counts of every
-/// input's `scriptSig` and every output's `scriptPubKey` (the previous
-/// `Transaction::total_sigop_cost(|_| None)` shape).
-#[must_use]
-pub fn count_tx_legacy(tx: &Tx) -> u32 {
-    let mut count = 0_u32;
-    for input in &tx.inputs {
-        count = count.saturating_add(count_script(&input.script_sig, false));
-    }
-    for output in &tx.outputs {
-        count = count.saturating_add(count_script(&output.script_pubkey, false));
-    }
-    count
-}
-
-fn count_script(script: &[u8], accurate: bool) -> u32 {
-    let mut count = 0_u32;
-    let mut pushnum_cache = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(op)) => match op {
-                opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY => {
-                    count = count.saturating_add(1);
-                }
-                opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY => {
-                    match (accurate, pushnum_cache) {
-                        (true, Some(keys)) => count = count.saturating_add(u32::from(keys)),
-                        _ => count = count.saturating_add(20),
-                    }
-                }
-                other => pushnum_cache = opcode::decode_pushnum(other),
-            },
-            Ok(Instruction::PushBytes(_)) => pushnum_cache = None,
-            Err(EarlyEndOfScript) => break,
-        }
-    }
-    count
 }
