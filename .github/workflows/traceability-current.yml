@@ -1,0 +1,70 @@
+name: Integrate post-split cleanup with current main
+on:
+  push:
+    branches: [automation/traceability-current-20260911]
+permissions:
+  contents: write
+concurrency:
+  group: traceability-current-20260911
+  cancel-in-progress: true
+jobs:
+  validate-and-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/traceability-current-target
+          key: traceability-current-stable-${{ github.run_id }}
+          restore-keys: traceability-current-stable-
+      - name: Merge current main, validate, and fast-forward cleanup branch
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/traceability-current-target
+        shell: bash
+        run: |
+          set -euo pipefail
+          product=docs/node-contract-traceability-20260911
+          git fetch origin main "$product"
+          work="$RUNNER_TEMP/traceability-current-product"
+          git worktree add --detach "$work" "origin/$product"
+          cd "$work"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          old="$(git rev-parse HEAD)"
+          git merge --no-ff --no-edit origin/main
+          cargo fmt -p bitcoin-rs-node
+          if ! git diff --quiet; then
+            git add crates/node/src docs/contracts
+            git commit --amend --no-edit
+          fi
+          cargo fmt -p bitcoin-rs-node -- --check
+          git diff --check origin/main HEAD
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
+          for filter in recovery_evidence:: tx_ingress:: checkpoint:: sync:: apply::; do
+            cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib "$filter" -- --test-threads=1
+          done
+          git merge-base --is-ancestor "$old" HEAD
+          git push origin "HEAD:refs/heads/$product"
+          echo "UPDATED $product $(git rev-parse HEAD) FROM $old MAIN $(git rev-parse origin/main)"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/traceability-current-target
+          key: traceability-current-stable-${{ github.run_id }}
