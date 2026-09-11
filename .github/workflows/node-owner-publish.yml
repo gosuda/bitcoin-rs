@@ -1,0 +1,68 @@
+name: node-owner-publish
+on:
+  push:
+    branches: [automation/node-owner-publish-20260911]
+permissions:
+  contents: read
+concurrency:
+  group: node-owner-publish-20260911
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare pinned source and previously reviewed transformation engine
+        run: |
+          set -eu
+          cp -r .node-owner-workbench "$RUNNER_TEMP/owner-tools"
+          git show cbecfad474163de49defab0b73173054000e897d:.node-owner-workbench/refactor.py > "$RUNNER_TEMP/owner-tools/refactor.py"
+          test "$(git hash-object "$RUNNER_TEMP/owner-tools/refactor.py")" = cfbc213d2d7ee3d268242c898618d408e06edc5c
+          git checkout --detach 0e10cd7e1cfc3d37654c1d622be19cebc2dda196
+          git config user.name 'Node Refactoring Workbench'
+          git config user.email 'node-refactor@users.noreply.github.com'
+          mkdir -p "$RUNNER_TEMP/evidence"
+          cp -r "$RUNNER_TEMP/owner-tools" "$RUNNER_TEMP/evidence/tools"
+          python "$RUNNER_TEMP/owner-tools/patch_tools.py"
+          python -m compileall -q "$RUNNER_TEMP/owner-tools"
+          pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          shared-key: node-owner-breaking
+          save-if: true
+      - name: Build five atomic candidates and run acceptance checks
+        env:
+          OWNER_EVIDENCE: ${{ runner.temp }}/evidence
+        run: python "$RUNNER_TEMP/owner-tools/build_candidates.py"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: node-owner-candidates
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Download this run's validated candidate bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" --name node-owner-candidates --dir "$RUNNER_TEMP/candidates"
+      - name: Publish new feature branches without rewriting existing history
+        run: python .node-owner-workbench/publish_candidates.py "$RUNNER_TEMP/candidates"
