@@ -350,6 +350,7 @@ impl MiningCoordinator {
         if signet.is_some() {
             rules.push(MiningRule::new("signet"));
         }
+        // API-11 advertises producer capabilities, never client-requested names.
         BlockTemplate {
             rules,
             candidate,

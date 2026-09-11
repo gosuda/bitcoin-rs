@@ -220,7 +220,7 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 
 
 - **Owner**: `MiningCoordinator::template_from_candidate` in
-  `crates/node/src/mining.rs`; JSON projection in
+  `crates/node/src/mining/candidate.rs`; JSON projection in
   `crates/rpc/src/handlers/mining.rs` `render_block_template`.
 - Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
   Client-advertised names are not echoed.

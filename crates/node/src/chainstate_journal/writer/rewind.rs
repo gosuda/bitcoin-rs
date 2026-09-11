@@ -180,7 +180,7 @@ impl<S: KvStore> JournalWriter<S> {
         for name in names {
             self.dir.remove_file(name)?;
         }
-        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
         Ok(())
     }
 
@@ -201,7 +201,7 @@ impl<S: KvStore> JournalWriter<S> {
             FULL_REVALIDATION_MARKER,
             b"journal fork crossed below checkpoint base\n",
         )?;
-        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
         self.state = WriterState::Frozen;
         Ok(())
     }

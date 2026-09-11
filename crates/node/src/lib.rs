@@ -17,9 +17,6 @@ pub mod apply;
 pub mod chain_effects;
 mod chainstate_journal;
 mod checkpoint;
-mod checkpoint_fs;
-/// Periodic chainstate checkpoint publication during sync.
-mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
 /// Typed in-process node lifecycle: the embedding surface over the same
@@ -59,7 +56,7 @@ pub mod storage_footprint;
 pub mod sync;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
-mod txindex_worker;
+mod txindex;
 /// Prevout lookups across a window of consecutive blocks.
 mod window_overlay;
 pub use apply::{
@@ -96,7 +93,7 @@ pub use storage_footprint::{
 
 pub use sync::BlockSync;
 
-pub use txindex_worker::TxIndexRuntime;
+pub use txindex::TxIndexRuntime;
 
 #[cfg(feature = "zmq")]
 pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

@@ -171,7 +171,7 @@ impl<S: KvStore> JournalWriter<S> {
         options.write(true).create(true).truncate(true);
         let file = self.dir.open_with(&name, &options)?;
         file.sync_all()?;
-        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
 
         self.segment_gen = next_gen;
         self.segment_offset = 0;

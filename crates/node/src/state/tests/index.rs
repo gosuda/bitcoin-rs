@@ -91,7 +91,7 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     assert!(state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
         matches!(
             lifecycle.load().as_ref(),
-            crate::txindex_worker::TxIndexLifecycle::Opening
+            crate::txindex::TxIndexLifecycle::Opening
         )
     }));
     assert!(state.tx_index_worker.is_none());
@@ -102,7 +102,7 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     while state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
         matches!(
             lifecycle.load().as_ref(),
-            crate::txindex_worker::TxIndexLifecycle::Opening
+            crate::txindex::TxIndexLifecycle::Opening
         )
     }) {
         assert!(

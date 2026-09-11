@@ -10,19 +10,20 @@ This version adds the scheduling requirements in `IDX-08`; changes to those
 requirements must update this clause and its executable proof together.
 
 Owners:
-- `TxIndexRuntime` and worker state in `crates/node/src/txindex_worker.rs`;
+- `TxIndexRuntime` in `crates/node/src/txindex/runtime.rs` and worker state in
+  `crates/node/src/txindex.rs`;
   reconciliation, cursor commits, bounded preparation, and rollback in its
   `reconciliation.rs`, `cursor.rs`, `catch_up.rs`, and `rollback.rs` modules.
-- `TxIndexQueryEngine` in `crates/node/src/txindex_worker/query.rs` owns the shared
+- `TxIndexQueryEngine` in `crates/node/src/txindex/query.rs` owns the shared
   snapshot gate and public query entrypoints. Its `query/transactions.rs`,
   `query/scripts.rs`, `query/block_source.rs`, and `query/budget.rs` modules own
   exact transaction resolution, script traversal, block identity, and aggregate
   work accounting respectively.
-- Worker supervision and backend opening in `txindex_worker/lifecycle.rs` and
-  `txindex_worker/startup.rs`; startup owns generation-checked publication.
+- Worker supervision and backend opening in `txindex/lifecycle.rs` and
+  `txindex/startup.rs`; startup owns generation-checked publication.
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
 - Capability status: worker-owned `TxIndexLifecycle` in
-  `crates/node/src/txindex_worker.rs` mapped by `TxIndexCapability` onto the
+  `crates/node/src/txindex.rs` mapped by `TxIndexCapability` onto the
   RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
   status enum.
 
@@ -181,7 +182,7 @@ remove another script's output.
     watermark identity records to delete exactly the rows contributed by each
     disconnected block from the tip down to the common ancestor.
   - When the rollback depth (watermark height minus common ancestor height)
-    exceeds `txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100 000 blocks),
+    exceeds `txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100 000 blocks),
     the worker routes to `reset_capabilities` and backfills forward instead of
     executing a long block-by-block rollback
     (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
@@ -228,18 +229,18 @@ remove another script's output.
 - `crates/index/tests/index_roundtrip.rs`
   `commit_golden_blocks_writes_expected_electrs_rows`: electrs family
   occupancy after one atomic `IndexWriter::commit_block` (`IDX-06`).
-- `crates/node/src/txindex_worker_recovery_tests.rs`:
+- `crates/node/src/txindex/recovery_tests.rs`:
   - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
   - `absent_tip_rewinds_index_to_empty`
   - `missing_disconnected_body_routes_rewind_to_rebuild`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
   - `live_only_index_ahead_is_reported_and_reseeded`
-- `crates/node/src/txindex_worker_lifecycle_tests.rs` and
-  `crates/node/src/txindex_worker_integration_tests.rs`: lifecycle
+- `crates/node/src/txindex/lifecycle_tests.rs` and
+  `crates/node/src/txindex/integration_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.
-- `crates/node/src/txindex_worker_query_tests.rs`: query gating, snapshot
+- `crates/node/src/txindex/query_tests.rs`: query gating, snapshot
   consistency, and revision ABA detection tests.
-- `crates/node/src/txindex_worker_block_source_tests.rs`: confirmed-body
+- `crates/node/src/txindex/block_source_tests.rs`: confirmed-body
   serving by height/hash (`IDX-03`, `RCV-01`).
 - `crates/node/src/apply.rs`:
   `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.
@@ -249,7 +250,7 @@ remove another script's output.
 
 ### Query-budget regression evidence
 
-`crates/node/src/txindex_worker/query/budget/tests.rs` exercises the shared
+`crates/node/src/txindex/query/budget/tests.rs` exercises the shared
 historical/live byte budget, independent row/scan/body-read admission limits,
 rejection of truncated scans, and non-consuming rejection of over-budget work
 (`IDX-03`, `CL-14`). No query limit or persisted representation changes.
@@ -263,7 +264,7 @@ the worker's claim. Cancellation before helper creation may release normally.
 These paths do not cancel the underlying storage-engine call.
 
 Evidence for `IDX-07` abandonment and `IDX-08` shutdown:
-`crates/node/src/txindex_worker/startup/open_wait/tests.rs` covers bounded
+`crates/node/src/txindex/startup/open_wait/tests.rs` covers bounded
 cancellation, deadline precedence, disconnection, and backend error propagation;
-`crates/node/src/txindex_worker/startup/tests.rs` covers namespace poisoning and
+`crates/node/src/txindex/startup/tests.rs` covers namespace poisoning and
 clean release. The query-budget limits and on-disk formats are unchanged.

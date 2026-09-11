@@ -1024,11 +1024,15 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(BlockTemplateRequest {
         mode: BlockTemplateMode::Template,
-        capabilities: vec![MiningCapability::new("coinbasetxn")],
+        capabilities: vec![
+            MiningCapability::new("coinbasetxn"),
+            MiningCapability::new("unknown-client-only"),
+            MiningCapability::new("proposal"),
+        ],
         rules: Vec::new(),
         long_poll_id: None,
     })?);
-    // Bitcoin Core's getblocktemplate contract advertises server capabilities,
+    // API-11 advertises only implemented server capabilities,
     // and omits Signet metadata on networks that are not Signet.
     assert_eq!(
         template

@@ -1,11 +1,15 @@
+//! Checkpoint formats, loading, publication, and periodic scheduling.
+
 mod format;
+pub(crate) mod fs;
 mod io;
 mod load;
 mod publish;
+pub(crate) mod worker;
 
-use crate::checkpoint_fs::CheckpointRoot;
+use crate::checkpoint::fs::CheckpointRoot;
 #[cfg(test)]
-use crate::checkpoint_fs::open_data_dir;
+use crate::checkpoint::fs::open_data_dir;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;

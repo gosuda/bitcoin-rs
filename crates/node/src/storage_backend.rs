@@ -159,11 +159,18 @@ mod tests {
             include_str!("storage_footprint/scan.rs"),
             None,
         ),
+        ("txindex.rs", include_str!("txindex.rs"), None),
         (
-            "txindex_worker.rs",
-            include_str!("txindex_worker.rs"),
-            Some("mod body_reader_tests;"),
+            "txindex/startup.rs",
+            include_str!("txindex/startup.rs"),
+            None,
         ),
+        (
+            "txindex/lifecycle.rs",
+            include_str!("txindex/lifecycle.rs"),
+            None,
+        ),
+        ("txindex/query.rs", include_str!("txindex/query.rs"), None),
     ];
 
     const CONCRETE_OPEN_TOKENS: &[&str] = &[

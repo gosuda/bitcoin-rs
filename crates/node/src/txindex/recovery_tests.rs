@@ -6,6 +6,7 @@
 //! evidence (`WarningStore` plus `chain-rollback-event.json`).
 
 use arc_swap::ArcSwapOption;
+use bitcoin_rs_index::reconcile::{ReconcileLeg, ReconcilePhase};
 
 use bitcoin::{
     Amount, Block, BlockHash, ScriptBuf, Sequence, Transaction, TxIn, TxMerkleNode, TxOut, Witness,

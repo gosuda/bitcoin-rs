@@ -11,7 +11,7 @@ use bitcoin_rs_rpc::context::{BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
 use crate::apply::{ConnectOutcome, DisconnectOutcome};
-use crate::txindex_worker::TxIndexRuntime;
+use crate::txindex::TxIndexRuntime;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
