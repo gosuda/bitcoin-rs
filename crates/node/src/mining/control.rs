@@ -19,6 +19,7 @@ use bitcoin_rs_mining::SignetMiningInfo;
 use bitcoin_rs_mining::difficulty_for_bits;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::CompactTarget;
+use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 
@@ -26,47 +27,47 @@ impl MiningCoordinator {
     pub(super) fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
         let tip = self.applied_tip.load_full();
         let blocks = tip.as_ref().map_or(0, |tip| tip.height);
-        let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
-            Some(tip) => {
-                let tree = self.block_tree.read();
-                let tip_bits =
-                    tree.node(tip.tip_id)
-                        .map(|node| node.header.bits)
-                        .map_err(|error| {
-                            MiningControlError::Failed(CompactString::from(error.to_string()))
-                        })?;
-                let current_time = Self::current_time_secs().max(1);
-                let next =
-                    MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time)
-                        .map_err(|error| {
-                            MiningControlError::Failed(CompactString::from(error.to_string()))
-                        })?;
-                (
-                    tip_bits,
-                    difficulty_for_bits(tip_bits),
-                    next.bits,
-                    difficulty_for_bits(next.bits),
-                )
-            }
-            None => (
-                CompactTarget::from_consensus(0),
-                0.0,
-                CompactTarget::from_consensus(0),
-                0.0,
-            ),
-        };
-        let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
-        let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
-        let last_candidate = self.state.lock().last_candidate;
-        let network_hashes_per_second = {
-            let tree = self.block_tree.read();
-            estimate_network_hashps(
-                &tree,
-                tip.as_ref().map(|snapshot| snapshot.tip_id),
-                120,
-                self.network,
+        let (bits, difficulty, next_bits, next_difficulty, network_hashes_per_second) =
+            match tip.as_ref() {
+                Some(tip) => {
+                    let tree = self.block_tree.read();
+                    let tip_bits =
+                        tree.node(tip.tip_id)
+                            .map(|node| node.header.bits)
+                            .map_err(|error| {
+                                MiningControlError::Failed(CompactString::from(error.to_string()))
+                            })?;
+                    let current_time = Self::current_time_secs().max(1);
+                    let next =
+                        MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time)
+                            .map_err(|error| {
+                                MiningControlError::Failed(CompactString::from(error.to_string()))
+                            })?;
+                    let rate = estimate_network_hashps(&tree, Some(tip.tip_id), 120, self.network);
+                    (
+                        tip_bits,
+                        difficulty_for_bits(tip_bits),
+                        next.bits,
+                        difficulty_for_bits(next.bits),
+                        rate,
+                    )
+                }
+                None => (
+                    CompactTarget::from_consensus(0),
+                    0.0,
+                    CompactTarget::from_consensus(0),
+                    0.0,
+                    0.0,
+                ),
+            };
+        let (pooled_transactions, minimum_fee_rate) = {
+            let mempool = self.mempool.read();
+            (
+                u64::try_from(mempool.len()).unwrap_or(u64::MAX),
+                mempool.min_relay_fee_sat_per_kvb(),
             )
         };
+        let last_candidate = self.state.lock().last_candidate;
         Ok(MiningInfo {
             blocks,
             last_candidate,
@@ -154,6 +155,10 @@ impl MiningControl for MiningCoordinator {
 
     fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
         self.submit(&block)
+    }
+
+    fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
+        self.accept_submitted_header(header)
     }
 
     fn publish_generation(&self) {
