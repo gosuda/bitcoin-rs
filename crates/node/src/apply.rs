@@ -18,11 +18,13 @@ use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, ConsensusEncode as _, Hash256, LockTime, Network, OutPoint,
-    Script, Sequence, Tx, TxOut, Txid, Witness, consensus_bytes,
+    Block, ConsensusEncode as _, Hash256, Network, OutPoint, Tx, TxOut, Txid, consensus_bytes,
 };
 
 use bitcoin_rs_storage::{InMemoryUndoStore, block_body::BlockBodyStore};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 
 use bitcoin_rs_utxo::{
     LiveOutput, LiveOutputMeta, UtxoSet,
@@ -6170,10 +6172,10 @@ mod consensus_rule_tests {
                         Case::MissingPrevout => {}
                         Case::NonFinalLocktime => {
                             spend.lock_time = LockTime::from_consensus(2);
-                            spend.inputs[0].sequence = Sequence::from_consensus(0)
+                            spend.inputs[0].sequence = Sequence::from_consensus(0);
                         }
                         Case::OutputsGreaterThanInputs => {
-                            spend.outputs[0].value = Amount::from_sat(2_000)
+                            spend.outputs[0].value = Amount::from_sat(2_000);
                         }
                         Case::CoinbaseScriptSigLength | Case::SigopOverflow => unreachable!(),
                     }
@@ -10689,6 +10691,7 @@ mod chain_generation_tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn invalidate_block_reconsiders_under_held_transition() {
         use bitcoin_rs_primitives::TxIn;
         use bitcoin_rs_primitives::consensus_bytes;

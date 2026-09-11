@@ -5,9 +5,7 @@
 //! commit or a peer orphan/reject transition.
 
 use alloc::{sync::Arc, vec::Vec};
-use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness, Wtxid,
-};
+use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, Wtxid};
 use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
@@ -548,7 +546,7 @@ impl MempoolGateway {
 mod tests {
     use super::*;
     use crate::{Mempool, MempoolEntry};
-    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
     use parking_lot::{Mutex, RwLock};
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1195,7 +1193,7 @@ mod tests {
                 };
                 self.gateway.chain_changed(&[]);
                 assert!(reservation.finish().is_ok());
-                coin.1.script_pubkey = Script::from_bytes(vec![0x00])
+                coin.1.script_pubkey = Script::from_bytes(vec![0x00]);
             }
             Some(ChainAdmissionSnapshot {
                 prevouts: vec![coin],
@@ -1346,7 +1344,7 @@ mod tests {
                 gateway.chain_changed(&[parent.txid()]);
                 let mut replacement = (*child).clone();
                 if refresh {
-                    replacement.inputs[0].witness = Witness::from_stack(vec![vec![1]])
+                    replacement.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
                 } else {
                     replacement.outputs[0].value =
                         Amount::from_sat(replacement.outputs[0].value.to_sat() - 1);

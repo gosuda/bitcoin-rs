@@ -34,7 +34,7 @@ fn fixture(inputs: usize, script_len: usize, witness_len: Option<usize>) -> Tx {
     if let Some(length) = witness_len {
         // Witness only on the last input also exercises mixed transactions.
         let input = tx.inputs.last_mut().expect("witness fixture input");
-        input.witness = Witness::from_stack(vec![vec![0x55; length]])
+        input.witness = Witness::from_stack(vec![vec![0x55; length]]);
     }
     tx
 }

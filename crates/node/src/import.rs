@@ -7,9 +7,10 @@
 
 use anyhow::{Context as _, Result};
 
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Witness,
-};
+use bitcoin_rs_primitives::{Block, Hash256};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 
 use crate::state::NodeState;
 

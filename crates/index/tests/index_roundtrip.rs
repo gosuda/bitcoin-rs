@@ -9,7 +9,7 @@ use std::{
 };
 
 use bitcoin_rs_primitives::{
-    Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Block, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     consensus_bytes, encode::double_sha256,
 };
 use parking_lot::{Mutex, RwLock};

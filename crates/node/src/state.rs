@@ -14,9 +14,11 @@ use bitcoin_rs_chain::{BlockBodyMetadata, BlockBodySource, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Tx, Txid, Witness,
-    chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,
+    Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN, deserialize,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 
 use bitcoin_rs_rpc::context::{
     BlockLog, NetworkState, PruneResult, PruneService, PruneServiceError, PruneStatus,

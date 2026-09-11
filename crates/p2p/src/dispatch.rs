@@ -959,7 +959,7 @@ mod tests {
     }
 
     fn dummy_tx(byte: u8) -> Tx {
-        use bitcoin_rs_primitives::{OutPoint, Script, TxIn, TxOut, Witness};
+        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut, Witness};
         Tx {
             version: 2,
             inputs: vec![TxIn {

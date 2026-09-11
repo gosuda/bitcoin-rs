@@ -324,7 +324,7 @@ mod wire_metadata_tests {
             2..=4 => tx.inputs[1].witness = Witness::from_stack(vec![vec![0xaa; mode - 1]]),
             5 => {
                 tx.inputs[0].witness = Witness::from_stack(vec![Vec::new(), vec![0xbb; 253]]);
-                tx.inputs[1].witness = Witness::from_stack(vec![Vec::new()])
+                tx.inputs[1].witness = Witness::from_stack(vec![Vec::new()]);
             }
             6 => tx.inputs[1].witness = Witness::from_stack(vec![Vec::new(); 253]),
             _ => panic!("unknown fixture mode"),

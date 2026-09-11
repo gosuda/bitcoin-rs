@@ -17,9 +17,7 @@ use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
 
 use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
 
-use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Witness,
-};
+use bitcoin_rs_primitives::{Block, Hash256};
 
 use crate::apply::error::ApplyError;
 
@@ -2769,7 +2767,7 @@ mod tests {
             )?;
             fork_prev = block.block_hash();
             if height == 2 {
-                block.txs[0].outputs[0].value = Amount::from_sat(2)
+                block.txs[0].outputs[0].value = Amount::from_sat(2);
             }
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(&block).len();
@@ -8194,7 +8192,7 @@ mod tests {
         for height in 1..=depth {
             let mut coinbase = coinbase_transaction(height);
             if height == 1 {
-                coinbase.outputs[0].value = Amount::from_sat(subsidy)
+                coinbase.outputs[0].value = Amount::from_sat(subsidy);
             }
             let mut txs = vec![coinbase];
             if height == depth {
