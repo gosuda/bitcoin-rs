@@ -1,0 +1,86 @@
+name: node-consolidated-update
+
+on:
+  push:
+    branches: [agent/node-finish-publication-20260911]
+    paths:
+      - .github/node-consolidated-update.py
+      - .github/node-consolidated-plan.b64
+      - .github/workflows/node-consolidated-update.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt,clippy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: node-consolidated-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            node-async-compat-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+            node-finish-${{ runner.os }}-rust195-${{ hashFiles('Cargo.lock') }}
+      - name: Reconstruct and validate the exact merged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 250ce87287fe751a82e315775d81e45d2bae8fd8
+          git fetch origin 953395c1797f4ab911a1a6a136132bb9fe8b0a91
+          cp .github/node-consolidated-update.py /tmp/node-consolidated-update.py
+          cp .github/node-consolidated-plan.b64 /tmp/node-consolidated-plan.b64
+          python /tmp/node-consolidated-update.py prepare /tmp/node-consolidated-plan.b64 /tmp/node-consolidated-checked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-consolidated-checked
+          path: /tmp/node-consolidated-checked/
+          retention-days: 7
+          if-no-files-found: error
+  stage:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-consolidated-checked
+          path: /tmp/node-consolidated-checked
+      - name: Expose the validated merge commit for the PR fast-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 250ce87287fe751a82e315775d81e45d2bae8fd8
+          git fetch origin 953395c1797f4ab911a1a6a136132bb9fe8b0a91
+          python .github/node-consolidated-update.py stage /tmp/node-consolidated-checked
