@@ -191,9 +191,25 @@ pub(super) fn load_payloads(
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = manifest.applied_tip.chain_tx_count;
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
-    headers
-        .tree
-        .restore_chain_tx_count(headers.applied_tip_id, chain_tx_count)?;
+    // Header reconstruction initializes counts to zero. Restore the exact
+    // cumulative count on the applied tip; ancestor counts remain unknown.
+    let mut cursor = Some(headers.applied_tip_id);
+    while let Some(node_id) = cursor {
+        let parent = headers
+            .tree
+            .node(node_id)
+            .map_err(|error| CheckpointError::Header(error.into()))?
+            .parent;
+        headers.tree.restore_chain_tx_count(
+            node_id,
+            if node_id == headers.applied_tip_id {
+                chain_tx_count
+            } else {
+                0
+            },
+        )?;
+        cursor = parent;
+    }
     let applied_node = headers
         .tree
         .node(headers.applied_tip_id)
