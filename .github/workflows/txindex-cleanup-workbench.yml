@@ -24,6 +24,8 @@ jobs:
         scope: [index, node]
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      SCOPE: ${{ matrix.scope }}
     defaults:
       run:
         working-directory: candidate
@@ -48,24 +50,20 @@ jobs:
           shared-key: txindex-cleanup-native-${{ matrix.scope }}
           cache-on-failure: true
       - name: Generate modules and audit exact original function bodies
-        env:
-          SCOPE: ${{ matrix.scope }}
         run: |
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           python -m pip install 'Pygments==2.19.2'
           if [[ "$SCOPE" == index ]]; then
             python ../workbench/.workbench/refactor_txindex.py
           else
             python ../workbench/.workbench/refactor_txindex_node.py
           fi
-          if [[ -f ../workbench/.workbench/finalize_txindex.py ]]; then
-            python ../workbench/.workbench/finalize_txindex.py "$SCOPE"
-          fi
+          python ../workbench/.workbench/finalize_txindex.py "$SCOPE"
           cargo +1.95.0 fmt --all
       - name: Compiler-assisted import cleanup
-        env:
-          SCOPE: ${{ matrix.scope }}
         run: |
-          for pass in 1 2 3; do
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
+          for pass in 1 2; do
             if [[ "$SCOPE" == index ]]; then
               cargo +1.95.0 fix --locked -p bitcoin-rs-index --features fjall,redb --all-targets --allow-dirty --allow-staged
             else
@@ -73,9 +71,8 @@ jobs:
             fi
           done
       - name: Format and strict Clippy
-        env:
-          SCOPE: ${{ matrix.scope }}
         run: |
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           cargo +1.95.0 fmt --all
           cargo +1.95.0 fmt --all -- --check
           if [[ "$SCOPE" == index ]]; then
@@ -84,9 +81,8 @@ jobs:
             cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings
           fi
       - name: Affected contract and integration tests
-        env:
-          SCOPE: ${{ matrix.scope }}
         run: |
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           if [[ "$SCOPE" == index ]]; then
             cargo +1.95.0 test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast
           else
@@ -95,20 +91,22 @@ jobs:
           fi
       - name: Public documentation links
         if: ${{ matrix.scope == 'index' }}
-        run: RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p bitcoin-rs-index --features fjall,redb --no-deps
+        run: |
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
+          RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p bitcoin-rs-index --features fjall,redb --no-deps
       - name: Verify diff scope and export candidate
         if: ${{ always() }}
-        env:
-          SCOPE: ${{ matrix.scope }}
         run: |
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           if [[ "$SCOPE" == index ]]; then
             git add crates/index/src/index.rs crates/index/src/index crates/index/README.md
           else
-            git add crates/node/src/txindex_worker.rs crates/node/src/txindex_worker crates/node/src/storage_backend.rs crates/node/README.md
+            git add crates/node/src/txindex_worker.rs crates/node/src/txindex_worker crates/node/src/storage_backend.rs crates/node/README.md crates/node/src/sync/requests.rs
           fi
           git diff --cached --check
           git diff --cached --stat
-          git diff --cached --name-only | SCOPE="$SCOPE" python -c 'import os,sys; s=os.environ["SCOPE"]; paths=sys.stdin.read().splitlines(); assert paths; allowed={"index":lambda p: p in {"crates/index/src/index.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/"),"node":lambda p: p in {"crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs","crates/node/README.md"} or p.startswith("crates/node/src/txindex_worker/")}; assert all(allowed[s](p) for p in paths), paths'
+          git diff --exit-code
+          git diff --cached --name-only | SCOPE="$SCOPE" python -c 'import os,sys; s=os.environ["SCOPE"]; paths=sys.stdin.read().splitlines(); assert paths; allowed={"index":lambda p: p in {"crates/index/src/index.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/"),"node":lambda p: p in {"crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs","crates/node/README.md","crates/node/src/sync/requests.rs"} or p.startswith("crates/node/src/txindex_worker/")}; assert all(allowed[s](p) for p in paths), paths'
           git diff --cached --binary > /tmp/txindex-${SCOPE}.patch
           git diff --cached --name-only -z | tar -czf /tmp/txindex-${SCOPE}-source.tar.gz --null -T -
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -118,5 +116,6 @@ jobs:
           path: |
             /tmp/txindex-${{ matrix.scope }}.patch
             /tmp/txindex-${{ matrix.scope }}-source.tar.gz
+            /tmp/txindex-${{ matrix.scope }}.log
           retention-days: 1
           if-no-files-found: error
