@@ -241,6 +241,54 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+/// Reads header lines until the blank terminator, enforcing the header size
+/// ceiling and capturing the three headers the demux consumes.
+fn read_headers(
+    reader: &mut BufReader<TcpStream>,
+    mut header_bytes: usize,
+) -> io::Result<(usize, Option<usize>, Option<String>, bool)> {
+    let mut content_length = None;
+    let mut authorization = None;
+    let mut keep_alive = false;
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "headers ended early",
+            ));
+        }
+        header_bytes = header_bytes.saturating_add(line.len());
+        if header_bytes > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "headers too large",
+            ));
+        }
+        if line == "\r\n" {
+            return Ok((header_bytes, content_length, authorization, keep_alive));
+        }
+        let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("content-length") {
+            let parsed = value.parse::<usize>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
+            })?;
+            if parsed > MAX_BODY_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
+            }
+            content_length = Some(parsed);
+        } else if name.eq_ignore_ascii_case("authorization") {
+            authorization = Some(value.to_owned());
+        } else if name.eq_ignore_ascii_case("connection") {
+            keep_alive = value.eq_ignore_ascii_case("keep-alive");
+        }
+    }
+}
+
 fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequest>> {
     let mut request_line = String::new();
     let bytes = reader.read_line(&mut request_line)?;
@@ -295,47 +343,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request method",
         ));
     }
-    let mut header_bytes = request_line.len();
-    let mut content_length = None;
-    let mut authorization = None;
-    let mut keep_alive = false;
-    loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "headers ended early",
-            ));
-        }
-        header_bytes = header_bytes.saturating_add(line.len());
-        if header_bytes > MAX_HEADER_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
-        }
-        if line == "\r\n" {
-            break;
-        }
-        let Some((name, value)) = line.trim_end_matches(['\r', '\n']).split_once(':') else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid header"));
-        };
-        let value = value.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            let parsed = value.parse::<usize>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
-            })?;
-            if parsed > MAX_BODY_BYTES {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "body too large"));
-            }
-            content_length = Some(parsed);
-        } else if name.eq_ignore_ascii_case("authorization") {
-            authorization = Some(value.to_owned());
-        } else if name.eq_ignore_ascii_case("connection") {
-            keep_alive = value.eq_ignore_ascii_case("keep-alive");
-        }
-    }
+    let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
 
     // Unsupported methods still reach the demux.  If a body is framed, consume it;
     // otherwise a missing Content-Length is valid for methods such as HEAD and PUT.
