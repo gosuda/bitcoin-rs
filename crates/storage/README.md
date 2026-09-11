@@ -2,7 +2,7 @@
 
 The backend-neutral storage layer every persisted index and chain-state store sits on: key-value access over named column families, atomic write batches with an explicit durability ladder, append-only flat files for immutable block bodies, and the streaming Core frame format.
 
-`KvStore` is the central trait: `get`, ordered `iter_prefix` iteration, bounded `scan_prefix_bounded` scans under a `PrefixScanLimit`, and point-in-time `snapshot` reads, with all mutations going through backend-specific `WriteBatch` types applied by `write`, by `write_deferred` (visible immediately, crash durability deferred to `flush`), or by `write_durable`. `ColumnFamily` names the logical column families shared by every backend and `StorageError` is the common error type. Concrete backends are feature-gated and exported from the crate root: `FjallStore` (the default), `RocksDbStore`, `RedbStore`, and `MdbxStore`; the implementation modules themselves are private. The specialized redb transaction index has no public concrete type: it is constructed only through the redb-gated `open_redb_tx_index_store` factory, which hides the store behind an opaque `impl KvStore`. Immutable block bodies bypass key-value storage entirely: `FlatFileBlockStore` and `FlatFileBlockReader` manage the append-only flat files with `BlockFilePosition` addressing.
+`KvStore` is the central trait: `get`, ordered `iter_prefix` iteration, bounded `scan_prefix_bounded` scans under a `PrefixScanLimit`, and point-in-time `snapshot` reads, with all mutations going through backend-specific `WriteBatch` types applied by `write`, by `write_deferred` (visible immediately, crash durability deferred to `flush`), or by `write_durable`. `ColumnFamily` names the logical column families shared by every backend and `StorageError` is the common error type. Concrete backends are feature-gated and exported from the crate root: `FjallStore` (the default), `RocksDbStore`, and `RedbStore`; the implementation modules themselves are private. The specialized redb transaction index has no public concrete type: it is constructed only through the redb-gated `open_redb_tx_index_store` factory, which hides the store behind an opaque `impl KvStore`. Immutable block bodies bypass key-value storage entirely: `FlatFileBlockStore` and `FlatFileBlockReader` manage the append-only flat files with `BlockFilePosition` addressing.
 
 All backends also implement `write_durable_if`: given a conjunction of
 `WriteCondition`s — each key `Absent`, or its value `Equals` an `expected` byte
@@ -34,8 +34,8 @@ enabled — flooring each share and handing the remainder (plus every disabled
 namespace's share) to chainstate, so the shares always sum to at most the
 budget. Each backend accepts its namespace's share through `open_with_cache`
 (`open_redb_tx_index_store_with_cache` for the redb transaction index); fjall
-sizes its block cache, redb its page cache, `RocksDB` its LRU block cache, and
-MDBX its reserved dirty-page pool. Clamping bounds: budgets land in
+sizes its block cache, redb its page cache, and `RocksDB` its LRU block cache.
+Clamping bounds: budgets land in
 `[16 MiB, 1 TiB]`, and the node logs the effective per-namespace capacities at
 startup.
 
@@ -54,7 +54,6 @@ See [`docs/contracts/storage-footprint.md`](../../docs/contracts/storage-footpri
 - `fjall` (default): enables the fjall-backed `FjallStore`.
 - `rocksdb`: enables the Rust-RocksDB-backed `RocksDbStore`.
 - `redb`: enables the redb-backed `RedbStore` and the `open_redb_tx_index_store` transaction-index factory.
-- `mdbx`: enables the MDBX-backed `MdbxStore`.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
