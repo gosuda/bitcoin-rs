@@ -253,3 +253,17 @@ remove another script's output.
 historical/live byte budget, independent row/scan/body-read admission limits,
 rejection of truncated scans, and non-consuming rejection of over-budget work
 (`IDX-03`, `CL-14`). No query limit or persisted representation changes.
+
+### Store-open cancellation evidence
+
+The store-open wait polls node shutdown, runtime stop, and generation revocation
+at bounded intervals. Once the helper has started, cancellation and timeout are
+typed abandoned-open outcomes: startup poisons the namespace before releasing
+the worker's claim. Cancellation before helper creation may release normally.
+These paths do not cancel the underlying storage-engine call.
+
+Evidence for `IDX-07` abandonment and `IDX-08` shutdown:
+`crates/node/src/txindex_worker/startup/open_wait/tests.rs` covers bounded
+cancellation, deadline precedence, disconnection, and backend error propagation;
+`crates/node/src/txindex_worker/startup/tests.rs` covers namespace poisoning and
+clean release. The query-budget limits and on-disk formats are unchanged.

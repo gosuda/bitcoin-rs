@@ -34,7 +34,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 
 /// Worker-owned open: opens the store, constructs writer/reader/engine,
 /// publishes lifecycle, and runs reconciliation — all behind one
@@ -108,16 +107,35 @@ pub(super) fn run_worker_with_open(
 
     heartbeat.stop_and_join();
 
-    match worker_result {
-        Ok(()) => {
-            registry.release(&namespace_key, generation.id());
+    finish_worker(
+        runtime,
+        lifecycle,
+        generation,
+        &namespace_key,
+        worker_result,
+    );
+}
+
+/// Report the terminal outcome before releasing its namespace claim.
+/// An abandoned backend may still touch the store, so its claim must stay
+/// poisoned for the process lifetime (`IDX-07`).
+fn finish_worker(
+    runtime: &TxIndexRuntime,
+    lifecycle: &Arc<ArcSwap<TxIndexLifecycle>>,
+    generation: &Generation,
+    namespace_key: &Path,
+    result: Result<(), TxIndexWorkerError>,
+) {
+    let registry = &*NAMESPACE_REGISTRY;
+    if let Err(error) = result {
+        if error.abandoned_open() {
+            registry.poison(namespace_key, generation.id());
         }
-        Err(error) => {
-            tracing::error!(%error, "txindex worker open or run failed");
-            fail_worker(runtime, lifecycle, generation, &error.to_string());
-            registry.release(&namespace_key, generation.id());
-        }
+        tracing::error!(%error, "txindex worker open or run failed");
+        fail_worker(runtime, lifecycle, generation, &error.to_string());
     }
+    // Release is generation-checked and never removes a poisoned claim.
+    registry.release(namespace_key, generation.id());
 }
 
 /// Fails the worker as one unit: the runtime stops the loop and gates the
@@ -190,7 +208,7 @@ pub(super) fn open_and_run(
         spec.epoch,
         Duration::ZERO,
         TXINDEX_OPEN_TIMEOUT,
-        shutdown,
+        || shutdown.load(Ordering::Acquire) || generation.is_revoked() || runtime.should_stop(),
     )?;
 
     // Check shutdown and generation immediately after backend open returns.
@@ -263,8 +281,12 @@ pub(super) fn open_tx_index_with_timeout(
     epoch: u64,
     open_delay: Duration,
     open_timeout: Duration,
-    shutdown: &Arc<AtomicBool>,
+    should_stop: impl Fn() -> bool,
 ) -> Result<OpenTxIndex, TxIndexWorkerError> {
+    // No helper exists yet: cancellation here can release the namespace.
+    if should_stop() {
+        return Err(TxIndexWorkerError::Stopped);
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     let backend = storage_backend;
     let dir = txindex_dir.to_path_buf();
@@ -276,39 +298,16 @@ pub(super) fn open_tx_index_with_timeout(
         })
         .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    // Poll in short slices so a shutdown during the open deadline
-    // exits promptly instead of waiting the full timeout.
-    let timeout = open_timeout;
-    let deadline = Instant::now() + timeout;
-    loop {
-        if shutdown.load(Ordering::Acquire) {
-            return Err(TxIndexWorkerError::Stopped);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            tracing::error!(
-                timeout_secs = timeout.as_secs(),
-                backend = %storage_backend,
-                dir = %txindex_dir.display(),
-                "txindex store open timed out — the storage engine recovery \
-                 appears stuck; detaching the open thread and publishing Failed"
-            );
-            return Err(TxIndexWorkerError::OpenTimeout {
-                secs: timeout.as_secs(),
-            });
-        }
-        match rx.recv_timeout(remaining) {
-            Ok(result) => return result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(TxIndexWorkerError::Storage(
-                    bitcoin_rs_storage::StorageError::Backend(
-                        "txindex open helper thread exited without result".to_owned(),
-                    ),
-                ));
-            }
-        }
+    let result = open_wait::wait_for_open_result(&rx, open_timeout, should_stop);
+    if matches!(&result, Err(TxIndexWorkerError::OpenTimeout { .. })) {
+        tracing::error!(
+            timeout_secs = open_timeout.as_secs(),
+            backend = %storage_backend,
+            dir = %txindex_dir.display(),
+            "txindex store open timed out; detaching the open helper and poisoning its namespace"
+        );
     }
+    result
 }
 
 /// Opens the txindex store on the worker thread through the namespace's single
@@ -353,3 +352,8 @@ where
         batch_limits,
     })
 }
+
+mod open_wait;
+
+#[cfg(test)]
+mod tests;
