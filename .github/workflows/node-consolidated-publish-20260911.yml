@@ -1,0 +1,133 @@
+name: Publish validated consolidated node update
+
+on:
+  push:
+    branches:
+      - agent/node-finish-publication-20260911
+    paths:
+      - .github/workflows/node-consolidated-publish-20260911.yml
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: node-consolidated-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Publish only a successful exact-tree validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import time
+          import urllib.request
+
+          repo = 'gosuda/bitcoin-rs'
+          old = '250ce87287fe751a82e315775d81e45d2bae8fd8'
+          base = '953395c1797f4ab911a1a6a136132bb9fe8b0a91'
+          tree = 'd335a8f2f563de29b40d583b5aca6d714904b370'
+          branch = 'refactor/node-txindex-729f0e86'
+          staging = 'agent/node-consolidated-validated-20260911'
+          expected_checks = {'format', 'clippy-195', 'clippy-stable', 'redb-clippy', 'node-tests', 'integration', 'owner-gates', 'whitespace'}
+
+          def api(path, data=None):
+              req = urllib.request.Request(
+                  'https://api.github.com/repos/' + repo + '/' + path,
+                  data=None if data is None else json.dumps(data).encode(),
+                  method='GET' if data is None else 'PATCH',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json',
+                           'User-Agent': 'node-consolidated-publication'})
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+
+          pr = api('pulls/945')
+          if pr['state'] != 'open' or pr.get('merged'):
+              raise SystemExit('PR #945 is closed; preserving it without changes')
+          if pr['head']['ref'] != branch or pr['head']['sha'] != old:
+              raise SystemExit('PR #945 has changed; refusing stale publication')
+
+          deadline = time.monotonic() + 1800
+          run = None
+          while time.monotonic() < deadline:
+              runs = api('actions/workflows/node-consolidated-update.yml/runs?branch=agent%2Fnode-finish-publication-20260911&per_page=5')['workflow_runs']
+              if not runs:
+                  raise SystemExit('No exact-tree validator run exists')
+              candidate = runs[0]
+              if candidate['status'] == 'completed':
+                  if candidate['conclusion'] != 'success':
+                      raise SystemExit('Exact-tree validator did not pass: ' + candidate['html_url'])
+                  run = candidate
+                  break
+              time.sleep(20)
+          if run is None:
+              raise SystemExit('Validation still incomplete; nothing published')
+
+          jobs = api('actions/runs/' + str(run['id']) + '/jobs')['jobs']
+          if not all(any(j['name'] == name and j['conclusion'] == 'success' for j in jobs) for name in ('validate', 'stage')):
+              raise SystemExit('Both validation and staging must succeed')
+
+          with tempfile.TemporaryDirectory(prefix='node-publication-') as tmp:
+              subprocess.run(['gh', 'run', 'download', str(run['id']), '--repo', repo,
+                              '--name', 'node-consolidated-evidence', '--dir', tmp], check=True)
+              record = json.loads((Path(tmp) / 'publication.json').read_text())
+              if not record.get('validated') or record.get('base') != base or record.get('old') != old or record.get('tree') != tree:
+                  raise SystemExit('Unexpected validation manifest identity')
+              checks = record.get('checks', [])
+              if {check.get('name') for check in checks} != expected_checks or any(check.get('rc') != 0 for check in checks):
+                  raise SystemExit('Missing or unsuccessful acceptance checks')
+              commit = record.get('commit', '')
+              if len(commit) != 40 or any(c not in '0123456789abcdef' for c in commit):
+                  raise SystemExit('Invalid validated commit identity')
+              git('fetch', '--no-tags', 'origin', 'refs/heads/' + staging)
+              if git('rev-parse', 'FETCH_HEAD') != commit:
+                  raise SystemExit('Staged ref differs from validation evidence')
+              if git('rev-parse', commit + '^{tree}') != tree:
+                  raise SystemExit('Unexpected source tree')
+              if git('rev-list', '--parents', '-n', '1', commit).split() != [commit, old, base]:
+                  raise SystemExit('Unexpected merge parents')
+              subprocess.run(['git', 'merge-base', '--is-ancestor', old, commit], check=True)
+              pr = api('pulls/945')
+              if pr['state'] != 'open' or pr.get('merged') or pr['head']['ref'] != branch or pr['head']['sha'] != old:
+                  raise SystemExit('PR changed during validation; preserving concurrent work')
+              subprocess.run(['git', 'push', '--atomic', 'origin', commit + ':refs/heads/' + branch], check=True)
+              if git('ls-remote', 'origin', 'refs/heads/' + branch).split()[0] != commit:
+                  raise SystemExit('Published ref could not be verified')
+              evidence = '\n\n## Consolidated update publication\n\n' + (
+                  'Published commit: `' + commit + '`. Exact source tree: `' + tree + '`.\n\n'
+                  'This normal fast-forward update preserves both the prior PR head and main at `' + base + '` as merge parents. '
+                  'It preserves merged cleanup work and reconciles the current txindex owners, checkpoint grouping, mining capability contract, and validation fixes.\n\n'
+                  'Required standalone validation and staging passed: ' + run['html_url'] + '. '
+                  'The acceptance record covers workspace formatting; strict all-target native node Clippy on Rust 1.95.0 and stable; '
+                  'stable redb Clippy; native node unit tests; mining, embedding, and shutdown test targets; '
+                  'ownership/evidence/hot-path gates; and whitespace checks. The shutdown target may contain zero enabled tests. '
+                  'This is not a claim of full optional-backend, kernel, platform, or performance acceptance.\n\n'
+                  'No main-branch update, force-push, PR merge, or merged-branch rewrite was performed by this publication job. '
+                  'The separate validator is the evidence for this commit; ordinary PR CI has not been asserted to pass.\n')
+              latest = api('pulls/945')
+              if latest['state'] != 'open' or latest.get('merged') or latest['head']['sha'] != commit:
+                  raise SystemExit('Branch published, but PR changed before metadata update')
+              api('pulls/945', {'base': 'main', 'body': (latest.get('body') or '') + evidence})
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                  summary.write('Published and verified PR #945: `' + commit + '`\n\n' + run['html_url'] + '\n')
+              print('PUBLISHED_AND_VERIFIED', commit, tree, run['html_url'])
