@@ -11,18 +11,20 @@ use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
 use crate::peer::Peer;
+use crate::socket::{HANDSHAKE_TIMEOUT, configure_peer_stream};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Maximum backoff for transient accept errors (ECONNABORTED, EMFILE, …).
 /// Bounded so the listener recovers quickly once the pressure clears.
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
-const HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_mins(1);
-/// Stream read timeout used while polling handshake and message reads.
-const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
+
 type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
+
 type SyncWakeHandle = Option<Sender<()>>;
+
 type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 
 /// Optional node-owned handles layered onto a listener or outbound session.
@@ -283,9 +285,11 @@ pub enum ListenerError {
 /// Binds `addr` and runs an accept loop until `shutdown` is set.
 ///
 /// On each accepted connection, spawns a thread that runs the inbound
-/// handshake followed by a message-dispatch loop. The handshake uses
-/// `HANDSHAKE_READ_TIMEOUT` (60s); after handshake, the message loop polls
-/// inbound reads every second while enforcing a 60s inbound idle timeout.
+/// handshake followed by a message-dispatch loop. Socket flags come from
+/// [`crate::socket::configure_peer_stream`]. The handshake uses
+/// [`crate::socket::HANDSHAKE_TIMEOUT`]; after handshake, the message loop
+/// polls inbound reads every [`crate::socket::STREAM_POLL_INTERVAL`] while
+/// enforcing a 60s inbound idle timeout.
 /// The thread terminates on:
 ///   - successful handshake then idle (60s of no inbound messages)
 ///   - wire / FSM error
@@ -681,16 +685,17 @@ fn run_outbound_connection(
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
-        .map_err(crate::wire::PeerError::Io)?;
+    configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
     if shared.is_session_cancelled() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
     }
+
+    // Wrapped before registration and the handshake, so failed socket
+    // posture cannot leave a dead peer in live-connection accounting.
+    let counters = std::sync::Arc::new(crate::PeerCounters::default());
+    let stream = crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)?;
 
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
@@ -705,14 +710,11 @@ fn run_outbound_connection(
     }
 
     let nonce = generate_nonce(addr);
-    // Wrapped before the handshake, so the bytes it spends are counted too.
-    let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::from_connected(stream, counters)
-        .map_err(crate::wire::PeerError::Io)?;
+
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
-    let handshake_deadline = Instant::now() + HANDSHAKE_READ_TIMEOUT;
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_outbound_handshake(
         &mut peer,
         nonce,
@@ -818,7 +820,7 @@ fn spawn_handshake_thread(
         );
     }
     // The handle is intentionally dropped: per-connection threads outlive
-    // this listener thread by up to HANDSHAKE_READ_TIMEOUT.
+    // this listener thread by up to HANDSHAKE_TIMEOUT.
 }
 
 fn run_handshake(
@@ -828,15 +830,7 @@ fn run_handshake(
     shared: &ConnectionShared,
     inbound_sync_sinks: &InboundSyncSinks,
 ) -> Result<(), crate::wire::PeerError> {
-    stream
-        .set_nonblocking(false)
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-        .map_err(crate::wire::PeerError::Io)?;
-    stream
-        .set_write_timeout(Some(HANDSHAKE_READ_TIMEOUT))
-        .map_err(crate::wire::PeerError::Io)?;
+    configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
 
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
@@ -862,7 +856,7 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, magic);
-    let handshake_deadline = Instant::now() + HANDSHAKE_READ_TIMEOUT;
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_inbound_handshake(
         &mut peer,
         nonce,
@@ -930,8 +924,12 @@ fn run_connected_session(
     inbound_sync_sinks: &InboundSyncSinks,
     lease: crate::PeerLease,
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
-    info: crate::PeerInfo,
+    mut info: crate::PeerInfo,
 ) -> Result<(), crate::wire::PeerError> {
+    // BIP339 announcement preference is the peer's received wtxidrelay,
+    // independently of our own advertisement. Publish it atomically with the
+    // completed handshake so relay never chooses a type during negotiation.
+    info.wtxid_relay = peer.wtxid_relay.peer_supported();
     let setup_result: Result<std::thread::JoinHandle<()>, crate::wire::PeerError> = (|| {
         #[cfg(test)]
         if WRITER_SETUP_FAIL.swap(false, Ordering::Relaxed) {
@@ -978,20 +976,15 @@ fn run_connected_session(
         "p2p handshake complete; entering message loop",
     );
 
-    let loop_result = (|| {
-        peer.stream
-            .set_read_timeout(Some(STREAM_POLL_INTERVAL))
-            .map_err(crate::wire::PeerError::Io)?;
-        run_message_loop(
-            peer,
-            peer_addr,
-            &lease,
-            inbound_sync_sinks,
-            shared.chain_query.as_deref(),
-            shared.tx_inventory.as_deref(),
-            shared.totals.as_ref(),
-        )
-    })();
+    let loop_result = run_message_loop(
+        peer,
+        peer_addr,
+        &lease,
+        inbound_sync_sinks,
+        shared.chain_query.as_deref(),
+        shared.tx_inventory.as_deref(),
+        shared.totals.as_ref(),
+    );
 
     shared.peer_table.remove_current(peer_addr, &lease);
     lease.cancel();
@@ -1256,6 +1249,7 @@ fn unix_secs_i64(now: SystemTime) -> i64 {
         i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
     })
 }
+
 fn unix_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1443,9 +1437,11 @@ mod writer_setup_cleanup_tests {
         crate::PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,
+            best_known_height: 0,
             conn_time,
             inbound: false,
             addr_bind: addr,
@@ -1555,10 +1551,12 @@ mod writer_shutdown_tests {
         crate::PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 1,
             user_agent: String::from("/test/"),
             start_height,
             conn_time: 0,
+            best_known_height: start_height,
             inbound: false,
             addr_bind: addr,
             time_offset: 0,
@@ -2028,69 +2026,91 @@ mod writer_shutdown_tests {
     }
 
     #[test]
-    fn run_connected_session_joins_writer_with_external_lease_clone_alive() {
-        let (client, server, peer_addr) = loopback_pair();
-        // The client EOFs immediately, so the session's first read fails.
-        drop(client);
+    fn run_connected_session_publishes_peer_relay_preference_and_joins_writer() {
+        for peer_requested_wtxid in [false, true] {
+            let (client, server, peer_addr) = loopback_pair();
+            // The client EOFs immediately, so the session's first read fails.
+            drop(client);
 
-        let peer_table = Arc::new(crate::PeerTable::new());
-        let banned = Arc::new(RwLock::new(Vec::new()));
-        let shared = ConnectionShared::from_parts(peer_table, banned, None);
-
-        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
-        let lease = crate::PeerLease::new(outbound_tx);
-        let lease_probe = lease.clone();
-        shared.peer_table.register(peer_addr, lease.clone());
-
-        let info = crate::PeerInfo {
-            addr: peer_addr,
-            version: 70_016,
-            services: 0,
-            user_agent: String::from("/test/"),
-            start_height: 0,
-            conn_time: 0,
-            inbound: false,
-            addr_bind: peer_addr,
-            time_offset: 0,
-            counters: std::sync::Arc::new(crate::PeerCounters::default()),
-        };
-        let sinks = InboundSyncSinks::new(
-            crossbeam_channel::unbounded().0,
-            crossbeam_channel::unbounded().0,
-            None,
-        );
-
-        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
-        let worker = std::thread::spawn(move || {
-            let mut peer = Peer::new(
-                crate::CountingStream::new(
-                    server,
-                    std::sync::Arc::new(crate::PeerCounters::default()),
-                ),
-                Magic::BITCOIN,
+            let peer_table = Arc::new(crate::PeerTable::new());
+            let banned = Arc::new(RwLock::new(Vec::new()));
+            let (published_tx, published_rx) = crossbeam_channel::bounded(1);
+            let observed_table = Arc::clone(&peer_table);
+            let shared = ConnectionShared::from_parts(peer_table, banned, None).with_peer_ready(
+                Arc::new(move |_source| {
+                    let requested = observed_table.infos()[0].wtxid_relay;
+                    let _ = published_tx.try_send(requested);
+                }),
             );
-            let result = run_connected_session(
-                &mut peer,
-                peer_addr,
-                Magic::BITCOIN,
-                &shared,
-                &sinks,
-                lease,
-                outbound_rx,
-                info,
-            );
-            let _ = done_tx.send(result);
-        });
 
-        // The external clone keeps the queue's senders alive for the whole
-        // call; only the teardown close signal lets the writer exit, so the
-        // session must still return under the failsafe.
-        let result = done_rx
-            .recv_timeout(FAILSAFE)
-            .expect("session must return while an external lease clone is alive");
-        worker.join().expect("worker join");
-        assert!(result.is_err(), "EOF on read must end the session");
-        assert!(lease_probe.is_cancelled());
+            let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+            let lease = crate::PeerLease::new(outbound_tx);
+            let lease_probe = lease.clone();
+            shared.peer_table.register(peer_addr, lease.clone());
+
+            let info = crate::PeerInfo {
+                addr: peer_addr,
+                version: 70_016,
+                wtxid_relay: false,
+                services: 0,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: peer_addr,
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            };
+            let sinks = InboundSyncSinks::new(
+                crossbeam_channel::unbounded().0,
+                crossbeam_channel::unbounded().0,
+                None,
+            );
+
+            let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+            let worker = std::thread::spawn(move || {
+                let mut peer = Peer::new(
+                    crate::CountingStream::new(
+                        server,
+                        std::sync::Arc::new(crate::PeerCounters::default()),
+                    ),
+                    Magic::BITCOIN,
+                );
+                // Receiving wtxidrelay chooses outbound inventory; our own
+                // advertisement alone must not switch the remote preference.
+                if peer_requested_wtxid {
+                    peer.wtxid_relay.mark_peer_supported();
+                } else {
+                    peer.wtxid_relay.mark_local_advertised();
+                }
+                let result = run_connected_session(
+                    &mut peer,
+                    peer_addr,
+                    Magic::BITCOIN,
+                    &shared,
+                    &sinks,
+                    lease,
+                    outbound_rx,
+                    info,
+                );
+                let _ = done_tx.send(result);
+            });
+
+            // The external clone keeps the queue's senders alive for the whole
+            // call; only the teardown close signal lets the writer exit, so the
+            // session must still return under the failsafe.
+            let result = done_rx
+                .recv_timeout(FAILSAFE)
+                .expect("session must return while an external lease clone is alive");
+            worker.join().expect("worker join");
+            assert!(result.is_err(), "EOF on read must end the session");
+            assert!(lease_probe.is_cancelled());
+            assert_eq!(
+                published_rx.try_recv().expect("published ready metadata"),
+                peer_requested_wtxid
+            );
+        }
     }
 
     #[test]
@@ -2172,10 +2192,12 @@ mod ready_notify_tests {
         crate::PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 1,
             user_agent: String::from("/test/"),
             start_height,
             conn_time: 0,
+            best_known_height: start_height,
             inbound: false,
             addr_bind: addr,
             time_offset: 0,

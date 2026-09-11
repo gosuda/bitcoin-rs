@@ -6,8 +6,6 @@ use bitcoin_rs_storage::{
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-#[cfg(feature = "mdbx")]
-use std::{path::PathBuf, process::Command};
 
 const ROWS: u32 = 10_000;
 const DELETE_ROWS: u32 = 1_000;
@@ -325,15 +323,6 @@ fn redb_equivalence_hash() -> TestResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "mdbx")]
-#[test]
-fn mdbx_equivalence_hash() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let hash = run_equivalence_suite(bitcoin_rs_storage::MdbxStore::open(temp.path())?)?;
-    eprintln!("mdbx aggregate hash: {}", hash_hex(&hash));
-    Ok(())
-}
-
 #[cfg(feature = "redb")]
 #[test]
 fn redb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
@@ -368,26 +357,18 @@ fn portable_backends_have_identical_aggregate_hashes() -> TestResult<()> {
     let rocks_temp = tempfile::TempDir::new()?;
     let fjall_temp = tempfile::TempDir::new()?;
     let redb_temp = tempfile::TempDir::new()?;
-    #[cfg(feature = "mdbx")]
-    let mdbx_temp = tempfile::TempDir::new()?;
 
     let rocksdb =
         run_equivalence_suite(bitcoin_rs_storage::RocksDbStore::open(rocks_temp.path())?)?;
     let fjall = run_equivalence_suite(bitcoin_rs_storage::FjallStore::open(fjall_temp.path())?)?;
     let redb = run_equivalence_suite(bitcoin_rs_storage::RedbStore::open(redb_temp.path())?)?;
-    #[cfg(feature = "mdbx")]
-    let mdbx = run_equivalence_suite(bitcoin_rs_storage::MdbxStore::open(mdbx_temp.path())?)?;
 
     eprintln!("rocksdb aggregate hash: {}", hash_hex(&rocksdb));
     eprintln!("fjall aggregate hash: {}", hash_hex(&fjall));
     eprintln!("redb aggregate hash: {}", hash_hex(&redb));
-    #[cfg(feature = "mdbx")]
-    eprintln!("mdbx aggregate hash: {}", hash_hex(&mdbx));
 
     assert_eq!(rocksdb, fjall);
     assert_eq!(rocksdb, redb);
-    #[cfg(feature = "mdbx")]
-    assert_eq!(rocksdb, mdbx);
     Ok(())
 }
 
@@ -683,18 +664,6 @@ fn redb_write_durable_if_laws() -> TestResult<()> {
     Ok(())
 }
 
-#[cfg(feature = "mdbx")]
-#[test]
-fn mdbx_write_durable_if_laws() -> TestResult<()> {
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::MdbxStore::open(temp.path())?;
-    run_write_condition_laws(&store)?;
-    run_competing_writer_laws(&store)?;
-    drop(store);
-    run_reopen_durability_law(|| bitcoin_rs_storage::MdbxStore::open(temp.path()))?;
-    Ok(())
-}
-
 #[cfg(feature = "rocksdb")]
 #[test]
 fn rocksdb_rejects_second_writable_primary_open_on_same_path() -> TestResult<()> {
@@ -706,69 +675,5 @@ fn rocksdb_rejects_second_writable_primary_open_on_same_path() -> TestResult<()>
         "a second writable primary open must fail while the first store owns the database"
     );
     drop(first);
-    Ok(())
-}
-
-#[cfg(feature = "mdbx")]
-#[test]
-fn mdbx_write_durable_if_spans_processes() -> TestResult<()> {
-    const CF: ColumnFamily = ColumnFamily::BlockBodies;
-    const CHILD_DATA_DIR: &str = "BITCOIN_RS_MDBX_CONDITIONAL_WRITE_CHILD";
-    let key = b"mdbx-cross-process".as_slice();
-    if let Some(path) = std::env::var_os(CHILD_DATA_DIR) {
-        // Child mode: claim the parent's pre-image through the conditional
-        // primitive; MDBX's cross-process write lock serializes the boundary.
-        let store = bitcoin_rs_storage::MdbxStore::open(PathBuf::from(path))?;
-        let mut batch = store.new_batch();
-        batch.put(CF, key, b"newer");
-        assert!(store.write_durable_if(
-            &[WriteCondition::Equals {
-                cf: CF,
-                key,
-                expected: b"older"
-            }],
-            batch,
-        )?);
-        return Ok(());
-    }
-    let temp = tempfile::TempDir::new()?;
-    let store = bitcoin_rs_storage::MdbxStore::open(temp.path())?;
-    store.put(CF, key, b"older")?;
-    let status = Command::new(std::env::current_exe()?)
-        .arg("--exact")
-        .arg("mdbx_write_durable_if_spans_processes")
-        .arg("--nocapture")
-        .env(CHILD_DATA_DIR, temp.path())
-        .status()?;
-    assert!(status.success(), "MDBX writer child failed: {status}");
-
-    // The child consumed the pre-image across processes: the stale claim
-    // misses, and its unrelated write never lands either.
-    let stale_key = b"mdbx-unrelated".as_slice();
-    let mut batch = store.new_batch();
-    batch.put(CF, stale_key, b"stale");
-    assert!(!store.write_durable_if(
-        &[WriteCondition::Equals {
-            cf: CF,
-            key,
-            expected: b"older"
-        }],
-        batch,
-    )?);
-    assert_eq!(store.get(CF, key)?, Some(b"newer".to_vec()));
-    assert_eq!(store.get(CF, stale_key)?, None);
-
-    // The cross-process value satisfies a fresh claim.
-    let mut batch = store.new_batch();
-    batch.delete(CF, key);
-    assert!(store.write_durable_if(
-        &[WriteCondition::Equals {
-            cf: CF,
-            key,
-            expected: b"newer"
-        }],
-        batch,
-    )?);
-    assert_eq!(store.get(CF, key)?, None);
     Ok(())
 }

@@ -6,28 +6,36 @@
 //! [`bitcoin_rs_chain::BlockTree`]; inbound full blocks are applied through
 //! [`crate::apply::apply_block`].
 
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use alloc::{sync::Arc, vec::Vec};
 
-mod stage;
+use bitcoin::{
+    hashes::Hash as _,
+    p2p::message_blockdata::{GetHeadersMessage, Inventory},
+};
 
-use bitcoin::hashes::Hash as _;
-use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
-use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerTable};
+
+use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
+
 use bitcoin_rs_primitives::{Block, Hash256};
+
+use crate::apply::error::ApplyError;
+
 use crossbeam_channel::Receiver;
+
 use hashbrown::HashMap;
+
 use parking_lot::Mutex;
-use smallvec::SmallVec;
 
 use self::stage::{BlockStager, DrainedBlock, StagedBlock};
-#[cfg(test)]
-pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
-pub use bitcoin_rs_p2p::download_window::SyncBudget;
-pub use bitcoin_rs_p2p::download_window::default_sync_budget;
+
+use smallvec::SmallVec;
+
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
+
 #[allow(unused_imports)]
 use bitcoin_rs_p2p::download_window::{
     BLOCK_STALLING_TIMEOUT, BLOCK_STALLING_TIMEOUT_MAX, DownloadWindow, FanoutCandidate,
@@ -38,10 +46,19 @@ use bitcoin_rs_p2p::download_window::{
     statically_fanout_eligible,
 };
 
+pub use bitcoin_rs_p2p::download_window::{SyncBudget, default_sync_budget};
+
+#[cfg(test)]
+pub(crate) use bitcoin_rs_p2p::download_window::MIN_PEERS_FOR_FANOUT;
+
+mod stage;
+
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
+
 /// Wire protocol version we advertise on outbound `getheaders`.
 const PROTOCOL_VERSION: u32 = 70_016;
+
 /// Time after which an unanswered `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -51,7 +68,7 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 ///
 /// Owns the production [`DownloadWindow`]. Session identity stays on the
 /// shared [`PeerTable`]; this orchestrator calls identity-checked table
-/// methods and does not schedule through `P2pService::select_download_peers`.
+/// methods. The P2P service does not hold a second window.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     followers: crate::chain_effects::ChainFollowers,
@@ -63,6 +80,13 @@ pub struct BlockSync {
     pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     known_sessions: Mutex<HashMap<SocketAddr, bitcoin_rs_p2p::ConnectionId>>,
+    /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
+    /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
+    /// no chain transition: the failed `finish` left the gateway generation
+    /// odd, so every further attempt would bounce off `AlreadyActive` and
+    /// churn staged state. Only recreating the sync object (restart path)
+    /// clears it; there is no in-place recovery that re-evens generation.
+    apply_halted: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +96,7 @@ struct PendingHeaderRequest {
     target_height: u32,
     requested_at: Instant,
 }
+
 #[derive(Clone, Debug)]
 struct ExpectedApplyCache {
     chain_tip_hash: Hash256,
@@ -126,6 +151,116 @@ fn is_peer_fault(error: &ChainError) -> bool {
     }
 }
 
+/// The one eligibility and ordering rule for demonstrated-best-known
+/// height peer selection (P2P-03): a peer is request-eligible when its
+/// demonstrated height exceeds `floor`, and among eligible peers the
+/// greatest height wins. First-wins on equal heights.
+fn sync_peer_candidate(peer: &PeerInfo, floor: u32) -> Option<SyncPeer> {
+    let height = u32::try_from(peer.best_known_height).ok()?;
+    (height > floor).then_some(SyncPeer {
+        addr: peer.addr,
+        best_known_height: peer.best_known_height,
+    })
+}
+
+/// Whether `candidate` outranks `current`: strictly greater demonstrated
+/// height; first-wins on ties.
+fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
+    candidate.best_known_height > current.best_known_height
+}
+
+fn active_demonstrated_height(
+    tree: &BlockTree,
+    active_tip: NodeId,
+    demonstrated_tips: &[Hash256],
+) -> Option<u32> {
+    demonstrated_tips
+        .iter()
+        .filter_map(|hash| tree.active_height_of(active_tip, *hash))
+        .max()
+}
+
+fn body_capability_height(
+    peer: &PeerInfo,
+    tree: &BlockTree,
+    active_tip: Option<NodeId>,
+    demonstrated_tips: &[Hash256],
+) -> Option<u32> {
+    // A session has no branch evidence until its first accepted header batch;
+    // keep the handshake capability during that discovery window. Once it has
+    // evidence, only a tip on the current active chain is usable for bodies.
+    if demonstrated_tips.is_empty() {
+        return u32::try_from(peer.best_known_height).ok();
+    }
+    active_tip.and_then(|tip| active_demonstrated_height(tree, tip, demonstrated_tips))
+}
+
+fn settle_window_failure(
+    transition: crate::apply::ChainTransition<'_>,
+    mut error: crate::apply::WindowApplyError,
+) -> crate::apply::WindowApplyError {
+    if matches!(error.source, ApplyError::UtxoCommit(_)) {
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
+    } else if let Err(finish_source) = transition.finish() {
+        tracing::error!(
+            original = %error.source,
+            finish = %finish_source,
+            "chain transition could not be settled after a window failure; \
+             mempool admission stays closed until recovery or restart"
+        );
+        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
+    }
+    error
+}
+
+/// Settles a successful window: finishes the transition, or classifies a
+/// finish failure as [`WindowApplyDisposition::Fatal`] when the reserved
+/// even generation could not be published.
+///
+/// Symmetric with [`settle_window_failure`]: both paths attempt `finish`
+/// and surface a `Fatal` disposition when the CAS fails, so the caller
+/// stops retrying instead of wedging on an odd generation.
+#[allow(clippy::result_large_err)]
+fn settle_window_success(
+    transition: crate::apply::ChainTransition<'_>,
+    applied: usize,
+    committed: Vec<crate::apply::ConnectOutcome>,
+) -> core::result::Result<usize, crate::apply::WindowApplyError> {
+    match transition.finish() {
+        Ok(()) => Ok(applied),
+        Err(finish_source) => {
+            tracing::error!(
+                finish = %finish_source,
+                "chain transition could not be settled after a committed window; \
+                 mempool admission stays closed until recovery or restart"
+            );
+            Err(crate::apply::WindowApplyError {
+                applied,
+                committed,
+                source: finish_source,
+                disposition: crate::apply::WindowApplyDisposition::Fatal,
+                invalidated: Box::default(),
+            })
+        }
+    }
+}
+
+/// Where restoration of un-applied drained blocks must start.
+///
+/// When the whole chunk committed and only the chain-transition finish failed
+/// (`stopped == chunk_len`), there is no refused block to skip: restoration
+/// starts at the head of the next chunk, `chunk_start + stopped`. When a block
+/// was refused inside the chunk (`stopped < chunk_len`), that block is dropped
+/// for retry and restoration starts one past it, `chunk_start + stopped + 1`.
+fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize) -> usize {
+    let base = chunk_start.saturating_add(stopped);
+    if stopped < chunk_len {
+        base.saturating_add(1)
+    } else {
+        base
+    }
+}
+
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
     #[must_use]
@@ -147,6 +282,7 @@ impl BlockSync {
             pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             known_sessions: Mutex::new(HashMap::new()),
+            apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -190,6 +326,10 @@ impl BlockSync {
                     applied: 0,
                     committed: Vec::new(),
                     source,
+                    // Admission can also stay closed after a prior torn
+                    // `UtxoCommit` or a `Fatal` settlement; recovery must
+                    // reset the gateway generation before a retry can begin
+                    // (`ChainTransition` owns that recovery rule).
                     disposition: crate::apply::WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                 })?;
@@ -199,14 +339,15 @@ impl BlockSync {
                     self.followers.connected(block, outcome);
                 }
                 let applied = outcomes.len();
-                let _ = transition.finish();
-                Ok(applied)
+                settle_window_success(transition, applied, outcomes)
             }
             Err(error) => {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
                     self.followers.connected(block, outcome);
                 }
-                Err(error)
+                // `ChainTransition` documents which failures may safely
+                // publish the reserved even generation.
+                Err(settle_window_failure(transition, error))
             }
         }
     }
@@ -275,7 +416,7 @@ impl BlockSync {
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
         for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
-            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
             let request_outcome = match (&chain_tip, &applied_tip) {
                 (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
                     peer.addr,
@@ -360,8 +501,24 @@ impl BlockSync {
             );
             match acceptance {
                 Ok(node_ids) => {
+                    let announced_tip = node_ids
+                        .last()
+                        .and_then(|id| tree.node(*id).ok())
+                        .map(|node| node.hash);
+                    let active_height =
+                        tree.tip()
+                            .zip(announced_tip)
+                            .and_then(|(active_tip, hash)| {
+                                tree.active_height_of(active_tip.tip_id, hash)
+                                    .and_then(|height| i32::try_from(height).ok())
+                            });
                     self.handles.assume_valid_gate.evaluate(&tree);
                     drop(tree);
+                    if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
+                        self.peer_table
+                            .note_announced_tip(source, tip_hash, active_height);
+                    }
+                    self.refresh_active_peer_credit();
                     tracing::debug!(
                         accepted = node_ids.len(),
                         received = batch_len,
@@ -408,6 +565,33 @@ impl BlockSync {
         }
     }
 
+    fn refresh_active_peer_credit(&self) {
+        let sessions = self.peer_table.sessions();
+        let updates: Vec<(PeerSource, i32)> = {
+            let tree = self.handles.block_tree.read();
+            let Some(active_tip) = tree.tip() else {
+                return;
+            };
+            sessions
+                .into_iter()
+                .filter_map(|session| {
+                    let info = session.info?;
+                    let height = active_demonstrated_height(
+                        &tree,
+                        active_tip.tip_id,
+                        &session.demonstrated_tips,
+                    )?;
+                    let height = i32::try_from(height).ok()?;
+                    (height > info.best_known_height)
+                        .then_some((session.lease.source(session.addr), height))
+                })
+                .collect()
+        };
+        for (source, height) in updates {
+            self.peer_table.note_announced_height(source, height);
+        }
+    }
+
     /// Requests the next header batch from the highest peer above the applied
     /// tip, using a locator taken after `drain_inbound_headers` so it reflects
     /// headers accepted this tick.
@@ -424,24 +608,17 @@ impl BlockSync {
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let mut header_peer: Option<SyncPeer> = None;
         for peer in self.peer_table.infos() {
-            let Ok(height) = u32::try_from(peer.start_height) else {
+            let Some(candidate) = sync_peer_candidate(&peer, applied_height) else {
                 continue;
             };
-            if height <= applied_height {
-                continue;
-            }
-            let candidate = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.start_height,
-            };
-            if header_peer.is_none_or(|current| current.start_height < candidate.start_height) {
+            if header_peer.is_none_or(|current| outranks(current, candidate)) {
                 header_peer = Some(candidate);
             }
         }
         if let Some(peer) = header_peer {
-            let peer_best_height = u32::try_from(peer.start_height).unwrap_or(0);
+            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
             if peer_best_height > header_height {
-                self.send_getheaders(peer.addr, header_height, peer.start_height);
+                self.send_getheaders(peer.addr, header_height, peer.best_known_height);
             }
         }
     }
@@ -670,6 +847,10 @@ impl BlockSync {
                     "block sync: chainstate torn by a failed disconnect, shutting down"
                 );
             }
+            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
+                // The reorg owner has closed admission and requested shutdown.
+                tracing::error!(%error, "block sync: reorg generation settlement failed");
+            }
             Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
                 tracing::error!(
                     %error,
@@ -744,8 +925,32 @@ impl BlockSync {
         (!plan.disconnect.is_empty()).then_some(chain_tip.tip_id)
     }
 
+    /// Records a Fatal window settlement: logs the terminal state and latches
+    /// the halt flag so later ticks keep staging inbound blocks but start no
+    /// further chain transition. Staged blocks stay queued until recreation.
+    fn note_fatal_settlement(&self, stopped: usize, source: &ApplyError) {
+        tracing::error!(
+            applied = stopped,
+            error = %source,
+            "block sync: chain transition could not be settled; \
+             mempool admission is closed and the node will not \
+             retry until recovery or restart"
+        );
+        self.apply_halted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
+        // A latched Fatal settlement left the gateway generation odd: starting
+        // another transition would bounce off `AlreadyActive` and churn staged
+        // state every tick. Staged blocks stay queued until recreation. The
+        // counter keeps the stall observable: the one `error!` in
+        // `note_fatal_settlement` fires once, these ticks stay quiet.
+        if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
+            metrics::counter!("node.sync.apply_halted_ticks").increment(1);
+            return (0, 0);
+        }
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
@@ -808,8 +1013,13 @@ impl BlockSync {
                 Err(error) => {
                     let stopped = error.applied.min(chunk.len());
                     failed = failed.saturating_add(1);
-                    if let Some(blocker) = chunk.get(stopped) {
+                    let blocker = chunk.get(stopped);
+                    if let Some(blocker) = blocker {
                         failed_hash = Some(blocker.hash);
+                    }
+                    if error.disposition == crate::apply::WindowApplyDisposition::Fatal {
+                        self.note_fatal_settlement(stopped, &error.source);
+                    } else if let Some(blocker) = blocker {
                         tracing::warn!(
                             hash = %blocker.hash,
                             error = %error.source,
@@ -822,11 +1032,12 @@ impl BlockSync {
                     applied = applied.saturating_add(stopped);
                     // Everything after the block that failed, in the order it
                     // was drained: the rest of this chunk past the failure, then
-                    // every chunk not yet attempted.
-                    let restore_from = chunk_start
-                        .saturating_add(stopped)
-                        .saturating_add(1)
-                        .min(drained.len());
+                    // every chunk not yet attempted. When the whole chunk
+                    // committed and only finish failed (`stopped == chunk.len()`),
+                    // there is no refused block to skip, so restoration starts
+                    // at the next chunk head.
+                    let restore_from =
+                        restore_split(chunk_start, stopped, chunk.len()).min(drained.len());
                     self.block_stager
                         .lock()
                         .restore_many(drained[restore_from..].iter().cloned());
@@ -1059,37 +1270,48 @@ impl BlockSync {
     fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
         let mut header_peer: Option<SyncPeer> = None;
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        for peer in self.peer_table.infos() {
+        let sessions = self.peer_table.sessions();
+        let tree = self.handles.block_tree.read();
+        let active_tip = tree.tip_id();
+        for session in sessions {
+            let Some(peer) = session.info else {
+                continue;
+            };
             // Height clause of the fan-out eligibility predicate (KTD6) and
             // the pre-existing candidate filter: the peer's known chain must
-            // reach past our applied tip, i.e. cover the window front being
-            // requested. Delta vs Core: Core tracks a continuously updated
-            // per-peer best header (`pindexBestKnownBlock`, fed by headers/
-            // inv processing); this codebase only has the handshake-time
-            // `start_height`, so that is the proxy used — per-request
-            // truncation by `peer_best_height` bounds the damage of a stale
-            // value.
-            if u32::try_from(peer.start_height)
-                .ok()
-                .is_none_or(|height| height <= our_height)
-            {
+            // reach past our applied tip, i.e., cover the window front being
+            // requested. Like Core's `pindexBestKnownBlock`, eligibility reads
+            // the demonstrated best-known height (handshake snapshot, raised
+            // as the peer hands us accepted headers) rather than the
+            // handshake value alone — a long-lived at-tip peer would
+            // otherwise become ineligible for every newly announced block
+            // (#617). Per-request truncation by `peer_best_height` still
+            // bounds the damage of a stale value.
+            let Some(sync_peer) = sync_peer_candidate(&peer, our_height) else {
                 continue;
-            }
-            let sync_peer = SyncPeer {
-                addr: peer.addr,
-                start_height: peer.start_height,
             };
-            if header_peer
-                .is_none_or(|current: SyncPeer| current.start_height < sync_peer.start_height)
-            {
+            if header_peer.is_none_or(|current| outranks(current, sync_peer)) {
                 header_peer = Some(sync_peer);
             }
+            let Some(active_height) =
+                body_capability_height(&peer, &tree, active_tip, &session.demonstrated_tips)
+            else {
+                continue;
+            };
+            if active_height <= our_height {
+                continue;
+            }
+            let body_peer = SyncPeer {
+                addr: peer.addr,
+                best_known_height: i32::try_from(active_height).unwrap_or(i32::MAX),
+            };
             candidates.push(FanoutCandidate {
-                peer: sync_peer,
+                peer: body_peer,
                 fanout_eligible: statically_fanout_eligible(&peer),
                 soft_blocked: false,
             });
         }
+        drop(tree);
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut window = self.download_window.lock();
             for candidate in &mut candidates {
@@ -1125,17 +1347,16 @@ impl BlockSync {
             // cooldown) fills the window; a soft-blocked peer serves only as
             // the last resort when no alternative exists. Without the
             // preference, a disconnected staller that reconnects with an
-            // inflated start_height would out-sort every honest peer and
-            // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
+            // inflated demonstrated best-known height would out-sort every
+            // honest peer and re-acquire the window front (RE-ADV-2 /
+            // first-audit ADV-2).
             let mut preferred: Option<SyncPeer> = None;
             for candidate in candidates
                 .iter()
                 .filter(|candidate| !candidate.soft_blocked)
             {
                 // First-wins on equal heights, matching the header-peer fold.
-                if preferred
-                    .is_none_or(|current| current.start_height < candidate.peer.start_height)
-                {
+                if preferred.is_none_or(|current| outranks(current, candidate.peer)) {
                     preferred = Some(candidate.peer);
                 }
             }
@@ -1146,7 +1367,7 @@ impl BlockSync {
                 .collect()
         };
         if request_peers.len() > 1 {
-            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.start_height));
+            request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.best_known_height));
         }
         request_peers.truncate(request_peer_limit);
         SyncPeerSelection {
@@ -1167,7 +1388,8 @@ impl BlockSync {
         };
         let candidates = probe_peers.iter().filter(|peer| {
             peer.addr != owner
-                && u32::try_from(peer.start_height).is_ok_and(|height| height >= required_height)
+                && u32::try_from(peer.best_known_height)
+                    .is_ok_and(|height| height >= required_height)
         });
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
@@ -1427,15 +1649,29 @@ impl BlockSync {
         front_height: u32,
         now: Instant,
     ) -> Option<SocketAddr> {
+        let sessions = self.peer_table.sessions();
+        let tree = self.handles.block_tree.read();
+        let active_tip = self.handles.chain_tip.load_full()?.tip_id;
+        let active_front_height = tree.active_height_of(active_tip, front_hash)?;
         let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
-        for peer in self.peer_table.infos() {
+        for session in sessions {
+            let Some(peer) = session.info else {
+                continue;
+            };
             if peer.addr != owner
                 && statically_fanout_eligible(&peer)
-                && u32::try_from(peer.start_height).is_ok_and(|height| height >= front_height)
+                && body_capability_height(
+                    &peer,
+                    &tree,
+                    Some(active_tip),
+                    &session.demonstrated_tips,
+                )
+                .is_some_and(|height| height >= active_front_height)
             {
                 candidates.push(peer.addr);
             }
         }
+        drop(tree);
         let candidates: SmallVec<[SocketAddr; 8]> = {
             let window = self.download_window.lock();
             candidates
@@ -1599,33 +1835,61 @@ fn metric_count(value: usize) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     use arc_swap::ArcSwapOption;
     // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-    use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-    use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerSource, PeerTable};
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::TipSnapshot;
+    use bitcoin_rs_mempool::Mempool;
+    use bitcoin_rs_mempool::MempoolLimits;
+    use bitcoin_rs_p2p::PeerInfo;
+    use bitcoin_rs_p2p::PeerLease;
+    use bitcoin_rs_p2p::PeerSource;
+    use bitcoin_rs_p2p::PeerTable;
+    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::OutPoint;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::TxOut;
+    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::encode::double_sha256;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
-        consensus_bytes,
-    };
     use bitcoin_rs_script::push_int;
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_utxo::UtxoSet;
     use crossbeam_channel::unbounded;
     use hashbrown::HashMap;
-    use metrics::{
-        Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata,
-        Recorder, SharedString, Unit,
-    };
-    use parking_lot::{Mutex, RwLock};
+    use metrics::Counter;
+    use metrics::CounterFn;
+    use metrics::Gauge;
+    use metrics::GaugeFn;
+    use metrics::Histogram;
+    use metrics::HistogramFn;
+    use metrics::Key;
+    use metrics::KeyName;
+    use metrics::Metadata;
+    use metrics::Recorder;
+    use metrics::SharedString;
+    use metrics::Unit;
+    use parking_lot::Mutex;
+    use parking_lot::RwLock;
 
-    use super::{BlockSync, InboundHeaders, Inventory, Message};
+    use super::BlockSync;
+    use super::InboundHeaders;
+    use super::Inventory;
+    use super::Message;
     use crate::apply::Chainstate;
 
     #[test]
@@ -1691,6 +1955,289 @@ mod tests {
         if !matches!(second, Message::GetHeaders(_)) {
             return Err(std::io::Error::other("expected getheaders").into());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
+        // Regression test for the #617 shape: once a node has caught up, no
+        // connected peer has a handshake-time start_height above its applied
+        // height — every peer connected while the node was at or below the
+        // tip. When a new header then extends the tip (a sendheaders
+        // announcement), the announcing peer demonstrably has the block, so
+        // its demonstrated best-known height must keep it request-eligible
+        // and tick must fetch the missing body instead of skipping every
+        // peer for a stale handshake snapshot.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut tip_id = genesis_id;
+        for height in 1_u32..=2 {
+            let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+        }
+        // Applied frontier at height 2; header 3 arrives later, below.
+        let applied = {
+            let node = tree.node(tip_id)?;
+            TipSnapshot {
+                tip_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+        let announced_header = test_header(BlockHash::from(tree.node(tip_id)?.hash), 3);
+        let expected = announced_header.compute_hash();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let handles = apply_handles(
+            Arc::clone(&chain_tip),
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        );
+        let sync = BlockSync::for_test(
+            handles,
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // The peer's handshake height equals the applied height: it connected
+        // while the node was at the tip, before the new block existed.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(addr, 2));
+
+        // The peer announces the new tip header; drain accepts it and must
+        // record the demonstrated height on the peer.
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![announced_header],
+            source: Some(current_source(&peers, addr)),
+        })?;
+
+        sync.tick();
+
+        let first = rx
+            .try_recv()
+            .map_err(|_| std::io::Error::other("no getdata sent for the new tip header"))?;
+        let Message::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        assert_eq!(
+            inventory.len(),
+            1,
+            "only the unapplied new block is requested"
+        );
+        match &inventory[0] {
+            Inventory::WitnessBlock(hash) => {
+                assert_eq!(
+                    Hash256::from_le_bytes(hash.as_byte_array()),
+                    expected.into()
+                );
+            }
+            _ => return Err(std::io::Error::other("expected witness block inventory").into()),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md) — the reorg
+        // edge of the branch-aware credit. A winning fork announced at tip
+        // re-selects the tree's best chain during acceptance, and the
+        // announcing peer must earn credit against that POST-reselection
+        // chain. A filter that credited only headers on the pre-insert tip
+        // would leave the peer ineligible and no fork body would be fetched.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let losing1 = test_header(genesis.compute_hash(), 1);
+        let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+        let losing2 = test_header(losing1.compute_hash(), 2);
+        let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+        let applied = {
+            let node = tree.node(losing2_id)?;
+            TipSnapshot {
+                tip_id: losing2_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+
+        let winning1 = test_header(genesis.compute_hash(), 101);
+        let winning2 = test_header(winning1.compute_hash(), 102);
+        let winning3 = test_header(winning2.compute_hash(), 103);
+        let expected: Vec<Hash256> = [&winning1, &winning2, &winning3]
+            .iter()
+            .map(|header| header.compute_hash().into())
+            .collect();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+        // The peer's handshake height equals the applied height: it
+        // connected at the losing tip, and only the fork announcement it
+        // delivers demonstrates anything beyond that.
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+        let rx = connect_peer(&peers, synthetic_peer(addr, 2));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![winning1, winning2, winning3],
+            source: Some(current_source(&peers, addr)),
+        })?;
+
+        sync.tick();
+
+        // The winning fork's actual tip height is 3 (the fixture's 101..103
+        // only seed merkle/time bytes; tree heights derive from parents).
+        assert_eq!(
+            peers.infos()[0].best_known_height,
+            3,
+            "the announced winning fork must earn credit on the reselected best chain"
+        );
+        let first = rx
+            .try_recv()
+            .map_err(|_| std::io::Error::other("no getdata sent for the announced fork"))?;
+        let Message::GetData(inventory) = first else {
+            return Err(std::io::Error::other("expected getdata").into());
+        };
+        let requested = inventory
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            requested, expected,
+            "the reorg connect set must be requested after the common ancestor"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+        // Contract proof: P2P-03 (docs/contracts/p2p-wire.md). Peer A's
+        // accepted fork is initially losing, peer B later extends it so the
+        // fork wins, and B then disconnects. A must retain the accepted tip
+        // evidence and remain eligible for the bodies it demonstrated.
+        let mut tree = BlockTree::new();
+        let genesis = genesis_header();
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let losing1 = test_header(genesis.compute_hash(), 1);
+        let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+        let losing2 = test_header(losing1.compute_hash(), 2);
+        tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+        let genesis_node = tree.node(genesis_id)?;
+        let applied = TipSnapshot {
+            tip_id: genesis_id,
+            height: genesis_node.height,
+            chainwork: genesis_node.chainwork,
+            hash: genesis_node.hash,
+        };
+
+        let fork1 = test_header(genesis.compute_hash(), 101);
+        let fork2 = test_header(fork1.compute_hash(), 102);
+        let fork3 = test_header(fork2.compute_hash(), 103);
+        let expected = [fork1, fork2, fork3];
+        let expected_hashes: Vec<Hash256> = expected
+            .iter()
+            .map(|header| header.compute_hash().into())
+            .collect();
+
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        applied_tip.store(Some(Arc::new(applied)));
+        let peers = Arc::new(PeerTable::new());
+        let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
+        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
+        let (_inbound_blocks_tx, inbound_blocks_rx_raw) =
+            unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            inbound_headers_rx,
+            inbound_blocks_rx,
+        );
+
+        let peer_a = test_addr(8333, 0)?;
+        let peer_b = test_addr(8333, 1)?;
+        let rx_a = connect_peer(&peers, synthetic_peer(peer_a, 0));
+        let _rx_b = connect_peer(&peers, synthetic_peer(peer_b, 0));
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork1, fork2],
+            source: Some(current_source(&peers, peer_a)),
+        })?;
+        sync.drain_inbound_headers();
+        assert_eq!(
+            peers
+                .infos()
+                .into_iter()
+                .find(|info| info.addr == peer_a)
+                .ok_or("peer A info missing")?
+                .best_known_height,
+            0,
+            "a losing fork must not receive scalar credit yet"
+        );
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![fork3],
+            source: Some(current_source(&peers, peer_b)),
+        })?;
+        sync.drain_inbound_headers();
+        assert_eq!(
+            peers
+                .infos()
+                .into_iter()
+                .find(|info| info.addr == peer_a)
+                .ok_or("peer A info missing after reorg")?
+                .best_known_height,
+            2,
+            "peer A's retained fork tip must be credited after the fork wins"
+        );
+        assert!(peers.disconnect_source(current_source(&peers, peer_b)));
+
+        sync.tick();
+
+        let requested = next_getdata(&rx_a)?
+            .into_iter()
+            .map(|item| match item {
+                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
+                _ => Err(std::io::Error::other("expected witness block inventory")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            requested,
+            expected_hashes[..2],
+            "the surviving peer must serve the bodies it demonstrated"
+        );
         Ok(())
     }
 
@@ -1876,6 +2423,7 @@ mod tests {
     #[test]
     fn outweighed_branch_target_accepts_shorter_higher_work_branch()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::CompactTarget;
         let genesis = genesis_header();
         let mut tree = BlockTree::new();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1894,9 +2442,12 @@ mod tests {
         };
 
         let mut high_work = test_header(genesis.compute_hash(), 101);
-        high_work.bits = 0x2000_ffff;
+        high_work.bits = CompactTarget::from_consensus(0x2000_ffff);
         high_work.nonce = 0;
-        while !pow_met(high_work.bits, Hash256::from(high_work.compute_hash())) {
+        while !pow_met(
+            high_work.bits.to_consensus(),
+            Hash256::from(high_work.compute_hash()),
+        ) {
             high_work.nonce = high_work.nonce.wrapping_add(1);
         }
         let high_work_id =
@@ -1932,6 +2483,7 @@ mod tests {
     #[test]
     fn branch_switch_uses_staged_bodies_without_durable_store()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(2)?;
         sync.ensure_genesis_tip();
         install_budget(
@@ -1965,7 +2517,7 @@ mod tests {
         let mut fork = Vec::new();
         for height in 1..=3_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent = sync.handles.block_tree.write().insert_node(
                 Some(fork_parent),
@@ -2087,6 +2639,7 @@ mod tests {
     #[test]
     fn branch_switch_replans_after_a_competing_connect_before_transition()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(2)?;
         sync.ensure_genesis_tip();
         for block in &main {
@@ -2109,7 +2662,7 @@ mod tests {
         let mut fork = Vec::new();
         for height in 1..=3_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent = sync.handles.block_tree.write().insert_node(
                 Some(fork_parent),
@@ -2128,7 +2681,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(main[1].block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing main branch tip"))?;
         let mut racing_coinbase = coinbase_transaction(3);
-        racing_coinbase.outputs[0].script_pubkey = push_int(3);
+        racing_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
         let racing = mined_block_with_prev_hash(main[1].block_hash(), 3, vec![racing_coinbase]);
         stage_body(&sync, &racing);
         sync.handles.block_tree.write().insert_node(
@@ -2162,7 +2715,7 @@ mod tests {
             preloaded_rx.recv().map_err(|_| {
                 std::io::Error::other("branch switch did not pause after preloading began")
             })?;
-            crate::apply::apply_block(&sync.handles, &racing)?;
+            sync.handles.apply_block(&racing)?;
             continue_tx
                 .send(())
                 .map_err(|_| std::io::Error::other("branch switch stopped before replanning"))?;
@@ -2186,6 +2739,7 @@ mod tests {
     #[test]
     fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::{Amount, Script};
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -2204,7 +2758,7 @@ mod tests {
         let mut fork = Vec::new();
         for height in 1..=2_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
             let mut block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent = sync.handles.block_tree.write().insert_node(
                 Some(fork_parent),
@@ -2213,7 +2767,7 @@ mod tests {
             )?;
             fork_prev = block.block_hash();
             if height == 2 {
-                block.txs[0].outputs[0].value = 2;
+                block.txs[0].outputs[0].value = Amount::from_sat(2);
             }
             let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
             let bytes = consensus_bytes(&block).len();
@@ -2317,13 +2871,25 @@ mod tests {
         assert!(!stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 0);
+        // MPL-04: rejecting the invalid branch must still allow the selected
+        // valid main branch to reconnect through ordinary forward apply.
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
+        assert_eq!(
+            sync.handles.applied_tip.load_full().map(|tip| tip.hash),
+            Some(main_hash)
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
         Ok(())
     }
 
+    /// Generation settlement: MPL-04 in docs/contracts/mempool-mutations.md.
+    /// Prefix and body ownership: docs/solutions/architecture-patterns/node-reorg-execution-design.md.
     #[test]
-    fn operational_reorg_failure_preserves_branch_and_ownership()
+    fn operational_reorg_failure_preserves_branch_and_retries_without_restart()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+        use bitcoin_rs_primitives::Script;
+        let (mut sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
         assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
@@ -2339,7 +2905,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing genesis node"))?;
         let mut fork_coinbase = coinbase_transaction(1);
-        fork_coinbase.outputs[0].script_pubkey = push_int(2);
+        fork_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let fork = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![fork_coinbase]);
         let fork_id = sync.handles.block_tree.write().insert_node(
             Some(genesis_id),
@@ -2364,7 +2930,30 @@ mod tests {
                 .mark_received(hash, bytes, Instant::now());
         }
 
-        sync.switch_branch_if_outweighed();
+        let outcome = crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            descendant_id,
+            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.retire_applied_reorg_body(hash),
+        );
+        assert!(
+            matches!(
+                &outcome,
+                Err(crate::reorg::ReorgError::ConnectFailed {
+                    disconnected: 1,
+                    connected: 0,
+                    source,
+                    ..
+                }) if matches!(source.as_ref(), crate::ApplyError::BlockBodyPersistence(_))
+            ),
+            "the body-store refusal must follow a committed disconnect, got {outcome:?}"
+        );
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.hash),
+            Some(Hash256::from_le_bytes(genesis.block_hash().as_bytes())),
+            "a refused pre-UTXO connect leaves the fork point as the committed tip"
+        );
 
         {
             let tree = sync.handles.block_tree.read();
@@ -2377,12 +2966,36 @@ mod tests {
         assert!(stager.contains(&descendant_hash));
         drop(stager);
         assert_eq!(sync.download_window.lock().received_len(), 2);
+        // MPL-04: a known committed prefix must finish its generation, so a
+        // transient pre-UTXO refusal cannot wedge admission and later applies.
+        assert!(
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "admission must reopen after the clean connect refusal"
+        );
+
+        crate::reorg::switch_to_branch(
+            &sync.handles,
+            &sync.followers,
+            descendant_id,
+            |hash| sync.block_stager.lock().staged_body(hash),
+            |hash| sync.retire_applied_reorg_body(hash),
+        )?;
+        assert_eq!(
+            applied_tip.load_full().map(|tip| tip.hash),
+            Some(descendant_hash),
+            "retrying the same reorg must reach the target without restarting"
+        );
+        assert!(sync.handles.mempool_gateway.stable_generation().is_some());
+        assert!(!sync.block_stager.lock().contains(&fork_hash));
+        assert!(!sync.block_stager.lock().contains(&descendant_hash));
+        assert_eq!(sync.download_window.lock().received_len(), 0);
         Ok(())
     }
 
     #[test]
     fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -2400,7 +3013,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing genesis node"))?;
         let mut target_coinbase = coinbase_transaction(1);
-        target_coinbase.outputs[0].script_pubkey = push_int(2);
+        target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let target = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![target_coinbase]);
         let target_id = sync.handles.block_tree.write().insert_node(
             Some(genesis_id),
@@ -2408,7 +3021,7 @@ mod tests {
             NodeStatus::HeaderValid,
         )?;
         let mut wrong_coinbase = coinbase_transaction(1);
-        wrong_coinbase.outputs[0].script_pubkey = push_int(3);
+        wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
         let wrong = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![wrong_coinbase]);
         let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
         let wrong_hash = Hash256::from_le_bytes(wrong.block_hash().as_bytes());
@@ -2454,6 +3067,7 @@ mod tests {
     #[test]
     fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -2471,7 +3085,7 @@ mod tests {
             .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
             .ok_or_else(|| std::io::Error::other("missing genesis node"))?;
         let mut target_coinbase = coinbase_transaction(1);
-        target_coinbase.outputs[0].script_pubkey = push_int(2);
+        target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let target = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![target_coinbase]);
         let target_id = sync.handles.block_tree.write().insert_node(
             Some(genesis_id),
@@ -2479,7 +3093,7 @@ mod tests {
             NodeStatus::HeaderValid,
         )?;
         let mut wrong_coinbase = coinbase_transaction(1);
-        wrong_coinbase.outputs[0].script_pubkey = push_int(3);
+        wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
         let wrong = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![wrong_coinbase]);
         let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
         let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
@@ -3340,14 +3954,20 @@ mod tests {
             let addr = test_addr(9001, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
         sync.tick();
 
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Effective fan-out stripe (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET
+            .div_ceil(super::MIN_PEERS_FOR_FANOUT)
+            .clamp(
+                super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                super::PEER_INFLIGHT_BUDGET,
+            );
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(
@@ -3386,7 +4006,7 @@ mod tests {
             let addr = test_addr(9021, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
@@ -3547,7 +4167,7 @@ mod tests {
             let addr = test_addr(9230, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
@@ -3680,7 +4300,7 @@ mod tests {
             let addr = test_addr(9254, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
 
@@ -3701,7 +4321,13 @@ mod tests {
             "a timed-out peer must not immediately reacquire the same block stripe"
         );
 
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Effective fan-out stripe (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET
+            .div_ceil(super::MIN_PEERS_FOR_FANOUT)
+            .clamp(
+                super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                super::PEER_INFLIGHT_BUDGET,
+            );
         for (idx, rx) in rxs.iter().enumerate() {
             let Message::GetData(inventory) = rx.try_recv()? else {
                 return Err(std::io::Error::other("expected getdata for eligible peer").into());
@@ -3873,6 +4499,27 @@ mod tests {
         };
         let (sync, peers, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
         let owner = test_addr(9320, 0)?;
+        let alternate = test_addr(9320, 1)?;
+
+        // The alternate peer connected at height zero. Its accepted header
+        // announcement proves the active front, which must make it a hedge
+        // candidate even though the handshake snapshot remains at zero.
+        let alternate_lease = peers
+            .lease(alternate)
+            .ok_or_else(|| std::io::Error::other("alternate peer lease missing"))?;
+        let mut alternate_info = peers
+            .infos()
+            .into_iter()
+            .find(|info| info.addr == alternate)
+            .ok_or_else(|| std::io::Error::other("alternate peer info missing"))?;
+        alternate_info.start_height = 0;
+        alternate_info.best_known_height = 0;
+        assert!(peers.publish_info(alternate, &alternate_lease, alternate_info));
+        assert!(peers.note_announced_tip(
+            current_source(&peers, alternate),
+            Hash256::from_le_bytes(expected[0].as_bytes()),
+            Some(1),
+        ));
 
         // The first drain builds the asymmetric wedge and starts the episode.
         sync.tick();
@@ -4828,7 +5475,7 @@ mod tests {
         let (sync, peers, block_tree, applied_tip, expected) =
             sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-        let rx = connect_peer(&peers, synthetic_peer(addr, 200));
+        let rx = connect_peer(&peers, synthetic_peer(addr, 300));
 
         let mut requested = Vec::new();
         let ticks = super::PENDING_BUDGET / super::GETDATA_BATCH_SIZE;
@@ -5618,30 +6265,215 @@ mod tests {
             sync.block_stager.lock().contains(&block3_hash),
             "tail block must be restored after the mid-batch failure"
         );
-        // G5: the mid-batch failure leaves the gateway generation odd
-        // (fail-closed). Admission stays closed; a retry cannot begin a new
-        // chain change until an external recovery path resets the generation.
+        // The mid-batch failure must hand the gateway generation back so the
+        // retry can begin a new transition. Leaving it odd refused every
+        // later apply at the gate with the same "clean shutdown has begun"
+        // text and no log line — the silent tip wedge observed live on the
+        // explorer node (issue #618 post-#657 field report). The committed
+        // prefix is per-block atomic and no authoritative UTXO mutation
+        // occurred for the failed block, so the even generation is safe to
+        // restore.
         assert!(
-            sync.handles.mempool_gateway.stable_generation().is_none(),
-            "generation must be odd after mid-batch failure (G5 fail-closed)"
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "generation must be even after mid-batch failure so the retry can begin"
         );
 
-        // Retry is blocked by the odd generation: begin_chain_change rejects
-        // an odd value, so the re-sent block 2 cannot apply.
+        // The retry actually applies: the re-sent block 2 (the fail-once
+        // body store succeeds on its second attempt) must advance the tip
+        // past the failed height instead of being refused at the gate.
         inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2))?;
         sync.tick();
 
-        assert_eq!(
-            applied_tip.load_full().map(|tip| tip.height),
-            Some(1),
-            "height must not advance while the generation is odd (G5 fail-closed)"
+        let retry_height = applied_tip.load_full().map(|tip| tip.height);
+        assert!(
+            retry_height.is_some_and(|height| height >= 2),
+            "retry must advance past the failed height, got {retry_height:?}"
         );
         assert!(
-            sync.handles.mempool_gateway.stable_generation().is_none(),
-            "generation must remain odd after the blocked retry"
+            sync.handles.mempool_gateway.stable_generation().is_some(),
+            "generation must stay even after the retry"
         );
         assert!(fail_once_store.persisted_height(1));
         Ok(())
+    }
+
+    #[test]
+    fn utxo_commit_failure_keeps_mempool_generation_odd() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        let error = crate::apply::WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: crate::apply::error::ApplyError::UtxoCommit(
+                bitcoin_rs_utxo::UtxoError::CorruptRecord,
+            ),
+            disposition: crate::apply::WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        };
+
+        let error = super::settle_window_failure(transition, error);
+
+        assert!(matches!(
+            error.source,
+            crate::apply::error::ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord)
+        ));
+        assert_eq!(
+            sync.handles.mempool_gateway.stable_generation(),
+            None,
+            "a possibly torn UTXO commit must keep admission closed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settle_window_failure_finish_failure_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        // Force a different odd generation so the CAS in finish fails.
+        sync.handles
+            .mempool_gateway
+            .force_chain_generation(transition.proof().odd_generation().wrapping_add(2));
+        let error = crate::apply::WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: crate::apply::error::ApplyError::BlockValueOverflow,
+            disposition: crate::apply::WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        };
+
+        let error = super::settle_window_failure(transition, error);
+
+        assert_eq!(
+            error.disposition,
+            crate::apply::WindowApplyDisposition::Fatal,
+            "finish failure must be classified Fatal"
+        );
+        assert!(
+            matches!(
+                error.source,
+                crate::apply::error::ApplyError::BlockValueOverflow
+            ),
+            "original source must be preserved, not overwritten by the finish error"
+        );
+        assert_eq!(
+            sync.handles.mempool_gateway.stable_generation(),
+            None,
+            "generation must stay odd after a failed finish"
+        );
+        Ok(())
+    }
+
+    /// A recorded Fatal settlement halts further apply attempts: staged blocks
+    /// stay queued, no new transition starts, and the latched tick reports
+    /// idle instead of churning an `AlreadyActive` refusal every round.
+    #[test]
+    fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+        stage_body(&sync, &main[0]);
+        let staged = sync.block_stager.lock().received_len();
+        assert!(
+            staged > 0,
+            "the staged block must be queued before the halt"
+        );
+        assert!(
+            !sync.apply_halted.load(std::sync::atomic::Ordering::SeqCst),
+            "a fresh sync object must not start halted"
+        );
+        sync.note_fatal_settlement(0, &crate::apply::error::ApplyError::BlockValueOverflow);
+        assert_eq!(
+            sync.apply_buffered_blocks(None),
+            (0, 0),
+            "a halted sync must not start another transition"
+        );
+        assert_eq!(
+            sync.block_stager.lock().received_len(),
+            staged,
+            "halted ticks must preserve staged blocks for recreation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn utxo_commit_skip_holds_under_moved_generation() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        // Force a different odd generation so finish would fail if attempted.
+        sync.handles
+            .mempool_gateway
+            .force_chain_generation(transition.proof().odd_generation().wrapping_add(2));
+        let error = crate::apply::WindowApplyError {
+            applied: 0,
+            committed: Vec::new(),
+            source: crate::apply::error::ApplyError::UtxoCommit(
+                bitcoin_rs_utxo::UtxoError::CorruptRecord,
+            ),
+            disposition: crate::apply::WindowApplyDisposition::Operational,
+            invalidated: Box::default(),
+        };
+
+        let error = super::settle_window_failure(transition, error);
+
+        assert_eq!(
+            error.disposition,
+            crate::apply::WindowApplyDisposition::Fatal,
+            "UtxoCommit settlement must be fatal and must not attempt finish"
+        );
+        assert!(
+            matches!(
+                error.source,
+                crate::apply::error::ApplyError::UtxoCommit(
+                    bitcoin_rs_utxo::UtxoError::CorruptRecord
+                )
+            ),
+            "UtxoCommit source must be unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn settle_window_success_finish_failure_is_fatal() -> Result<(), Box<dyn std::error::Error>> {
+        let (sync, _peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(1)?;
+        let transition = sync.handles.begin_transition()?;
+        // Force a different odd generation so the CAS in finish fails.
+        sync.handles
+            .mempool_gateway
+            .force_chain_generation(transition.proof().odd_generation().wrapping_add(2));
+        let applied = 2_usize;
+        let committed: Vec<crate::apply::ConnectOutcome> = Vec::new();
+
+        let error = match super::settle_window_success(transition, applied, committed) {
+            Err(error) => error,
+            Ok(_) => panic!("finish failure must return Err, got Ok"),
+        };
+
+        assert_eq!(
+            error.disposition,
+            crate::apply::WindowApplyDisposition::Fatal,
+            "success-path finish failure must be classified Fatal"
+        );
+        assert_eq!(error.applied, applied, "applied count must be preserved");
+        assert!(
+            error.committed.is_empty(),
+            "committed outcomes must be preserved"
+        );
+        assert_eq!(
+            sync.handles.mempool_gateway.stable_generation(),
+            None,
+            "generation must stay odd after a failed finish"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restore_split_pins_off_by_one() {
+        // Full-chunk stop: nothing refused, restore from the next chunk head.
+        // The old formula (chunk_start + stopped + 1) returned 5 here.
+        assert_eq!(super::restore_split(2, 2, 2), 4);
+        // Mid-chunk stop: the refused block is dropped, tail starts after it.
+        assert_eq!(super::restore_split(2, 1, 2), 4);
+        // Empty chunk boundary.
+        assert_eq!(super::restore_split(0, 0, 0), 0);
     }
 
     #[test]
@@ -6470,7 +7302,7 @@ mod tests {
         }
     }
 
-    impl crate::apply::PruneBodyStore for FailOnceBodyStore {
+    impl bitcoin_rs_storage::block_body::BlockBodyStore for FailOnceBodyStore {
         fn persist_block_body(
             &self,
             height: u32,
@@ -6544,6 +7376,7 @@ mod tests {
     const GENESIS_TIME: u32 = 1_296_688_602;
 
     fn test_header(prev_blockhash: BlockHash, height: u32) -> Header {
+        use bitcoin_rs_primitives::CompactTarget;
         let mut merkle = [0_u8; 32];
         merkle[..4].copy_from_slice(&height.to_le_bytes());
         let mut header = Header {
@@ -6551,24 +7384,31 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&merkle),
             time: GENESIS_TIME.saturating_add(height),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: height,
         };
         // Mine rather than hope: the fixture previously relied on nonce=height
         // happening to satisfy regtest's easy target, so any change to another
         // header field silently broke proof-of-work validation.
-        while !pow_met(header.bits, Hash256::from(header.compute_hash())) {
+        while !pow_met(
+            header.bits.to_consensus(),
+            Hash256::from(header.compute_hash()),
+        ) {
             header.nonce = header.nonce.wrapping_add(1);
         }
         header
     }
 
     fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
+        use bitcoin_rs_primitives::CompactTarget;
         let mut header = test_header(prev_blockhash, height);
-        header.bits = 0x207f_fffe;
+        header.bits = CompactTarget::from_consensus(0x207f_fffe);
         for nonce in 0..=u32::MAX {
             header.nonce = nonce;
-            if pow_met(header.bits, Hash256::from(header.compute_hash())) {
+            if pow_met(
+                header.bits.to_consensus(),
+                Hash256::from(header.compute_hash()),
+            ) {
                 return header;
             }
         }
@@ -6583,7 +7423,10 @@ mod tests {
         header.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
         for nonce in 0..=u32::MAX {
             header.nonce = nonce;
-            if pow_met(header.bits, Hash256::from(header.compute_hash())) {
+            if pow_met(
+                header.bits.to_consensus(),
+                Hash256::from(header.compute_hash()),
+            ) {
                 return Ok(header);
             }
         }
@@ -6699,25 +7542,27 @@ mod tests {
     }
 
     fn coinbase_transaction(height: u32) -> Tx {
+        use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
         let mut script_sig = push_int(i64::from(height));
         script_sig.extend_from_slice(&push_int(1));
         Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig,
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(script_sig),
+                sequence: Sequence::from_consensus(0xffff_ffff),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
     fn transaction(seed: u8) -> Tx {
+        use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
         Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -6725,15 +7570,15 @@ mod tests {
                     Txid(Hash256::from_le_bytes(&[seed; 32])),
                     u32::from(seed),
                 ),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xffff_ffff),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -6742,19 +7587,23 @@ mod tests {
         height: u32,
         txdata: Vec<Tx>,
     ) -> Block {
+        use bitcoin_rs_primitives::CompactTarget;
         let mut block = Block {
             header: Header {
                 version: 1,
                 prev_blockhash,
                 merkle_root: Hash256::default(),
                 time: GENESIS_TIME.saturating_add(height),
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: txdata,
         };
         block.header.merkle_root = merkle_root(&block.txs);
-        while !pow_met(block.header.bits, Hash256::from(block.block_hash())) {
+        while !pow_met(
+            block.header.bits.to_consensus(),
+            Hash256::from(block.block_hash()),
+        ) {
             block.header.nonce = block.header.nonce.saturating_add(1);
         }
         block
@@ -6774,7 +7623,9 @@ mod tests {
                 hashes.push(*last);
             }
             hashes = hashes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let mut buffer = [0_u8; 64];
                     buffer[..32].copy_from_slice(&pair[0]);
@@ -6821,9 +7672,11 @@ mod tests {
         PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height,
+            best_known_height: start_height,
             conn_time: 0,
             inbound: true,
             addr_bind: addr,
@@ -7114,12 +7967,18 @@ mod tests {
         for idx in 0..super::MIN_PEERS_FOR_FANOUT {
             receivers.push(connect_peer(
                 &peers,
-                eligible_peer(test_addr(9505, idx)?, 200 - i32::try_from(idx)?),
+                eligible_peer(test_addr(9505, idx)?, 300 - i32::try_from(idx)?),
             ));
         }
         sync.tick();
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Effective fan-out stripe (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET
+            .div_ceil(super::MIN_PEERS_FOR_FANOUT)
+            .clamp(
+                super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+                super::PEER_INFLIGHT_BUDGET,
+            );
         for (idx, receiver) in receivers.iter().enumerate() {
             let Message::GetData(inventory) = receiver.try_recv()? else {
                 return Err(std::io::Error::other("expected fanout getdata").into());
@@ -7155,12 +8014,17 @@ mod tests {
             addrs.push(addr);
             receivers.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                eligible_peer(addr, 300 - i32::try_from(idx)?),
             ));
         }
         sync.tick();
         assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
-        let cap = super::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
+        // Nine live peers at the first tick: the window divides nine ways
+        // (mirrors `effective_peer_inflight`).
+        let cap = super::PENDING_BUDGET.div_ceil(PEER_COUNT).clamp(
+            super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
+            super::PEER_INFLIGHT_BUDGET,
+        );
         for (idx, receiver) in receivers[..SELECTED_PEERS].iter().enumerate() {
             let Message::GetData(inventory) = receiver.try_recv()? else {
                 return Err(std::io::Error::other("expected initial stripe").into());
@@ -7171,13 +8035,36 @@ mod tests {
             );
         }
         let _ = receivers[0].try_recv()?;
+        // The spare takes the window remainder past the eight full stripes;
+        // drain it now so the next read sees only the requeued stripe.
+        let Message::GetData(remainder) = receivers[SELECTED_PEERS].try_recv()? else {
+            return Err(std::io::Error::other("expected remainder getdata for spare peer").into());
+        };
+        assert_eq!(
+            witness_block_inventory(remainder)?,
+            expected[SELECTED_PEERS * cap..]
+        );
         let dropped = addrs[1];
         peers.disconnect(dropped);
         sync.tick();
         let Message::GetData(inventory) = receivers[SELECTED_PEERS].try_recv()? else {
             return Err(std::io::Error::other("expected requeued getdata").into());
         };
-        assert_eq!(witness_block_inventory(inventory)?, expected[cap..2 * cap]);
+        // The freed stripe spreads across remaining capacity (the spare tops
+        // up its remainder share while the other peers absorb the rest), so
+        // prove the union over every remaining peer is exactly the freed
+        // stripe: every freed block re-requested, nothing else.
+        let mut requeued = witness_block_inventory(inventory)?;
+        for (idx, rx) in receivers.iter().enumerate() {
+            if idx == 1 || idx == SELECTED_PEERS {
+                continue; // disconnected peer; spare drained above
+            }
+            requeued.extend(witness_block_inventory(next_getdata(rx)?)?);
+        }
+        requeued.sort();
+        let mut freed = expected[cap..2 * cap].to_vec();
+        freed.sort();
+        assert_eq!(requeued, freed, "every freed block must be re-requested");
         assert_eq!(
             sync.download_window.lock().pending_len(),
             super::PENDING_BUDGET
@@ -7295,6 +8182,7 @@ mod tests {
     );
 
     fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
         let genesis = Network::Regtest.genesis_block();
         let mut tree = BlockTree::new();
         let mut parent = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
@@ -7304,7 +8192,7 @@ mod tests {
         for height in 1..=depth {
             let mut coinbase = coinbase_transaction(height);
             if height == 1 {
-                coinbase.outputs[0].value = subsidy;
+                coinbase.outputs[0].value = Amount::from_sat(subsidy);
             }
             let mut txs = vec![coinbase];
             if height == depth {
@@ -7313,15 +8201,15 @@ mod tests {
                     version: 2,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(first_txid, 0),
-                        script_sig: push_int(1),
-                        sequence: 0xffff_ffff,
-                        witness: Vec::new(),
+                        script_sig: Script::from_bytes(push_int(1)),
+                        sequence: Sequence::from_consensus(0xffff_ffff),
+                        witness: Witness::new(),
                     }],
                     outputs: vec![TxOut {
-                        value: subsidy - 100_000,
-                        script_pubkey: Vec::new(),
+                        value: Amount::from_sat(subsidy - 100_000),
+                        script_pubkey: Script::new(),
                     }],
-                    lock_time: 0,
+                    lock_time: LockTime::from_consensus(0),
                 });
             }
             let block = mined_block_with_prev_hash(prev_hash, height, txs);
@@ -7332,9 +8220,9 @@ mod tests {
         let chain_tip = tree.tip_handle();
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let handles = apply_handles(chain_tip, applied_tip, Arc::new(RwLock::new(tree)));
-        crate::apply::apply_block(&handles, &genesis)?;
+        handles.apply_block(&genesis)?;
         for block in &blocks {
-            crate::apply::apply_block(&handles, block)?;
+            handles.apply_block(block)?;
         }
         let bodies: HashMap<Hash256, (Block, bytes::Bytes)> = blocks
             .iter()
@@ -7351,6 +8239,7 @@ mod tests {
     #[test]
     fn permanent_forward_failure_purges_invalid_blocks_without_retry()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::Amount;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -7361,7 +8250,7 @@ mod tests {
         // The value change alters the txid, so the staged body contradicts the
         // header's merkle root: a permanent consensus failure.
         let mut bad_body = bad.clone();
-        bad_body.txs[0].outputs[0].value = 2;
+        bad_body.txs[0].outputs[0].value = Amount::from_sat(2);
         let descendant =
             mined_block_with_prev_hash(bad.block_hash(), 3, vec![coinbase_transaction(3)]);
         {
@@ -7400,6 +8289,7 @@ mod tests {
     #[test]
     fn partial_reorg_readmits_only_still_disconnected_transactions()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::{Amount, Script};
         let (handles, main, mut bodies) = matured_chain(101)?;
         let tip = main
             .last()
@@ -7421,7 +8311,7 @@ mod tests {
             let mut coinbase = coinbase_transaction(height);
             // Distinguish the branch: same-height coinbases on both chains
             // must not carry identical txids, or the fork headers collide.
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent =
                 tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -7431,7 +8321,7 @@ mod tests {
         let fork_target = fork_parent;
         drop(tree);
         let mut corrupt = fork_blocks[fork_blocks.len() - 1].clone();
-        corrupt.txs[0].outputs[0].value = 2;
+        corrupt.txs[0].outputs[0].value = Amount::from_sat(2);
         let last = fork_blocks.len() - 1;
         fork_blocks[last] = corrupt;
         for block in &fork_blocks {
@@ -7473,6 +8363,8 @@ mod tests {
             Some(connected_tip),
             "the successful connected prefix is the final active chain"
         );
+        // MPL-04: the valid connected prefix reopens only after re-admission.
+        assert!(handles.mempool_gateway.stable_generation().is_some());
         let mempool = handles.mempool.read();
         assert_eq!(
             mempool.len(),
@@ -7499,6 +8391,7 @@ mod tests {
 
     #[test]
     fn fatal_disconnect_readmits_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::Script;
         let (mut handles, main, mut bodies) = matured_chain(101)?;
         let tip = main
             .last()
@@ -7518,7 +8411,7 @@ mod tests {
         let mut fork_blocks = Vec::new();
         for height in 51..=52_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent =
                 tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -7551,6 +8444,9 @@ mod tests {
             "a fatal disconnect must never reconsider disconnected transactions"
         );
         assert_eq!(handles.mempool.read().sequence_number(), 0);
+        // MPL-04: a stuck marker must keep all later chain changes fenced.
+        assert!(handles.mempool_gateway.stable_generation().is_none());
+        assert!(handles.begin_transition().is_err());
         let spend_in_pool = handles.mempool.read().contains_txid(&spend_txid);
         assert!(
             !spend_in_pool,
@@ -7562,6 +8458,7 @@ mod tests {
     #[test]
     fn permanent_connect_failure_through_switch_to_branch_invalidates_subtree()
     -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin_rs_primitives::{Amount, Script};
         let (handles, main, mut bodies) = matured_chain(101)?;
         // Build a competing fork rooted at block 50. The first fork block has a
         // corrupted body (coinbase value changed → txid changed → merkle root
@@ -7577,7 +8474,7 @@ mod tests {
         let mut fork_blocks = Vec::new();
         for height in 51..=52_u32 {
             let mut coinbase = coinbase_transaction(height);
-            coinbase.outputs[0].script_pubkey = push_int(2);
+            coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
             let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
             fork_parent =
                 tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -7602,7 +8499,7 @@ mod tests {
         // permanent consensus failure (MerkleRoot), which the classifier
         // marks as permanent and invalidates the subtree.
         let mut corrupt = fork_blocks[0].clone();
-        corrupt.txs[0].outputs[0].value = 2;
+        corrupt.txs[0].outputs[0].value = Amount::from_sat(2);
         fork_blocks[0] = corrupt;
         for block in &fork_blocks {
             bodies.insert(
