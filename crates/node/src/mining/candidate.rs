@@ -46,6 +46,7 @@ use std::sync::atomic::Ordering;
 struct InFlightAssemblyGuard<'a> {
     coordinator: &'a MiningCoordinator,
     key: GenerationKey,
+    id: u64,
     armed: bool,
 }
 
@@ -58,7 +59,7 @@ impl Drop for InFlightAssemblyGuard<'_> {
         if state
             .in_flight
             .as_ref()
-            .is_some_and(|flight| flight.key == self.key)
+            .is_some_and(|flight| flight.key == self.key && flight.id == self.id)
         {
             state.in_flight = None;
             drop(state);
@@ -126,11 +127,18 @@ impl MiningCoordinator {
             return Ok(cached);
         }
 
-        state.in_flight = Some(InFlight { key, result: None });
+        state.next_flight_id = state.next_flight_id.wrapping_add(1);
+        let flight_id = state.next_flight_id;
+        state.in_flight = Some(InFlight {
+            key,
+            id: flight_id,
+            result: None,
+        });
         drop(state);
         let mut flight_guard = InFlightAssemblyGuard {
             coordinator: self,
             key,
+            id: flight_id,
             armed: true,
         };
 
@@ -156,7 +164,7 @@ impl MiningCoordinator {
             Err(error) => Err(error.clone()),
         };
         if let Some(flight) = state.in_flight.as_mut()
-            && flight.key == key
+            && flight.key == key && flight.id == flight_id
         {
             flight.result = Some(returned.clone());
         }
@@ -164,7 +172,7 @@ impl MiningCoordinator {
         if state
             .in_flight
             .as_ref()
-            .is_some_and(|flight| flight.key == key && flight.result.is_some())
+            .is_some_and(|flight| flight.key == key && flight.id == flight_id && flight.result.is_some())
         {
             state.in_flight = None;
         }
