@@ -603,7 +603,7 @@ fn open_timeout_publishes_error_not_infinite_spin() {
         1,
         Duration::from_secs(10),
         Duration::from_secs(1),
-        &shutdown,
+        || shutdown.load(Ordering::Acquire),
     );
 
     let Err(TxIndexWorkerError::OpenTimeout { secs }) = result else {

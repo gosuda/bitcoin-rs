@@ -1157,6 +1157,7 @@ fn populate_sync_header_chain(
     (blocks, received_scan_expected)
 }
 
+#[cfg(feature = "fjall")]
 fn populate_header_chain_from_blocks(tree: &mut BlockTree, blocks: &[Block]) {
     let genesis = Network::Regtest.genesis_block();
     let genesis_id = tree
