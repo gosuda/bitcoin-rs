@@ -18,6 +18,11 @@ pub fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
         }
         Message::WtxidRelay => {
             ensure_negotiating_or_ready(peer)?;
+            // BIP339 requires negotiation before verack. Once Ready, keep
+            // the published per-connection relay preference unchanged.
+            if peer.state == PeerState::Ready {
+                return Ok(());
+            }
             peer.wtxid_relay.mark_peer_supported();
             Ok(())
         }

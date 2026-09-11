@@ -81,12 +81,13 @@ deny = [
     { crate = "rustls-wolfcrypt-provider", reason = "Rustls must use a non-C provider" },
     { crate = "rustls-cng", reason = "Rustls must use a non-C provider" },
 ]
-# Duplicate-version guard (issue #174).
+# Duplicate-version guard (DEP-02 / issue #174).
 #
 # Duplicates are denied graph-wide. `bitcoin`, `bitcoin_hashes`, `secp256k1`,
 # and `secp256k1-sys` carry NO skip entry on purpose: the workspace pins one
 # copy of each (secp256k1 0.29 aligned with bitcoin 0.32's embedded line), so
-# any future duplicate in the consensus stack hard-fails this check.
+# any future duplicate in the consensus stack hard-fails this check. G20
+# (`g20_unique_consensus_crates`) names the same four crates.
 #
 # Everything below is an audited, third-party-only split with the driver of
 # each skipped copy named. One current version remains unskipped as the
@@ -124,7 +125,7 @@ skip = [
     { crate = "winnow@0.7.15", reason = "toml_edit 0.22 via toml 0.8" },
     { crate = "shlex@1.3.0", reason = "bindgen 0.72 build dep" },
     # syn 3.0 pulled by newer proc-macro crates; workspace pins syn 2.0.
-    { crate = "syn@3.0.4", reason = "proc-macro crate chain" },
+    { crate = "syn@3.0.5", reason = "proc-macro crate chain" },
     # windows-only metadata targets; multiple versions pinned by different win crates.
     { crate = "windows-sys@0.59.0", reason = "windows-only split" },
     { crate = "windows-sys@0.60.2", reason = "windows-only split" },

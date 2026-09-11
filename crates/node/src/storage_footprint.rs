@@ -476,9 +476,6 @@ fn compiled_features() -> Vec<String> {
     if cfg!(feature = "rocksdb") {
         features.push("rocksdb".to_owned());
     }
-    if cfg!(feature = "mdbx") {
-        features.push("mdbx".to_owned());
-    }
     if cfg!(feature = "kernel") {
         features.push("kernel".to_owned());
     }
@@ -520,34 +517,22 @@ fn io_from_footprint(error: &FootprintError) -> anyhow::Error {
 }
 
 fn scan_store(backend: StorageBackend, path: &Path, namespace: &str) -> Result<Vec<LogicalOwner>> {
-    match backend {
-        #[cfg(feature = "fjall")]
-        StorageBackend::Fjall => {
-            let store = bitcoin_rs_storage::FjallStore::open(path).map_err(anyhow::Error::new)?;
-            Ok(logical_store_owners(&store, namespace)?)
-        }
-        #[cfg(feature = "redb")]
-        StorageBackend::Redb => {
-            let store = bitcoin_rs_storage::RedbStore::open(path).map_err(anyhow::Error::new)?;
-            Ok(logical_store_owners(&store, namespace)?)
-        }
-        #[cfg(feature = "rocksdb")]
-        StorageBackend::RocksDb => {
-            let store = bitcoin_rs_storage::RocksDbStore::open(path).map_err(anyhow::Error::new)?;
-            Ok(logical_store_owners(&store, namespace)?)
-        }
-        #[cfg(feature = "mdbx")]
-        StorageBackend::Mdbx => {
-            let store = bitcoin_rs_storage::MdbxStore::open(path).map_err(anyhow::Error::new)?;
-            Ok(logical_store_owners(&store, namespace)?)
-        }
-        #[cfg(any(
-            not(feature = "rocksdb"),
-            not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
-        ))]
-        other => bail!("unsupported storage backend for footprint scan: {other}"),
+    crate::storage_backend::open_store_inspection(backend, path, LogicalScan { namespace })
+}
+
+struct LogicalScan<'a> {
+    namespace: &'a str,
+}
+
+impl crate::storage_backend::StoreConsumer for LogicalScan<'_> {
+    type Output = Vec<LogicalOwner>;
+    type Error = anyhow::Error;
+
+    fn consume<S>(self, store: Arc<S>) -> Result<Self::Output>
+    where
+        S: bitcoin_rs_storage::KvStore,
+    {
+        Ok(logical_store_owners(&*store, self.namespace)?)
     }
 }
 
@@ -555,58 +540,25 @@ fn scan_store_with_watermarks(
     backend: StorageBackend,
     path: &Path,
 ) -> Result<(Vec<LogicalOwner>, Option<IndexWatermarkEvidence>)> {
-    match backend {
-        #[cfg(feature = "fjall")]
-        StorageBackend::Fjall => {
-            let store =
-                Arc::new(bitcoin_rs_storage::FjallStore::open(path).map_err(anyhow::Error::new)?);
-            let owners = logical_store_owners(&*store, "txindex")?;
-            let watermarks = Indexer::new(store)
-                .watermarks()
-                .ok()
-                .map(watermark_evidence);
-            Ok((owners, watermarks))
-        }
-        #[cfg(feature = "redb")]
-        StorageBackend::Redb => {
-            let store =
-                Arc::new(bitcoin_rs_storage::RedbStore::open(path).map_err(anyhow::Error::new)?);
-            let owners = logical_store_owners(&*store, "txindex")?;
-            let watermarks = Indexer::new(store)
-                .watermarks()
-                .ok()
-                .map(watermark_evidence);
-            Ok((owners, watermarks))
-        }
-        #[cfg(feature = "rocksdb")]
-        StorageBackend::RocksDb => {
-            let store =
-                Arc::new(bitcoin_rs_storage::RocksDbStore::open(path).map_err(anyhow::Error::new)?);
-            let owners = logical_store_owners(&*store, "txindex")?;
-            let watermarks = Indexer::new(store)
-                .watermarks()
-                .ok()
-                .map(watermark_evidence);
-            Ok((owners, watermarks))
-        }
-        #[cfg(feature = "mdbx")]
-        StorageBackend::Mdbx => {
-            let store =
-                Arc::new(bitcoin_rs_storage::MdbxStore::open(path).map_err(anyhow::Error::new)?);
-            let owners = logical_store_owners(&*store, "txindex")?;
-            let watermarks = Indexer::new(store)
-                .watermarks()
-                .ok()
-                .map(watermark_evidence);
-            Ok((owners, watermarks))
-        }
-        #[cfg(any(
-            not(feature = "rocksdb"),
-            not(feature = "fjall"),
-            not(feature = "redb"),
-            not(feature = "mdbx")
-        ))]
-        other => bail!("unsupported storage backend for footprint scan: {other}"),
+    crate::storage_backend::open_store_inspection(backend, path, TxIndexScan)
+}
+
+struct TxIndexScan;
+
+impl crate::storage_backend::StoreConsumer for TxIndexScan {
+    type Output = (Vec<LogicalOwner>, Option<IndexWatermarkEvidence>);
+    type Error = anyhow::Error;
+
+    fn consume<S>(self, store: Arc<S>) -> Result<Self::Output>
+    where
+        S: bitcoin_rs_storage::KvStore,
+    {
+        let owners = logical_store_owners(&*store, "txindex")?;
+        let watermarks = Indexer::new(store)
+            .watermarks()
+            .ok()
+            .map(watermark_evidence);
+        Ok((owners, watermarks))
     }
 }
 

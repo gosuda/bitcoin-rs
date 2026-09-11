@@ -111,10 +111,10 @@ pub(crate) fn getzmqnotifications(ctx: &Arc<Context>, params: &Value) -> Result<
     crate::handlers::ensure_no_params(params)?;
     let notifications = ctx
         .zmq_notifications()
-        .iter()
+        .into_iter()
         .map(|notification| v31::GetZmqNotifications {
-            type_: notification.notification_type.to_string(),
-            address: notification.address.clone(),
+            type_: notification.topic.notifier_type().to_string(),
+            address: notification.endpoint,
             hwm: u64::from(notification.hwm),
         })
         .collect::<Vec<_>>();
@@ -1207,9 +1207,22 @@ mod tests {
     fn getzmqnotifications_returns_active_metadata() {
         use alloc::sync::Arc;
 
-        let ctx = Arc::new(Context::new().with_zmq_notifications(vec![
-            crate::context::ZmqNotification::new("pubhashblock", "tcp://127.0.0.1:28332", 7),
-        ]));
+        #[derive(Debug)]
+        struct NotifierPublisher;
+        impl crate::zmq::ZmqPublisher for NotifierPublisher {
+            fn active_notifiers(&self) -> Vec<crate::zmq::ZmqNotifier> {
+                vec![crate::zmq::ZmqNotifier {
+                    topic: crate::zmq::ZmqTopic::HashBlock,
+                    endpoint: "tcp://127.0.0.1:28332".to_string(),
+                    hwm: 7,
+                }]
+            }
+            fn publish_hashblock(&self, _hash: bitcoin_rs_primitives::Hash256) {}
+            fn publish_hashtx(&self, _txid: bitcoin_rs_primitives::Txid) {}
+            fn publish_rawblock(&self, _bytes: &[u8]) {}
+            fn publish_rawtx(&self, _bytes: &[u8]) {}
+        }
+        let ctx = Arc::new(Context::new().with_zmq_publisher(Arc::new(NotifierPublisher)));
         let result = getzmqnotifications(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -1598,7 +1611,7 @@ mod descriptor_checksum_tests {
         let bare = format!("combo({key})");
         let checksum =
             descriptor_checksum(&bare).unwrap_or_else(|| panic!("{bare} must have a checksum"));
-        let without = getdescriptorinfo(&ctx, &json!([&bare]))
+        let without = getdescriptorinfo(&ctx, &json!([bare]))
             .unwrap_or_else(|err| panic!("bare combo must analyse: {err}"));
         let with = getdescriptorinfo(&ctx, &json!([format!("{bare}#{checksum}")]))
             .unwrap_or_else(|err| panic!("checksummed combo must analyse: {err}"));
@@ -1689,7 +1702,6 @@ mod descriptor_checksum_tests {
 #[cfg(test)]
 mod deriveaddresses_tests {
     use alloc::sync::Arc;
-    use sonic_rs::JsonContainerTrait as _;
 
     use super::*;
 
