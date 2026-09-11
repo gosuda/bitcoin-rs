@@ -41,7 +41,7 @@ impl MiningCoordinator {
             .applied_tip
             .load_full()
             .is_some_and(|tip| tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id));
-        if on_applied {
+        if on_applied || node.chain_tx_count != 0 {
             return Some(BlockValidationResult::Duplicate);
         }
         Some(BlockValidationResult::DuplicateInconclusive)
