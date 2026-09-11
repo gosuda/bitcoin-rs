@@ -938,7 +938,7 @@ mod tests {
         );
 
         shutdown.store(true, Ordering::SeqCst);
-        handle.join().expect("server thread");
+        drop(handle.join().expect("server thread"));
         Ok(())
     }
 
