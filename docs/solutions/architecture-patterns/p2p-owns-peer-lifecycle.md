@@ -50,7 +50,6 @@ evidence is not recovered later and handshake metadata is never rewritten.
   transition (`apply_network_active`) on the shared flag and `PeerTable`.
   Production block-download scheduling stays on `BlockSync`'s download window.
   `P2pService` does not keep a shadow window or call `forget_peer` on ready.
-  `BlockSync` is the sole owner of the production download window.
 - Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale
