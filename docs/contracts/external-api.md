@@ -502,6 +502,9 @@ owned by [wallet-facing.md](wallet-facing.md).
     `proposal_of_an_applied_block_is_duplicate`,
     `proposal_of_an_invalid_header_is_duplicate_invalid`,
     `proposal_of_a_header_only_block_is_duplicate_inconclusive`,
+    `proposal_of_a_disconnected_scripts_valid_block_is_duplicate`,
+    `submit_of_a_disconnected_scripts_valid_block_is_duplicate`,
+    `applied_ancestor_with_unset_chain_tx_count_is_duplicate`,
     `duplicate_submit_returns_duplicate`
 - `API-19`:
   - `crates/node/src/mining.rs` tests `consensus_failures_use_core_bip22_reasons`,
