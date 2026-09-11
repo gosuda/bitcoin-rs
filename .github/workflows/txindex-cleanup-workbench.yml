@@ -17,7 +17,11 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  index:
+  validate:
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [index, node]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:
@@ -41,39 +45,78 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
         with:
           workspaces: candidate
-          shared-key: txindex-cleanup-native
+          shared-key: txindex-cleanup-native-${{ matrix.scope }}
           cache-on-failure: true
-      - name: Generate source modules and prove original function-body preservation
+      - name: Generate modules and audit exact original function bodies
+        env:
+          SCOPE: ${{ matrix.scope }}
         run: |
           python -m pip install 'Pygments==2.19.2'
-          python ../workbench/.workbench/refactor_txindex.py
+          if [[ "$SCOPE" == index ]]; then
+            python ../workbench/.workbench/refactor_txindex.py
+          else
+            python ../workbench/.workbench/refactor_txindex_node.py
+          fi
+          if [[ -f ../workbench/.workbench/finalize_txindex.py ]]; then
+            python ../workbench/.workbench/finalize_txindex.py "$SCOPE"
+          fi
           cargo +1.95.0 fmt --all
       - name: Compiler-assisted import cleanup
-        run: cargo +1.95.0 fix --locked -p bitcoin-rs-index --features fjall,redb --all-targets --allow-dirty --allow-staged
+        env:
+          SCOPE: ${{ matrix.scope }}
+        run: |
+          for pass in 1 2 3; do
+            if [[ "$SCOPE" == index ]]; then
+              cargo +1.95.0 fix --locked -p bitcoin-rs-index --features fjall,redb --all-targets --allow-dirty --allow-staged
+            else
+              cargo +1.95.0 fix --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets --allow-dirty --allow-staged
+            fi
+          done
       - name: Format and strict Clippy
+        env:
+          SCOPE: ${{ matrix.scope }}
         run: |
           cargo +1.95.0 fmt --all
           cargo +1.95.0 fmt --all -- --check
-          cargo +1.95.0 clippy --locked -p bitcoin-rs-index --features fjall,redb --all-targets -- -D warnings
-      - name: Index contract and integration tests
-        run: cargo +1.95.0 test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast
+          if [[ "$SCOPE" == index ]]; then
+            cargo +1.95.0 clippy --locked -p bitcoin-rs-index --features fjall,redb --all-targets -- -D warnings
+          else
+            cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings
+          fi
+      - name: Affected contract and integration tests
+        env:
+          SCOPE: ${{ matrix.scope }}
+        run: |
+          if [[ "$SCOPE" == index ]]; then
+            cargo +1.95.0 test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast
+          else
+            cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib txindex -- --nocapture
+            cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib runtime_backend_construction_has_one_owner -- --nocapture
+          fi
       - name: Public documentation links
+        if: ${{ matrix.scope == 'index' }}
         run: RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p bitcoin-rs-index --features fjall,redb --no-deps
       - name: Verify diff scope and export candidate
         if: ${{ always() }}
+        env:
+          SCOPE: ${{ matrix.scope }}
         run: |
-          git add crates/index/src/index.rs crates/index/src/index
+          if [[ "$SCOPE" == index ]]; then
+            git add crates/index/src/index.rs crates/index/src/index crates/index/README.md
+          else
+            git add crates/node/src/txindex_worker.rs crates/node/src/txindex_worker crates/node/src/storage_backend.rs crates/node/README.md
+          fi
           git diff --cached --check
           git diff --cached --stat
-          git diff --cached --name-only | python -c 'import sys; paths=sys.stdin.read().splitlines(); assert paths; assert all(p == "crates/index/src/index.rs" or p.startswith("crates/index/src/index/") for p in paths), paths'
-          git diff --cached --binary > /tmp/txindex-index.patch
-          tar -czf /tmp/txindex-index-source.tar.gz crates/index/src/index.rs crates/index/src/index
+          git diff --cached --name-only | SCOPE="$SCOPE" python -c 'import os,sys; s=os.environ["SCOPE"]; paths=sys.stdin.read().splitlines(); assert paths; allowed={"index":lambda p: p in {"crates/index/src/index.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/"),"node":lambda p: p in {"crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs","crates/node/README.md"} or p.startswith("crates/node/src/txindex_worker/")}; assert all(allowed[s](p) for p in paths), paths'
+          git diff --cached --binary > /tmp/txindex-${SCOPE}.patch
+          git diff --cached --name-only -z | tar -czf /tmp/txindex-${SCOPE}-source.tar.gz --null -T -
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: ${{ always() }}
         with:
-          name: txindex-index-candidate
+          name: txindex-${{ matrix.scope }}-candidate
           path: |
-            /tmp/txindex-index.patch
-            /tmp/txindex-index-source.tar.gz
+            /tmp/txindex-${{ matrix.scope }}.patch
+            /tmp/txindex-${{ matrix.scope }}-source.tar.gz
           retention-days: 1
           if-no-files-found: error
