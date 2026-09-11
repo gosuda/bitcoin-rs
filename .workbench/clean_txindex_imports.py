@@ -55,7 +55,9 @@ def clean(scope):
                 leaf=re.sub(r'\s+',' ',leaf)
                 name=leaf.split(' as ')[-1] if ' as ' in leaf else leaf.rsplit('::',1)[-1]
                 implicit=(scope=='index' and ((p.stem=='rows' and name=='IntoBytes') or (p.stem=='block' and name=='_')))
+                implicit|=(scope=='index' and p.stem in {'write','format'} and name=='WriteBatch')
                 implicit|=(scope=='node' and p.stem=='forward' and leaf=='rayon::prelude::*')
+                implicit|=(scope=='node' and facade and name in {'BlockSource','ScriptIndexQuery','TxIndexQuery'})
                 if facade and visibility:
                     keep=name in production_exports or name in ids
                 else:
@@ -70,5 +72,5 @@ def clean(scope):
         header='\n'.join(line for line in src.splitlines() if line.startswith('//!'))+'\n'
         result='\n'.join(out)
         result=re.sub(r'^//!.*\n','',result,flags=re.M)
-        p.write_text(header+result+'\n')
+        p.write_text(re.sub(r'\n{3,}', '\n\n', header+result+'\n'))
     print('Narrowed imports and isolated test-only facade/lifecycle dependencies:',scope)
