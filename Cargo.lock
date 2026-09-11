@@ -339,6 +339,8 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "compact_str",
+ "criterion",
+ "hashbrown 0.17.1",
  "proptest",
  "thiserror",
 ]

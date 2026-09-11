@@ -6,8 +6,7 @@
 
 use super::{
     ActiveChainView, CURSOR_BYTE_LEN, ChainIdentity, ChainTip, ConsumerCursor, ReconcileLeg,
-    ReconcilePhase, ReconcilePlan, SelectedWatermark, plan, plan_from_identity,
-    selected_watermark,
+    ReconcilePhase, ReconcilePlan, SelectedWatermark, plan, plan_from_identity, selected_watermark,
 };
 use crate::{IndexCapabilities, IndexWatermark, IndexWatermarks};
 use bitcoin_rs_primitives::Hash256;
