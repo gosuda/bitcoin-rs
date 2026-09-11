@@ -1,5 +1,5 @@
 //! Representation controls for the current checkpoint journal, not power-loss proof.
-//! CONTRACT v1: docs/contracts/recovery.md, JRN-HEAD-01.
+//! CONTRACT: docs/contracts/recovery.md, JRN-01 (version 1.0).
 
 use super::*;
 
