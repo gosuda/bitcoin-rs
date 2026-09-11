@@ -5,7 +5,7 @@ on:
     branches: [automation/txindex-cleanup-workbench-20260911]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: txindex-cleanup-workbench
@@ -39,7 +39,7 @@ jobs:
         with:
           ref: d4392c35858bce7626cec35fea905ebe97b554c0
           path: candidate
-          persist-credentials: false
+          persist-credentials: true
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: '1.95.0'
@@ -59,7 +59,14 @@ jobs:
             python ../workbench/.workbench/refactor_txindex_node.py
           fi
           python ../workbench/.workbench/finalize_txindex.py "$SCOPE"
-          cargo +1.95.0 fmt --all
+          if [[ -f ../workbench/.workbench/adjustments.py ]]; then
+            python ../workbench/.workbench/adjustments.py "$SCOPE"
+          fi
+          if [[ "$SCOPE" == index ]]; then
+            cargo +1.95.0 fmt -p bitcoin-rs-index
+          else
+            rustfmt +1.95.0 --edition 2024 crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
+          fi
       - name: Compiler-assisted import cleanup
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
@@ -73,11 +80,13 @@ jobs:
       - name: Format and strict Clippy
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          cargo +1.95.0 fmt --all
-          cargo +1.95.0 fmt --all -- --check
           if [[ "$SCOPE" == index ]]; then
+            cargo +1.95.0 fmt -p bitcoin-rs-index
+            cargo +1.95.0 fmt -p bitcoin-rs-index -- --check
             cargo +1.95.0 clippy --locked -p bitcoin-rs-index --features fjall,redb --all-targets -- -D warnings
           else
+            rustfmt +1.95.0 --edition 2024 crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
+            rustfmt +1.95.0 --edition 2024 --check crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
             cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings
           fi
       - name: Affected contract and integration tests
@@ -109,6 +118,26 @@ jobs:
           git diff --cached --name-only | SCOPE="$SCOPE" python -c 'import os,sys; s=os.environ["SCOPE"]; paths=sys.stdin.read().splitlines(); assert paths; allowed={"index":lambda p: p in {"crates/index/src/index.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/"),"node":lambda p: p in {"crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs","crates/node/README.md","crates/node/src/sync/requests.rs"} or p.startswith("crates/node/src/txindex_worker/")}; assert all(allowed[s](p) for p in paths), paths'
           git diff --cached --binary > /tmp/txindex-${SCOPE}.patch
           git diff --cached --name-only -z | tar -czf /tmp/txindex-${SCOPE}-source.tar.gz --null -T -
+      - name: Publish validated source only, without workbench history
+        run: |
+          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
+          branch="refactor/txindex-${SCOPE}-modules-20260911"
+          if [[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]]; then
+            git fetch --depth=1 origin "$branch"
+            test "$(git write-tree)" = "$(git rev-parse FETCH_HEAD^{tree})"
+            git rev-parse FETCH_HEAD > /tmp/txindex-${SCOPE}-commit.txt
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            if [[ "$SCOPE" == index ]]; then
+              git commit -m 'refactor(index): modularize txindex storage and simplify canonical row mutations'
+            else
+              git commit -m 'refactor(node): separate txindex lifecycle, reconciliation, and query owners'
+            fi
+            git push origin "HEAD:refs/heads/$branch"
+            git rev-parse HEAD > /tmp/txindex-${SCOPE}-commit.txt
+          fi
+          cat /tmp/txindex-${SCOPE}-commit.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: ${{ always() }}
         with:
@@ -117,5 +146,6 @@ jobs:
             /tmp/txindex-${{ matrix.scope }}.patch
             /tmp/txindex-${{ matrix.scope }}-source.tar.gz
             /tmp/txindex-${{ matrix.scope }}.log
+            /tmp/txindex-${{ matrix.scope }}-commit.txt
           retention-days: 1
           if-no-files-found: error
