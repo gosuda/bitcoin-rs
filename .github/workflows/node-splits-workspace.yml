@@ -4,69 +4,31 @@ on:
     branches: [automation/node-splits-20260911]
 permissions:
   contents: read
-concurrency:
-  group: node-splits-workspace-${{ github.sha }}
-  cancel-in-progress: false
 jobs:
-  source:
+  toolchain:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - name: Archive pinned public source and parser wheels
-        run: |
-          mkdir -p /tmp/node-bootstrap
-          git fetch --quiet --no-tags --depth=1 origin e6c5eae02738260b5b7240738323098afd6d7c5b
-          git archive --format=tar.gz --output=/tmp/node-bootstrap/source.tar.gz e6c5eae02738260b5b7240738323098afd6d7c5b
-          python3 -m pip download --python-version 313 --implementation cp --abi cp313 --only-binary=:all: --dest /tmp/node-bootstrap tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: node-source-bootstrap
-          path: /tmp/node-bootstrap/
-          retention-days: 2
-  validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [apply, sync-mining]
+    timeout-minutes: 15
     env:
       RUSTUP_TOOLCHAIN: '1.95.0'
-      CARGO_TERM_COLOR: never
-      CARGO_INCREMENTAL: 0
-      CARGO_BUILD_JOBS: 2
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: e6c5eae02738260b5b7240738323098afd6d7c5b
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: '1.95.0'
           components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Fetch locked public dependencies and archive offline tools
+        run: |
+          cargo fetch --locked --target x86_64-unknown-linux-gnu
+          mkdir -p /tmp/node-offline
+          tar --zstd -cf /tmp/node-offline/toolchain.tar.zst -C "$HOME/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu" bin lib libexec
+          tar --zstd -cf /tmp/node-offline/registry.tar.zst -C "$HOME/.cargo" registry/cache registry/index git
+          sha256sum /tmp/node-offline/*
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          shared-key: node-splits-native-v2
-          cache-on-failure: true
-      - name: Install pinned Rust parser
-        run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-      - name: Prepare extraction helper
-        run: python3 .github/node-splits/adjust.py
-      - name: Extract, validate, and publish source-only branch
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: python3 .github/node-splits/validate.py --group '${{ matrix.group }}' --publish
-      - name: Retain diagnostic evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: node-splits-${{ matrix.group }}
-          path: |
-            /tmp/node-splits-report.json
-            /tmp/compiler.jsonl
-          if-no-files-found: ignore
-          retention-days: 7
+          name: node-offline-toolchain
+          path: /tmp/node-offline/
+          compression-level: 0
+          retention-days: 2
