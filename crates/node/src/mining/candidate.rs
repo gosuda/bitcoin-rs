@@ -38,6 +38,35 @@ use compact_str::CompactString;
 use hashbrown::HashMap;
 use std::sync::atomic::Ordering;
 
+/// Clears an abandoned single-flight slot if candidate assembly unwinds.
+///
+/// Release/quickstart builds abort on panic, but test, development, and other
+/// unwind-enabled profiles must not leave same-key callers blocked behind a
+/// permanently in-flight generation.
+struct InFlightAssemblyGuard<'a> {
+    coordinator: &'a MiningCoordinator,
+    key: GenerationKey,
+    armed: bool,
+}
+
+impl Drop for InFlightAssemblyGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.coordinator.state.lock();
+        if state
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.key == self.key)
+        {
+            state.in_flight = None;
+            drop(state);
+            self.coordinator.wake.notify_all();
+        }
+    }
+}
+
 impl MiningCoordinator {
     pub(super) fn live_candidate(&self) -> Result<Arc<Candidate>, MiningControlError> {
         let mut last_race = None;
@@ -99,6 +128,11 @@ impl MiningCoordinator {
 
         state.in_flight = Some(InFlight { key, result: None });
         drop(state);
+        let mut flight_guard = InFlightAssemblyGuard {
+            coordinator: self,
+            key,
+            armed: true,
+        };
 
         let assembled = self.assemble_for_key(key);
         let mut state = self.state.lock();
@@ -134,6 +168,7 @@ impl MiningCoordinator {
         {
             state.in_flight = None;
         }
+        flight_guard.armed = false;
         returned
     }
 

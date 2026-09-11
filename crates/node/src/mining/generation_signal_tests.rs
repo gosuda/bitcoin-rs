@@ -1,3 +1,5 @@
+// CONTRACT: `docs/contracts/architecture.md#ARCH-07` owns post-commit
+// consumer ordering; `MiningGenerationSignal` is the mining wake projection.
 use super::MempoolSequenceWake;
 use super::MiningGenerationSignal;
 use bitcoin_rs_mining::BlockTemplateRequest;
