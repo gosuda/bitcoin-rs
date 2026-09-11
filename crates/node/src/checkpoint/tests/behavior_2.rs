@@ -25,9 +25,28 @@ fn authenticated_header_semantics_require_resync() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// The offsets below are the checkpoint envelope (16 bytes) followed by the
+/// stable `CoinStats::to_bytes` layout defined in
+/// `crates/utxo/src/stats/coin_stats.rs`: MuHash numerator/denominator, then
+/// height, total amount, bogo size, transaction count, and UTXO count.
+/// The `full resync` assertion is the checkpoint recovery contract documented
+/// in `docs/policies/db-migration.md` and exercised by the loader.
 #[test]
 fn authenticated_coinstats_semantics_require_resync() -> Result<(), Box<dyn std::error::Error>> {
-    for offset in [16, 16 + 768, 16 + 772, 16 + 780, 16 + 788, 16 + 796] {
+    const COINSTATS_ENVELOPE_BYTES: usize = 16;
+    const MUHASH_BYTES: usize = 384 + 384;
+    const HEIGHT_BYTES: usize = 4;
+    const U64_BYTES: usize = 8;
+    const COINSTATS_FIELD_OFFSETS: [usize; 6] = [
+        COINSTATS_ENVELOPE_BYTES,
+        COINSTATS_ENVELOPE_BYTES + MUHASH_BYTES,
+        COINSTATS_ENVELOPE_BYTES + MUHASH_BYTES + HEIGHT_BYTES,
+        COINSTATS_ENVELOPE_BYTES + MUHASH_BYTES + HEIGHT_BYTES + U64_BYTES,
+        COINSTATS_ENVELOPE_BYTES + MUHASH_BYTES + HEIGHT_BYTES + 2 * U64_BYTES,
+        COINSTATS_ENVELOPE_BYTES + MUHASH_BYTES + HEIGHT_BYTES + 3 * U64_BYTES,
+    ];
+
+    for offset in COINSTATS_FIELD_OFFSETS {
         let dir = tempfile::tempdir()?;
         let (tree, _, applied) = chain_with_applied_height(0, 0)?;
         let applied_tip = tip_snapshot(&tree, applied)?;
