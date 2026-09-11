@@ -713,14 +713,28 @@ impl BlockSync {
         false
     }
 
+    /// Returns whether `ancestor` is the node at `height` on `descendant`'s branch.
+    fn is_ancestor_at_height(
+        tree: &BlockTree,
+        ancestor: NodeId,
+        height: u32,
+        descendant: NodeId,
+    ) -> bool {
+        tree.node_at_height_from(descendant, height) == Some(ancestor)
+    }
+
     /// Uses the active-chain height index only while the applied tip is its prefix.
     ///
     /// During a header-first reorg the caller retains old-height blocks rather
     /// than walking the applied ancestry or dropping a body from the new branch.
     fn indexed_applied_ancestry_tip(tree: &BlockTree, applied_tip: &TipSnapshot) -> Option<NodeId> {
         let active_tip = tree.tip()?;
-        (tree.node_at_height_from(active_tip.tip_id, applied_tip.height)
-            == Some(applied_tip.tip_id))
+        Self::is_ancestor_at_height(
+            tree,
+            applied_tip.tip_id,
+            applied_tip.height,
+            active_tip.tip_id,
+        )
         .then_some(active_tip.tip_id)
     }
 
@@ -914,9 +928,16 @@ impl BlockSync {
 
     /// Returns the header tip when the applied chain is not on its branch.
     ///
+    /// SYNC-FRONTIER-01: ancestry is identified by node identity, not height
+    /// alone. An applied ancestor needs no switch; request selection starts at
+    /// the first connect node of the parent-walk plan. The trusted active-height
+    /// index may answer linear-sync queries without constructing that plan.
+    /// Forks, disconnected roots, and invalidated indices retain parent-walk
+    /// semantics. This does not change admission, request budgets, or apply.
+    ///
     /// The applied tip is on the branch exactly when the header tip's ancestor
     /// at the applied height is the applied block itself.
-    fn outweighed_branch_target(&self) -> Option<bitcoin_rs_chain::NodeId> {
+    fn outweighed_branch_target(&self) -> Option<NodeId> {
         let chain_tip = self.handles.chain_tip.load_full()?;
         let applied = self.handles.applied_tip.load_full()?;
         if chain_tip.hash == applied.hash {
@@ -924,6 +945,13 @@ impl BlockSync {
         }
         let tree = self.handles.block_tree.read();
         let applied_id = tree.lookup(applied.hash)?;
+        // Normal IBD extends the applied chain. Its trusted height index proves
+        // ancestry without allocating a plan for the entire remaining chain.
+        // Keep the parent-walk planner for actual forks and disconnected roots.
+        let applied_height = tree.node(applied_id).ok()?.height;
+        if Self::is_ancestor_at_height(&tree, applied_id, applied_height, chain_tip.tip_id) {
+            return None;
+        }
         let plan = plan_reorg(&tree, applied_id, chain_tip.tip_id).ok()?;
         (!plan.disconnect.is_empty()).then_some(chain_tip.tip_id)
     }
@@ -1427,6 +1455,29 @@ impl BlockSync {
         );
     }
 
+    /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.
+    /// Keep fallible ancestry navigation separate from request publication.
+    fn first_connect_height(
+        tree: &BlockTree,
+        applied_hash: Hash256,
+        target: NodeId,
+    ) -> Option<u32> {
+        let applied_id = tree.lookup(applied_hash)?;
+        let height = tree.node(applied_id).ok()?.height;
+        if Self::is_ancestor_at_height(tree, applied_id, height, target)
+            && let Some(successor_height) = height.checked_add(1)
+            && tree.node_at_height_from(target, successor_height).is_some()
+        {
+            return Some(successor_height);
+        }
+        let first = plan_reorg(tree, applied_id, target)
+            .ok()?
+            .connect
+            .into_iter()
+            .next()?;
+        Some(tree.node(first).ok()?.height)
+    }
+
     fn send_getdata_for_pending_blocks(
         &self,
         sync_peer_addr: SocketAddr,
@@ -1437,19 +1488,11 @@ impl BlockSync {
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
         let tree = self.handles.block_tree.read();
-        let Some(applied_id) = tree.lookup(applied_tip.hash) else {
+        let Some(request_start_height) =
+            Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)
+        else {
             return GetdataRequestOutcome::default();
         };
-        let Ok(plan) = plan_reorg(&tree, applied_id, chain_tip.tip_id) else {
-            return GetdataRequestOutcome::default();
-        };
-        let Some(first_connect) = plan.connect.first() else {
-            return GetdataRequestOutcome::default();
-        };
-        let Ok(first_connect) = tree.node(*first_connect) else {
-            return GetdataRequestOutcome::default();
-        };
-        let request_start_height = first_connect.height;
 
         let mut window = self.download_window.lock();
         let request = window.next_peer_request(
@@ -1881,6 +1924,147 @@ mod tests {
     use super::Inventory;
     use super::Message;
     use crate::apply::Chainstate;
+
+    fn check_sync_frontier_pair(
+        sync: &BlockSync,
+        rx: &crossbeam_channel::Receiver<Message>,
+        addr: SocketAddr,
+        applied: &TipSnapshot,
+        target: &TipSnapshot,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let expected = bitcoin_rs_chain::plan_reorg(
+            &sync.handles.block_tree.read(),
+            applied.tip_id,
+            target.tip_id,
+        )
+        .ok();
+        sync.handles
+            .applied_tip
+            .store(Some(Arc::new(applied.clone())));
+        sync.handles.chain_tip.store(Some(Arc::new(target.clone())));
+        assert_eq!(
+            sync.outweighed_branch_target(),
+            expected
+                .as_ref()
+                .filter(|plan| !plan.disconnect.is_empty())
+                .map(|_| target.tip_id),
+            "branch gate differs: {applied:?} -> {target:?}; indexed or parent-walk fixture"
+        );
+        sync.install_budget(super::default_sync_budget());
+        let outcome = sync.send_getdata_for_pending_blocks(addr, true, 100, target, applied);
+        let expected_ids = expected
+            .as_ref()
+            .map(|plan| plan.connect.as_slice())
+            .unwrap_or_default();
+        if expected_ids.is_empty() {
+            assert!(!outcome.sent);
+            assert!(rx.try_recv().is_err());
+            return Ok(());
+        }
+        assert!(outcome.sent);
+        let Message::GetData(inventory) = rx.try_recv()? else {
+            return Err("expected witness getdata".into());
+        };
+        let requested = witness_block_inventory(inventory)?;
+        let tree = sync.handles.block_tree.read();
+        let expected_hashes = expected_ids
+            .iter()
+            .take(requested.len())
+            .map(|id| tree.node(*id).map(|node| BlockHash(node.hash)))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(requested, expected_hashes);
+        assert!(!requested.is_empty());
+        assert!(rx.try_recv().is_err());
+        Ok(())
+    }
+
+    // SYNC-FRONTIER-01: the documented contracts of outweighed_branch_target
+    // and send_getdata_for_pending_blocks require ancestry, not equal heights.
+    // Independent oracle: crates/chain/src/reorg.rs::plan_reorg, unchanged by
+    // this optimization. Compare actual emitted hashes, not only batch sizes.
+    #[test]
+    fn indexed_sync_frontiers_match_parent_plans() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
+        let mut main = vec![root];
+        for tag in 1..=12 {
+            let parent = *main.last().ok_or("missing main parent")?;
+            let header = test_header(BlockHash::from(tree.node(parent)?.hash), tag);
+            main.push(tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)?);
+        }
+        let mut fork = vec![main[2]];
+        for tag in 101..=106 {
+            let parent = *fork.last().ok_or("missing fork parent")?;
+            let header = test_header(BlockHash::from(tree.node(parent)?.hash), tag);
+            fork.push(tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)?);
+        }
+        let foreign_header = test_header(BlockHash::from(Hash256::from_le_bytes(&[0; 32])), 200);
+        let foreign = tree.insert_node(None, foreign_header, NodeStatus::HeaderValid)?;
+        let endpoints = [root, main[2], main[6], main[12], fork[2], fork[6], foreign];
+        let snapshots = endpoints
+            .iter()
+            .map(|&tip_id| {
+                let node = tree.node(tip_id)?;
+                Ok(TipSnapshot {
+                    tip_id,
+                    height: node.height,
+                    chainwork: node.chainwork,
+                    hash: node.hash,
+                })
+            })
+            .collect::<Result<Vec<_>, bitcoin_rs_chain::ChainError>>()?;
+        let chain_tip = tree.tip_handle();
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let block_tree = Arc::new(RwLock::new(tree));
+        let peers = Arc::new(PeerTable::new());
+        let (_, headers_rx) = unbounded::<InboundHeaders>();
+        let (_, blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+        let sync = BlockSync::for_test(
+            apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+            Arc::clone(&peers),
+            Arc::new(Mutex::new(headers_rx)),
+            Arc::new(Mutex::new(blocks_rx)),
+        );
+        let addr = SocketAddr::from(([127, 0, 0, 1], 8_333));
+        let rx = connect_peer(&peers, synthetic_peer(addr, 100));
+
+        // Repeat the same matrix after public node_mut invalidates the index,
+        // without changing any node. Cached and parent-walk answers must agree.
+        for tainted in [false, true] {
+            if tainted {
+                let mut tree = block_tree.write();
+                let _ = tree.node_mut(main[12])?;
+            }
+            for applied in &snapshots {
+                for target in &snapshots {
+                    check_sync_frontier_pair(&sync, &rx, addr, applied, target)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // SYNC-FRONTIER-01: an invalidated height index must preserve the
+    // unchanged parent-plan result even when public node_mut leaves a gap.
+    #[test]
+    fn request_frontier_retains_parent_plan_on_height_gaps()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
+        let root_hash = tree.node(root)?.hash;
+        let header = test_header(BlockHash::from(root_hash), 1);
+        let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;
+        tree.node_mut(child)?.height = 2;
+        let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;
+        let [first] = plan.connect.as_slice() else {
+            return Err("expected one connect node".into());
+        };
+        assert_eq!(
+            BlockSync::first_connect_height(&tree, root_hash, child),
+            Some(tree.node(*first)?.height),
+        );
+        Ok(())
+    }
 
     #[test]
     fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std::error::Error>>

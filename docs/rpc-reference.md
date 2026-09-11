@@ -69,7 +69,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `clearbanned` | 0.4.0 |  |
 | `setnetworkactive` | 0.4.0 |  |
 | `getnodeaddresses` | 0.4.0 |  |
-| `getblocktemplate` | 0.4.0 | Pinned v17 template contract; BIP23 submitold/workid extras are not emitted. |
+| `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
 | `submitblock` | 0.4.0 |  |
 | `prioritisetransaction` | 0.4.0 |  |
