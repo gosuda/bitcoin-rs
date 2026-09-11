@@ -1,0 +1,133 @@
+name: one-shot txindex supervision refactor
+
+on:
+  push:
+    branches:
+      - chatgpt/txindex-supervision-modules
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.repository == 'gosuda/bitcoin-rs'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt,clippy
+      - name: Split runtime and supervision modules
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('crates/node/src/txindex_worker.rs')
+          source = root.read_text()
+
+          runtime_marker = '/// Shared wake/revision/health state owned by `NodeState` and referenced by\n'
+          lifecycle_marker = '/// One immutable lifecycle snapshot published atomically behind `ArcSwap`.\n'
+          open_spec_marker = '/// Immutable specification for worker-owned store open. Constructed\n'
+          supervisor_marker = '/// Handle used to spawn and join the supervised reconciliation worker.\n'
+          open_result_marker = '/// Result of opening the txindex store: writer, reader, and batch limits.\n'
+          undo_marker = '/// Exact spent-coin script anchor decoded from one block\'s undo record.\n'
+
+          markers = (
+              runtime_marker,
+              lifecycle_marker,
+              open_spec_marker,
+              supervisor_marker,
+              open_result_marker,
+              undo_marker,
+          )
+          for marker in markers:
+              if source.count(marker) != 1:
+                  raise SystemExit(f'expected exactly one marker: {marker!r}')
+
+          runtime_start = source.index(runtime_marker)
+          lifecycle_start = source.index(lifecycle_marker, runtime_start)
+          open_spec_start = source.index(open_spec_marker, lifecycle_start)
+          supervisor_start = source.index(supervisor_marker, open_spec_start)
+          open_result_start = source.index(open_result_marker, supervisor_start)
+          undo_start = source.index(undo_marker, open_result_start)
+
+          runtime = source[runtime_start:lifecycle_start].rstrip() + '\n'
+          lifecycle = source[lifecycle_start:open_spec_start].rstrip() + '\n'
+          open_spec = source[open_spec_start:supervisor_start].rstrip() + '\n\n'
+          supervisor = source[supervisor_start:open_result_start].rstrip() + '\n'
+          open_result = source[open_result_start:undo_start].rstrip() + '\n'
+
+          lifecycle = lifecycle.replace(
+              '    fn load_engine(&self) -> Result<Arc<TxIndexQueryEngine>, TxQueryError> {',
+              '    pub(super) fn load_engine(&self) -> Result<Arc<TxIndexQueryEngine>, TxQueryError> {',
+              1,
+          )
+          open_result = open_result.replace(
+              'fn run_worker_with_open(',
+              'pub(super) fn run_worker_with_open(',
+              1,
+          ).replace(
+              'fn open_tx_index_with_timeout(',
+              'pub(super) fn open_tx_index_with_timeout(',
+              1,
+          )
+
+          stop_marker = '    /// Returns true once a failure or shutdown has been published.\n'
+          if runtime.count(stop_marker) != 1:
+              raise SystemExit('runtime stop marker changed')
+          health_accessors = '''    /// Returns true once a worker failure has been published.\n    #[must_use]\n    pub(super) fn is_failed(&self) -> bool {\n        self.failed.load(Ordering::Acquire)\n    }\n\n    /// Returns true once shutdown has been requested.\n    #[must_use]\n    pub(super) fn shutdown_requested(&self) -> bool {\n        self.shutdown.load(Ordering::Acquire)\n    }\n\n'''
+          runtime = runtime.replace(stop_marker, health_accessors + stop_marker, 1)
+
+          source = source[:runtime_start] + source[undo_start:]
+
+          old_modules = '''mod capability;\nmod heartbeat;\nmod namespace;\nmod query;\nmod query_adapter;\nmod scheduling;\n\npub(crate) use capability::TxIndexCapability;\nuse query::IndexProgress;\npub(crate) use query::{IndexBlockSource, QueryEngineLive, TxIndexQueryEngine};\n'''
+          new_modules = '''mod capability;\nmod heartbeat;\nmod lifecycle;\nmod namespace;\nmod open;\nmod query;\nmod query_adapter;\nmod runtime;\nmod scheduling;\nmod supervisor;\n\npub(crate) use capability::TxIndexCapability;\npub(crate) use lifecycle::{TxIndexLifecycle, TxIndexQueryAdapter};\n#[cfg(test)]\npub(crate) use open::install_txindex_open_gate;\n#[cfg(test)]\nuse open::open_tx_index_with_timeout;\nuse open::run_worker_with_open;\npub(crate) use open::TxIndexOpenSpec;\nuse query::IndexProgress;\npub(crate) use query::{IndexBlockSource, QueryEngineLive, TxIndexQueryEngine};\npub(crate) use runtime::Generation;\npub use runtime::TxIndexRuntime;\npub(crate) use supervisor::TxIndexWorker;\n'''
+          if source.count(old_modules) != 1:
+              raise SystemExit('txindex module declaration block changed')
+          source = source.replace(old_modules, new_modules, 1)
+
+          query = Path('crates/node/src/txindex_worker/query.rs')
+          query_source = query.read_text()
+          old_failed = 'if self.runtime.failed.load(Ordering::Acquire) {'
+          old_shutdown = 'if self.runtime.shutdown.load(Ordering::Acquire) {'
+          if query_source.count(old_failed) != 1 or query_source.count(old_shutdown) != 1:
+              raise SystemExit('query health access changed')
+          query_source = query_source.replace(old_failed, 'if self.runtime.is_failed() {', 1)
+          query_source = query_source.replace(old_shutdown, 'if self.runtime.shutdown_requested() {', 1)
+
+          root.write_text(source)
+          query.write_text(query_source)
+          Path('crates/node/src/txindex_worker/runtime.rs').write_text(
+              '//! Process-local txindex wake, revision, health, and generation state.\n\nuse super::*;\n\n' + runtime
+          )
+          Path('crates/node/src/txindex_worker/lifecycle.rs').write_text(
+              '//! Atomic lifecycle publication and the stable query adapter handle.\n\nuse super::*;\n\n' + lifecycle
+          )
+          Path('crates/node/src/txindex_worker/open.rs').write_text(
+              '//! Worker-owned txindex store open, composition, and lifecycle publication.\n\nuse super::*;\n\n' + open_spec + open_result
+          )
+          Path('crates/node/src/txindex_worker/supervisor.rs').write_text(
+              '//! Txindex worker thread supervision, joining, detaching, and namespace poisoning.\n\nuse super::*;\n\n' + supervisor
+          )
+          PY
+
+          cargo fmt --all
+          git diff --check
+          cargo clippy -p bitcoin-rs-node --no-default-features --features fjall --lib -- -D warnings
+      - name: Commit generated refactor
+        shell: bash
+        run: |
+          git rm .github/workflows/chatgpt-txindex-refactor.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/node/src/txindex_worker.rs \
+                  crates/node/src/txindex_worker/query.rs \
+                  crates/node/src/txindex_worker/runtime.rs \
+                  crates/node/src/txindex_worker/lifecycle.rs \
+                  crates/node/src/txindex_worker/open.rs \
+                  crates/node/src/txindex_worker/supervisor.rs
+          git commit -m 'refactor(node): split txindex runtime supervision'
+          git push origin HEAD:chatgpt/txindex-supervision-modules
