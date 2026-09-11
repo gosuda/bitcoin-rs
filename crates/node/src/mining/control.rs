@@ -154,7 +154,8 @@ impl MiningControl for MiningCoordinator {
         hash_ps_at(&tree, tip.as_deref(), lookup, height, self.network)
     }
 
-    fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
+    fn submit_block(&self, mut block: Block) -> Result<BlockValidationResult, MiningControlError> {
+        self.fill_uncommitted_witness(&mut block);
         self.submit(&block)
     }
 

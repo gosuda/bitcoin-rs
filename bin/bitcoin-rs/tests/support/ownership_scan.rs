@@ -27,7 +27,10 @@ const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
         "handles.mempool_gateway",
     ),
     // Reorg transaction reconsideration uses the same typed gateway owner.
-    ("crates/node/src/reorg/execution.rs", "handles.mempool_gateway"),
+    (
+        "crates/node/src/reorg/execution.rs",
+        "handles.mempool_gateway",
+    ),
 ];
 
 /// Mutating methods on `Mempool` that only the mempool owner may call from

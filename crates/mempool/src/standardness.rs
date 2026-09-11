@@ -490,6 +490,17 @@ fn is_dust(output: &TxOut, dust_relay_fee: u64) -> bool {
     output.value.to_sat() < minimal_non_dust(&output.script_pubkey, dust_relay_fee)
 }
 
+/// Core `GetDust`: whether any output is below the dust-relay threshold.
+///
+/// `OP_RETURN` outputs have a zero threshold, so a 0-value nulldata output is
+/// not dust.
+#[must_use]
+pub fn tx_has_dust_outputs(tx: &Tx, dust_relay_fee: u64) -> bool {
+    tx.outputs
+        .iter()
+        .any(|output| is_dust(output, dust_relay_fee))
+}
+
 #[inline]
 const fn compact_size_len(len: usize) -> usize {
     if len < 0xfd {
@@ -826,6 +837,7 @@ mod tests {
         );
     }
 
+    // CONTRACT: API-24
     #[test]
     fn dust_relay_fee_changes_the_boundary() {
         let mut tx = standard_tx(1);
@@ -841,6 +853,8 @@ mod tests {
             ..policy()
         };
         assert_eq!(is_standard_tx(&tx, &lower_fee), Ok(()));
+        assert!(tx_has_dust_outputs(&tx, DUST_RELAY_FEE_SAT_PER_KVB));
+        assert!(!tx_has_dust_outputs(&tx, BROADCAST_MIN_FEE_SAT_PER_KVB));
     }
 
     #[test]
