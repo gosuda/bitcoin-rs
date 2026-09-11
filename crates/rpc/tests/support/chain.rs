@@ -10,7 +10,10 @@
 use super::{GateResult, fail};
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
+};
 
 /// Block the seed chain starts from; one minute after the genesis stamp, so
 /// mediantime arithmetic matches Core's regtest spacing.
@@ -55,15 +58,17 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
                 previous_output: null_prevout(),
                 // BIP34 height push plus one pad byte: consensus requires a
                 // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-                script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
+                    .concat()
+                    .into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: REGTEST_SUBSIDY_SATS,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+                script_pubkey: vec![0x51].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let mut block = Block {
             header: bitcoin_rs_primitives::Header {
@@ -71,7 +76,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
                 prev_blockhash: bitcoin_rs_primitives::BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
                 time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-                bits: REGTEST_BITS,
+                bits: CompactTarget::from_consensus(REGTEST_BITS),
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -128,7 +133,8 @@ fn grind_pow(block: &mut Block) -> GateResult<()> {
 
 /// Returns true when the header hash, read as a little-endian integer, meets
 /// the compact bits target (Core `CheckProofOfWork` shape).
-fn pow_is_met(bits: u32, hash: &Hash256) -> bool {
+fn pow_is_met(bits: CompactTarget, hash: &Hash256) -> bool {
+    let bits = bits.to_consensus();
     let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
     let mantissa = bits & 0x00ff_ffff;
     if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {

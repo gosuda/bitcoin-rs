@@ -110,7 +110,7 @@ fn stream_committed_range(
             JournalReplayError::CommittedRangeInvalid(format!("segment entry: {error}"))
         })?;
         if let Some(generation) =
-            super::writer::parse_segment_name_pub(entry.file_name().to_string_lossy().as_ref())
+            super::writer::parse_segment_name(entry.file_name().to_string_lossy().as_ref())
             && generation >= head.start_gen
             && generation <= head.journal_gen
         {
@@ -186,7 +186,7 @@ fn stream_segment(
         JournalReplayError::CommittedRangeInvalid("frame header size overflow".to_owned())
     })?;
 
-    let name = super::writer::segment_name_pub(generation);
+    let name = super::writer::segment_name(generation);
     let file = dir.open(name.as_str()).map_err(|error| {
         JournalReplayError::CommittedRangeInvalid(format!("open segment {generation}: {error}"))
     })?;
@@ -640,7 +640,7 @@ fn block_hash_of(record: &JournalRecord) -> Hash256 {
 mod tests {
     use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
     use bitcoin_rs_primitives::{
-        BlockHash, Hash256, Header, OutPoint, TxOut, Txid, consensus_bytes,
+        Amount, BlockHash, CompactTarget, Hash256, Header, OutPoint, TxOut, Txid, consensus_bytes,
     };
     use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
     use bitcoin_rs_utxo::{BorrowedBlockChanges, BorrowedUtxoAdd, UtxoSet};
@@ -664,7 +664,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&merkle),
             time,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: u32::from(marker),
         }
     }
@@ -681,8 +681,8 @@ mod tests {
         Coin {
             outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
             txout: TxOut {
-                value,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(value),
+                script_pubkey: vec![0x51].into(),
             },
             height,
             coinbase: true,

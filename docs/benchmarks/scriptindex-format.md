@@ -1,11 +1,70 @@
-# ScriptIndex on-disk format audit
+# Generic index on-disk format
+
+This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes increment `INDEX_FORMAT_VERSION` only and keep `CURRENT_SCHEMA` unchanged. There is no translator and no legacy reader; an unknown index version degrades that capability to unavailable or rebuilding through the existing `CapabilityState` vocabulary, rebuilds from retained canonical data, and never fails authoritative startup. A rejected index file is left in place until explicit authorized rebuild.
+
+## Row families
+
+| Family | Key | Value | Purpose |
+|---|---|---|---|
+| Transaction occurrence | `txid + block identity + position` | body locator and transaction byte range | pre-BIP34 duplicate txids and side branches never overwrite evidence |
+| Script history | `script digest + chronological position + event identity` | funding or spending locator | ordering-preserving integer encoding, byte order explicitly tested; retains provably unspendable outputs |
+| Live script locator | `script prefix + full outpoint` | minimal locator | truncated prefix accelerates lookup only with exact script verification; value and script resolve against coherent coins |
+| Spender relation | `origin occurrence + vout` | spending occurrence and input index | outspend queries |
+| Capability watermark | `capability` | height, hash, schema version, revision | readiness by hash, never height alone |
+| Per-block contribution | `capability + block identity` | before and after row sets | exact reversal within the rollback cutover |
+
+`ScriptIndex(full)` is live plus history; `ScriptIndex(utxo)` is live only. Core `txindex` advertisement is a separate explicit operator promise, never inferred from internal locators.
+
+## Cells it owns
+
+| Cell | Metric | Status |
+|---|---|---|
+| `index.format.bytes_per_row` per family | logical bytes per row and physical fjall bytes per row on a real pinned corpus | `planned_not_executed` |
+| `index.format.amplification` | physical over logical per family, default fjall, after compaction | `planned_not_executed` |
+| `index.backfill.throughput` | blocks/s and bytes/s per aligned capability set under `PreparedBatchLimits` | `planned_not_executed` |
+| Byte-order and encoding contract | ordering-preserving keys proven by `le_order.rs`-class tests on persisted bytes | `planned_not_executed` |
+
+Rows plus watermarks commit atomically per bounded batch after verifying parent, target identity and runtime revision; stale prepared work is discarded. Full history backfill requires retained bodies or an explicit archive or reindex input.
+
+```bash
+cargo test --locked -p bitcoin-rs-index --no-default-features --features fjall --test overhaul_scriptindex -- --nocapture
+```
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (frozen audit 2026-09-02)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
 
 Froze 2026-09-02 at branch `overhaul/one-session` commit `a24d23b`.
 This document is a **frozen** audit: the methodology and verdicts below are
 the reference. Numbers recorded here are fixture-scale and labeled as such;
 they are not mainnet projections.
 
-## Freeze order
+### Freeze order
 
 This document freezes its methodology before its numbers. The sections below
 appear in the order they were settled:
@@ -19,7 +78,7 @@ appear in the order they were settled:
 7. **Q1–Q5 verdicts** — the five design questions and their answers.
 8. **Versioning** — per-capability format/reset contract.
 
-## Trial count
+### Trial count
 
 Every byte count in this document is from a single synthetic fixture run on
 the `MemoryStore` backend (a `BTreeMap`-backed `KvStore`). Logical byte counts
@@ -33,7 +92,7 @@ No trial count is claimed for physical bytes: the fjall figures are cited
 from `docs/benchmarks/storage-footprint.md` (single run, 200k rows, after the
 LZ4-all-levels fix). They are labeled **fixture-scale** throughout.
 
-## Fjall-primary accounting
+### Fjall-primary accounting
 
 Fjall is the reference backend for physical byte counts because it is the
 backend the workspace ships with by default and the one whose compression
@@ -57,7 +116,7 @@ policy was audited (`docs/benchmarks/storage-footprint.md`).
 - Block-bodies and undo-data column families are out of scope: this audit
   covers only the four ScriptIndex column families.
 
-## Query mix
+### Query mix
 
 The audit exercises the read-path operations that ScriptIndex callers use:
 
@@ -71,7 +130,7 @@ The audit exercises the read-path operations that ScriptIndex callers use:
 
 The query mix is read-only. No write-path measurement is in scope.
 
-## Materiality rule
+### Materiality rule
 
 A finding is **material** if it changes a design decision or a caller
 contract. A finding is **informational** if it confirms an existing decision.
@@ -85,7 +144,7 @@ contract. A finding is **informational** if it confirms an existing decision.
   `TxPosition` width, positioned Spending values, LE vs sortable keys, per-CF
   cost, and the Live locator.
 
-## One-corpus / one-disposable-fixture guard
+### One-corpus / one-disposable-fixture guard
 
 **No multi-GB corpus build was started.** The audit uses only:
 
@@ -99,9 +158,9 @@ The disposable-fixture guard: any fixture created for this audit (the
 `le_order.rs` test blocks) is test-only, behind `#[test]`, and never shipped
 as a benchmark corpus or a data file.
 
-## Logical vs physical bytes
+### Logical vs physical bytes
 
-### Logical byte layout (from `crates/index/src/types.rs`)
+#### Logical byte layout (from `crates/index/src/types.rs`)
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
@@ -121,7 +180,7 @@ as a benchmark corpus or a data file.
 - BlockHeaders rows are keyed by the raw 80-byte block header (which is also
   the block hash). The value is empty.
 
-### Physical bytes on fjall (fixture-scale, cited from storage-footprint.md)
+#### Physical bytes on fjall (fixture-scale, cited from storage-footprint.md)
 
 These figures are from the 200k-row-per-CF synthetic corpus in
 `docs/benchmarks/storage-footprint.md`, after the LZ4-all-levels fix. They
@@ -150,9 +209,9 @@ the synthetic corpus are highly repetitive (deterministic pattern), so LZ4
 compresses them well. Real block headers are near-incompressible (they
 contain hashes, timestamps, nonces); expect on-disk ≈ logical on mainnet.
 
-## Q1–Q5 verdicts
+### Q1–Q5 verdicts
 
-### Q1: TxPosition width — is 8 bytes (4+4) sufficient?
+#### Q1: TxPosition width — is 8 bytes (4+4) sufficient?
 
 **Verdict: keep 8 bytes (4+4).**
 
@@ -167,7 +226,7 @@ row (from 8n to 16n bytes) for zero benefit. The `Ord` implementation
 already compares numerically, not lexicographically, so the LE encoding is
 correct and the width is sufficient.
 
-### Q2: Empty Spending value vs position — should Spending carry positions?
+#### Q2: Empty Spending value vs position — should Spending carry positions?
 
 **Verdict: Spending rows carry positions (format version 4).**
 
@@ -176,7 +235,7 @@ queries, so an unpositioned spend costs a 4 MB full-block reservation each and
 exhausts the query budget after ~16 spends (issue #262). Positions make the
 spend path the same one-transaction read as funding.
 
-### Q3: Keep LE height vs switch to sortable (big-endian) height?
+#### Q3: Keep LE height vs switch to sortable (big-endian) height?
 
 **Verdict: switch to big-endian heights (store format 5).**
 
@@ -201,7 +260,7 @@ The earlier keep-LE note in this file described a fixture-scale sort cost.
 That cost is not the pagination cost, and it is not a compatibility
 constraint. Store format 5 is the chosen layout.
 
-### Q4: Per-CF cost table (fixture-scale)
+#### Q4: Per-CF cost table (fixture-scale)
 
 **Verdict: the per-CF cost table is labeled fixture-scale and cited from
 `storage-footprint.md`.**
@@ -223,16 +282,19 @@ constraint. Store format 5 is the chosen layout.
 - The Spending amplification figure predates positioned Spending values
   (format version 4) and has not been re-measured.
 
-### Q5: Live UTXO locator — what is the baseline key shape?
+#### Q5: Live UTXO locator — what is the baseline key shape?
 
 **Verdict: baseline is `prefix(8) || txid(32) || vout(4)` with an empty
 value. A smaller locator requires an injectivity proof.**
 
 ScriptLive is a compact reverse view of the authoritative UTXO set (current
 outpoint locators per script), not a mempool index and not a Coin copy.
-Rows are **not implemented** in this audit. This verdict freezes the
-baseline key shape so a future implementation does not need to revisit
-the decision.
+Rows were **not implemented** when this audit was frozen. This verdict
+froze the baseline key shape so the implementation did not need to
+revisit the decision. Since then `ScriptLiveRow` landed in
+`crates/index/src/types.rs` with exactly this 44-byte key
+(`SCRIPT_LIVE_ROW_SIZE = HASH_PREFIX_LEN + 32 + 4`) and its own
+watermark key (`SCRIPT_LIVE_WATERMARK_KEY` in `crates/index/src/index.rs`).
 
 **Baseline key: `prefix(8) || txid(32) || vout(4)` = 44 bytes, empty value.**
 
@@ -259,7 +321,7 @@ live outpoints can produce the same key, and that prefix-scan efficiency is
 preserved. No such proof is offered here; the 44-byte baseline is the
 default until one is.
 
-## Versioning: per-capability format and reset
+### Versioning: per-capability format and reset
 
 The index tracks two independently versioned capabilities via
 `IndexCapability`:
