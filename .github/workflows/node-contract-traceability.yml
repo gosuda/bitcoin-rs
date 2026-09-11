@@ -1,0 +1,48 @@
+name: Node contract traceability follow-up
+on:
+  push:
+    branches: [automation/node-contract-traceability-20260911]
+    paths:
+      - .github/node-contract-traceability.py
+      - .github/workflows/node-contract-traceability.yml
+permissions:
+  contents: write
+concurrency:
+  group: node-contract-traceability-20260911
+  cancel-in-progress: true
+jobs:
+  validate-and-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt,clippy
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/node-contract-target
+          key: node-contract-rust195-${{ github.run_id }}
+          restore-keys: node-contract-rust195-
+      - name: Validate exact follow-up tree and publish source branch
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/node-contract-target
+        run: python3 .github/node-contract-traceability.py
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/node-contract-target
+          key: node-contract-rust195-${{ github.run_id }}
