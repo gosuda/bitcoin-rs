@@ -257,7 +257,7 @@ pub(super) fn write_checkpoint_inner(
         target_os = "android",
         target_os = "redox"
     )))]
-    injected_io(failpoint, CheckpointFailpoint::GenerationRename)?;
+    super::io::injected_io(failpoint, CheckpointFailpoint::GenerationRename)?;
     // On portable targets `allocate_generation` atomically reserved and this
     // function wrote the final generation directory directly. CURRENT is the
     // sole visibility commit point.
