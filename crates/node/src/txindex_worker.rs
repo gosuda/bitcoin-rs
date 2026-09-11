@@ -396,8 +396,6 @@ pub(crate) struct TxIndexWorker {
     namespace_key: Option<PathBuf>,
 }
 
-impl TxIndexWorker {}
-
 /// Result of opening the txindex store: writer, reader, and batch limits.
 pub(crate) struct OpenTxIndex {
     pub(crate) writer: Arc<dyn TxIndexWriter>,
