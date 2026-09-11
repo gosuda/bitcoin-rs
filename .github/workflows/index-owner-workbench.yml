@@ -33,9 +33,10 @@ jobs:
           mkdir -p evidence
           python workbench/.workbench/index-query/apply.py candidate
           python workbench/.workbench/index-query/finish.py candidate
+          python workbench/.workbench/index-query/fix.py candidate
           git -C candidate add -A
           git -C candidate write-tree | tee evidence/pre-format-tree.txt
-          test "$(git -C candidate write-tree)" = d6f6eb62933401399e3c0cc2b97dc1714a298217
+          test "$(git -C candidate write-tree)" = 6083387425d6d1db366bda8e56e4d66ed59317ef
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.95.0
@@ -52,6 +53,7 @@ jobs:
           cargo +1.95.0 fmt --all -- --check
           git add -A
           git diff --cached --check
+          git write-tree > ../evidence/tested-tree.txt
           rustc +1.95.0 --version --verbose | tee ../evidence/toolchain.txt
           sha256sum Cargo.lock | tee ../evidence/lock-sha256.txt
       - name: Clippy for the changed owners and all their targets
@@ -75,6 +77,11 @@ jobs:
       - name: Index tests on Redb
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --features redb --tests 2>&1 | tee ../evidence/index-redb.log
+      - name: Verify tests did not mutate the candidate source
+        working-directory: candidate
+        run: |
+          git add -A
+          test "$(git write-tree)" = "$(cat ../evidence/tested-tree.txt)"
       - name: Preserve exact candidate and checks, including failures
         if: always()
         working-directory: candidate
@@ -92,6 +99,18 @@ jobs:
           path: evidence
           retention-days: 3
           if-no-files-found: error
+      - name: Export only public compiler and registry cache for offline diagnostics
+        if: failure()
+        run: |
+          mkdir -p native-tools
+          tar -czf native-tools/rust-offline.tar.gz -C "$HOME" .rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu .cargo/registry
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: failure()
+        with:
+          name: index-query-offline-tools-${{ github.run_id }}
+          path: native-tools/rust-offline.tar.gz
+          retention-days: 1
+          if-no-files-found: warn
   publish:
     needs: validate
     runs-on: ubuntu-latest
@@ -114,6 +133,7 @@ jobs:
           git apply --index ../evidence/candidate.patch
           git diff --cached --check
           test "$(git write-tree)" = "$(cat ../evidence/candidate-tree.txt)"
+          test "$(git write-tree)" = "$(cat ../evidence/tested-tree.txt)"
           if git diff --cached --name-only | grep -E '^\.(github|workbench)/'; then
             echo 'Workbench files must not enter the code branch' >&2
             exit 1
