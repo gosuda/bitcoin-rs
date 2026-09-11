@@ -21,7 +21,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 `generateblock` txid and raw-tx parse errors. `API-28` is
 `getprioritisedtransactions` `modified_fee` in satoshis. `API-29` is Core
 `generatetoaddress` / `generateblock` invalid-output text. `API-30` is
-`generateblock` `TestBlockValidity` before solve.
+`generateblock` `TestBlockValidity` before solve. `API-31` is
+`generateblock` multipath, ranged, and Expand private-key errors.
 
 ## Clauses
 
@@ -117,8 +118,9 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 - `generatetoaddress` accepts only a network-valid address, uses mempool
   package selection, collects fees, and always submits.
 - `generateblock` accepts an address or descriptor (`require_checksum = false`;
-  a supplied checksum is verified). Ranged/multipath descriptors are refused.
-  The transactions array is required (an explicit `[]` is coinbase-only).
+  a supplied checksum is verified). Ranged and multipath descriptors are
+  refused (`API-31`). The transactions array is required (an explicit `[]` is
+  coinbase-only).
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
   mempool admission. Extra positional arguments are rejected. Output parse
@@ -457,7 +459,7 @@ owned by [wallet-facing.md](wallet-facing.md).
 - `generatetoaddress` refuses a non-address with `-5`
   `Error: Invalid address`.
 - `generateblock` tries a descriptor first (`require_checksum = false`).
-  Ranged/multipath descriptors stay `-8`. If Parse fails, the text is
+  Ranged/multipath descriptors are `-8` (`API-31`). If Parse fails, the text is
   tried as an address; a miss is `-5`
   `Error: Invalid address or descriptor`, matching Core
   `src/rpc/mining.cpp`. A supplied checksum that fails Parse is refused
@@ -481,6 +483,21 @@ owned by [wallet-facing.md](wallet-facing.md).
   go through GBT `propose` (`API-18` LookupBlockIndex vocabulary).
   Shutdown and journal backpressure stay `Unavailable`,
   not TestBlockValidity.
+
+
+### `API-31`: `generateblock` multipath, ranged, and Expand errors
+
+- **Owner**: `generateblock_payout_script` in
+  `crates/rpc/src/handlers/util.rs`.
+- Core `getScriptFromDescriptor` throws before the address fallback:
+  - more than one parsed descriptor → `-8`
+    `Multipath descriptor not accepted`
+  - `IsRange()` → `-8`
+    `Ranged descriptor not accepted. Maybe pass through deriveaddresses first?`
+  - `Expand(0)` failure → `-5`
+    `Cannot derive script without private keys`
+- Multipath is checked first, matching Core `descs.size() > 1` before
+  `IsRange()`. A descriptor that is both is the multipath error.
 
 ## Live gaps
 
@@ -666,5 +683,10 @@ owned by [wallet-facing.md](wallet-facing.md).
     `generateblock_raw_tx_does_not_require_mempool_admission`
   - `crates/rpc/src/handlers/mining.rs` test
     `generateblock_maps_test_block_validity_to_verify_error`
+
+- `API-31`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `generateblock_rejects_multipath_before_ranged_like_core`,
+    `generateblock_rejects_hardened_xpub_like_core`
 
 ## Vocabulary
