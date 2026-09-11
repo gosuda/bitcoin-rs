@@ -7,6 +7,9 @@ permissions:
 concurrency:
   group: index-owner-workbench
   cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
@@ -31,7 +34,6 @@ jobs:
           python workbench/.workbench/index-query/apply.py candidate
           python workbench/.workbench/index-query/finish.py candidate
           git -C candidate add -A
-          git -C candidate diff --cached --check
           git -C candidate write-tree | tee evidence/pre-format-tree.txt
           test "$(git -C candidate write-tree)" = d6f6eb62933401399e3c0cc2b97dc1714a298217
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
@@ -48,6 +50,8 @@ jobs:
         run: |
           cargo +1.95.0 fmt --all
           cargo +1.95.0 fmt --all -- --check
+          git add -A
+          git diff --cached --check
           rustc +1.95.0 --version --verbose | tee ../evidence/toolchain.txt
           sha256sum Cargo.lock | tee ../evidence/lock-sha256.txt
       - name: Clippy for the changed owners and all their targets
@@ -88,3 +92,38 @@ jobs:
           path: evidence
           retention-days: 3
           if-no-files-found: error
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: af5d034d1a74973666b8ef37adc4de3f9ea11d23
+          path: candidate
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: index-query-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+      - name: Publish only the exact validated tree to a new ref
+        working-directory: candidate
+        run: |
+          git apply --index ../evidence/candidate.patch
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat ../evidence/candidate-tree.txt)"
+          if git diff --cached --name-only | grep -E '^\.(github|workbench)/'; then
+            echo 'Workbench files must not enter the code branch' >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin refs/heads/refactor/index-query-owner-742; then
+            echo 'Candidate branch already exists; refusing to overwrite it' >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(index): own query consistency and shared runtime state' -m "Relates #742, #645, #217. Validated on Rust 1.95.0 by Actions run ${GITHUB_RUN_ID}; workbench files excluded."
+          git push origin HEAD:refs/heads/refactor/index-query-owner-742
+          git rev-parse HEAD
