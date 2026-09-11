@@ -16,7 +16,7 @@ The checkpoint manifest records this component under the current codec identifie
 
 ## Features
 
-- `rocksdb`, `fjall`, `redb`, `mdbx`: forward the storage-backend selection into the `storage` crate.
+- `rocksdb`, `fjall`, `redb`: forward the storage-backend selection into the `storage` crate.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
