@@ -579,6 +579,7 @@ fn write_status(
     stream.flush()
 }
 
+/// Splits an HTTP request target into its path and optional query string.
 fn split_path_query(path: &str) -> (&str, &str) {
     path.split_once('?')
         .map_or((path, ""), |(path, query)| (path, query))
