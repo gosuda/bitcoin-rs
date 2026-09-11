@@ -1,0 +1,60 @@
+name: Node splits workspace
+on:
+  push:
+    branches: [automation/node-splits-20260911]
+permissions:
+  contents: read
+concurrency:
+  group: node-splits-workspace-20260911
+  cancel-in-progress: true
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Inspect node responsibility boundaries
+        run: |
+          python3 - <<'PY'
+          import pathlib, re
+          root = pathlib.Path('crates/node/src')
+          for path in sorted(root.rglob('*.rs')):
+              if '/tests/' in str(path) or path.stem.endswith('tests'):
+                  continue
+              text = path.read_text()
+              lines = text.splitlines()
+              if len(lines) < 500:
+                  continue
+              print(f'\n=== {path} ({len(lines)} lines) ===')
+              for no, line in enumerate(lines, 1):
+                  if re.match(r'^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?(?:const\s+)?(?:struct|enum|trait|type|fn|impl|mod)\b', line):
+                      print(f'{no}: {line}')
+                  elif re.match(r'^    (?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?fn\b', line):
+                      print(f'  {no}: {line}')
+          print('\n=== OWNERSHIP GATES / SOURCE-PATH REFERENCES ===')
+          for path in sorted(pathlib.Path('.').glob('bin/bitcoin-rs/tests/gates/*.rs')):
+              for no, line in enumerate(path.read_text().splitlines(), 1):
+                  if 'node/src/' in line or 'node::apply::' in line:
+                      print(f'{path}:{no}: {line}')
+          PY
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Baseline native node lint check
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall --all-targets -- -D warnings
