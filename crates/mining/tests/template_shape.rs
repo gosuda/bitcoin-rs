@@ -12,7 +12,10 @@ use bitcoin_rs_mining::{
     CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
     assemble_ordered_candidate,
 };
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness,
+};
 
 #[test]
 #[allow(clippy::too_many_lines)]
@@ -46,7 +49,7 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
         previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 250,
         version: 0x2000_0001,
-        bits: 0x1d00_ffff,
+        bits: CompactTarget::from_consensus(0x1d00_ffff),
         min_time: 10,
         current_time: 20,
         locktime_cutoff: 10,
@@ -168,7 +171,7 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
             previous_block_hash: Hash256::from_le_bytes(&[0x22; 32]),
             height: 10,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 2,
             locktime_cutoff: 1,
@@ -187,7 +190,7 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
             previous_block_hash: Hash256::from_le_bytes(&[0x22; 32]),
             height: 10,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 2,
             locktime_cutoff: 1,
@@ -239,15 +242,15 @@ fn tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
                 parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&bytes))),
                 0,
             ),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -263,7 +266,7 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
             previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
             height: 100,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 2,
             locktime_cutoff: 1,
@@ -299,7 +302,7 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
             previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
             height: 100,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 2,
             locktime_cutoff: 1,
@@ -332,7 +335,7 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
                 previous_block_hash: Hash256::from_le_bytes(&[0x55; 32]),
                 height: 432,
                 version: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 min_time: 1,
                 current_time: 2,
                 locktime_cutoff: 1,
@@ -364,7 +367,7 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
         previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 1,
         version: 1,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1,
         current_time: 2,
         locktime_cutoff: 1,
@@ -412,7 +415,7 @@ fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
         previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 1,
         version: 1,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1,
         current_time: 2,
         locktime_cutoff: 1,

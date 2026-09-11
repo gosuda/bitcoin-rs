@@ -57,7 +57,8 @@ impl Stack {
             .get(
                 self.items
                     .len()
-                    .checked_sub(depth + 1)
+                    .checked_sub(depth)
+                    .and_then(|index| index.checked_sub(1))
                     .ok_or(StackError::Underflow)?,
             )
             .ok_or(StackError::Underflow)
@@ -68,7 +69,8 @@ impl Stack {
         let index = self
             .items
             .len()
-            .checked_sub(depth + 1)
+            .checked_sub(depth)
+            .and_then(|index| index.checked_sub(1))
             .ok_or(StackError::Underflow)?;
         Ok(self.items.remove(index))
     }
@@ -121,14 +123,19 @@ impl Stack {
         Ok(self.items.drain(start..).collect())
     }
 
-    /// Moves the top item to another bounded stack.
+    /// Moves the top item to another bounded stack without cloning it.
+    ///
+    /// This is an ownership-transfer API, not a performance guarantee; callers
+    /// must rely on the transfer and error-ordering contract documented in the
+    /// script crate README.
     pub fn move_to(&mut self, destination: &mut Self) -> Result<(), StackError> {
-        let item = self.pop()?;
-        if let Err(error) = destination.push(item.clone()) {
-            self.push(item)?;
-            return Err(error);
+        if self.is_empty() {
+            return Err(StackError::Underflow);
         }
-        Ok(())
+        if destination.items.is_full() {
+            return Err(StackError::Overflow);
+        }
+        destination.push(self.pop()?)
     }
 
     /// Moves an item from another bounded stack onto this stack.
