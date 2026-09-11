@@ -639,8 +639,12 @@ impl HttpSurface {
 
 fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
-    if method == "GET" && path.starts_with("/rest/") {
-        return HttpRoute::Rest { path, query };
+    if path.starts_with("/rest/") {
+        return if method == "GET" {
+            HttpRoute::Rest { path, query }
+        } else {
+            HttpRoute::NotFound
+        };
     }
     if let Some((surface, rest)) = crate::esplora::namespace(path) {
         let surface = match surface {
