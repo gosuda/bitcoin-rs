@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 
-BASE = "802ac778d67132cee65a9195edcf4fe2f8059ae4"
 PRODUCT = "docs/node-contract-traceability-20260911"
 
 
@@ -32,8 +31,10 @@ def main() -> int:
     if os.environ.get("GITHUB_REPOSITORY") != "gosuda/bitcoin-rs":
         raise RuntimeError("unexpected repository")
     root = Path(os.environ["GITHUB_WORKSPACE"])
+    base = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=root, text=True).strip()
+    print("VALIDATION_BASE", base, flush=True)
     work = Path(os.environ["RUNNER_TEMP"]) / "node-contract-traceability"
-    run("git", "worktree", "add", "--detach", str(work), BASE, cwd=root)
+    run("git", "worktree", "add", "--detach", str(work), base, cwd=root)
 
     reporter = work / "crates/node/src/recovery_evidence/reporter.rs"
     replace_once(
@@ -109,7 +110,7 @@ def main() -> int:
     if remote:
         raise RuntimeError(f"refusing existing product branch: {remote}")
     run("git", "push", "origin", f"{head}:refs/heads/{PRODUCT}", cwd=work)
-    print("PUBLISHED", PRODUCT, head, flush=True)
+    print("PUBLISHED", PRODUCT, head, "BASE", base, flush=True)
     return 0
 
 
