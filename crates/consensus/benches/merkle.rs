@@ -5,7 +5,7 @@
 use std::hint::black_box;
 
 use bitcoin_rs_consensus::verify_block::block_merkle_root_matches_txids;
-use bitcoin_rs_primitives::{Block, Hash256, Header, Txid, encode::double_sha256};
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Header, Txid, encode::double_sha256};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn make_txids(count: usize) -> Vec<Txid> {
@@ -28,7 +28,11 @@ fn scalar_merkle(level: &mut Vec<Txid>) -> Option<(Txid, bool)> {
     }
     let mut mutated = false;
     while level.len() > 1 {
-        mutated |= level.chunks_exact(2).any(|pair| pair[0] == pair[1]);
+        mutated |= level
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| pair[0] == pair[1]);
         let original_len = level.len();
         for parent in 0..original_len.div_ceil(2) {
             let left = level[2 * parent];
@@ -64,7 +68,7 @@ fn benchmark_block(merkle_root: Hash256) -> Block {
             prev_blockhash: bitcoin_rs_primitives::BlockHash::default(),
             merkle_root,
             time: 0,
-            bits: 0,
+            bits: CompactTarget::from_consensus(0),
             nonce: 0,
         },
         txs: Vec::new(),

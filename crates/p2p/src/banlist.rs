@@ -1,7 +1,7 @@
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hashbrown::HashMap;
@@ -52,11 +52,11 @@ impl BanList {
     /// Load a ban list from a dedicated file.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, PeerError> {
         let path = path.into();
-        if !Path::new(&path).exists() {
-            return Ok(Self::new(path));
-        }
-
-        let mut file = File::open(&path)?;
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::new(path)),
+            Err(error) => return Err(error.into()),
+        };
         let mut data = String::new();
         file.read_to_string(&mut data)?;
 
@@ -76,7 +76,11 @@ impl BanList {
             let banned_until = if until_secs == 0 {
                 None
             } else {
-                Some(UNIX_EPOCH + Duration::from_secs(until_secs))
+                Some(
+                    UNIX_EPOCH
+                        .checked_add(Duration::from_secs(until_secs))
+                        .ok_or_else(|| PeerError::InvalidBanEntry(line.to_owned()))?,
+                )
             };
             list.entries.insert(
                 ip,

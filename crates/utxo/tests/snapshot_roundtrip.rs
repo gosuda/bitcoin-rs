@@ -2,7 +2,7 @@
 
 use std::io::{Cursor, Seek};
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
 use bitcoin_rs_utxo::{
     BlockChanges, SnapshotCoin, SnapshotCoinObserver, UtxoAdd, UtxoChangeEvents,
     UtxoChangeListener, UtxoError, UtxoInserted, UtxoKey, UtxoRemoved, UtxoSet, hash_serialized_3,
@@ -22,8 +22,8 @@ fn txid(seed: u64) -> Hash256 {
 
 fn txout(seed: u64) -> TxOut {
     TxOut {
-        value: 2_000 + seed,
-        script_pubkey: vec![0x51, u8::try_from(seed % 256).unwrap_or(0)],
+        value: Amount::from_sat(2_000 + seed),
+        script_pubkey: vec![0x51, u8::try_from(seed % 256).unwrap_or(0)].into(),
     }
 }
 
@@ -38,8 +38,8 @@ fn snapshot_roundtrip_preserves_vout_and_metadata_boundaries()
     let low_txout = txout(42_001);
     let high_txout = txout(42_002);
     let max_txout = TxOut {
-        value: 42_003,
-        script_pubkey: Vec::new(),
+        value: Amount::from_sat(42_003),
+        script_pubkey: Script::new(),
     };
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(low, low_txout.clone(), false, 400));
@@ -146,8 +146,8 @@ fn observed_snapshot_traversal_matches_the_current_reader() -> Result<(), Box<dy
     let second_txid = txid(200_001);
     let first = txout(200_010);
     let second = TxOut {
-        value: 200_011,
-        script_pubkey: Vec::new(),
+        value: Amount::from_sat(200_011),
+        script_pubkey: Script::new(),
     };
     let mut changes = BlockChanges::default();
     changes.add(UtxoAdd::new(
