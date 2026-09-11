@@ -1,0 +1,22 @@
+name: Node parser inputs
+on:
+  push:
+    branches: [automation/node-splits-20260911]
+    paths: [.github/workflows/node-parser-inputs.yml]
+permissions:
+  contents: read
+jobs:
+  parser-wheels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download pinned public parser wheels
+        run: |
+          python3 -m pip download --no-deps --only-binary=:all: --python-version 311 --platform manylinux2014_x86_64 --implementation cp --abi cp311 --dest "$RUNNER_TEMP/parser-wheels" tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+          (cd "$RUNNER_TEMP/parser-wheels" && sha256sum *.whl > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: node-parser-wheels
+          path: ${{ runner.temp }}/parser-wheels/
+          retention-days: 1
+          if-no-files-found: error
