@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
-use crate::txindex_worker::TxIndexRuntime;
+use crate::txindex::TxIndexRuntime;
 
 // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (wake coalescing).
 #[test]

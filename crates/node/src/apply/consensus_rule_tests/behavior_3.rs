@@ -6,20 +6,20 @@ fn txindex_worker_failure_makes_queries_unavailable_without_blocking_apply()
 -> Result<(), Box<dyn std::error::Error>> {
     let handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
+    let runtime = Arc::new(crate::txindex::TxIndexRuntime::new(wake_tx));
     let index: Arc<FailAfterStartupTxIndex> = Arc::new(FailAfterStartupTxIndex::new()?);
     let writer: Arc<dyn bitcoin_rs_index::writer::TxIndexWriter> = index.clone();
     let evidence_dir = tempfile::tempdir()?;
-    let _worker = crate::txindex_worker::TxIndexWorker::spawn(
+    let _worker = crate::txindex::TxIndexWorker::spawn(
         Arc::clone(&runtime),
         writer,
         Arc::clone(&handles.applied_tip),
         Arc::clone(&handles.block_tree),
         None,
-        crate::txindex_worker::DEFAULT_BATCH_LIMITS,
+        crate::txindex::DEFAULT_BATCH_LIMITS,
         bitcoin_rs_index::IndexCapabilities::HISTORICAL,
         Arc::new(crate::state::ChainEventPublisher::detached(0).0),
-        crate::txindex_worker::test_recovery_reporter(evidence_dir.path()).0,
+        crate::txindex::test_recovery_reporter(evidence_dir.path()).0,
         u32::MAX,
         wake_rx,
     )?;
@@ -54,16 +54,16 @@ fn txindex_worker_failure_makes_queries_unavailable_without_blocking_apply()
     );
 
     let reader: Arc<dyn bitcoin_rs_index::IndexReader> = index;
-    let query = crate::txindex_worker::TxIndexQueryEngine::new(
+    let query = crate::txindex::TxIndexQueryEngine::new(
         Arc::clone(&runtime),
         reader,
-        crate::txindex_worker::IndexBlockSource::new(Arc::new(parking_lot::RwLock::new(
+        crate::txindex::IndexBlockSource::new(Arc::new(parking_lot::RwLock::new(
             bitcoin_rs_rpc::context::BlockLog::new(),
         ))),
         Arc::clone(&handles.block_tree),
         Arc::clone(&handles.applied_tip),
         None,
-        crate::txindex_worker::QueryEngineLive {
+        crate::txindex::QueryEngineLive {
             utxo: None,
             chain_transition: None,
             enabled: bitcoin_rs_index::IndexCapabilities::TX_LOOKUP,

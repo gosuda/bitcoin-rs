@@ -2,17 +2,16 @@
 //!
 //! These exercise the full worker lifecycle path including the test-only
 //! keyed open gate.
+
 #![expect(
     clippy::expect_used,
     reason = "test: integration tests use expect for clarity"
 )]
-
 use super::*;
 use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_rpc::context::BlockLog;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::{sync::Arc, sync::atomic::AtomicBool};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,8 +123,7 @@ fn worker_open_panic_publishes_failed() {
     );
 
     // Clean up.
-    let worker = worker;
-    worker.runtime.request_shutdown();
+    inputs.runtime.request_shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +293,7 @@ fn late_open_cannot_publish_after_revocation() {
         "revoked generation must prevent publication"
     );
 
-    let worker = worker;
-    worker.runtime.request_shutdown();
+    inputs.runtime.request_shutdown();
 }
 
 // ---------------------------------------------------------------------------

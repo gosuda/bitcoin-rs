@@ -1,21 +1,19 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
+use super::*;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{
     HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow,
+    types::TxPosition, types::TxPositionValue,
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, consensus_bytes, encode::double_sha256,
 };
-use bitcoin_rs_rpc::context::{BlockRecord, ScriptHistoryRecord};
+use bitcoin_rs_rpc::{context::BlockRecord, context::ScriptHistoryRecord};
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
-
-use super::*;
 use parking_lot::Mutex;
+use std::{sync::atomic::AtomicBool, sync::atomic::AtomicUsize, sync::atomic::Ordering};
 
 #[derive(Clone)]
 struct ScanResponse {

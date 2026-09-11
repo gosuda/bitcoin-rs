@@ -27,7 +27,7 @@ pub(super) fn build_tx_index_open_spec(
     config: &NodeConfig,
     txindex_cache_bytes: u64,
     epoch: u64,
-) -> Result<Option<crate::txindex_worker::TxIndexOpenSpec>> {
+) -> Result<Option<crate::txindex::TxIndexOpenSpec>> {
     let enabled = tx_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
@@ -39,14 +39,14 @@ pub(super) fn build_tx_index_open_spec(
         .data_dir
         .canonicalize()
         .unwrap_or_else(|_| config.data_dir.clone());
-    Ok(Some(crate::txindex_worker::TxIndexOpenSpec {
+    Ok(Some(crate::txindex::TxIndexOpenSpec {
         data_dir: config.data_dir.clone(),
         namespace: "txindex",
         storage_backend: config.storage.backend,
         cache_bytes: txindex_cache_bytes,
         epoch,
         enabled,
-        rollback_rebuild_cutover: crate::txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
+        rollback_rebuild_cutover: crate::txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER,
         canonical_data_root,
         utxo: None,
         chain_transition: None,
@@ -54,9 +54,9 @@ pub(super) fn build_tx_index_open_spec(
 }
 
 pub(super) struct TxIndexSpawn {
-    pub(super) spec: crate::txindex_worker::TxIndexOpenSpec,
-    pub(super) generation: crate::txindex_worker::Generation,
-    pub(super) block_source: crate::txindex_worker::IndexBlockSource,
+    pub(super) spec: crate::txindex::TxIndexOpenSpec,
+    pub(super) generation: crate::txindex::Generation,
+    pub(super) block_source: crate::txindex::IndexBlockSource,
     pub(super) body_source: Arc<dyn BlockBodySource>,
     pub(super) wake_rx: Receiver<()>,
     pub(super) recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
@@ -114,7 +114,7 @@ impl NodeState {
             .tx_index_lifecycle
             .as_ref()
             .context("txindex lifecycle missing for a pending worker spawn")?;
-        let worker = crate::txindex_worker::TxIndexWorker::spawn_with_open(
+        let worker = crate::txindex::TxIndexWorker::spawn_with_open(
             Arc::clone(runtime),
             spawn.spec,
             Arc::clone(lifecycle),
@@ -171,7 +171,7 @@ impl NodeState {
                 }
                 if let Some(lifecycle) = &self.tx_index_lifecycle {
                     lifecycle.store(Arc::new(
-                        crate::txindex_worker::TxIndexLifecycle::ShutdownAbandoned,
+                        crate::txindex::TxIndexLifecycle::ShutdownAbandoned,
                     ));
                 }
                 // Poison the namespace so it cannot be reclaimed in this process.

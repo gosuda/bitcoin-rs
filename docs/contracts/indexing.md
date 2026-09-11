@@ -10,10 +10,18 @@ This version adds the scheduling requirements in `IDX-08`; changes to those
 requirements must update this clause and its executable proof together.
 
 Owners:
-- `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
+- `TxIndexRuntime` in `crates/node/src/txindex/runtime.rs` owns the process-local
+  revision, health, phase, and nonblocking wake signal.
+- `TxIndexQueryEngine` and the single-snapshot outer adapter in
+  `crates/node/src/txindex/query.rs` own query gating and the shared work budget;
+  `query/transactions.rs` and `query/scripts.rs` implement the bounded queries.
+- `Worker` in `crates/node/src/txindex/worker.rs` owns reconciliation execution;
+  `worker/reconcile.rs`, `worker/commit.rs`, and `forward.rs` keep rollback,
+  cursor/commit fences, and bounded forward preparation separate. Positional
+  reconciliation policy remains in `bitcoin_rs_index::reconcile`.
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
 - Capability status: worker-owned `TxIndexLifecycle` in
-  `crates/node/src/txindex_worker.rs` mapped by `TxIndexCapability` onto the
+  `crates/node/src/txindex/lifecycle.rs` mapped by `TxIndexCapability` onto the
   RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
   status enum.
 
@@ -172,7 +180,7 @@ remove another script's output.
     watermark identity records to delete exactly the rows contributed by each
     disconnected block from the tip down to the common ancestor.
   - When the rollback depth (watermark height minus common ancestor height)
-    exceeds `txindex_worker::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100 000 blocks),
+    exceeds `txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (100 000 blocks),
     the worker routes to `reset_capabilities` and backfills forward instead of
     executing a long block-by-block rollback
     (`docs/benchmarks/index-rollback-rebuild-cutover.md`).
@@ -219,18 +227,18 @@ remove another script's output.
 - `crates/index/tests/index_roundtrip.rs`
   `commit_golden_blocks_writes_expected_electrs_rows`: electrs family
   occupancy after one atomic `IndexWriter::commit_block` (`IDX-06`).
-- `crates/node/src/txindex_worker_recovery_tests.rs`:
+- `crates/node/src/txindex/recovery_tests.rs`:
   - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
   - `absent_tip_rewinds_index_to_empty`
   - `missing_disconnected_body_routes_rewind_to_rebuild`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
   - `live_only_index_ahead_is_reported_and_reseeded`
-- `crates/node/src/txindex_worker_lifecycle_tests.rs` and
-  `crates/node/src/txindex_worker_integration_tests.rs`: lifecycle
+- `crates/node/src/txindex/lifecycle_tests.rs` and
+  `crates/node/src/txindex/integration_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.
-- `crates/node/src/txindex_worker_query_tests.rs`: query gating, snapshot
+- `crates/node/src/txindex/query_tests.rs`: query gating, snapshot
   consistency, and revision ABA detection tests.
-- `crates/node/src/txindex_worker_block_source_tests.rs`: confirmed-body
+- `crates/node/src/txindex/block_source_tests.rs`: confirmed-body
   serving by height/hash (`IDX-03`, `RCV-01`).
 - `crates/node/src/apply.rs`:
   `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.

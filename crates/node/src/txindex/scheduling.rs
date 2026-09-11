@@ -3,11 +3,9 @@
 //! Wake messages are hints; the revision determines whether the chain moved.
 //! A buffered batch keeps its original deadline across subsequent wakes.
 
-use std::time::{Duration, Instant};
-
-use crossbeam_channel::Receiver;
-
 use super::TxIndexRuntime;
+use crossbeam_channel::Receiver;
+use std::{time::Duration, time::Instant};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BatchWait {

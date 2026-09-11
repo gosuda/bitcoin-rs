@@ -13,7 +13,7 @@ Owners:
 - Crash and lost-write fault tests: `crates/node/tests/overhaul_crash_matrix.rs`
 - Reorg and disconnect: `crates/node/tests/overhaul_streaming_reorg.rs`
 - Checkpoint independence: `crates/node/tests/overhaul_checkpoint_independence.rs`
-- Index worker recovery: `crates/node/src/txindex_worker_recovery_tests.rs`
+- Index worker recovery: `crates/node/src/txindex/recovery_tests.rs`
 - Policy: `docs/policies/db-migration.md`
 
 ## Durable root
@@ -297,7 +297,7 @@ count advances and rewinds by the exact transaction delta.
   validates fresh replay, schema refusal, and checkpoint authority removal.
 - `crates/storage/tests/overhaul_atomic_durability.rs` (planned): tests the
   storage-level prior-or-whole-proposed rule and durable batch completion.
-- `crates/node/src/txindex_worker_recovery_tests.rs` (existing):
+- `crates/node/src/txindex/recovery_tests.rs` (existing):
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
     (`RCV-05`);
   - `tip_change_during_rebuild_converges_on_new_tip` (`RCV-06`);

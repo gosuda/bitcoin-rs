@@ -1,10 +1,16 @@
-//! Txindex lifecycle/progress projection for RPC capability reporting.
+//! Coherent index progress and RPC capability projection.
 
 use super::{
-    Arc, ArcSwap, CapabilityState, CapabilityStatus, IndexCapabilities, IndexProgress,
-    TxIndexCapabilitySource, TxIndexLifecycle, TxIndexQueryEngine, TxIndexRuntime, TxQueryError,
-    txindex_status,
+    lifecycle::TxIndexLifecycle, query::IndexProgress, query::TxIndexQueryEngine,
+    runtime::TxIndexRuntime,
 };
+use arc_swap::ArcSwap;
+use bitcoin_rs_index::IndexCapabilities;
+use bitcoin_rs_rpc::{
+    capabilities::CapabilityState, capabilities::CapabilityStatus,
+    capabilities::TxIndexCapabilitySource, capabilities::txindex_status, context::TxQueryError,
+};
+use std::sync::Arc;
 
 /// Progress reads that raced a tip or revision move before the status
 /// report gives up on a coherent answer for this snapshot.

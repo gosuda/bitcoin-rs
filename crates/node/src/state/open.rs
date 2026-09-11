@@ -274,21 +274,20 @@ impl NodeState {
                     spec.utxo = Some(Arc::clone(&utxo));
                     spec.chain_transition = Some(Arc::clone(&chain_transition));
                     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-                    let runtime = Arc::new(crate::txindex_worker::TxIndexRuntime::new(wake_tx));
+                    let runtime = Arc::new(crate::txindex::TxIndexRuntime::new(wake_tx));
                     let body_source: Arc<dyn BlockBodySource> =
                         Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
-                    let block_source =
-                        crate::txindex_worker::IndexBlockSource::new(Arc::clone(&blocks))
-                            .with_block_body_source(Arc::clone(&body_source))
-                            .with_block_tree(Arc::clone(&block_tree));
-                    let lifecycle: Arc<arc_swap::ArcSwap<crate::txindex_worker::TxIndexLifecycle>> =
+                    let block_source = crate::txindex::IndexBlockSource::new(Arc::clone(&blocks))
+                        .with_block_body_source(Arc::clone(&body_source))
+                        .with_block_tree(Arc::clone(&block_tree));
+                    let lifecycle: Arc<arc_swap::ArcSwap<crate::txindex::TxIndexLifecycle>> =
                         Arc::new(arc_swap::ArcSwap::from_pointee(
-                            crate::txindex_worker::TxIndexLifecycle::Opening,
+                            crate::txindex::TxIndexLifecycle::Opening,
                         ));
-                    let adapter = Arc::new(crate::txindex_worker::TxIndexQueryAdapter::new(
-                        Arc::clone(&lifecycle),
-                    ));
-                    let generation = crate::txindex_worker::Generation::new(spec.epoch);
+                    let adapter = Arc::new(crate::txindex::TxIndexQueryAdapter::new(Arc::clone(
+                        &lifecycle,
+                    )));
+                    let generation = crate::txindex::Generation::new(spec.epoch);
                     (
                         Some(runtime),
                         Some(TxIndexSpawn {
@@ -305,7 +304,7 @@ impl NodeState {
                 }
                 None => (None, None, None, None),
             };
-        let txindex_status = Arc::new(crate::txindex_worker::TxIndexCapability::new(
+        let txindex_status = Arc::new(crate::txindex::TxIndexCapability::new(
             tx_index_lifecycle.clone(),
             tx_index_runtime.clone(),
             tx_index_capabilities(&config),
