@@ -217,7 +217,7 @@ fn next_block_sequence_locks_final(
         }
         bitcoin_rs_consensus::bip68::sequence_lock_satisfied(
             tx.version,
-            input.sequence,
+            input.sequence.to_consensus(),
             context.height,
             context.locktime_cutoff,
             context.height,
@@ -239,7 +239,10 @@ mod tests {
     use std::sync::Arc;
 
     use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
-    use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Sequence, Tx, TxIn, TxOut,
+        Txid, Witness,
+    };
 
     use super::{RESIDUAL_PACKAGE_CONSTRUCTIONS, select_packages};
     use crate::template::CandidateContext;
@@ -286,7 +289,7 @@ mod tests {
             previous_block_hash: Hash256::from_le_bytes(&[0xcd; 32]),
             height: 100,
             version: 0x2000_0000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 2,
             locktime_cutoff: 1,
@@ -328,15 +331,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&bytes)), 0),
-                script_sig: vec![],
-                sequence: u32::MAX,
-                witness: vec![],
+                script_sig: vec![].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 }
