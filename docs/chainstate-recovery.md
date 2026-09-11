@@ -17,8 +17,10 @@ fallbacks, or the status of the planned durable-root model below.
 
 The optional checkpoint journal keeps its framed `head.json` codec and file-size
 check in `crates/node/src/chainstate_journal/head.rs`; `segment.rs` owns the shared
-filename grammar, and `error.rs` owns the shared typed failures. Writer startup
-and replay use those owners directly. The former writer-level head paths and
+filename grammar, and `error.rs` owns the shared typed failures. The normative
+representation contract is version 1 in [contracts/recovery.md](contracts/recovery.md),
+requirements `JRN-HEAD-01` and `JRN-SEGMENT-01`. Writer startup and replay use
+those owners directly. The former writer-level head paths and
 `segment_name_pub` / `parse_segment_name_pub` forwarding wrappers are removed.
 
 `writer.rs` remains the sole mutation and publication owner: storage flush,

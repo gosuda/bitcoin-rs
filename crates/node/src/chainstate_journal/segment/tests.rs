@@ -1,4 +1,4 @@
-//! CONTRACT: docs/chainstate-recovery.md, current journal filename representation.
+//! CONTRACT v1: docs/contracts/recovery.md, JRN-SEGMENT-01.
 use super::*;
 
 #[test]
