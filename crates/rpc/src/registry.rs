@@ -267,5 +267,5 @@ declare_rows! {
     "hashtx", SurfaceKind::Zmq, Status::Implemented, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubhashtx endpoint.", "0.4.0", None;
     "rawblock", SurfaceKind::Zmq, Status::Implemented, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubrawblock endpoint.", "0.4.0", None;
     "rawtx", SurfaceKind::Zmq, Status::Implemented, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubrawtx endpoint.", "0.4.0", None;
-    "sequence", SurfaceKind::Zmq, Status::Implemented, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/node/src/zmq_publisher.rs).", "0.4.0", None;
+    "sequence", SurfaceKind::Zmq, Status::Implemented, "zmq", CORE_VERSION, "Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs).", "0.4.0", None;
 }
