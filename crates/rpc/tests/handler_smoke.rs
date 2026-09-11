@@ -820,6 +820,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let mut ctx = Context::new().with_mining_control(Arc::new(SmokeMiningControl::new()));
+        // API-12 mainnet gates live in the handler unit tests; the smoke
+        // proof renders shapes, so it runs off-mainnet like core_compat.
+        ctx.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
         let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
         let block = Block {
