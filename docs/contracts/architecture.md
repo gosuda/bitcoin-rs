@@ -221,6 +221,14 @@ Owners:
   owns the durable event journal; this is dependency direction, not a second
   event contract. Do not push cross-store ordering into `utxo` or `storage`.
 
+### `ARCH-08`: Durable pruning and reorg retention
+
+- Transaction-cache pruning must not remove transactions from a block above
+  the durable checkpoint's reorg-retention floor. A requested prune height
+  becomes eligible only after durability has been published through
+  `CORE_REORG_SAFETY_MARGIN`; this protects reconsideration of disconnected
+  transactions during reorg handling.
+
 ## Live gaps
 
 - **Node slimming and extraction (#217)**: Peer connection session and lease
@@ -231,9 +239,9 @@ Owners:
   / `ChainTransition` facade (`ARCH-07`). Derived consumers live in
   `ChainFollowers` / `ChainEffects` and are dispatched after commit
   while the `ChainTransition` is still held; `Chainstate` does not hold
-  them. `crates/p2p` owns `DownloadWindow` and `BlockStager`. `crates/node`
-  still carries leftover domain mechanics: UTXO undo persistence and
-  disconnect markers (`apply.rs`), the node-side sync coordinator (`sync.rs`),
+  them. `crates/p2p` owns `DownloadWindow`, `BlockStager`, and `SyncPlanner`.
+  `crates/node` still carries leftover domain mechanics: UTXO undo persistence
+  and disconnect markers (`apply.rs`), the node-side sync executor (`sync.rs`),
   and direct backend construction and cache share dispatch (`state.rs`).
   Relocating remaining coordinator policy into `crates/p2p` remains tracked
   under #217 (open). A dedicated `crates/chainstate` waits until journal,

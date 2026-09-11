@@ -3,16 +3,12 @@
 # bitcoin-rs cargo-fuzz targets, minimize them with cargo fuzz cmin, and
 # record provenance in fuzz/CORPUS_PROVENANCE.md.
 #
-# Mapping (target <- qa-assets/fuzz_corpora):
-#   p2p_message   <- p2p_deserialize_raw_net_msg  (reframed: strip the 24-byte
-#                    envelope, map the command to the harness selector byte;
-#                    the harness rebuilds magic/length/checksum itself)
-#   block_decode  <- bitcoin_deserialize_block    (raw consensus bytes, direct)
-#   tx_decode     <- bitcoin_deserialize_transaction (raw consensus bytes, direct)
-#   script_eval   <- bitcoin_deserialize_script + bitcoin_script_bytes_to_asm_fmt
-#                    (raw script bytes, wrapped into the script_eval framing:
-#                    the harness FLAGS entry NONE, and for files >= 32 bytes
-#                    a P2TR variant using its TAPROOT entry)
+# Mapping owner: fuzz/CORPUS_PROVENANCE.md (docs/contracts/qa-corpus.md,
+# clause QAC-01). This script never duplicates the per-target mapping; the
+# importer (import_qa_assets.py) owns how each upstream corpus directory is
+# transformed, while the provenance document owns which upstream corpora feed
+# which target and why. Update that document, not this script, when the
+# mapping changes.
 #
 # Disk discipline (repo AGENTS.md): the worst-case footprint of the clone is
 # declared below (shallow clone ~= corpus size, assumed <= 2 GiB); free space
@@ -105,14 +101,21 @@ readonly OUT_BASE="${FUZZ_DIR}/corpus"
 # --- 3. Transform and publish bounded seeds ---------------------------------
 # One mapper owns framing and atomic publication for all targets. Failures in
 # directory enumeration, reads, or publication stop before cmin or provenance.
+# bitcoin_arbitrary_* corpora hold arbitrary::Unstructured byte streams, not
+# consensus-serialized objects; every target here consumes consensus bytes, so
+# upstream ships them unused. Log them to keep the exclusion explicit.
+for arbitrary_dir in "${CORPORA}"/bitcoin_arbitrary_*; do
+    [ -d "${arbitrary_dir}" ] || continue
+    log "excluding ${arbitrary_dir##*/}: Unstructured bytes, not consensus-serialized (see fuzz/CORPUS_PROVENANCE.md)"
+done
 "${CARGO_ENV[@]}" python3 "${REPO_ROOT}/scripts/import_qa_assets.py" \
     --corpora "${CORPORA}" --repo-root "${REPO_ROOT}" \
     --out-base "${OUT_BASE}" --max-seed-bytes "${MAX_SEED_BYTES}"
 
 # --- 4. Minimize each target corpus with cargo fuzz cmin ---------------------
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
-"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_decode
-"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_decode
+"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
+"${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" script_eval
 
 # --- 5. Provenance ------------------------------------------------------------
@@ -120,6 +123,8 @@ readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"
 IMPORT_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly IMPORT_DATE
 # Stage beside the destination: failed writes leave the previous record intact.
+# The Mapping section stays owned by fuzz/CORPUS_PROVENANCE.md; the generated
+# record refreshes only run-dependent fields, preserving authored rows.
 PROVENANCE_TMP="$(mktemp "${FUZZ_DIR}/.corpus-provenance.XXXXXX")"
 cat > "${PROVENANCE_TMP}" <<EOF
 # Fuzz corpus provenance
@@ -131,24 +136,39 @@ Seeds under fuzz/corpus/ were imported from
 
 | Field | Value |
 |---|---|
-| Upstream commit | ${UPSTREAM_COMMIT} |
-| Import date | ${IMPORT_DATE} |
+| Upstream commit | @@UPSTREAM_COMMIT@@ |
+| Import date | @@IMPORT_DATE@@ |
 | License | CC0-1.0 |
-| Import tool | scripts/import-qa-assets.sh (shallow clone, then cargo fuzz cmin per target) |
+| Import tool | scripts/import-qa-assets.sh (clone pinned to the commit above, then cargo fuzz cmin per target) |
+| Size policy | source files >= ${MAX_SEED_BYTES} bytes are skipped and counted in the import log (repo-size bound matching the targets' input caps) |
 
-## Mapping
-
-| Target | Upstream corpus | Transformation |
-|---|---|---|
-| p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload bounded so the selector plus payload fits ${MAX_SEED_BYTES} bytes (harness rebuilds magic/length/checksum) |
-| block_decode | fuzz_corpora/bitcoin_deserialize_block | direct copy (raw consensus bytes) |
-| tx_decode | fuzz_corpora/bitcoin_deserialize_transaction | direct copy (raw consensus bytes) |
-| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes bounded by the harness ELEMENT_LEN_MAX and seed budget, then wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
-
-Corpora were minimized with cargo fuzz cmin after import; only minimized
-seeds are tracked here. Re-run the script after major decoder changes to
-refresh.
 EOF
+
+# Carried forward: the authored Mapping section (and the footer that follows
+# it) stays owned by the checked-in CORPUS_PROVENANCE.md; a rerun refreshes
+# only the run-dependent fields above.
+if [ ! -f "${PROVENANCE}" ] || ! grep -q -- '^## Mapping$' "${PROVENANCE}"; then
+    rm -f -- "${PROVENANCE_TMP}"
+    PROVENANCE_TMP=""
+    log "ERROR: ${PROVENANCE} missing or has no '## Mapping' section; refusing to overwrite provenance"
+    exit 1
+fi
+sed -n '/^## Mapping$/,$p' -- "${PROVENANCE}" >> "${PROVENANCE_TMP}"
+
+# Fill the run-dependent fields from this import.
+python3 - "${PROVENANCE_TMP}" "${UPSTREAM_COMMIT}" "${IMPORT_DATE}" <<'PYEOF'
+import sys
+
+path, commit, date = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path, encoding="utf-8") as f:
+    text = f.read()
+for field, value in (("| Upstream commit |", commit), ("| Import date |", date)):
+    start = text.index(field)
+    end = text.index("\n", start)
+    text = text[:start] + f"{field} {value} |" + text[end:]
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
 chmod 0644 -- "${PROVENANCE_TMP}"
 mv -T -- "${PROVENANCE_TMP}" "${PROVENANCE}"
 PROVENANCE_TMP=""

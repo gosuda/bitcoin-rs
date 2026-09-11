@@ -10,7 +10,16 @@ This version adds the scheduling requirements in `IDX-08`; changes to those
 requirements must update this clause and its executable proof together.
 
 Owners:
-- `TxIndexRuntime`, `TxIndexQueryEngine`, `Worker` in `crates/node/src/txindex_worker.rs`
+- `TxIndexRuntime` and worker state in `crates/node/src/txindex_worker.rs`;
+  reconciliation, cursor commits, bounded preparation, and rollback in its
+  `reconciliation.rs`, `cursor.rs`, `catch_up.rs`, and `rollback.rs` modules.
+- `TxIndexQueryEngine` in `crates/node/src/txindex_worker/query.rs` owns the shared
+  snapshot gate and public query entrypoints. Its `query/transactions.rs`,
+  `query/scripts.rs`, `query/block_source.rs`, and `query/budget.rs` modules own
+  exact transaction resolution, script traversal, block identity, and aggregate
+  work accounting respectively.
+- Worker supervision and backend opening in `txindex_worker/lifecycle.rs` and
+  `txindex_worker/startup.rs`; startup owns generation-checked publication.
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
 - Capability status: worker-owned `TxIndexLifecycle` in
   `crates/node/src/txindex_worker.rs` mapped by `TxIndexCapability` onto the
@@ -237,3 +246,24 @@ remove another script's output.
 - `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
   `attached_source_is_the_worker_row`: `getcapabilities` advertises one
   txindex row from `txindex_status` (`IDX-02`).
+
+### Query-budget regression evidence
+
+`crates/node/src/txindex_worker/query/budget/tests.rs` exercises the shared
+historical/live byte budget, independent row/scan/body-read admission limits,
+rejection of truncated scans, and non-consuming rejection of over-budget work
+(`IDX-03`, `CL-14`). No query limit or persisted representation changes.
+
+### Store-open cancellation evidence
+
+The store-open wait polls node shutdown, runtime stop, and generation revocation
+at bounded intervals. Once the helper has started, cancellation and timeout are
+typed abandoned-open outcomes: startup poisons the namespace before releasing
+the worker's claim. Cancellation before helper creation may release normally.
+These paths do not cancel the underlying storage-engine call.
+
+Evidence for `IDX-07` abandonment and `IDX-08` shutdown:
+`crates/node/src/txindex_worker/startup/open_wait/tests.rs` covers bounded
+cancellation, deadline precedence, disconnection, and backend error propagation;
+`crates/node/src/txindex_worker/startup/tests.rs` covers namespace poisoning and
+clean release. The query-budget limits and on-disk formats are unchanged.

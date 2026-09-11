@@ -1,11 +1,12 @@
 # Fuzz Targets
 
 Five `cargo-fuzz` harnesses covering the untrusted-input surfaces of
-bitcoin-rs: P2P wire messages, block/transaction deserialization, the
-production script interpreter, and UTXO snapshot loading. Seed corpora under
-`fuzz/corpus/` are imported from rust-bitcoin/qa-assets by
-`scripts/import-qa-assets.sh`; see `fuzz/CORPUS_PROVENANCE.md` for upstream
-commit, license, and mapping.
+bitcoin-rs: P2P wire messages, block/transaction **consensus** after
+rust-bitcoin deserialization, the production script interpreter, and UTXO
+snapshot loading. Seed corpora under `fuzz/corpus/` are imported from
+rust-bitcoin/qa-assets by `scripts/import-qa-assets.sh`; see
+`fuzz/CORPUS_PROVENANCE.md` for upstream commit, license, and mapping.
+Parser-only rust-bitcoin decode targets are not kept.
 
 ## Prerequisites
 
@@ -24,13 +25,13 @@ cargo +nightly fuzz run p2p_message
 
 Replace `p2p_message` with any of:
 
-| Target          | Surface                                              |
-|-----------------|------------------------------------------------------|
-| `p2p_message`   | P2P wire message decoder (`read_message`)            |
-| `block_decode`  | Block consensus deserialization                      |
-| `tx_decode`     | Transaction consensus deserialization                |
-| `script_eval`   | Production interpreter entry point (`Interpreter::execute` with fuzz-selected `VerifyFlags`) |
-| `utxo_snapshot` | UTXO snapshot deserializer (`read_snapshot_strict_v4`)     |
+| Target           | Surface                                                                 |
+|------------------|-------------------------------------------------------------------------|
+| `p2p_message`    | P2P wire message decoder (`read_message`)                               |
+| `block_validate` | rust-bitcoin block parse, then `verify_block_rules`                     |
+| `tx_validate`    | rust-bitcoin tx/witness parse, then consensus + mempool `check_acceptance` |
+| `script_eval`    | Production interpreter entry point (`Interpreter::execute` with fuzz-selected `VerifyFlags`) |
+| `utxo_snapshot`  | UTXO snapshot deserializer (`read_snapshot_strict_v4`)                  |
 
 To limit the number of iterations:
 
