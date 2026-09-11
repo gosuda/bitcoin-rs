@@ -27,7 +27,7 @@ fn authenticated_header_semantics_require_resync() -> Result<(), Box<dyn std::er
 
 /// The offsets below are the checkpoint envelope (16 bytes) followed by the
 /// stable `CoinStats::to_bytes` layout defined in
-/// `crates/utxo/src/stats/coin_stats.rs`: MuHash numerator/denominator, then
+/// `crates/utxo/src/stats/coin_stats.rs`: `MuHash` numerator/denominator, then
 /// height, total amount, bogo size, transaction count, and UTXO count.
 /// The `full resync` assertion is the checkpoint recovery contract documented
 /// in `docs/policies/db-migration.md` and exercised by the loader.
