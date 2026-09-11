@@ -109,10 +109,6 @@ mixed-tip page.
 - `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset` (existing)
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
   (existing)
-- `crates/rpc/src/esplora.rs` tests
-  `esplora_lives_only_under_the_api_prefix`,
-  `api_is_the_public_electrs_directory`, and
-  `esplora_is_the_mempool_backend_superset` (existing)
 
 ## Vocabulary
 
