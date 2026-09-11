@@ -1190,6 +1190,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
     Ok(())
 }
 
+/// CONTRACT: API-06 — getmininginfo's networkhashps mirrors the default
+/// getnetworkhashps window.
 #[test]
 fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let state = open_regtest()?;
