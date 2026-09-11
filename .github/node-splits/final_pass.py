@@ -1,5 +1,4 @@
 """Final native-gated pass for unpublished node splits. Workbench-only."""
-from collections import Counter
 from pathlib import Path
 import sys
 
@@ -51,8 +50,12 @@ def transform(work, label, relative, stages):
         expected.add(validation)
 
         # Exact unused bindings reported by the previous all-target compiler
-        # pass. Keep the root Rayon prelude: root-level tests still call
-        # `par_iter` after the production responsibilities move out.
+        # pass. Root-level tests still use Rayon, so make that import test-only
+        # instead of suppressing the production warning.
+        root_file = root / "apply.rs"
+        drop_import(root_file, "use rayon::prelude::*;")
+        ensure_import(root_file, "use rayon::prelude::*;", cfg_test=True)
+        expected.add(root_file)
         unused = {
             "apply.rs": [
                 "use bitcoin_rs_chain::ChainWork;",
@@ -103,6 +106,7 @@ def transform(work, label, relative, stages):
             "use bitcoin_rs_index::writer::TxIndexWriter;",
         ):
             ensure_import(lifecycle, line, cfg_test=True)
+        drop_import(lifecycle, "use rayon::prelude::*;")
         expected.add(lifecycle)
 
         startup = root / "txindex_worker/startup.rs"
@@ -111,10 +115,12 @@ def transform(work, label, relative, stages):
             "use super::wait_txindex_open_gate;\n",
         )
         startup.write_text(startup_text)
+        drop_import(startup, "use rayon::prelude::*;")
         expected.add(startup)
 
         # Test implementations moved below their owners, so the root no longer
-        # needs their old test-only imports.
+        # needs old monolith-wide imports. The legacy query-test file is still a
+        # root child and now imports its snapshot trait explicitly.
         root_file = root / "txindex_worker.rs"
         for line in (
             "use bitcoin_rs_index::ScriptLiveScan;",
@@ -129,6 +135,9 @@ def transform(work, label, relative, stages):
         ):
             drop_import(root_file, line)
         expected.add(root_file)
+        query_tests = root / "txindex_worker_query_tests.rs"
+        ensure_import(query_tests, "use bitcoin_rs_index::TxIndexSnapshot;")
+        expected.add(query_tests)
 
         # Exact module-local unused bindings from the previous all-target
         # compiler pass. These are former monolith-wide imports, not API shims.
@@ -146,7 +155,6 @@ def transform(work, label, relative, stages):
                 "use bitcoin_rs_storage::block_body::BlockBodyStore;",
                 "use rayon::prelude::*;",
             ],
-            "txindex_worker/lifecycle.rs": ["use rayon::prelude::*;"],
             "txindex_worker/catch_up.rs": [
                 "use bitcoin_rs_index::TxIndexSnapshot;",
                 "use bitcoin_rs_storage::block_body::BlockBodyStore;",
@@ -169,9 +177,6 @@ def transform(work, label, relative, stages):
 
 f.transform = transform
 m.transform = transform
-
-# Every still-unpublished group must pass the original exact test-token gate;
-# sync has already passed and been published as #928.
 m.validate = base_validate
 
 # Already published groups are immutable. Work only on apply/txindex/reorg.
