@@ -166,17 +166,13 @@ pub fn plan_from_identity(
     target: ChainTip,
     chain: &impl ActiveChainView,
 ) -> ReconcilePlan {
-    let identity_matches_cursor = (
-        cursor.epoch,
-        cursor.sequence,
-        cursor.hash,
-        cursor.height,
-    ) == (
-        identity.epoch,
-        identity.sequence,
-        identity.tip_hash,
-        identity.tip_height,
-    );
+    let identity_matches_cursor = (cursor.epoch, cursor.sequence, cursor.hash, cursor.height)
+        == (
+            identity.epoch,
+            identity.sequence,
+            identity.tip_hash,
+            identity.tip_height,
+        );
     let identity_matches_target =
         identity.tip_hash == target.hash && identity.tip_height == target.height;
     if identity_matches_cursor && identity_matches_target {
