@@ -1,3 +1,5 @@
+// CONTRACT: `docs/contracts/recovery.md#RCV-12` owns process-visible recovery
+// warnings and durable marker ordering; these tests are proof, not policy.
 use super::*;
 
 // -----------------------------------------------------------------------

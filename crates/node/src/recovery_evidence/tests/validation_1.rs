@@ -1,3 +1,5 @@
+// CONTRACT: `docs/contracts/recovery.md#RCV-12` owns recovery-evidence
+// identity/codec and marker refusal semantics; `RCV-04` owns crash behavior.
 use super::*;
 
 // -----------------------------------------------------------------------

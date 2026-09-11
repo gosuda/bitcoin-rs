@@ -1,3 +1,4 @@
+use bitcoin_rs_index::TxIndexSnapshot;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use arc_swap::ArcSwapOption;
