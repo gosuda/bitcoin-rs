@@ -67,6 +67,9 @@ mixed-tip page.
 - `/api` does not serve mempool-backend helpers. `/internal/*` and
   `/block-template` live under `/esplora`, the electrs superset
   `mempool/backend` uses as `ESPLORA_REST_API_URL`.
+- Only GET and POST exist on `/api` and `/esplora`. Other methods, and
+  GET outside `/rest/`, `/api`, and `/esplora`, 404 at the listener demux
+  and never become JSON-RPC.
 
 ### `WF-03`: Proof is a public-process consumer
 
@@ -87,7 +90,8 @@ mixed-tip page.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
-  (existing)
+- `crates/rpc/src/server.rs` tests `classify_splits_rest_esplora_and_json_rpc` (existing)
+- `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset` (existing)
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
   (existing)
 - `crates/rpc/src/esplora.rs` tests

@@ -188,31 +188,21 @@ fn dispatch_http_request(
     match classify(&request.method, &request.path) {
         HttpRoute::Rest { path, query } => {
             let response = crate::rest::route(handler.context(), path, query, rest_enabled);
-            write_response(
-                stream,
-                &response,
-                keep_alive,
-                HttpSurface::CoreRest.cors_policy(),
-            )?;
+            write_response(stream, &response, keep_alive, CorsPolicy::Disabled)?;
         }
         HttpRoute::EsploraGet {
             surface,
             path,
             query,
         } => {
-            let response = crate::esplora::route(handler, path, query);
+            let esplora_surface = esplora_surface(surface);
+            let response = crate::esplora::route(handler, esplora_surface, path, query);
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
         }
         HttpRoute::EsploraPost { surface, path } => {
+            let esplora_surface = esplora_surface(surface);
             let response =
-                crate::esplora::route_post(handler, path, &request.body).unwrap_or_else(|| {
-                    crate::rest::Response {
-                        status: 404,
-                        reason: "Not Found",
-                        content_type: "text/plain",
-                        body: b"not found".to_vec(),
-                    }
-                });
+                crate::esplora::route_post(handler, esplora_surface, path, &request.body);
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
         }
         HttpRoute::Preflight { surface } => {
@@ -225,7 +215,7 @@ fn dispatch_http_request(
             write_response(stream, &response, keep_alive, surface.cors_policy())?;
         }
         HttpRoute::NotFound => {
-            write_status(stream, 404, "Not Found", b"not found", keep_alive)?;
+            write_not_found(stream, keep_alive)?;
         }
         HttpRoute::JsonRpc => {
             if !auth.validate_header(request.authorization.as_deref()) {
@@ -278,7 +268,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET" | "OPTIONS") {
+    if method.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
@@ -327,7 +317,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     }
 
     let content_length = match (method, content_length) {
-        ("GET" | "OPTIONS", length) => length.unwrap_or(0),
+        ("GET" | "HEAD" | "OPTIONS", length) => length.unwrap_or(0),
         (_, Some(length)) => length,
         (_, None) => {
             return Err(io::Error::new(
@@ -589,8 +579,6 @@ enum HttpRoute<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpSurface {
-    JsonRpc,
-    CoreRest,
     EsploraPublic,
     EsploraBackend,
 }
@@ -613,41 +601,58 @@ impl HttpSurface {
                 headers: PUBLIC_ESPLORA_HEADERS,
                 expose: PUBLIC_ESPLORA_EXPOSE_HEADERS,
             },
-            Self::JsonRpc | Self::CoreRest | Self::EsploraBackend => CorsPolicy::Disabled,
+            Self::EsploraBackend => CorsPolicy::Disabled,
         }
-    }
-}
-
-fn surface(path: &str) -> HttpSurface {
-    if path.starts_with("/rest/") {
-        return HttpSurface::CoreRest;
-    }
-    match crate::esplora::namespace(path) {
-        Some((crate::esplora::Surface::Public, _)) => HttpSurface::EsploraPublic,
-        Some((crate::esplora::Surface::Backend, _)) => HttpSurface::EsploraBackend,
-        None => HttpSurface::JsonRpc,
     }
 }
 
 fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
-    let surface = surface(path);
-    match (method, surface) {
-        ("GET", HttpSurface::CoreRest) => HttpRoute::Rest { path, query },
-        ("GET", HttpSurface::EsploraPublic | HttpSurface::EsploraBackend) => {
-            HttpRoute::EsploraGet {
+    if method == "GET" && path.starts_with("/rest/") {
+        return HttpRoute::Rest { path, query };
+    }
+    if let Some((surface, rest)) = crate::esplora::namespace(path) {
+        let surface = match surface {
+            crate::esplora::Surface::Public => HttpSurface::EsploraPublic,
+            crate::esplora::Surface::Backend => HttpSurface::EsploraBackend,
+        };
+        let path = if rest.is_empty() { "/" } else { rest };
+        match method {
+            "GET" => HttpRoute::EsploraGet {
                 surface,
                 path,
                 query,
-            }
+            },
+            "POST" => HttpRoute::EsploraPost { surface, path },
+            "OPTIONS" if surface == HttpSurface::EsploraPublic => HttpRoute::Preflight { surface },
+            _ => HttpRoute::NotFound,
         }
-        ("POST", HttpSurface::EsploraPublic | HttpSurface::EsploraBackend) => {
-            HttpRoute::EsploraPost { surface, path }
+    } else {
+        match method {
+            "POST" => HttpRoute::JsonRpc,
+            _ => HttpRoute::NotFound,
         }
-        ("OPTIONS", HttpSurface::EsploraPublic) => HttpRoute::Preflight { surface },
-        ("POST", HttpSurface::JsonRpc) => HttpRoute::JsonRpc,
-        _ => HttpRoute::NotFound,
     }
+}
+fn esplora_surface(surface: HttpSurface) -> crate::esplora::Surface {
+    match surface {
+        HttpSurface::EsploraPublic => crate::esplora::Surface::Public,
+        HttpSurface::EsploraBackend => crate::esplora::Surface::Backend,
+    }
+}
+
+fn write_not_found(stream: &mut TcpStream, keep_alive: bool) -> io::Result<()> {
+    write_response(
+        stream,
+        &crate::rest::Response {
+            status: 404,
+            reason: "Not Found",
+            content_type: "text/plain",
+            body: b"not found".to_vec(),
+        },
+        keep_alive,
+        CorsPolicy::Disabled,
+    )
 }
 
 fn write_response(
@@ -784,7 +789,7 @@ mod tests {
             classify("GET", "/api/blocks/tip/height"),
             HttpRoute::EsploraGet {
                 surface: HttpSurface::EsploraPublic,
-                path: "/api/blocks/tip/height",
+                path: "/blocks/tip/height",
                 query: ""
             }
         );
@@ -792,7 +797,7 @@ mod tests {
             classify("GET", "/esplora/internal/mempool/txs?max_txs=1"),
             HttpRoute::EsploraGet {
                 surface: HttpSurface::EsploraBackend,
-                path: "/esplora/internal/mempool/txs",
+                path: "/internal/mempool/txs",
                 query: "max_txs=1"
             }
         );
@@ -800,14 +805,45 @@ mod tests {
             classify("POST", "/api/tx"),
             HttpRoute::EsploraPost {
                 surface: HttpSurface::EsploraPublic,
-                path: "/api/tx"
+                path: "/tx"
             }
         );
         assert_eq!(
             classify("POST", "/esplora/internal/txs"),
             HttpRoute::EsploraPost {
                 surface: HttpSurface::EsploraBackend,
-                path: "/esplora/internal/txs"
+                path: "/internal/txs"
+            }
+        );
+        assert_eq!(
+            classify("GET", "/blocks/tip/height"),
+            HttpRoute::NotFound,
+            "unprefixed GET is not Esplora"
+        );
+        assert_eq!(
+            classify("HEAD", "/api/tx"),
+            HttpRoute::NotFound,
+            "HEAD /api/tx must not run POST /tx"
+        );
+        assert_eq!(
+            classify("PUT", "/"),
+            HttpRoute::NotFound,
+            "non-POST methods are not JSON-RPC"
+        );
+        assert_eq!(
+            classify("GET", "/api/v1/block-height/0"),
+            HttpRoute::EsploraGet {
+                surface: HttpSurface::EsploraPublic,
+                path: "/v1/block-height/0",
+                query: ""
+            },
+            "GET /api/v1 stays in the closed /api directory (404 inside Esplora)"
+        );
+        assert_eq!(
+            classify("POST", "/api/v1/tx"),
+            HttpRoute::EsploraPost {
+                surface: HttpSurface::EsploraPublic,
+                path: "/v1/tx"
             }
         );
         assert_eq!(
