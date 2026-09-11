@@ -24,6 +24,8 @@ pub const PROTOCOL_VERSION: u32 = 70_016;
 
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
+/// Maximum control messages coalesced into one vectored write.
+pub const MAX_WRITE_BURST: usize = 16;
 
 /// Maximum number of headers accepted in one `headers` message.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
@@ -173,6 +175,28 @@ impl Message {
         };
         #[allow(clippy::expect_used)]
         CommandString::try_from_static(name).expect("static P2P command")
+    }
+
+    /// Large relay payloads that the writer emits as their own writev.
+    ///
+    /// Control messages (`inv`, `getdata`, `ping`, `pong`, `verack`, …) are
+    /// small and latency-sensitive, so the writer coalesces a ready burst of
+    /// them. Blocks, transactions, and headers stay one frame per syscall so
+    /// a 1 MiB body cannot pin a 16-message encode behind it.
+    #[must_use]
+    pub const fn is_bulk_payload(&self) -> bool {
+        matches!(
+            self,
+            Self::Tx(_)
+                | Self::Block(_)
+                | Self::BlockPayload(_)
+                | Self::Headers(_)
+                | Self::MerkleBlock(_)
+                | Self::CFilter(_)
+                | Self::CmpctBlock(_)
+                | Self::BlockTxn(_)
+                | Self::Alert(_)
+        )
     }
 }
 
@@ -332,6 +356,54 @@ pub fn write_message<W: Write + ?Sized>(
             write_framed(writer, magic, &command, &payload)
         }
     }
+}
+/// Write a burst of Bitcoin v1 network messages in one vectored pass.
+///
+/// Returns the framed wire length of each message, in order, so the writer
+/// can release the outbound budget that admitted them. A single message uses
+/// the stack-header path in [`write_message`].
+pub fn write_messages<W: Write + ?Sized>(
+    writer: &mut W,
+    magic: Magic,
+    messages: &[Message],
+) -> Result<Vec<usize>, PeerError> {
+    if messages.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let [message] = messages {
+        return Ok(vec![write_message(writer, magic, message)?]);
+    }
+
+    let mut headers = Vec::with_capacity(messages.len());
+    let mut payloads = Vec::with_capacity(messages.len());
+    let mut sizes = Vec::with_capacity(messages.len());
+    for message in messages {
+        let command = message.command();
+        let payload = encode_payload(message)?;
+        if payload.len() > MAX_MESSAGE_PAYLOAD {
+            return Err(PeerError::PayloadTooLarge(payload.len()));
+        }
+        let mut header = [0u8; HEADER_LEN];
+        header[..4].copy_from_slice(&magic.to_bytes());
+        header[4..16].copy_from_slice(&encode_command(&command)?);
+        header[16..20].copy_from_slice(
+            &u32::try_from(payload.len())
+                .map_err(|_| PeerError::PayloadTooLarge(payload.len()))?
+                .to_le_bytes(),
+        );
+        header[20..24].copy_from_slice(&checksum(&payload));
+        sizes.push(HEADER_LEN + payload.len());
+        headers.push(header);
+        payloads.push(payload);
+    }
+
+    let mut slices = Vec::with_capacity(headers.len().saturating_mul(2));
+    for (header, payload) in headers.iter().zip(payloads.iter()) {
+        slices.push(IoSlice::new(header));
+        slices.push(IoSlice::new(payload));
+    }
+    write_all_vectored(writer, &mut slices)?;
+    Ok(sizes)
 }
 
 /// Read and validate a Bitcoin v1 network message.
@@ -676,7 +748,7 @@ mod tests {
 
     use super::{
         HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
-        write_message,
+        write_message, write_messages,
     };
 
     /// Serves exactly one v1 wire header and fails on any read beyond it.
@@ -850,6 +922,26 @@ mod tests {
             assert_eq!(wire_len(message)?, written);
             assert_eq!(written, buffer.len());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn write_messages_matches_sequential_write_message() -> Result<(), PeerError> {
+        let messages = [
+            super::Message::Ping(1),
+            super::Message::Pong(1),
+            super::Message::Verack,
+        ];
+        let mut sequential = Vec::new();
+        let mut expected = Vec::new();
+        for message in &messages {
+            expected.push(write_message(&mut sequential, Magic::REGTEST, message)?);
+        }
+
+        let mut coalesced = Vec::new();
+        let sizes = write_messages(&mut coalesced, Magic::REGTEST, &messages)?;
+        assert_eq!(sizes, expected);
+        assert_eq!(coalesced, sequential);
         Ok(())
     }
 }
