@@ -338,6 +338,7 @@ mod tests {
         }
     }
 
+    // Contract clause: `docs/contracts/validation-default.md` `VAL-03`.
     #[test]
     fn compare_block_parse_agrees_or_requires_kernel_feature() {
         let block = coinbase_block();
@@ -345,9 +346,7 @@ mod tests {
         let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
         let result = compare_block_parse(&raw, &txids);
         if kernel_compiled() {
-            if let Err(error) = result {
-                panic!("Core parse must match native txids: {error}");
-            }
+            result.expect("Core parse must match native txids");
         } else {
             match result {
                 Err(crate::ConsensusError::Kernel(reason)) => {
@@ -361,6 +360,7 @@ mod tests {
         }
     }
 
+    // Contract clause: `docs/contracts/validation-default.md` `VAL-03`.
     #[test]
     fn compare_block_parse_rejects_txid_mismatch_when_compiled() {
         if !kernel_compiled() {
