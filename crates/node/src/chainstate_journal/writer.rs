@@ -652,7 +652,10 @@ impl<S: KvStore> JournalWriter<S> {
             Ok(frontier) => frontier,
             Err(error) => return self.fail_append(record.height, error),
         };
-        let bytes = encode_record(record);
+        let bytes = match encode_record(record) {
+            Ok(bytes) => bytes,
+            Err(error) => return self.fail_append(record.height, error.into()),
+        };
         let next_offset = self.append_record_bytes(record.height, &bytes)?;
 
         self.segment_offset = next_offset;
@@ -1435,7 +1438,7 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::*;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 
     use crate::chainstate_journal::record::{Coin, Mutation};
 
@@ -1546,6 +1549,10 @@ mod tests {
         fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
             unreachable!("unused in writer tests")
         }
+
+        fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+            unreachable!("unused in writer tests")
+        }
     }
 
     struct NoopBatch;
@@ -1585,8 +1592,8 @@ mod tests {
                             height,
                         ),
                         txout: TxOut {
-                            value: u64::from(height),
-                            script_pubkey: vec![0x51],
+                            value: Amount::from_sat(u64::from(height)),
+                            script_pubkey: vec![0x51].into(),
                         },
                         height,
                         coinbase: true,
@@ -1601,8 +1608,8 @@ mod tests {
                             height.wrapping_sub(1),
                         ),
                         txout: TxOut {
-                            value: u64::from(height),
-                            script_pubkey: vec![0x51],
+                            value: Amount::from_sat(u64::from(height)),
+                            script_pubkey: vec![0x51].into(),
                         },
                         height: height.wrapping_sub(1),
                         coinbase: false,
@@ -1822,7 +1829,7 @@ mod tests {
         let mut writer = open_fresh("rotation", Arc::clone(&store))?;
         // Rotate exactly once, before the second append.
         let first = sample_record(1);
-        writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+        writer.rotate_bytes = u64::try_from(encode_record(&first)?.len())?;
         writer.append(&first)?;
         writer.append(&sample_record(2))?;
         assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
@@ -2040,7 +2047,7 @@ mod tests {
         {
             let mut writer = open_fresh("rotation-crash", Arc::clone(&store))?;
             let first = sample_record(1);
-            writer.rotate_bytes = u64::try_from(encode_record(&first).len())?;
+            writer.rotate_bytes = u64::try_from(encode_record(&first)?.len())?;
             writer.append(&first)?;
             writer.flush_to(1)?;
             writer.inject_failpoint(JournalWriterFailpoint::HeadTempWrite);

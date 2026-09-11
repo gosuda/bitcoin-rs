@@ -21,7 +21,9 @@ use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, MutationOutcome, PolicyError, RbfError,
     RemovalReason, ReplacementCandidate,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::opcode;
 
 /// Node default: Bitcoin Core incremental relay fee, 1000 sat/kvB.
@@ -62,19 +64,19 @@ fn tx(prevout: OutPoint, output_value: u64, sequence: u32) -> Tx {
 fn tx_multi(inputs: &[(OutPoint, u32)], output_value: u64, script_pubkey: Vec<u8>) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: inputs
             .iter()
             .map(|(prevout, sequence)| TxIn {
                 previous_output: *prevout,
-                script_sig: Vec::new(),
-                sequence: *sequence,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(*sequence),
+                witness: Witness::new(),
             })
             .collect(),
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey,
+            value: Amount::from_sat(output_value),
+            script_pubkey: script_pubkey.into(),
         }],
     }
 }
@@ -472,17 +474,19 @@ fn acceptance_preview_surfaces_ancestor_limits() -> Result<(), Box<dyn Error>> {
 fn fanout_root(label: u8, output_count: usize) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint(label, 0),
-            script_sig: Vec::new(),
-            sequence: 0xFF_FF_FF_FF,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: (0..output_count)
             .map(|index| TxOut {
-                value: 1_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
-                script_pubkey: p2wpkh_script(),
+                value: Amount::from_sat(
+                    1_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                ),
+                script_pubkey: p2wpkh_script().into(),
             })
             .collect(),
     }
@@ -591,8 +595,8 @@ fn oversized_weight_is_not_standard_on_both_surfaces() {
     let mut oversized = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     oversized.outputs = (0..3_400)
         .map(|_| TxOut {
-            value: 1_000,
-            script_pubkey: p2wpkh_script(),
+            value: Amount::from_sat(1_000),
+            script_pubkey: p2wpkh_script().into(),
         })
         .collect();
 

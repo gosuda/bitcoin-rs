@@ -6,14 +6,7 @@
 
 use bitcoin_rs_primitives::BlockHash;
 
-/// Block payload facts available without materializing a full block body.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BlockBodyMetadata {
-    /// Serialized block byte length.
-    pub body_size: usize,
-    /// Number of transactions encoded in the block.
-    pub tx_count: usize,
-}
+pub use bitcoin_rs_storage::block_body::BlockBodyMetadata;
 
 /// Storage-backed block body reader used when headers and bodies are stored
 /// separately.

@@ -125,7 +125,7 @@ skip = [
     { crate = "winnow@0.7.15", reason = "toml_edit 0.22 via toml 0.8" },
     { crate = "shlex@1.3.0", reason = "bindgen 0.72 build dep" },
     # syn 3.0 pulled by newer proc-macro crates; workspace pins syn 2.0.
-    { crate = "syn@3.0.4", reason = "proc-macro crate chain" },
+    { crate = "syn@3.0.5", reason = "proc-macro crate chain" },
     # windows-only metadata targets; multiple versions pinned by different win crates.
     { crate = "windows-sys@0.59.0", reason = "windows-only split" },
     { crate = "windows-sys@0.60.2", reason = "windows-only split" },

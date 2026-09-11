@@ -21,6 +21,7 @@ redb = []
 [dependencies]
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-script.workspace = true
+hashbrown.workspace = true
 secp256k1.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
@@ -33,10 +34,13 @@ rayon.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 anyhow.workspace = true
-hashbrown.workspace = true
 bitcoin.workspace = true
 sonic-rs.workspace = true
 
 [[bench]]
 name = "merkle"
+harness = false
+
+[[bench]]
+name = "block_facts"
 harness = false
