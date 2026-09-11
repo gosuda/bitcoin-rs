@@ -119,7 +119,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
 | `stop` | n/a | Lifecycle control not exposed over RPC. |
-| `submitheader` | n/a | Header-only submission not implemented. |
 | `getaddrmaninfo` | n/a | Addrman table stats not exposed. |
 | `abortprivatebroadcast` | n/a | Private-broadcast store not implemented. |
 | `analyzepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
@@ -237,4 +236,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Implemented 70, Deviation 8, Extension 2, Unimplemented 94 - total 174.
+Row counts: Implemented 71, Deviation 8, Extension 2, Unimplemented 93 - total 174.
