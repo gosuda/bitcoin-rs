@@ -6,7 +6,8 @@
 use std::sync::Arc;
 use std::vec::Vec;
 
-use bitcoin_rs_primitives::{Block, BlockHash, Header, Network, Tx, Txid};
+use bitcoin_rs_mempool::SnapshotEntry;
+use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::Candidate;
@@ -113,6 +114,8 @@ pub struct BlockTemplate {
     pub submit_old: Option<bool>,
     /// Signet challenge, present only on signet.
     pub signet: Option<SignetMiningInfo>,
+    /// Opaque server work identity when the producer requires one on submission.
+    pub work_id: Option<CompactString>,
 }
 
 /// BIP22 validation vocabulary shared by proposal and solved-block submission.
@@ -171,7 +174,7 @@ pub struct MiningInfo {
     /// Most recently assembled candidate facts.
     pub last_candidate: Option<LastCandidateInfo>,
     /// Compact target bits of the applied tip.
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Difficulty represented by `bits`.
     pub difficulty: f64,
     /// Estimated network hashes per second.
@@ -181,7 +184,7 @@ pub struct MiningInfo {
     /// Active consensus network.
     pub network: Network,
     /// Compact target bits for the next candidate.
-    pub next_bits: u32,
+    pub next_bits: CompactTarget,
     /// Difficulty represented by `next_bits`.
     pub next_difficulty: f64,
     /// Configured minimum mining feerate in satoshis per kvB.
@@ -216,6 +219,8 @@ pub enum MiningControlError {
 pub enum GenerateTx {
     /// Include this currently-pooled transaction, looked up by txid.
     Mempool(Txid),
+    /// Include this transaction resolved from the mempool at parse time.
+    ResolvedMempool(SnapshotEntry),
     /// Include this decoded raw transaction even if it is not in the mempool.
     Raw(Tx),
 }
@@ -307,7 +312,8 @@ pub trait MiningControl: Send + Sync {
 
 /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
 #[must_use]
-pub fn difficulty_for_bits(consensus_bits: u32) -> f64 {
+pub fn difficulty_for_bits(consensus_bits: CompactTarget) -> f64 {
+    let consensus_bits = consensus_bits.to_consensus();
     let mantissa = consensus_bits & 0x00ff_ffff;
     if mantissa == 0 {
         return 0.0;
@@ -331,7 +337,9 @@ mod tests {
 
     #[test]
     fn difficulty_one_is_the_difficulty_1_target() {
-        let difficulty = difficulty_for_bits(0x1d00_ffff);
+        let difficulty = difficulty_for_bits(bitcoin_rs_primitives::CompactTarget::from_consensus(
+            0x1d00_ffff,
+        ));
         assert!(
             (difficulty - 1.0).abs() < f64::EPSILON,
             "0x1d00ffff must be difficulty 1, got {difficulty}"

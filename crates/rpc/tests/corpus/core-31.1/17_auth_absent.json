@@ -4,6 +4,7 @@
   "description": "No Authorization header. Core answers 401 with a WWW-Authenticate challenge, an HTML content type and an empty body; this node answers 401 with a JSON content type, no challenge and a 12-byte plain-text body.",
   "provenance": {
     "core_version": "31.1.0",
+    "core_source_commit": "9be056a8a72b624dae9623b2f7bded92c2a21c91",
     "core_binary_sha256": "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08",
     "network": "regtest",
     "tip_height": 0,

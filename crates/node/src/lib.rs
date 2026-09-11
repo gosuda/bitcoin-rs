@@ -17,9 +17,6 @@ pub mod apply;
 pub mod chain_effects;
 mod chainstate_journal;
 mod checkpoint;
-mod checkpoint_fs;
-/// Periodic chainstate checkpoint publication during sync.
-mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
 /// Typed in-process node lifecycle: the embedding surface over the same
@@ -29,6 +26,8 @@ pub mod embed;
 pub mod event_loop;
 /// Block import pipeline.
 pub mod import;
+/// Owned startup, rollback, and ordered service shutdown.
+mod lifecycle;
 /// Tracing initialization.
 pub mod logging;
 /// Metrics instrumentation and optional exposition.
@@ -50,28 +49,29 @@ pub mod shutdown;
 pub mod signal;
 /// Shared node state.
 pub mod state;
+mod storage_backend;
 /// Custody-grade data-directory storage-footprint evidence.
 pub mod storage_footprint;
 /// Block download orchestrator.
 pub mod sync;
-/// Inbound P2P transaction admission policy: orphan map and recent-rejects.
-pub mod tx_admission;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
-/// Outbound transaction relay worker: announce accepted txs to peers
-/// excluding the source connection.
-pub mod tx_relay;
-mod txindex_worker;
+mod txindex;
 /// Prevout lookups across a window of consecutive blocks.
 mod window_overlay;
-/// ZMQ publisher trait + implementations for the notification subsystem.
-pub mod zmq_publisher;
-
 pub use apply::{
     ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
+    error::{ApplyError, DisconnectError},
 };
+
 pub use bitcoin_rs_primitives::Network;
+
+pub use bitcoin_rs_rpc::zmq::{
+    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
+};
+
 pub use chain_effects::{ChainEffects, ChainFollowers};
+
 pub use config::{
     Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
     MiningConfig, MiningOverrides, NetworkSelection, NodeConfig, NotificationConfig,
@@ -79,18 +79,21 @@ pub use config::{
     RuntimeInputs, ScriptIndexMode, StorageConfig, StorageOverrides, UserConfig, ValidationConfig,
     ValidationOverrides, resolve,
 };
+
 pub use embed::{Node, NodeError, SyncProgress};
+
 pub use mining::{GenerationKey, MiningCoordinator};
+
 pub use run::run;
-pub use state::{ApplyError, DisconnectError};
+
 pub use storage_footprint::{
     DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES, EVIDENCE_FORMAT, MeasureStorageRequest,
     StorageFootprintEvidence, measure_storage_footprint, storage_footprint_json,
 };
+
 pub use sync::BlockSync;
-pub use txindex_worker::TxIndexRuntime;
+
+pub use txindex::TxIndexRuntime;
+
 #[cfg(feature = "zmq")]
-pub use zmq_publisher::SocketZmqPublisher;
-pub use zmq_publisher::{
-    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
-};
+pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

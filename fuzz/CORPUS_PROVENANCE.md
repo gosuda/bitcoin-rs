@@ -13,14 +13,20 @@ Seeds under fuzz/corpus/ were imported from
 | Import tool | scripts/import-qa-assets.sh (clone pinned to the commit above, then cargo fuzz cmin per target) |
 | Size policy | source files >= 65536 bytes are skipped and counted in the import log (repo-size bound matching the targets' input caps) |
 
+Ownership: this document is the single owner of the target-to-corpus
+mapping below. `scripts/import-qa-assets.sh` does not restate it; on re-import
+it refreshes only the run-dependent fields in the table above and carries this
+Mapping section forward verbatim. Update the mapping here, in the same commit
+as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
+
 ## Mapping
 
 | Target | Upstream corpus | Transformation |
 |---|---|---|
 | p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload kept as-is (harness rebuilds magic/length/checksum) |
-| block_decode | fuzz_corpora/bitcoin_deserialize_block | direct copy (raw consensus bytes) |
-| tx_decode | fuzz_corpora/bitcoin_deserialize_transaction | direct copy (raw consensus bytes) |
-| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector 0x00 = NONE); files >= 32 bytes also emit a P2TR key-path variant (selector 0x03 = TAPROOT) |
+| block_validate | fuzz_corpora/bitcoin_deserialize_block | consensus-serialized blocks; rust-bitcoin deserializes, then bitcoin-rs `verify_block_rules`. `bitcoin_arbitrary_block` is Unstructured bytes, not imported. Current seeds were the minimized `bitcoin_deserialize_block` set, moved from the retired `block_decode` target. |
+| tx_validate | fuzz_corpora/bitcoin_deserialize_transaction, fuzz_corpora/bitcoin_deserialize_witness | consensus-serialized txs/witnesses; rust-bitcoin deserializes, then bitcoin-rs consensus + mempool `check_acceptance`. `bitcoin_arbitrary_*` Unstructured streams are not imported. Current seeds were the minimized `bitcoin_deserialize_transaction` set, moved from the retired `tx_decode` target. |
+| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized
 seeds are tracked here. Re-run the script after major decoder changes to

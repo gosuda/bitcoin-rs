@@ -72,6 +72,17 @@ impl Handler {
     }
 }
 
+pub(crate) fn ensure_at_most_params(params: &Value, max: usize) -> Result<(), RpcError> {
+    if params.is_null() {
+        return Ok(());
+    }
+    let array = params_array(params)?;
+    if array.len() > max {
+        return Err(RpcError::InvalidParams("too many parameters"));
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_no_params(params: &Value) -> Result<(), RpcError> {
     if params.is_null() {
         return Ok(());
@@ -126,6 +137,18 @@ pub(crate) fn required_u64(
     params_array(params)?
         .get(index)
         .and_then(JsonValueTrait::as_u64)
+        .ok_or(RpcError::InvalidParams(name))
+}
+
+pub(crate) fn required_i64(
+    params: &Value,
+    index: usize,
+    name: &'static str,
+) -> Result<i64, RpcError> {
+    params
+        .as_array()
+        .and_then(|arr| arr.get(index))
+        .and_then(JsonValueTrait::as_i64)
         .ok_or(RpcError::InvalidParams(name))
 }
 
