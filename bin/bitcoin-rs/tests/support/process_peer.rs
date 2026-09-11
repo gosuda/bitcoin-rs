@@ -15,13 +15,16 @@ use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::{Magic, ServiceFlags};
 use serde_json::json;
 
-use super::process_node::{HarnessError, ProcessNode};
+use super::process_node::{HarnessError, ProcessNode, remaining_time};
 
 const HEADER_BYTES: usize = 24;
 const MAX_PAYLOAD_BYTES: usize = 4_000_000;
 const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MESSAGES: usize = 128;
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) struct ProcessPeer {
     stream: TcpStream,
@@ -77,17 +80,17 @@ impl ProcessPeer {
                 }
                 NetworkMessage::Verack if received_version => return Ok(peer),
                 NetworkMessage::Verack | NetworkMessage::Version(_) => {
-                    return Err(HarnessError::Protocol(
+                    return peer.record_result(Err(HarnessError::Protocol(
                         "out-of-order P2P handshake".to_owned(),
-                    ));
+                    )));
                 }
                 NetworkMessage::Ping(nonce) => peer.send(NetworkMessage::Pong(nonce), deadline)?,
                 _ => {}
             }
         }
-        Err(HarnessError::Protocol(
+        peer.record_result(Err(HarnessError::Protocol(
             "P2P handshake message limit".to_owned(),
-        ))
+        )))
     }
 
     pub(crate) fn send_transaction(&mut self, tx: &Transaction) -> Result<(), HarnessError> {
@@ -110,40 +113,55 @@ impl ProcessPeer {
                 _ => {}
             }
         }
-        Err(HarnessError::Protocol("P2P pong message limit".to_owned()))
+        self.record_result(Err(HarnessError::Protocol(
+            "P2P pong message limit".to_owned(),
+        )))
     }
 
     fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), HarnessError> {
-        let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
-        // Validate before recording/sending; the harness has the same byte
-        // budget for locally constructed and peer-supplied envelopes.
-        let decoded = decode_frame(&frame)?;
-        self.record("sending", Some(&decoded), &frame)?;
-        let mut pending = frame.as_slice();
-        while !pending.is_empty() {
-            self.stream.set_write_timeout(Some(remaining(deadline)?))?;
-            let written = self.stream.write(pending)?;
-            if written == 0 {
-                return Err(HarnessError::Protocol("closed P2P writer".to_owned()));
+        let result = (|| {
+            let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
+            // Check each frame before the peer sends it.
+            // Use the same size limit for sent and received frames.
+            let decoded = decode_frame(&frame)?;
+            self.record("sending", Some(&decoded), &frame)?;
+            let mut pending = frame.as_slice();
+            while !pending.is_empty() {
+                self.stream.set_write_timeout(Some(remaining(deadline)?))?;
+                let written = self.stream.write(pending)?;
+                if written == 0 {
+                    return Err(HarnessError::Protocol("closed P2P writer".to_owned()));
+                }
+                pending = pending
+                    .get(written..)
+                    .ok_or_else(|| HarnessError::Protocol("invalid write length".to_owned()))?;
             }
-            pending = pending
-                .get(written..)
-                .ok_or_else(|| HarnessError::Protocol("invalid write length".to_owned()))?;
-        }
-        self.record("sent", Some(&decoded), &[])
+            self.record("sent", Some(&decoded), &[])?;
+            remaining(deadline)?;
+            Ok(())
+        })();
+        self.record_result(result)
     }
 
     fn receive(&mut self, deadline: Instant) -> Result<NetworkMessage, HarnessError> {
-        let frame = match read_frame(&mut self.stream, deadline) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.record_failure(&error)?;
-                return Err(error);
+        let result = (|| {
+            let frame = read_frame(&mut self.stream, deadline)?;
+            let decoded = decode_frame(&frame);
+            let record = self.record("received", decoded.as_ref().ok(), &frame);
+            let message = decoded?;
+            record?;
+            remaining(deadline)?;
+            Ok(message)
+        })();
+        self.record_result(result)
+    }
+
+    fn record_result<T>(&mut self, result: Result<T, HarnessError>) -> Result<T, HarnessError> {
+        result.inspect_err(|error| {
+            if let Err(record_error) = self.record_failure(error) {
+                eprintln!("Cannot record the P2P failure: {record_error}");
             }
-        };
-        let decoded = decode_frame(&frame);
-        self.record("received", decoded.as_ref().ok(), &frame)?;
-        decoded
+        })
     }
 
     fn record_failure(&mut self, error: &HarnessError) -> Result<(), HarnessError> {
@@ -196,7 +214,10 @@ pub(crate) fn connect_loopback(
             &addr,
             remaining(deadline)?.min(Duration::from_millis(100)),
         ) {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                remaining(deadline)?;
+                return Ok(stream);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -213,10 +234,7 @@ pub(crate) fn connect_loopback(
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, HarnessError> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|time| !time.is_zero())
-        .ok_or_else(|| HarnessError::Protocol("P2P operation deadline".to_owned()))
+    remaining_time(deadline, Instant::now(), "P2P operation deadline")
 }
 
 fn read_exact(
@@ -234,6 +252,7 @@ fn read_exact(
             .get_mut(count..)
             .ok_or_else(|| HarnessError::Protocol("invalid read length".to_owned()))?;
     }
+    remaining(deadline)?;
     Ok(())
 }
 

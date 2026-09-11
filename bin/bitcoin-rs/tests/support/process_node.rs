@@ -193,12 +193,22 @@ fn executable(binary: NodeBinary) -> Result<PathBuf, HarnessError> {
     }
 }
 
-// Select distinct ephemeral addresses while both probe sockets are held.
-// The real children, not this helper, own their eventual listener binds.
-fn loopback_addresses() -> Result<(SocketAddr, SocketAddr), HarnessError> {
+// Keep both ports during setup. The child binds them after release.
+fn loopback_addresses() -> Result<(TcpListener, TcpListener), HarnessError> {
     let rpc = TcpListener::bind("127.0.0.1:0")?;
     let p2p = TcpListener::bind("127.0.0.1:0")?;
-    Ok((rpc.local_addr()?, p2p.local_addr()?))
+    Ok((rpc, p2p))
+}
+
+pub(crate) fn remaining_time(
+    deadline: Instant,
+    now: Instant,
+    message: &'static str,
+) -> Result<Duration, HarnessError> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|time| *time >= Duration::from_micros(1))
+        .ok_or_else(|| HarnessError::Protocol(message.to_owned()))
 }
 
 fn launch(
@@ -263,6 +273,10 @@ fn launch(
             ClockControl::None
         }
     };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     Ok((command, clock))
 }
 
@@ -284,7 +298,9 @@ impl ProcessNode {
             .prefix("run-")
             .tempdir_in(evidence_root)?
             .keep();
-        let (addr, p2p_addr) = loopback_addresses()?;
+        let ports = loopback_addresses()?;
+        let addr = ports.0.local_addr()?;
+        let p2p_addr = ports.1.local_addr()?;
         let journal = File::create(evidence.join("transcript.jsonl"))?;
         let stdout = File::create(evidence.join("stdout.log"))?;
         let stderr = File::create(evidence.join("stderr.log"))?;
@@ -323,11 +339,9 @@ impl ProcessNode {
                 "ci_run_attempt": std::env::var("GITHUB_RUN_ATTEMPT").ok(),
             }))?,
         )?;
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+        // Release the ports immediately before the child starts.
+        drop(ports);
+        let child = command.spawn()?;
         // Establish drop custody before taking the pipes or starting readers.
         let mut node = Self {
             child,
@@ -585,12 +599,7 @@ fn exchange_http(
     path: &str,
     deadline: Instant,
 ) -> Result<Value, HarnessError> {
-    let remaining = || {
-        deadline
-            .checked_duration_since(Instant::now())
-            .filter(|duration| !duration.is_zero())
-            .ok_or_else(|| HarnessError::Protocol("RPC deadline reached".into()))
-    };
+    let remaining = || remaining_time(deadline, Instant::now(), "RPC deadline reached");
     let mut wire = Vec::new();
     let body = request
         .map(serde_json::to_vec)
@@ -645,7 +654,9 @@ fn exchange_http(
                 .ok_or_else(|| HarnessError::Protocol("invalid read size".into()))?,
         );
     }
-    parse_http_reply(&bytes, request.is_none())
+    let reply = parse_http_reply(&bytes, request.is_none())?;
+    remaining()?;
+    Ok(reply)
 }
 
 fn parse_http_reply(bytes: &[u8], require_success: bool) -> Result<Value, HarnessError> {
@@ -845,5 +856,43 @@ impl CommonFunds {
             .push_key(&private.public_key(&secp))
             .into_script();
         Ok(spend)
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::{TcpListener, loopback_addresses, remaining_time};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn socket_time_limit_rejects_sub_microsecond_intervals() {
+        let now = Instant::now();
+        for nanos in [0, 1, 999] {
+            assert!(remaining_time(now + Duration::from_nanos(nanos), now, "expired").is_err());
+        }
+        for duration in [Duration::from_micros(1), Duration::from_secs(1)] {
+            assert_eq!(
+                remaining_time(now + duration, now, "expired").expect("valid time limit"),
+                duration
+            );
+        }
+    }
+
+    #[test]
+    fn selected_ports_stay_reserved() {
+        let ports = loopback_addresses().expect("select two ports");
+        let rpc = ports.0.local_addr().expect("RPC address");
+        let p2p = ports.1.local_addr().expect("P2P address");
+        assert_ne!(rpc, p2p);
+        for address in [rpc, p2p] {
+            let error =
+                TcpListener::bind(address).expect_err("the selected port must stay reserved");
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        }
+        drop(ports);
+        for address in [rpc, p2p] {
+            let listener = TcpListener::bind(address).expect("the released port must be available");
+            drop(listener);
+        }
     }
 }
