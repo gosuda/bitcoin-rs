@@ -4,23 +4,87 @@ on:
     branches: [workbench/index-owner-742-20260912]
 permissions:
   contents: read
+concurrency:
+  group: index-owner-workbench
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
 jobs:
-  inspect:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: af5d034d1a74973666b8ef37adc4de3f9ea11d23
+          path: workbench
           persist-credentials: false
-      - name: Export pinned tracked source without repository credentials
-        run: |
-          mkdir -p /tmp/index-owner-source
-          git archive --format=tar.gz HEAD > /tmp/index-owner-source/source.tar.gz
-          git rev-parse HEAD > /tmp/index-owner-source/source-commit.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          name: index-owner-source-${{ github.run_id }}
-          path: /tmp/index-owner-source
-          retention-days: 1
+          ref: af5d034d1a74973666b8ef37adc4de3f9ea11d23
+          path: candidate
+          persist-credentials: false
+      - name: Apply the pinned extraction and record its identity
+        run: |
+          mkdir -p evidence
+          python workbench/.workbench/index-query/apply.py candidate
+          python workbench/.workbench/index-query/finish.py candidate
+          git -C candidate add -A
+          git -C candidate diff --cached --check
+          git -C candidate write-tree | tee evidence/pre-format-tree.txt
+          test "$(git -C candidate write-tree)" = d6f6eb62933401399e3c0cc2b97dc1714a298217
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: candidate -> target
+          key: index-query-owner-742
+          cache-on-failure: true
+      - name: Format the candidate and check it
+        working-directory: candidate
+        run: |
+          cargo +1.95.0 fmt --all
+          cargo +1.95.0 fmt --all -- --check
+          rustc +1.95.0 --version --verbose | tee ../evidence/toolchain.txt
+          sha256sum Cargo.lock | tee ../evidence/lock-sha256.txt
+      - name: Clippy for the changed owners and all their targets
+        working-directory: candidate
+        run: cargo +1.95.0 clippy --locked -p bitcoin-rs-index -p bitcoin-rs-node -p bitcoin-rs-rpc --no-default-features --features bitcoin-rs-node/fjall --all-targets -- -D warnings 2>&1 | tee ../evidence/clippy.log
+      - name: Independent index tests without a backend
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --lib 2>&1 | tee ../evidence/index-independent.log
+      - name: Index storage and query tests on Fjall
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --features fjall --tests 2>&1 | tee ../evidence/index-fjall.log
+      - name: Node library regression suite
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib 2>&1 | tee ../evidence/node-lib.log
+      - name: RPC library regression suite
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-rpc --no-default-features --lib 2>&1 | tee ../evidence/rpc-lib.log
+      - name: Dependency and ownership gates
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture 2>&1 | tee ../evidence/ownership.log
+      - name: Index tests on Redb
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --features redb --tests 2>&1 | tee ../evidence/index-redb.log
+      - name: Preserve exact candidate and checks, including failures
+        if: always()
+        working-directory: candidate
+        run: |
+          mkdir -p ../evidence
+          git add -A
+          git diff --cached --binary > ../evidence/candidate.patch
+          git diff --cached --stat > ../evidence/diff-stat.txt
+          git write-tree > ../evidence/candidate-tree.txt
+          git archive --format=tar.gz "$(git write-tree)" > ../evidence/candidate-source.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: index-query-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: 3
           if-no-files-found: error
