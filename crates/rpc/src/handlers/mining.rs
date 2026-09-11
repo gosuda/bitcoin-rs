@@ -457,9 +457,13 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
 
     if mode_text == "proposal" {
         // API-12: proposal request parsing.
-        let data = request.get("data").and_then(JsonValueTrait::as_str).ok_or(
-            RpcError::InvalidType("Missing data String key for proposal"),
-        )?;
+        let data =
+            request
+                .get("data")
+                .and_then(JsonValueTrait::as_str)
+                .ok_or(RpcError::InvalidType(
+                    "Missing data String key for proposal",
+                ))?;
         return Ok(BlockTemplateRequest {
             mode: BlockTemplateMode::Proposal(decode_submitted_block(data)?),
             capabilities: Vec::new(),
