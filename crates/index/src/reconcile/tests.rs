@@ -1,11 +1,16 @@
 //! Contract coverage for reconciliation invariants in
 //! [`docs/contracts/indexing.md`](../../../docs/contracts/indexing.md).
 //! The tests below cover exact watermark alignment (`IDX-03`), selective
-//! capability reset (`IDX-04`), reorganization rollback (`IDX-06`), and
-//! isolated rebuild behavior (`IDX-07`).
+//! capability reset (`IDX-04`), reorganization rollback (`IDX-06`), isolated
+//! rebuild behavior (`IDX-07`), and positional cursor reconciliation.
 
-use super::{ReconcileLeg, ReconcilePhase, SelectedWatermark, selected_watermark};
+use super::{
+    ActiveChainView, CURSOR_BYTE_LEN, ChainIdentity, ChainTip, ConsumerCursor, ReconcileLeg,
+    ReconcilePhase, ReconcilePlan, SelectedWatermark, plan, plan_from_identity,
+    selected_watermark,
+};
 use crate::{IndexCapabilities, IndexWatermark, IndexWatermarks};
+use bitcoin_rs_primitives::Hash256;
 
 const A: IndexWatermark = IndexWatermark {
     height: 10,
@@ -20,11 +25,34 @@ const NEXT_HEIGHT: IndexWatermark = IndexWatermark {
     hash: [0x33; 32],
 };
 
+const ACTIVE: Hash256 = Hash256::from_le_bytes(&[0x41; 32]);
+const ORPHAN: Hash256 = Hash256::from_le_bytes(&[0x42; 32]);
+const MISSING: Hash256 = Hash256::from_le_bytes(&[0x43; 32]);
+const TARGET: Hash256 = Hash256::from_le_bytes(&[0x44; 32]);
+
 const fn capabilities(mask: u8) -> IndexCapabilities {
     IndexCapabilities {
         tx_lookup: mask & 1 != 0,
         script_history: mask & 2 != 0,
         script_live: mask & 4 != 0,
+    }
+}
+
+struct FixtureChain {
+    resolve_orphan_ancestor: bool,
+}
+
+impl ActiveChainView for FixtureChain {
+    fn contains(&self, position: Hash256) -> bool {
+        position == ACTIVE || position == ORPHAN
+    }
+
+    fn position_on_active_chain(&self, position: Hash256, height: u32) -> bool {
+        position == ACTIVE && height == 9
+    }
+
+    fn common_ancestor_height(&self, position: Hash256) -> Option<u32> {
+        (self.resolve_orphan_ancestor && position == ORPHAN).then_some(4)
     }
 }
 
@@ -42,8 +70,6 @@ fn selection_matches_exact_pairwise_equality_for_every_subset() {
                 };
                 for mask in 0..8 {
                     let selected = capabilities(mask);
-                    // Independent, pairwise statement of the contract. In particular,
-                    // None is a selected state, not an item to filter out.
                     let agree = (!selected.tx_lookup
                         || !selected.script_history
                         || tx_lookup == script_history)
@@ -99,7 +125,6 @@ fn same_height_different_hash_is_not_alignment() {
         selected_watermark(watermarks, capabilities(3)),
         SelectedWatermark::Invalid
     );
-    // A lagging or forked History capability cannot gate a Live-only selection.
     assert_eq!(
         selected_watermark(watermarks, capabilities(4)),
         SelectedWatermark::Valid(Some(A))
@@ -176,4 +201,94 @@ fn rollback_progress_covers_every_active_rollback() {
     assert_eq!(phase.rolling_back(), Some((120, 90)));
     assert_eq!(phase.rebuilding(), capabilities(4));
     assert_eq!(ReconcilePhase::default(), ReconcilePhase::FORWARD);
+}
+
+#[test]
+fn consumer_cursor_round_trips_exactly() {
+    let cursor = ConsumerCursor {
+        epoch: 7,
+        sequence: 11,
+        height: 123,
+        hash: Hash256::from_le_bytes(&[0x52; 32]),
+    };
+    let bytes = cursor.to_bytes();
+    assert_eq!(bytes.len(), CURSOR_BYTE_LEN);
+    assert_eq!(ConsumerCursor::from_bytes(&bytes), Some(cursor));
+    assert!(ConsumerCursor::from_bytes(&bytes[..CURSOR_BYTE_LEN - 1]).is_none());
+}
+
+#[test]
+fn positional_planner_distinguishes_forward_rollback_and_rebuild() {
+    let target = ChainTip {
+        hash: TARGET,
+        height: 12,
+    };
+    let cursor = |hash, height| ConsumerCursor {
+        epoch: 1,
+        sequence: 1,
+        height,
+        hash,
+    };
+    let resolved = FixtureChain {
+        resolve_orphan_ancestor: true,
+    };
+    assert_eq!(
+        plan(&cursor(ACTIVE, 9), target, &resolved),
+        ReconcilePlan::Forward { from_height: 10 }
+    );
+    assert_eq!(
+        plan(&cursor(ORPHAN, 9), target, &resolved),
+        ReconcilePlan::RollbackAndForward { ancestor_height: 4 }
+    );
+    assert_eq!(
+        plan(&cursor(MISSING, 9), target, &resolved),
+        ReconcilePlan::Rebuild
+    );
+
+    let unresolved = FixtureChain {
+        resolve_orphan_ancestor: false,
+    };
+    assert_eq!(
+        plan(&cursor(ORPHAN, 9), target, &unresolved),
+        ReconcilePlan::Rebuild,
+        "missing ancestry must not invent genesis as a common ancestor"
+    );
+}
+
+#[test]
+fn publisher_identity_cannot_claim_caught_up_against_a_different_target() {
+    let identity = ChainIdentity {
+        epoch: 3,
+        sequence: 5,
+        tip_hash: ACTIVE,
+        tip_height: 9,
+    };
+    let cursor = ConsumerCursor::from_identity(&identity);
+    let chain = FixtureChain {
+        resolve_orphan_ancestor: true,
+    };
+    assert_eq!(
+        plan_from_identity(
+            &cursor,
+            &identity,
+            ChainTip {
+                hash: TARGET,
+                height: 12,
+            },
+            &chain,
+        ),
+        ReconcilePlan::Forward { from_height: 10 }
+    );
+    assert_eq!(
+        plan_from_identity(
+            &cursor,
+            &identity,
+            ChainTip {
+                hash: ACTIVE,
+                height: 9,
+            },
+            &chain,
+        ),
+        ReconcilePlan::CaughtUp
+    );
 }
