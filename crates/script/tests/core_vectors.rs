@@ -33,7 +33,10 @@ use bitcoin::ScriptBuf;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::taproot::{LeafVersion, TaprootBuilder};
 use bitcoin_rs_primitives::tapleaf_hash;
-use bitcoin_rs_primitives::{Hash256, OutPoint, SighashCache, Tx, TxIn, TxOut, Txid, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid,
+    Witness, deserialize,
+};
 use bitcoin_rs_script::{
     Interpreter, ScriptError, VerifyFlags, opcode, push_data, push_int, taproot,
 };
@@ -551,22 +554,20 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
 // Transaction construction — Core's BuildCrediting/BuildSpending
 // ===========================================================================
 
-const SEQUENCE_FINAL: u32 = 0xffff_ffff;
-
 fn build_crediting_tx(script_pubkey: &[u8], amount: u64) -> Tx {
     Tx {
         version: 1,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![opcode::OP_0, opcode::OP_0],
-            sequence: SEQUENCE_FINAL,
-            witness: Vec::new(),
+            script_sig: vec![opcode::OP_0, opcode::OP_0].into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: amount,
-            script_pubkey: script_pubkey.to_vec(),
+            value: Amount::from_sat(amount),
+            script_pubkey: script_pubkey.to_vec().into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -576,15 +577,15 @@ fn build_spending_tx(script_sig: &[u8], witness: &[Vec<u8>], credit_tx: &Tx) -> 
         version: 1,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(credit_txid, 0),
-            script_sig: script_sig.to_vec(),
-            sequence: SEQUENCE_FINAL,
-            witness: witness.to_vec(),
+            script_sig: script_sig.to_vec().into(),
+            sequence: Sequence::MAX,
+            witness: witness.to_vec().into(),
         }],
         outputs: vec![TxOut {
             value: credit_tx.outputs[0].value,
-            script_pubkey: Vec::new(),
+            script_pubkey: Script::new(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -1217,8 +1218,8 @@ fn load_tx_vectors(
             prevouts.push((
                 OutPoint::new(txid, vout),
                 TxOut {
-                    value: amount,
-                    script_pubkey,
+                    value: Amount::from_sat(amount),
+                    script_pubkey: script_pubkey.into(),
                 },
             ));
         }
@@ -1292,7 +1293,10 @@ fn run_tx_vectors_native(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<Strin
                 verdict,
                 row.flags.bits(),
                 row.tx.lock_time,
-                row.tx.inputs.first().map_or(0, |input| input.sequence)
+                row.tx
+                    .inputs
+                    .first()
+                    .map_or(0, |input| input.sequence.to_consensus())
             ));
         }
     }
@@ -1319,7 +1323,10 @@ fn run_tx_vectors_kernel(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<Strin
                 verdict,
                 row.flags.bits(),
                 row.tx.lock_time,
-                row.tx.inputs.first().map_or(0, |input| input.sequence)
+                row.tx
+                    .inputs
+                    .first()
+                    .map_or(0, |input| input.sequence.to_consensus())
             ));
         }
     }
