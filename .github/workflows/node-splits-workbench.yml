@@ -4,10 +4,15 @@ on:
     branches: [automation/node-splits-a1178cc-20260911]
 permissions:
   contents: read
+concurrency:
+  group: node-splits-a1178cc-20260911
+  cancel-in-progress: false
 jobs:
   refactor:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    permissions:
+      contents: write
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 0
@@ -23,15 +28,34 @@ jobs:
         with:
           toolchain: '1.95.0'
           components: rustfmt,clippy
-      - name: Install the pinned syntax parser
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/node-split-target
+          key: node-splits-a1178cc-rust195-${{ github.run_id }}
+          restore-keys: node-splits-a1178cc-rust195-
+      - name: Install pinned syntax parser
         run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-      - name: Refactor and validate complete source groups
+      - name: Refactor and validate independent source groups
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/node-split-target
-        run: python3 .github/node-splits/refactor.py
-      - uses: actions/upload-artifact@v4
+        run: python3 .github/node-splits/continue.py
+      - name: Publish only commits that passed native validation
+        if: always()
+        env:
+          NODE_SPLIT_PUBLISH_TOKEN: ${{ github.token }}
+        run: python3 .github/node-splits/continue.py publish
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: node-split-validated-source
+          name: node-split-validation
           path: ${{ runner.temp }}/node-split-results
           retention-days: 1
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/node-split-target
+          key: node-splits-a1178cc-rust195-${{ github.run_id }}
