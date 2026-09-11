@@ -214,7 +214,7 @@ fixture replay gate. `API-11` is the BIP22/BIP23
 ### `API-11`: BIP22/BIP23 template extras
 
 - **Owner**: `MiningCoordinator::template_from_candidate` in
-  `crates/node/src/mining.rs`; JSON projection in
+  `crates/node/src/mining/candidate.rs`; JSON projection in
   `crates/rpc/src/handlers/mining.rs` `render_block_template`.
 - Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
   Client-advertised names are not echoed.
