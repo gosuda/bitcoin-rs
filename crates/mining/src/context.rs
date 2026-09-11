@@ -9,7 +9,7 @@ use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
 use bitcoin_rs_consensus::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 /// Contextual facts for the block that would extend `previous_tip_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,7 +22,7 @@ pub struct MiningChainContext {
     /// `LockedIn` deployment bit.
     pub version: i32,
     /// Compact target the candidate's nBits must equal.
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Earliest timestamp the candidate may carry: previous-tip MTP + 1.
     pub min_time: u32,
     /// Median time past of the previous tip over the BIP113 window.
@@ -85,7 +85,7 @@ impl MiningChainContext {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_chain::{BlockTree, ChainError, node::NodeStatus};
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
 
     use super::MiningChainContext;
 
@@ -95,7 +95,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::default(),
             time,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         }
     }
@@ -115,7 +115,7 @@ mod tests {
             u32::from_ne_bytes(context.version.to_ne_bytes()),
             0x2000_0000
         );
-        assert_eq!(context.bits, chain_bits);
+        assert_eq!(context.bits, CompactTarget::from_consensus(chain_bits));
         assert_eq!(context.prev_median_time_past, 1_000_000 + 6 * 600);
         assert_eq!(context.min_time, 1_000_000 + 6 * 600 + 1);
         assert!(!context.csv_active);
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(context.locktime_cutoff(tip_time + 600), tip_time + 600);
 
         let recovered = MiningChainContext::resolve(&tree, Network::Regtest, tip, tip_time + 1201)?;
-        assert_eq!(recovered.bits, 0x207f_ffff);
+        assert_eq!(recovered.bits, CompactTarget::from_consensus(0x207f_ffff));
 
         let unknown = bitcoin_rs_chain::node::NodeId::new(u32::MAX);
         assert_eq!(
@@ -199,7 +199,7 @@ mod tests {
                 start_time.saturating_add(height.saturating_mul(600)),
                 version_at(height),
             );
-            header.bits = bits;
+            header.bits = CompactTarget::from_consensus(bits);
             prev = header.compute_hash();
             tip = Some(tree.insert_header(header, NodeStatus::HeaderValid)?);
         }

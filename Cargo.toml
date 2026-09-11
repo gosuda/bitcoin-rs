@@ -172,8 +172,6 @@ rust-rocksdb = { version = ">=0.50, <0.51", default-features = false, features =
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
-# MDBX via init4tech fork — no features exposed.
-signet-libmdbx = { version = ">=0.8.3, <0.9", default-features = false }
 
 # fjall 3.x line.
 fjall = { version = ">=3.1.4, <4", default-features = false, features = ["lz4"] }

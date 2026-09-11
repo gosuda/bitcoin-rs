@@ -26,7 +26,6 @@ default = []
 rocksdb = []
 fjall = []
 redb = []
-mdbx = []
 
 [dev-dependencies]
 proptest.workspace = true
