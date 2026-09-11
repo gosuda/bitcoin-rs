@@ -3,23 +3,102 @@ on:
   push:
     branches: [automation/txindex-cleanup-workbench-20260911]
 permissions:
-  contents: read
+  contents: write
 concurrency:
-  group: txindex-current-source-${{ github.sha }}
-  cancel-in-progress: false
+  group: txindex-current-query-validation
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
 jobs:
-  current-source:
+  query:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: candidate
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 7f5a460de67965ff36955bab1434c75f080ad384
+          path: workbench
           persist-credentials: false
-      - name: Export exact current source
-        run: git archive --format=tar HEAD > /tmp/txindex-current-source.tar
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          name: txindex-current-source
-          path: /tmp/txindex-current-source.tar
+          ref: 7f5a460de67965ff36955bab1434c75f080ad384
+          path: candidate
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: candidate
+          shared-key: txindex-cleanup-native-node
+          cache-on-failure: true
+      - name: Generate current-main modules and audit function-body preservation
+        run: |
+          exec > >(tee -a /tmp/txindex-query.log) 2>&1
+          rustc +stable --version
+          cargo +stable --version
+          python -m pip install 'Pygments==2.19.2'
+          python ../workbench/.workbench/refactor_current_query.py
+          python ../workbench/.workbench/finalize_current_query.py
+          rustfmt +stable --edition 2024 crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
+      - name: Compiler-assisted unused import cleanup
+        run: |
+          exec > >(tee -a /tmp/txindex-query.log) 2>&1
+          for pass in 1 2; do
+            cargo +stable fix --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets --allow-dirty --allow-staged
+          done
+      - name: Formatting and strict Clippy
+        run: |
+          exec > >(tee -a /tmp/txindex-query.log) 2>&1
+          rustfmt +stable --edition 2024 crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
+          rustfmt +stable --edition 2024 --check crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
+          cargo +stable clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings
+      - name: Worker contracts and production ownership regression gates
+        run: |
+          exec > >(tee -a /tmp/txindex-query.log) 2>&1
+          cargo +stable test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib txindex_worker:: -- --nocapture --test-threads=1
+          cargo +stable test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib storage_backend::tests -- --nocapture
+      - name: Export exact source tree and reject unrelated edits
+        if: ${{ always() }}
+        run: |
+          exec > >(tee -a /tmp/txindex-query.log) 2>&1
+          git add crates/node/README.md crates/node/src/txindex_worker.rs crates/node/src/txindex_worker crates/node/src/storage_backend.rs
+          git diff --cached --check
+          git diff --cached --stat
+          git diff --exit-code
+          git diff --cached --name-only | python -c 'import sys; paths=sys.stdin.read().splitlines(); assert paths; assert all(p in {"crates/node/README.md","crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs"} or p.startswith("crates/node/src/txindex_worker/") for p in paths), paths'
+          git diff --cached --binary > /tmp/txindex-query.patch
+          git diff --cached --name-only -z | tar -czf /tmp/txindex-query-source.tar.gz --null -T -
+      - name: Publish validated source only
+        run: |
+          exec > >(tee -a /tmp/txindex-query.log) 2>&1
+          branch=refactor/txindex-query-boundaries-20260911
+          if [[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]]; then
+            git fetch --depth=1 origin "$branch"
+            test "$(git write-tree)" = "$(git rev-parse FETCH_HEAD^{tree})"
+            git rev-parse FETCH_HEAD > /tmp/txindex-query-commit.txt
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'refactor(node): split txindex query responsibilities and enforce module ownership coverage'
+            git push origin "HEAD:refs/heads/$branch"
+            git rev-parse HEAD > /tmp/txindex-query-commit.txt
+          fi
+          cat /tmp/txindex-query-commit.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: txindex-query-candidate
+          path: |
+            /tmp/txindex-query.patch
+            /tmp/txindex-query-source.tar.gz
+            /tmp/txindex-query.log
+            /tmp/txindex-query-commit.txt
           retention-days: 1
           if-no-files-found: error
