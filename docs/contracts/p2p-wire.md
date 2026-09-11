@@ -110,3 +110,5 @@ This page assigns ownership and cites proof under the
   `from_connected_disables_nagle`: the counting wrapper forwards one
   `write_vectored` for header plus payload, and the connected-socket
   constructor owns `TCP_NODELAY` (P2P-04).
+- `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
+  and outbound session sockets set `TCP_NODELAY` (`P2P-04`).

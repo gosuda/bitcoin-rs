@@ -99,6 +99,11 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     ensure_at_most_params(params, 2)?;
+    if let Some(dummy) = params_array(params)?.get(1) {
+        if !dummy.is_null() && dummy.as_str().is_none() {
+            return Err(RpcError::InvalidType("parameter must be string"));
+        }
+    }
     let hex = required_str(params, 0, "block hex is required")?;
     let block = decode_submitted_block(hex)?;
     match control.submit_block(block) {
@@ -109,8 +114,7 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 fn decode_submitted_block(hex: &str) -> Result<Block, RpcError> {
     let bytes = from_hex(hex).map_err(|()| block_decode_failed())?;
-    // Core `DecodeHexBlk` unserializes a witness block and ignores leftover
-    // bytes, so extra hex after a complete block is accepted.
+    // See the API-15 contract for DecodeHexBlk compatibility behavior.
     let mut reader: &[u8] = &bytes;
     <Block as ConsensusDecode>::consensus_decode(&mut reader).map_err(|_| block_decode_failed())
 }
@@ -1297,6 +1301,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-15
     fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
         let missing = Arc::new(Context::new());
         let error = submitblock(&missing, &json!(["00"]))
@@ -1317,6 +1322,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-15
     fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
@@ -1333,6 +1339,57 @@ mod tests {
             extra,
             RpcError::InvalidParams("too many parameters")
         ));
+    }
+
+    #[test]
+    // CONTRACT: API-15
+    fn submitblock_rejects_non_string_bip22_dummy() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let genesis = sample_block();
+        let hex = to_lower_hex(&consensus_bytes(&genesis));
+        for dummy in [json!(123), json!(true), json!([]), json!({})] {
+            let error = submitblock(&ctx, &json!([hex.as_str(), dummy]))
+                .expect_err("non-string BIP22 dummy must fail");
+            assert!(matches!(error, RpcError::InvalidType(_)));
+            assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+        }
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 0);
+
+        *control.submit.lock() = BlockValidationResult::Accepted;
+        let nulled = submitblock(&ctx, &json!([hex.as_str(), null]))
+            .unwrap_or_else(|err| panic!("null dummy must be accepted and ignored: {err}"));
+        assert!(nulled.is_null());
+        let stringed = submitblock(&ctx, &json!([hex.as_str(), "ignored"]))
+            .unwrap_or_else(|err| panic!("string dummy must be accepted and ignored: {err}"));
+        assert!(stringed.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    // CONTRACT: API-15
+    fn decode_tx_zero_input_zero_flag_accepted_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        // A single transaction encoded as version | zero-input dummy | zero flag |
+        // lock time: Core reads the zero flag as the legacy empty transaction
+        // (zero inputs, zero outputs) and admits it to validation instead of
+        // failing with -22.
+        let empty = Tx {
+            version: 1,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: LockTime::from_consensus(0),
+        };
+        let block = Block {
+            header: sample_block().header,
+            txs: vec![empty],
+        };
+        let hex = to_lower_hex(&consensus_bytes(&block));
+        let result = submitblock(&ctx, &json!([hex.as_str()]))
+            .unwrap_or_else(|err| panic!("zero-input zero-flag block must decode: {err}"));
+        assert!(result.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
