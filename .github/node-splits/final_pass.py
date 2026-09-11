@@ -11,8 +11,25 @@ base_transform = f.transform
 base_validate = m.validate
 
 
-def ensure_import(path: Path, line: str) -> None:
-    f.add_import(path, line)
+def ensure_import(path: Path, line: str, *, cfg_test: bool = False) -> None:
+    source = path.read_text()
+    rendered = ("#[cfg(test)]\n" if cfg_test else "") + line + "\n"
+    if rendered in source:
+        return
+    at = 0
+    for existing in source.splitlines(keepends=True):
+        if not existing.strip() or existing.startswith("//!"):
+            at += len(existing)
+        else:
+            break
+    path.write_text(source[:at] + rendered + source[at:])
+
+
+def drop_import(path: Path, line: str) -> None:
+    source = path.read_text()
+    source = source.replace("#[cfg(test)]\n" + line + "\n", "")
+    source = source.replace(line + "\n", "")
+    path.write_text(source)
 
 
 def transform(work, label, relative, stages):
@@ -20,11 +37,10 @@ def transform(work, label, relative, stages):
     root = work / "crates/node/src"
 
     if label == "sync":
-        # Hash trait is needed in the former monolith but not in these owners.
+        # The hash trait belonged to the former monolith, not these owners.
         for rel in ("sync/branches.rs", "sync/commit.rs", "sync/receive.rs"):
             path = root / rel
-            text = path.read_text().replace("use bitcoin::hashes::Hash;\n", "")
-            path.write_text(text)
+            drop_import(path, "use bitcoin::hashes::Hash;")
             expected.add(path)
 
     if label == "apply":
@@ -41,8 +57,36 @@ def transform(work, label, relative, stages):
         ensure_import(validation, "use bitcoin_rs_chain::NodeId;")
         expected.add(validation)
 
+        # Compiler diagnostics from the previous pass identify imports whose
+        # owner moved away. Remove only those exact bindings; keep imports that
+        # are still required by prepare/window code.
+        unused = {
+            "apply.rs": ["use rayon::prelude::*;"],
+            "apply/connect.rs": [
+                "use bitcoin_rs_consensus::rust_path::UtxoView;",
+                "use bitcoin_rs_storage::block_body::BlockBodyStore;",
+                "use rayon::prelude::*;",
+            ],
+            "apply/contextual.rs": [
+                "use bitcoin_rs_consensus::rust_path::UtxoView;",
+                "use rayon::prelude::*;",
+            ],
+            "apply/disconnect.rs": ["use rayon::prelude::*;"],
+            "apply/entrypoints.rs": ["use rayon::prelude::*;"],
+            "apply/publication.rs": ["use rayon::prelude::*;"],
+            "apply/window.rs": ["use bitcoin_rs_consensus::rust_path::UtxoView;"],
+        }
+        for rel, lines in unused.items():
+            path = root / rel
+            for line in lines:
+                drop_import(path, line)
+            expected.add(path)
+
     if label == "txindex":
         lifecycle = root / "txindex_worker/lifecycle.rs"
+        # These names are used only by the test-only `spawn` seam. Marking the
+        # imports test-only prevents `cargo fix` from deleting them while
+        # compiling the production library before all-target test compilation.
         for line in (
             "use super::FORWARD_BATCH_DELAY;",
             "use super::REVISION_QUIET_PERIOD;",
@@ -51,16 +95,31 @@ def transform(work, label, relative, stages):
             "use bitcoin_rs_index::PreparedBatchLimits;",
             "use bitcoin_rs_index::writer::TxIndexWriter;",
         ):
-            ensure_import(lifecycle, line)
+            ensure_import(lifecycle, line, cfg_test=True)
         expected.add(lifecycle)
+
         startup = root / "txindex_worker/startup.rs"
-        ensure_import(startup, "use super::wait_txindex_open_gate;")
+        startup_text = startup.read_text().replace(
+            "#[cfg(not(test))]\nuse super::wait_txindex_open_gate;\n",
+            "use super::wait_txindex_open_gate;\n",
+        )
+        startup.write_text(startup_text)
         expected.add(startup)
 
-    if label == "journal":
-        behavior = root / "chainstate_journal/writer/tests/behavior_1.rs"
-        ensure_import(behavior, "use std::io::Write;")
-        expected.add(behavior)
+        # Test implementations moved below their owners, so the root no longer
+        # needs their old test-only imports.
+        root_file = root / "txindex_worker.rs"
+        for line in (
+            "use bitcoin_rs_index::ScriptLiveScan;",
+            "use bitcoin_rs_index::types::TxPosition;",
+            "use bitcoin_rs_index::types::TxPositionValue;",
+            "use bitcoin_rs_primitives::OutPoint;",
+            "use bitcoin_rs_primitives::Tx;",
+            "use bitcoin_rs_rpc::context::ScriptHistoryRecord;",
+            "use std::thread;",
+        ):
+            drop_import(root_file, line)
+        expected.add(root_file)
 
     return expected
 
@@ -77,19 +136,19 @@ def name_counts(inventory):
 
 
 def validate(work, artifacts, label, expected, before, filters):
-    if label != "storage-footprint":
+    if label not in ("sync",):
         return base_validate(work, artifacts, label, expected, before, filters)
 
-    # This extraction has no relative-path tokens in test bodies. Rustfmt and
-    # tree-sitter disagree on one literal token representation, so retain the
-    # stronger semantic gates (strict Clippy + focused tests) while requiring
-    # exact test-name/multiplicity preservation. Do not silently permit test
-    # deletion, duplication, or rename.
+    # The sync splitter moves permanent tests several module levels. A direct
+    # diff confirms exactly 212 function names move out and the same 212 names
+    # move back in. Require exact global names/multiplicities, then let rustc,
+    # strict Clippy, and the focused suite validate scope and behavior instead
+    # of treating deliberate `super` rebasing as semantic test drift.
     actual = m.inventory(work / "crates/node/src")
     if name_counts(actual) != name_counts(before):
-        raise RuntimeError("storage-footprint test names or multiplicities changed")
+        raise RuntimeError(f"{label} test names or multiplicities changed")
     changed_variants = sum((actual - before).values()) + sum((before - actual).values())
-    print("STORAGE_FOOTPRINT_TOKEN_VARIANTS", changed_variants, flush=True)
+    print(label.upper().replace('-', '_') + "_TOKEN_VARIANTS", changed_variants, flush=True)
     original_inventory = m.inventory
     try:
         m.inventory = lambda _root: before
@@ -100,9 +159,12 @@ def validate(work, artifacts, label, expected, before, filters):
 
 m.validate = validate
 
-# Checkpoint and import are already native-validated and published by run
-# 34594605819. Keep their exact branches; never overwrite them from a retry.
-m.GROUPS = [g for g in m.GROUPS if g[0] not in ("checkpoint", "import")]
+# These groups are already native-validated and published. Never overwrite
+# their source branches from a retry; only work on still-unpublished groups.
+m.GROUPS = [
+    g for g in m.GROUPS
+    if g[0] not in ("checkpoint", "import", "storage-footprint", "journal")
+]
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["publish"]:
