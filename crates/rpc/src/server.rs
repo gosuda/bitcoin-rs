@@ -13,10 +13,15 @@ use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
+
 const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
+
 const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
+
 const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
+
 const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
+
 const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
@@ -100,6 +105,7 @@ impl RpcServer {
     }
 
     fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+        configure_rpc_stream(&stream)?;
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
@@ -132,6 +138,12 @@ impl RpcServer {
     }
 }
 
+/// Applies HTTP-session socket policy: `TCP_NODELAY` so a small response is
+/// not delayed by Nagle after the status line.
+fn configure_rpc_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)
+}
+
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
@@ -139,6 +151,7 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
 ) -> io::Result<()> {
+    configure_rpc_stream(&stream)?;
     stream.set_read_timeout(Some(idle_timeout))?;
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(stream);
@@ -711,6 +724,19 @@ mod tests {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::context::Context;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    #[test]
+    fn configure_rpc_stream_disables_nagle() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        configure_rpc_stream(&client).expect("configure client");
+        configure_rpc_stream(&server).expect("configure server");
+        assert!(client.nodelay().expect("client nodelay"));
+        assert!(server.nodelay().expect("server nodelay"));
+    }
 
     #[test]
     #[allow(clippy::expect_used)]

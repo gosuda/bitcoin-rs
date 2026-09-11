@@ -12,7 +12,10 @@ use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_mining::{
     CandidateContext, MiningError, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
 };
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, Wtxid,
+};
 
 #[test]
 fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), Box<dyn Error>> {
@@ -155,45 +158,49 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
     let witness_script = vec![0x00, 0x63, 0x52, 0xae, 0x68, 0x51];
     let funding = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x44; 32])), 0);
     let confirmed = TxOut {
-        value: 10_000,
-        script_pubkey: [
-            vec![0xa9, 0x14],
-            hash160::Hash::hash(&redeem).to_byte_array().to_vec(),
-            vec![0x87],
-        ]
-        .concat(),
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(
+            [
+                vec![0xa9, 0x14],
+                hash160::Hash::hash(&redeem).to_byte_array().to_vec(),
+                vec![0x87],
+            ]
+            .concat(),
+        ),
     };
     let parent = Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: funding,
-            script_sig: bitcoin_rs_script::push_data(&redeem),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&redeem)),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 9_000,
-            script_pubkey: [
-                vec![0x00, 0x20],
-                sha256::Hash::hash(&witness_script).to_byte_array().to_vec(),
-            ]
-            .concat(),
+            value: Amount::from_sat(9_000),
+            script_pubkey: Script::from_bytes(
+                [
+                    vec![0x00, 0x20],
+                    sha256::Hash::hash(&witness_script).to_byte_array().to_vec(),
+                ]
+                .concat(),
+            ),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     };
     let child = Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent.txid(), 0),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: vec![witness_script],
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::from_stack(vec![witness_script]),
         }],
         outputs: vec![TxOut {
-            value: 8_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(8_000),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
     };
     let mut batch = DisconnectedCandidates::new(0, 100);
     assert!(batch.offer(&parent, |outpoint| {
@@ -245,7 +252,7 @@ fn context(height: u32, segwit_active: bool) -> CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
         height,
         version: 0x2000_0000,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         min_time: 1_700_000_001,
         current_time: 1_700_000_600,
         locktime_cutoff: 1_700_000_000,
@@ -318,14 +325,14 @@ fn tx_with_witness(label: u8, value: u64, parent: Option<Txid>) -> Tx {
                 parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&bytes))),
                 0,
             ),
-            script_sig: vec![],
-            sequence: u32::MAX,
-            witness: vec![vec![label; 32]],
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: vec![vec![label; 32]].into(),
         }],
         outputs: vec![TxOut {
-            value,
-            script_pubkey: vec![0x51, label],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51, label].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }

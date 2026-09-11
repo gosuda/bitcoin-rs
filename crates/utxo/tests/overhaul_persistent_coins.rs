@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::{
     ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
 };
@@ -51,8 +51,8 @@ fn outpoint(txid: Hash256, vout: u32) -> OutPoint {
 
 fn txout(value: u64, script: &[u8]) -> TxOut {
     TxOut {
-        value,
-        script_pubkey: script.to_vec(),
+        value: Amount::from_sat(value),
+        script_pubkey: script.to_vec().into(),
     }
 }
 
@@ -318,13 +318,13 @@ fn connect_and_disconnect_retain_exact_keys_losslessly() {
         .get(&outpoint(a, 0))
         .expect("read coin")
         .expect("output 0");
-    assert_eq!(got_a.script_pubkey, script_a);
+    assert_eq!(got_a.script_pubkey.as_bytes(), script_a);
     assert_eq!(got_a.value, 100);
     let got_b = set
         .get(&outpoint(a, 1))
         .expect("read coin")
         .expect("output 1");
-    assert_eq!(got_b.script_pubkey, script_b);
+    assert_eq!(got_b.script_pubkey.as_bytes(), script_b);
     assert_eq!(got_b.value, 200);
 
     // Undo restores both halves exactly.
@@ -366,14 +366,16 @@ fn colliding_accelerators_never_alias_records() {
         set.get(&outpoint(a, 0))
             .expect("read coin")
             .expect("a:0")
-            .script_pubkey,
+            .script_pubkey
+            .as_bytes(),
         [0xAA]
     );
     assert_eq!(
         set.get(&outpoint(b, 0))
             .expect("read coin")
             .expect("b:0")
-            .script_pubkey,
+            .script_pubkey
+            .as_bytes(),
         [0xBA]
     );
     assert_eq!(
@@ -429,7 +431,7 @@ fn evicted_record_survives_partial_spend_byte_identically() {
         .get(&outpoint(a, 1))
         .expect("read coin")
         .expect("sibling output survived");
-    assert_eq!(sibling.script_pubkey, script_b);
+    assert_eq!(sibling.script_pubkey.as_bytes(), script_b);
     assert_eq!(sibling.value, 200);
     assert!(
         set.get(&outpoint(a, 0)).expect("read coin").is_none(),
@@ -450,14 +452,16 @@ fn evicted_record_survives_partial_spend_byte_identically() {
         set.get(&outpoint(a, 0))
             .expect("read coin")
             .expect("restored 0")
-            .script_pubkey,
+            .script_pubkey
+            .as_bytes(),
         script_a
     );
     assert_eq!(
         set.get(&outpoint(a, 1))
             .expect("read coin")
             .expect("restored 1")
-            .script_pubkey,
+            .script_pubkey
+            .as_bytes(),
         script_b
     );
 }

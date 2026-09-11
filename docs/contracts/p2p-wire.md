@@ -1,7 +1,6 @@
 # P2P wire contract (pointer)
 
-The peer-wire contract is split across two owners. This page assigns
-ownership and cites proof under the
+This page assigns ownership and cites proof under the
 [contracts precedence rule](README.md).
 
 - [`crates/p2p/src/compat.rs`](../../crates/p2p/src/compat.rs) owns the
@@ -23,6 +22,9 @@ ownership and cites proof under the
 - Message framing, envelope decoder, service flags, and network magic follow
   the inventory and the policy document. v1 frames for handshake and inventory
   commands are byte-identical to rust-bitcoin's `RawNetworkMessage`.
+  `getdata` block serving writes stored consensus payload bytes
+  (`Message::BlockPayload`) without a decode/re-encode round trip. The
+  decoder still types inbound `block` as `Message::Block`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
@@ -54,6 +56,18 @@ ownership and cites proof under the
   capability while header discovery is pending; after that point, the
   accepted tip must be on the active chain at or beyond the requested height.
 
+### `P2P-04`: Connected-socket posture and vectored emission
+
+- **Owner**: `CountingStream::from_connected` (`crates/p2p/src/counters.rs`).
+- Every accepted or dialed P2P `TcpStream` is wrapped by that constructor
+  before handshake bytes move. The constructor disables Nagle (`TCP_NODELAY`).
+- `CountingStream` forwards `write_vectored` so `wire::write_message` emits
+  header plus payload as one syscall. A wrapper that only implemented `write`
+  would split the frame again.
+- Handshake, the connection reader, and the writer-thread clone share one
+  `PeerCounters`. Timeouts stay with the listener: handshake and the message
+  loop use different poll intervals.
+
 ## Live gaps
 
 - **Peer lifecycle boundary**: Moving the remaining P2P scheduling and lifecycle policy out of `crates/node` is tracked under #217 (open).
@@ -72,6 +86,13 @@ ownership and cites proof under the
     matrix, and peer-visible reorg/restart behavior.
 - `crates/p2p/tests/core_interop_live.rs`: live interop lane running via
   `scripts/run-p2p-core-interop.sh` when an external `bitcoind` is provided.
+- `crates/p2p/src/counters.rs` tests
+  `a_vectored_write_counts_every_slice_the_socket_took`,
+  `a_short_vectored_write_counts_what_the_socket_took`, and
+  `write_message_through_counting_stream_stays_vectored`: a v1 frame's header
+  and payload leave as one `write_vectored`, and the wrapper counts every byte
+  the socket took (`P2P-01`). Elapsed time is
+  `crates/p2p/benches/write_message.rs`.
 - `crates/p2p/src/peer_table.rs` tests
   `note_announced_height_credits_only_the_delivering_connection` and
   `note_announced_height_raises_monotonically_and_reports_actual_updates`
@@ -84,3 +105,7 @@ ownership and cites proof under the
   `losing_fork_credit_survives_winner_disconnect` (retained branch evidence),
   and `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
   hedge eligibility).
+- `crates/p2p/src/counters.rs` tests `a_vectored_write_counts_every_slice`,
+  `from_connected_disables_nagle`: the counting wrapper forwards one
+  `write_vectored` for header plus payload, and the connected-socket
+  constructor owns `TCP_NODELAY` (P2P-04).

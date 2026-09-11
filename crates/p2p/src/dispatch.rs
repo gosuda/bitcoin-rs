@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
@@ -44,14 +44,15 @@ pub trait ChainQuery: Send + Sync {
     /// Serves block inventory one body at a time, in `items` order. For each
     /// block-typed item `headroom` is consulted EXACTLY ONCE, immediately
     /// BEFORE its body load; `false` halts production and sets `halted`
-    /// (I7, I9). Each loaded body is delivered through `serve`; a `serve`
+    /// (I7, I9). Each loaded body is the stored consensus payload, delivered
+    /// through `serve` without a decode/re-encode round trip. A `serve`
     /// error aborts production and propagates. Non-block / unservable items
     /// are collected into `not_found` and never loaded.
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 }
 
@@ -292,7 +293,7 @@ fn serve_getdata(
                     let outcome = chain.serve_inventory_blocks(
                         std::slice::from_ref(block_item),
                         headroom,
-                        &mut |block| send(Message::Block(block)),
+                        &mut |payload| send(Message::BlockPayload(payload)),
                     )?;
                     if outcome.halted {
                         return Err(PeerError::Protocol(
@@ -323,8 +324,8 @@ fn serve_getdata_blocks(
     match chain {
         None => send(Message::NotFound(items.to_vec()))?,
         Some(chain) => {
-            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |block| {
-                send(Message::Block(block))
+            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |payload| {
+                send(Message::BlockPayload(payload))
             })?;
             if outcome.halted {
                 return Err(PeerError::Protocol(
@@ -365,7 +366,10 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
-    use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+    use bitcoin_rs_primitives::{
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
+        Witness, Wtxid,
+    };
 
     use super::{
         ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, MAX_LOCATOR_HASHES, TxInventory,
@@ -375,6 +379,14 @@ mod tests {
     use crate::inv::MAX_INV_PER_MSG;
     use crate::peer::{Peer, PeerState};
     use crate::wire::{Message, PeerError};
+
+    fn block_payload_bytes(block: &Block) -> bytes::Bytes {
+        bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(block))
+    }
+
+    fn block_payload(block: &Block) -> Message {
+        Message::BlockPayload(block_payload_bytes(block))
+    }
 
     #[derive(Default)]
     struct FakeChain {
@@ -417,7 +429,7 @@ mod tests {
             &self,
             items: &[Inventory],
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -433,7 +445,7 @@ mod tests {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(found.clone())?;
+                serve(block_payload_bytes(found))?;
             }
             Ok(outcome)
         }
@@ -471,7 +483,7 @@ mod tests {
             &self,
             _items: &[Inventory],
             _headroom: &dyn Fn() -> bool,
-            _serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            _serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             Ok(InventoryServing::default())
         }
@@ -604,9 +616,12 @@ mod tests {
 
         let responses = dispatch_collect(&mut peer, &message, Some(&chain))?;
 
-        let [Message::Block(found), Message::NotFound(not_found)] = responses.as_slice() else {
-            panic!("expected block plus notfound, got {responses:?}");
+        let [Message::BlockPayload(found), Message::NotFound(not_found)] = responses.as_slice()
+        else {
+            panic!("expected block payload plus notfound, got {responses:?}");
         };
+        let found = Block::consensus_decode(found)
+            .unwrap_or_else(|error| panic!("served payload must decode: {error}"));
         assert_eq!(found.block_hash(), chain.headers[0].compute_hash());
         assert_eq!(not_found, &vec![missing]);
         Ok(())
@@ -653,7 +668,7 @@ mod tests {
             &self,
             items: &[Inventory],
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -677,7 +692,7 @@ mod tests {
                     );
                 }
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                serve(found.clone())?;
+                serve(block_payload_bytes(found))?;
             }
             Ok(outcome)
         }
@@ -719,8 +734,8 @@ mod tests {
         assert_eq!(
             emitted,
             vec![
-                Message::Block(block_a),
-                Message::Block(block_b),
+                block_payload(&block_a),
+                block_payload(&block_b),
                 Message::NotFound(vec![tx_inv, unknown]),
             ],
             "streamed emission must equal the pre-change batch shape (I8)"
@@ -944,7 +959,7 @@ mod tests {
     }
 
     fn dummy_tx(byte: u8) -> Tx {
-        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut};
+        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut, Witness};
         Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -952,15 +967,15 @@ mod tests {
                     txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
                     vout: 0,
                 },
-                script_sig: vec![byte],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: vec![byte].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1016,7 +1031,7 @@ mod tests {
             None,
         );
         let mut tx = dummy_tx(0x42);
-        tx.inputs[0].witness = vec![vec![0x01]];
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![0x01]]);
         let txid_item =
             Inventory::Transaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
         let witness_txid_item =
@@ -1071,6 +1086,7 @@ mod tests {
 
     #[test]
     fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+        use bitcoin_rs_primitives::Script;
         use std::sync::Arc;
 
         use bitcoin_rs_mempool::{
@@ -1098,8 +1114,8 @@ mod tests {
             );
             let mut tx = dummy_tx(0x51);
             tx.inputs[0].script_sig.clear();
-            tx.inputs[0].witness = vec![vec![0x51]];
-            tx.outputs[0].script_pubkey = vec![0x6a, 4, 1, 2, 3, 4];
+            tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+            tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]);
             let tx = Arc::new(tx);
             let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
             let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
@@ -1353,7 +1369,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&[0; 32]),
             time: nonce,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce,
         }
     }

@@ -5,21 +5,26 @@ handshaking, inbound dispatch, connection management, and block-download policy.
 
 Each `Peer` owns one connection's stream and handshake state. Live connections are
 identified by a `ConnectionId`, cleaned up through a `PeerLease`, and tracked with
-ready metadata by the shared `PeerTable`. `P2pService` owns workers and the
+ready metadata by the shared `PeerTable`. Inbound accept and outbound connect
+share one socket policy in `socket::configure_peer_stream` (`TCP_NODELAY`,
+blocking I/O, handshake/poll timeouts). `P2pService` owns workers and the
 session store; `BlockSync` owns the production download window. The node
 supplies chain queries and coordinates chain application. A connection
 negotiates version/verack in `handshake`, then runs the peer finite-state machine
 in `fsm`; `wire` is the protocol codec. Inbound traffic reaches the host through
 `dispatch_inbound_with_chain`, which streams getdata responses behind the outbound
 budget's pre-load production headroom gate and reads the active chain through the
-`ChainQuery` trait; `inbound` hands over `InboundBlock` and `InboundHeaders` with
-their wire bytes preserved. Misbehaving peers accumulate score on the file-persisted
+`ChainQuery` trait. Served block bodies are the stored consensus bytes
+(`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
+`InboundBlock` and `InboundHeaders` with their wire bytes preserved. Misbehaving peers accumulate score on the file-persisted
 `BanList`; whole subnets are excluded as a `BannedSubnet` built from an `IpSubnet`,
 and BIP155 addrv2 and BIP339 wtxid-relay state live in `addrv2` and `wtxid`.
 
 `PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`),
 connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`).
-It enforces key invariants across the node:
+A connected TCP stream enters that world only through `CountingStream::from_connected`,
+which owns `TCP_NODELAY` and forwards vectored writes so `wire::write_message` stays
+one `writev` on the socket. It enforces key invariants across the node:
 - **Single connection per address**: Exactly one live session per remote `SocketAddr`.
 - **Atomic predecessor cancellation**: Registering a new lease at an existing address
   atomically cancels and replaces the predecessor.

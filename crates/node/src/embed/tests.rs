@@ -3,7 +3,7 @@
 use super::*;
 use crate::NodeConfig;
 use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
-use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut};
+use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
 use parking_lot::Mutex;
 
@@ -70,16 +70,16 @@ fn spendable_script() -> Vec<u8> {
 fn spending_tx(previous_output: OutPoint) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output,
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: vec![vec![0x51]],
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::from_stack(vec![vec![0x51]]),
         }],
         outputs: vec![TxOut {
-            value: 92_000,
-            script_pubkey: spendable_script(),
+            value: Amount::from_sat(92_000),
+            script_pubkey: Script::from_bytes(spendable_script()),
         }],
     }
 }
@@ -106,8 +106,8 @@ fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
         changes.add(UtxoAdd::new(
             prevout,
             TxOut {
-                value: 100_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(100_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             },
             false,
             1,

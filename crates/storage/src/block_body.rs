@@ -138,9 +138,9 @@ pub trait BlockBodyStore: Send + Sync {
             return Ok(None);
         };
         Ok(Some(BlockBodyMetadata {
-              body_size: body.len(),
-              tx_count,
-          }))
+            body_size: body.len(),
+            tx_count,
+        }))
     }
 
     /// Bytes this store's block files occupy on disk, when it keeps files.
@@ -404,9 +404,9 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
         let body_size = usize::try_from(position.len)
             .map_err(|_| StorageError::InvalidOperation("block body length does not fit usize"))?;
         Ok(Some(BlockBodyMetadata {
-              body_size,
-              tx_count,
-          }))
+            body_size,
+            tx_count,
+        }))
     }
 
     fn sync(&self) -> Result<(), StorageError> {

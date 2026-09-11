@@ -10,7 +10,9 @@
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
 use bitcoin::consensus::{deserialize as oracle_decode, encode::VarInt, serialize};
-use bitcoin_rs_primitives::{Sighash, SighashCache, SighashError, Tx, TxOut, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, Script, Sighash, SighashCache, SighashError, Tx, TxOut, deserialize,
+};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -113,8 +115,8 @@ fn test_key() -> SecretKey {
 
 fn p2wpkh_prevout() -> TxOut {
     TxOut {
-        value: VALUE,
-        script_pubkey: hex(PROGRAM),
+        value: Amount::from_sat(VALUE),
+        script_pubkey: Script::from_bytes(hex(PROGRAM)),
     }
 }
 
@@ -188,7 +190,7 @@ fn published_bip143_digest_and_signature_anchor_reference() {
     let mut cache = SighashCache::new(&tx);
     assert_eq!(
         cache
-            .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, 1)
+            .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), 1)
             .expect("BIP143 digest")
             .as_byte_array()
             .as_slice(),
@@ -225,7 +227,7 @@ fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
             let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
             assert_eq!(
                 cache
-                    .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, raw)
+                    .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), raw)
                     .expect("raw BIP143 digest")
                     .as_byte_array(),
                 &expected,
@@ -244,7 +246,7 @@ fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
                 "consensus: outputs={output_count}, raw={raw:#x}",
             );
             let mut wrong_amount = prevout.clone();
-            wrong_amount.value += 1;
+            wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
             assert_eq!(
                 verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
                 Err(ScriptError::Invalid {
@@ -279,7 +281,7 @@ fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
         for raw in [0x100, 0x101, 0x1234_5682, 0x8000_0083, u32::MAX] {
             let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
             let actual = cache
-                .segwit_v0_signature_hash_raw(INPUT, &script, VALUE, raw)
+                .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), raw)
                 .expect("raw u32 digest");
             assert_eq!(actual.as_byte_array(), &expected);
             assert_ne!(
@@ -288,7 +290,12 @@ fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
             );
         }
         assert_eq!(
-            cache.segwit_v0_signature_hash_raw(tx.inputs.len(), &script, VALUE, 0),
+            cache.segwit_v0_signature_hash_raw(
+                tx.inputs.len(),
+                &script,
+                Amount::from_sat(VALUE),
+                0
+            ),
             Err(SighashError::InputOutOfRange {
                 index: tx.inputs.len(),
                 total: tx.inputs.len(),
@@ -314,7 +321,7 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
         for (mode, raw) in modes {
             assert_eq!(
                 cache
-                    .segwit_v0_signature_hash(INPUT, &script, VALUE, mode)
+                    .segwit_v0_signature_hash(INPUT, &script, Amount::from_sat(VALUE), mode)
                     .expect("named mode")
                     .as_byte_array(),
                 &reference_bip143(&oracle, INPUT, &script, VALUE, raw),
@@ -322,7 +329,12 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
         }
         for input in [INPUT, tx.inputs.len()] {
             assert_eq!(
-                cache.segwit_v0_signature_hash(input, &script, VALUE, Sighash::Default),
+                cache.segwit_v0_signature_hash(
+                    input,
+                    &script,
+                    Amount::from_sat(VALUE),
+                    Sighash::Default
+                ),
                 Err(SighashError::DefaultOnlyTaproot),
             );
         }
@@ -364,8 +376,8 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
         let mut program = vec![0x00, 0x20];
         program.extend_from_slice(&Sha256::digest(&script));
         let prevout = TxOut {
-            value: VALUE,
-            script_pubkey: program,
+            value: Amount::from_sat(VALUE),
+            script_pubkey: Script::from_bytes(program),
         };
         let failure = match (multisig, verify) {
             (false, true) => ScriptErrCode::CheckSigVerify,
@@ -392,7 +404,7 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
                     "multisig={multisig}, verify={verify}, outputs={output_count}, raw={byte:#x}",
                 );
                 let mut wrong_amount = prevout.clone();
-                wrong_amount.value += 1;
+                wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
                 assert_eq!(
                     verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
                     Err(ScriptError::Invalid { code: failure }),
@@ -429,7 +441,12 @@ fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
                     let expected = reference_bip143(&oracle, INPUT, &script, value, raw);
                     assert_eq!(
                         cache
-                            .segwit_v0_signature_hash_raw(INPUT, &script, value, raw)
+                            .segwit_v0_signature_hash_raw(
+                                INPUT,
+                                &script,
+                                Amount::from_sat(value),
+                                raw
+                            )
                             .expect("raw script-code digest")
                             .as_byte_array(),
                         &expected,

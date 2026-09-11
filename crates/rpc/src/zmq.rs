@@ -9,6 +9,9 @@
 use anyhow::{Context as _, bail};
 use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 #[cfg(feature = "zmq")]
 use core::fmt;
 #[cfg(feature = "zmq")]
@@ -1066,16 +1069,16 @@ mod compat_manifest_tests {
         use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label].into(),
             }],
         }
     }
@@ -1366,16 +1369,16 @@ mod sequence_observer_tests {
     fn sequence_tx(label: u8) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label].into(),
             }],
         }
     }

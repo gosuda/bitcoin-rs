@@ -27,7 +27,8 @@
 use std::ops::Range;
 
 use crate::{
-    Block, DecodeError, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid,
+    Amount, Block, DecodeError, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness,
     encode::{ConsensusDecode, read_array, read_i32_le, read_u32_le, read_u64_le},
     varint,
 };
@@ -589,8 +590,10 @@ impl<'a> ParsedTransaction<'a> {
         let version = read_i32_le(&mut version_reader)
             .unwrap_or_else(|_| unreachable!("validated version span"));
         let mut lock_time_reader = slice_at(self.bytes, self.lock_time_span);
-        let lock_time = read_u32_le(&mut lock_time_reader)
-            .unwrap_or_else(|_| unreachable!("validated lock-time span"));
+        let lock_time = LockTime::from_consensus(
+            read_u32_le(&mut lock_time_reader)
+                .unwrap_or_else(|_| unreachable!("validated lock-time span")),
+        );
 
         let inputs = self
             .inputs
@@ -606,14 +609,20 @@ impl<'a> ParsedTransaction<'a> {
                 let mut sequence_reader = slice_at(self.bytes, layout.sequence);
                 TxIn {
                     previous_output: OutPoint::new(txid, vout),
-                    script_sig: slice_at(self.bytes, layout.script_sig).to_vec(),
-                    sequence: read_u32_le(&mut sequence_reader)
-                        .unwrap_or_else(|_| unreachable!("validated sequence span")),
-                    witness: layout
-                        .witness
-                        .as_range()
-                        .map(|index| slice_at(self.bytes, self.witness_spans[index]).to_vec())
-                        .collect(),
+                    script_sig: Script::from_bytes(
+                        slice_at(self.bytes, layout.script_sig).to_vec(),
+                    ),
+                    sequence: Sequence::from_consensus(
+                        read_u32_le(&mut sequence_reader)
+                            .unwrap_or_else(|_| unreachable!("validated sequence span")),
+                    ),
+                    witness: Witness::from_stack(
+                        layout
+                            .witness
+                            .as_range()
+                            .map(|index| slice_at(self.bytes, self.witness_spans[index]).to_vec())
+                            .collect(),
+                    ),
                 }
             })
             .collect();
@@ -624,9 +633,13 @@ impl<'a> ParsedTransaction<'a> {
             .map(|layout| {
                 let mut value_reader = slice_at(self.bytes, layout.value);
                 TxOut {
-                    value: read_u64_le(&mut value_reader)
-                        .unwrap_or_else(|_| unreachable!("validated value span")),
-                    script_pubkey: slice_at(self.bytes, layout.script_pubkey).to_vec(),
+                    value: Amount::from_sat(
+                        read_u64_le(&mut value_reader)
+                            .unwrap_or_else(|_| unreachable!("validated value span")),
+                    ),
+                    script_pubkey: Script::from_bytes(
+                        slice_at(self.bytes, layout.script_pubkey).to_vec(),
+                    ),
                 }
             })
             .collect();

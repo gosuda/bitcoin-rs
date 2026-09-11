@@ -70,6 +70,13 @@ Derived work cannot fail the authoritative transition.
 Index recovery still uses `ChainEventPublisher` hints (`EVT-02`); this is not
 a second event log.
 
+### Peer socket
+A connected P2P TCP stream after accept or connect. `CountingStream::from_connected`
+is the owner of socket posture: it disables Nagle (`TCP_NODELAY`) once, then wraps
+the stream so handshake, reader, and writer-clone I/O all count into one
+`PeerCounters`. Vectored writes go through the same wrapper, so a framed message
+stays one `writev` instead of a header syscall plus a payload syscall.
+
 ### Authoritative peer table
 The single owner of live peer connections and their published handshake
 metadata (`bitcoin_rs_p2p::PeerTable`). It enforces one connection per remote
@@ -110,7 +117,8 @@ A peer holding up the apply frontier by failing to deliver a frontier block it w
 helpers. Ready snapshots carry `PeerSource`, and identity-checked table
 methods are what authorize a mutation. Address equality alone never does.
 `BlockSync` owns the production download window and may call those table
-methods directly. See `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
+methods directly. `P2pService` does not hold a second window. See
+`docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
 
 ### assumevalid
 Skipping script-signature verification for blocks at or below a trusted height while performing every other consensus check. Mainnet defaults to the hash-pinned anchor below; other networks default to height 0. `--assume-valid-height 0` requests full verification; a custom nonzero height skips without hash gating.
@@ -128,6 +136,17 @@ The default mainnet configuration: `fjall` backend, multi-peer download (outboun
 The two cost regimes a sync measurement must name before its numbers mean anything. **Download-bound:** wall is decided by the network path — live IBD. **Processing-bound:** blocks are local and wall is decided by validation plus storage commit — reindex and replay. A node can rank differently in the two, so a faster-than-X claim needs the regime and validation posture stated.
 
 ## Consensus validation
+
+### Native protocol primitives
+The owned Bitcoin protocol vocabulary in `crates/primitives`: `Tx`, `Block`,
+`Header`, `OutPoint`, `Amount`, `Sequence`, `LockTime`, `CompactTarget`,
+`Script`, `Witness`, hashes, sighash, compact-size encoding, and network
+constants. These types are implemented here; they are not `rust-bitcoin`
+aliases, wrappers, or conversion shims. Field types on `Tx`/`Header` are the
+same native newtypes — satoshis, nBits, scripts, and locktime are not raw
+integers at the protocol boundary. Durable tests pin Core vectors,
+published genesis hashes, and golden fixtures. RPC address/`asm` rendering
+may still use `rust-bitcoin` at the RPC boundary only.
 
 ### bitcoinkernel
 Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). With the `kernel` feature it is both the input-script verifier for every script class and the block **parser** on the apply path (*One-shot kernel block parse*). Rust performs the surrounding non-script transaction and block checks. `kernel` is the production default in `bitcoin-rs-consensus` and `bitcoin-rs-node`, and in the Compose image; the `bin/bitcoin-rs` binary leaves it off so `cargo build -p bitcoin-rs` uses the native interpreter. Builds with `kernel` need `cmake` and `libboost-dev`. Issue #213 keeps this library default until native wins the signed-spend and full-replay gates (`docs/contracts/validation-default.md`).

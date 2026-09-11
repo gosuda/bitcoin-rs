@@ -275,7 +275,9 @@ impl AdmissionLifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
+    };
     fn source(id: u64) -> PeerToken {
         PeerToken {
             addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
@@ -285,16 +287,16 @@ mod tests {
     fn tx(marker: u8, parent: Txid) -> Arc<Tx> {
         Arc::new(Tx {
             version: 2,
-            lock_time: u32::from(marker),
+            lock_time: LockTime::from_consensus(u32::from(marker)),
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(parent, 0),
-                script_sig: vec![],
-                sequence: u32::MAX,
-                witness: vec![],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
         })
     }
@@ -319,7 +321,7 @@ mod tests {
         pool.insert(tx(2, parent), source(1), 2);
         assert_eq!(pool.total_weight(), base_weight * 2);
         let mut changed = (*first).clone();
-        changed.inputs[0].witness = vec![vec![1]];
+        changed.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let changed = Arc::new(changed);
         pool.insert(Arc::clone(&changed), source(2), 3);
         assert_eq!(pool.len(), 2);
@@ -427,7 +429,7 @@ mod tests {
         let mut pool = OrphanPool::new(10);
         let first = tx(1, parent);
         let mut changed = (*first).clone();
-        changed.inputs[0].witness = vec![vec![1]];
+        changed.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let changed = Arc::new(changed);
         pool.insert(first, source(1), 0);
         pool.insert(Arc::clone(&changed), source(1), 119);
@@ -462,7 +464,7 @@ mod tests {
         let parent = tx(9, Txid::default()).txid();
         let resident = tx(1, parent);
         let mut rejected = (*resident).clone();
-        rejected.inputs[0].witness = vec![vec![1]];
+        rejected.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         assert_eq!(resident.txid(), rejected.txid());
         assert_ne!(resident.wtxid(), rejected.wtxid());
 
@@ -496,7 +498,7 @@ mod tests {
         let resident = tx(1, parent);
         let sibling = tx(2, parent);
         let mut rejected = (*resident).clone();
-        rejected.inputs[0].witness = vec![vec![1; 32]];
+        rejected.inputs[0].witness = Witness::from_stack(vec![vec![1; 32]]);
         assert_ne!(resident.weight(), rejected.weight());
         let mut state = AdmissionLifecycle::default();
         state.orphans.insert(Arc::clone(&resident), source(1), 0);

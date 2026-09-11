@@ -235,7 +235,9 @@ mod pagination_tests {
     use alloc::sync::Arc;
 
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use serde_json::Value;
 
     use super::{internal_mempool_txs, select_mempool_page};
@@ -251,10 +253,12 @@ mod pagination_tests {
                 version: 2,
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 1_000,
-                    script_pubkey: vec![0x51],
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: Script::from_bytes(vec![0x51]),
                 }],
-                lock_time: u32::try_from(index).expect("small fixture index"),
+                lock_time: LockTime::from_consensus(
+                    u32::try_from(index).expect("small fixture index"),
+                ),
             };
             let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, time, 0);
             expected.push((time, entry.txid));
@@ -373,15 +377,15 @@ mod pagination_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xaa; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: 99,
+            lock_time: LockTime::from_consensus(99),
         };
         let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 0);
         let cursor = entry.txid.to_string();
@@ -402,7 +406,7 @@ mod pagination_tests {
         let entries: Vec<_> = (0_u32..257)
             .map(|index| {
                 let tx = Tx {
-                    lock_time: index,
+                    lock_time: LockTime::from_consensus(index),
                     ..Tx::default()
                 };
                 MempoolEntry::new(Arc::new(tx), 100, 1_000, u64::from(index % 7), 0)
@@ -439,7 +443,7 @@ mod pagination_tests {
             .map(|index| {
                 MempoolEntry::new(
                     Arc::new(Tx {
-                        lock_time: index,
+                        lock_time: LockTime::from_consensus(index),
                         ..Tx::default()
                     }),
                     100,
@@ -532,7 +536,7 @@ mod pagination_tests {
             .map(|index| {
                 MempoolEntry::new(
                     Arc::new(Tx {
-                        lock_time: index,
+                        lock_time: LockTime::from_consensus(index),
                         ..Tx::default()
                     }),
                     100,

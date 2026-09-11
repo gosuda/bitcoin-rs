@@ -375,7 +375,8 @@ fn block_size(block: &Block) -> usize {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{
-        Block, Hash256, Network, OutPoint, Tx, TxIn, TxOut, consensus_bytes,
+        Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+        Witness, consensus_bytes,
     };
     use std::time::{Duration, Instant};
 
@@ -730,15 +731,15 @@ mod tests {
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::default(),
-                    script_sig: vec![0_u8; script_len],
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: vec![0_u8; script_len].into(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 }],
                 outputs: vec![TxOut {
-                    value: 0,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(0),
+                    script_pubkey: Script::new(),
                 }],
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
             }],
         }
     }

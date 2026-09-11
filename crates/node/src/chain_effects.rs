@@ -304,7 +304,9 @@ mod tests {
         AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
         MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
     };
-    use bitcoin_rs_primitives::{Network, OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    };
     use parking_lot::Mutex;
 
     #[derive(Debug, Default)]
@@ -404,15 +406,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 49_000,
-                script_pubkey: vec![0x6a, 0x04, 0xaa, 0xbb, 0xcc, 0xdd],
+                value: Amount::from_sat(49_000),
+                script_pubkey: Script::from_bytes(vec![0x6a, 0x04, 0xaa, 0xbb, 0xcc, 0xdd]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         })
     }
 
@@ -509,8 +511,8 @@ mod tests {
         *chain.prevouts.write() = vec![(
             outpoint,
             TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             },
         )];
         assert!(gateway.stable_generation().is_none());

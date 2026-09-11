@@ -4,7 +4,10 @@ use anyhow::Result;
 
 use bitcoin_rs_node::{Network, NodeConfig, apply::error::ApplyError, state::NodeState};
 
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -101,7 +104,10 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let mut replacement = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     replacement.header.time = replacement.header.time.saturating_add(1);
     replacement.header.nonce = 0;
-    while !pow_met(replacement.header.bits, replacement.block_hash().0) {
+    while !pow_met(
+        replacement.header.bits.to_consensus(),
+        replacement.block_hash().0,
+    ) {
         replacement.header.nonce = replacement
             .header
             .nonce
@@ -296,16 +302,16 @@ fn mined_regtest_child(prev_blockhash: BlockHash) -> Result<Block> {
 fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![1, u8::try_from(height)?],
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?]),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 1,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(1),
+            script_pubkey: Script::new(),
         }],
     };
     let mut block = Block {
@@ -314,14 +320,14 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: Network::Regtest.genesis_block().header.time + height,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase],
     };
     block.header.merkle_root = merkle_root(&block.txs)
         .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits, block.block_hash().0) {
+    while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
         block.header.nonce = block
             .header
             .nonce
