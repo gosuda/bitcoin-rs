@@ -3,6 +3,9 @@ use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use hashbrown::{HashMap, HashSet};
 use sha2::{Digest, Sha256};
 use slab::Slab;
@@ -108,9 +111,9 @@ pub struct PrioritisedTransaction {
 pub struct Mempool {
     /// Entry arena. Public ids are slab indices represented as `u32`.
     pub(crate) entries: Slab<MempoolEntry>,
-    /// Tx id to entry id lookup. Owned by this module; reach it
+    /// Tx id to entry id and acceptance sequence. Owned by this module; reach it
     /// through `contains_txid`, `entry_id_by_txid`, and `entry_by_txid`.
-    by_txid: HashMap<Txid, EntryId>,
+    by_txid: HashMap<Txid, IndexedEntry>,
     /// Funding index keyed by script hash then entry id. Owned by this
     /// module; reach it through `entries_funding_script`.
     funding: std::collections::BTreeSet<(ScriptHash, EntryId)>,
@@ -159,6 +162,13 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+}
+
+/// Current pool membership, retired together with the existing txid index row.
+#[derive(Clone, Copy, Debug)]
+struct IndexedEntry {
+    id: EntryId,
+    admitted_sequence: u64,
 }
 
 pub(crate) struct PreparedInsert {
@@ -385,7 +395,7 @@ impl Mempool {
         if entry.tx.inputs.iter().any(|input| {
             self.by_txid
                 .get(&input.previous_output.txid)
-                .is_some_and(|id| excluded.contains(id))
+                .is_some_and(|indexed| excluded.contains(&indexed.id))
         }) {
             return Err(MempoolError::EvictedParent);
         }
@@ -443,7 +453,15 @@ impl Mempool {
             self.fee_rate_floor
                 .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
         );
-        self.by_txid.insert(txid, id);
+        let mut changes = Vec::new();
+        self.push_change(&mut changes, txid, MutationOutcome::Accepted);
+        self.by_txid.insert(
+            txid,
+            IndexedEntry {
+                id,
+                admitted_sequence: self.mempool_sequence,
+            },
+        );
         self.index_entry(id);
         // The closure is taken after `index_entry`, because a transaction can
         // arrive after something that already spends its outputs — an orphan
@@ -451,8 +469,6 @@ impl Mempool {
         // become reachable once this entry is in the spend indexes.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
-        let mut changes = Vec::new();
-        self.push_change(&mut changes, txid, MutationOutcome::Accepted);
         if self.limits.max_total_bytes > 0 && self.total_vsize() > self.limits.max_total_bytes {
             changes.extend(crate::evict_lowest_fee_packages(
                 self,
@@ -488,12 +504,11 @@ impl Mempool {
     /// Returns a reference to the `MempoolEntry` for `txid`, or `None` if the
     /// transaction is not in the pool.
     ///
-    /// Composite of `self.by_txid.get(txid)` and `self.entry(*id)`. Saves the
+    /// Composite of `self.entry_id_by_txid(txid)` and `self.entry(id)`. Saves the
     /// 2-step lookup pattern at HTTP/RPC handler callsites.
     #[must_use]
     pub fn entry_by_txid(&self, txid: &Txid) -> Option<&MempoolEntry> {
-        let id = *self.by_txid.get(txid)?;
-        self.entry(id)
+        self.entry(self.entry_id_by_txid(txid)?)
     }
 
     /// Returns a clone of the shared `Arc<Tx>` for `txid`, or `None`
@@ -514,7 +529,23 @@ impl Mempool {
     /// this lookup after dropping and re-acquiring a pool lock.
     #[must_use]
     pub fn entry_id_by_txid(&self, txid: &Txid) -> Option<EntryId> {
-        self.by_txid.get(txid).copied()
+        self.by_txid.get(txid).map(|indexed| indexed.id)
+    }
+
+    /// Returns the resident entry only when its acceptance has `sequence`.
+    ///
+    /// Compare with the sequence of an `Accepted` mutation change from this
+    /// pool. Removal and re-admission invalidate the old receipt, even when
+    /// the same transaction allocation is reused. Unrelated mutations and fee
+    /// prioritisation do not invalidate it. The returned reference shares the
+    /// pool borrow, so identity and body are observed together.
+    #[must_use]
+    pub fn entry_by_txid_at_sequence(&self, txid: &Txid, sequence: u64) -> Option<&MempoolEntry> {
+        let indexed = self.by_txid.get(txid)?;
+        if indexed.admitted_sequence != sequence {
+            return None;
+        }
+        self.entry(indexed.id)
     }
 
     /// Returns whether the pool currently holds zero entries.
@@ -673,7 +704,7 @@ impl Mempool {
         // B-tree sets of fixed-size keys.
         let by_txid = u64::try_from(self.by_txid.capacity())
             .unwrap_or(u64::MAX)
-            .saturating_mul(u64::try_from(size_of::<(Txid, EntryId)>()).unwrap_or(0));
+            .saturating_mul(u64::try_from(size_of::<(Txid, IndexedEntry)>()).unwrap_or(0));
         let funding = u64::try_from(self.funding.len())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(ScriptHash, EntryId)>()).unwrap_or(0));
@@ -973,7 +1004,7 @@ impl Mempool {
             self.fee_deltas.insert(txid, accumulated);
         }
 
-        let Some(&id) = self.by_txid.get(&txid) else {
+        let Some(id) = self.entry_id_by_txid(&txid) else {
             return Ok(());
         };
         if let Some(entry) = self.entry_mut(id) {
@@ -1002,10 +1033,7 @@ impl Mempool {
                 txid,
                 fee_delta,
                 in_mempool: self.by_txid.contains_key(&txid),
-                modified_fee: self
-                    .by_txid
-                    .get(&txid)
-                    .and_then(|&id| self.entry(id).map(MempoolEntry::modified_fee)),
+                modified_fee: self.entry_by_txid(&txid).map(MempoolEntry::modified_fee),
             })
             .collect()
     }
@@ -1034,7 +1062,7 @@ impl Mempool {
         reason: RemovalReason,
         changes: &mut Vec<MutationChange>,
     ) {
-        let Some(id) = self.by_txid.get(txid).copied() else {
+        let Some(id) = self.entry_id_by_txid(txid) else {
             return;
         };
         self.remove_entry_and_descendants_into(id, reason, changes);
@@ -1080,7 +1108,7 @@ impl Mempool {
 
         let mut changes = Vec::new();
         for (tx, txid) in block_txs.iter().zip(block_txids) {
-            if let Some(id) = self.by_txid.get(txid).copied() {
+            if let Some(id) = self.entry_id_by_txid(txid) {
                 self.remove_entries_with_reasons(
                     &[(id, RemovalReason::BlockInclusion)],
                     &mut changes,
@@ -1542,7 +1570,7 @@ impl Mempool {
                     .tx
                     .inputs
                     .iter()
-                    .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+                    .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
                     .collect::<Vec<_>>()
             });
             for neighbour in parents.into_iter().chain(self.child_ids(id)) {
@@ -1581,7 +1609,7 @@ impl Mempool {
         let mut seeds = tx
             .inputs
             .iter()
-            .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+            .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
             .collect::<Vec<_>>();
         seeds.extend(self.existing_spenders_of(txid, tx.outputs.len()));
         let cluster = self.cluster_ids_seeded_by(&seeds, excluded);
@@ -1635,7 +1663,7 @@ impl Mempool {
         let mut stack = tx
             .inputs
             .iter()
-            .filter_map(|input| self.by_txid.get(&input.previous_output.txid).copied())
+            .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
             .collect::<Vec<_>>();
         while let Some(id) = stack.pop() {
             if ancestors.contains(&id) {
@@ -1644,8 +1672,8 @@ impl Mempool {
             ancestors.push(id);
             if let Some(entry) = self.entry(id) {
                 for input in &entry.tx.inputs {
-                    if let Some(parent) = self.by_txid.get(&input.previous_output.txid) {
-                        stack.push(*parent);
+                    if let Some(parent) = self.entry_id_by_txid(&input.previous_output.txid) {
+                        stack.push(parent);
                     }
                 }
             }
@@ -1789,7 +1817,7 @@ impl Mempool {
                 .tx
                 .inputs
                 .iter()
-                .any(|input| input.sequence < 0xFFFF_FFFE)
+                .any(|input| input.sequence.to_consensus() < 0xFFFF_FFFE)
         })
     }
 }
@@ -1917,11 +1945,11 @@ mod tests {
         let mut pool = Mempool::new(limits);
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let entry = MempoolEntry::new(Arc::new(tx), 100, 100, 1, 7);
@@ -1946,7 +1974,7 @@ mod tests {
 
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
@@ -1978,7 +2006,7 @@ mod tests {
         });
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![],
         };
@@ -2043,11 +2071,11 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let txid = tx.txid();
@@ -2065,7 +2093,7 @@ mod tests {
         });
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![],
         };
@@ -2093,7 +2121,7 @@ mod tests {
         });
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![],
         };
@@ -2130,21 +2158,21 @@ mod tests {
         });
         let tx_a = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![TxOut {
-                value: 100,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(100),
+                script_pubkey: Script::new(),
             }],
         };
         let txid_a = tx_a.txid();
         let tx_b = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![TxOut {
-                value: 200,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(200),
+                script_pubkey: Script::new(),
             }],
         };
         let txid_b = tx_b.txid();
@@ -2163,22 +2191,22 @@ mod tests {
         // Two distinct txs with different fee rates.
         let low_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let low_txid = low_tx.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7));
         let high_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x52].into(),
             }],
         };
         let high_txid = high_tx.txid();
@@ -2328,16 +2356,16 @@ mod tests {
         };
         let original = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prev,
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFD,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7))?;
@@ -2352,16 +2380,16 @@ mod tests {
 
         let replacement = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prev,
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFD,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 900,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(900),
+                script_pubkey: vec![0x52].into(),
             }],
         };
         pool.replace_transaction(
@@ -2384,21 +2412,21 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let low_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7)); // fee_rate = 1000
         let high_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x52].into(),
             }],
         };
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7)); // fee_rate = 100_000
@@ -2416,15 +2444,15 @@ mod tests {
         // RBF-signalled tx (sequence < 0xFFFFFFFE).
         let rbf_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint {
                     txid: txid_of([0xaa; 32]),
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: 0x0000_0001,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0x0000_0001),
+                witness: Witness::new(),
             }],
             outputs: Vec::new(),
         };
@@ -2433,15 +2461,15 @@ mod tests {
         // Non-RBF tx (sequence = MAX = 0xFFFFFFFF).
         let non_rbf_tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint {
                     txid: txid_of([0xbb; 32]),
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: 0xFF_FF_FF_FF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: Vec::new(),
         };
@@ -2459,7 +2487,7 @@ mod tests {
         let before = pool.sequence_number();
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
@@ -2475,11 +2503,11 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))?;
@@ -2515,24 +2543,24 @@ mod tests {
         };
         let spending = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![
                 TxIn {
                     previous_output: decoy,
-                    script_sig: Vec::new(),
-                    sequence: 0xFF_FF_FF_FF,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 },
                 TxIn {
                     previous_output: outpoint,
-                    script_sig: Vec::new(),
-                    sequence: 0xFF_FF_FF_FF,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 },
             ],
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let spending_txid = spending.txid();
@@ -2565,19 +2593,19 @@ mod tests {
         let other = vec![0x52];
         let funder = |script: Vec<u8>, tag: u8| Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint {
                     txid: txid_of([tag; 32]),
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: 0xFF_FF_FF_FF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: script,
+                value: Amount::from_sat(50_000),
+                script_pubkey: script.into(),
             }],
         };
         let matching_tx = funder(matching.clone(), 0xaa);
@@ -2638,16 +2666,16 @@ mod tests {
         };
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: unrelated,
-                script_sig: Vec::new(),
-                sequence: 0xFF_FF_FF_FF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let entry_txid = tx.txid();
@@ -2676,16 +2704,16 @@ mod tests {
         };
         let spender_tx = |fee: u64| Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: 0xFF_FF_FF_FF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: fee,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(fee),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let first = spender_tx(99_000);
@@ -2721,12 +2749,12 @@ mod tests {
         };
         let spending = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![],
         };
@@ -3296,11 +3324,11 @@ mod tests {
         });
         let low = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let low_txid = low.txid();
@@ -3308,11 +3336,11 @@ mod tests {
 
         let high = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x52].into(),
             }],
         };
         let high_txid = high.txid();
@@ -3335,11 +3363,11 @@ mod tests {
 
         let low = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let low_txid = low.txid();
@@ -3347,11 +3375,11 @@ mod tests {
 
         let high = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x52].into(),
             }],
         };
         let high_txid = high.txid();
@@ -3378,11 +3406,11 @@ mod tests {
         for nonce in 0..2_u32 {
             let tx = Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 1_000 + u64::from(nonce),
-                    script_pubkey: vec![0x51, u8::try_from(nonce).unwrap_or(0)],
+                    value: Amount::from_sat(1_000 + u64::from(nonce)),
+                    script_pubkey: vec![0x51, u8::try_from(nonce).unwrap_or(0)].into(),
                 }],
             };
             let fee = 100_u64.saturating_add(u64::from(nonce).saturating_mul(50));
@@ -3411,11 +3439,11 @@ mod tests {
         fn tx_paying(nonce: u8) -> Arc<Tx> {
             Arc::new(Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 1_000 + u64::from(nonce),
-                    script_pubkey: vec![0x51, nonce],
+                    value: Amount::from_sat(1_000 + u64::from(nonce)),
+                    script_pubkey: vec![0x51, nonce].into(),
                 }],
             })
         }
@@ -3493,16 +3521,16 @@ mod tests {
         // Original: 100 vbytes, low fee rate (100 sat/vbyte).
         let original = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prev,
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFD,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
             }],
         };
         let original_txid = original.txid();
@@ -3525,16 +3553,16 @@ mod tests {
         // lowest-fee-rate entry — the replacement itself.
         let replacement = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prev,
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFD,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 100,
-                script_pubkey: vec![0x52],
+                value: Amount::from_sat(100),
+                script_pubkey: vec![0x52].into(),
             }],
         };
         let replacement_txid = replacement.txid();
@@ -3887,19 +3915,19 @@ mod tests {
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: previous_outputs
                 .into_iter()
                 .map(|previous_output| TxIn {
                     previous_output,
-                    script_sig: Vec::new(),
-                    sequence: 0xFF_FF_FF_FF,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: vec![TxOut {
-                value: 5_000 + u64::from(label),
-                script_pubkey: vec![label],
+                value: Amount::from_sat(5_000 + u64::from(label)),
+                script_pubkey: vec![label].into(),
             }],
         }
     }
@@ -3923,22 +3951,24 @@ mod spend_index_tests {
     fn tx_with(inputs: &[OutPoint], outputs: u32, tag: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: inputs
                 .iter()
                 .map(|previous_output| TxIn {
                     previous_output: *previous_output,
-                    script_sig: Vec::new(),
-                    sequence: 0xFF_FF_FF_FF,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: (0..outputs)
                 .map(|vout| TxOut {
-                    value: 10_000_u64
-                        .saturating_add(u64::from(vout))
-                        .saturating_add(tag.saturating_mul(1_000)),
-                    script_pubkey: alloc::vec![0x51],
+                    value: Amount::from_sat(
+                        10_000_u64
+                            .saturating_add(u64::from(vout))
+                            .saturating_add(tag.saturating_mul(1_000)),
+                    ),
+                    script_pubkey: alloc::vec![0x51].into(),
                 })
                 .collect(),
         }
@@ -4227,7 +4257,7 @@ mod spend_index_tests {
         let root = tx_with(&[confirmed], 2, 1);
         let root_txid = root.txid();
         let mut a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
-        a.inputs[0].sequence = 0xFFFF_FFFD;
+        a.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let a_txid = a.txid();
         let b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
 
@@ -4319,7 +4349,7 @@ mod spend_index_tests {
         let root = tx_with(&[confirmed], 2, 1);
         let root_txid = root.txid();
         let mut a = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
-        a.inputs[0].sequence = 0xFFFF_FFFD;
+        a.inputs[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
         let a_txid = a.txid();
         let b = tx_with(&[OutPoint::new(root_txid, 1)], 1, 3);
 
@@ -4479,16 +4509,16 @@ mod dynamic_memory_usage_tests {
     fn tx_with(script_len: usize, tag: u8) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: alloc::vec![TxIn {
                 previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[tag; 32])), 0,),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: alloc::vec![TxOut {
-                value: 10_000,
-                script_pubkey: alloc::vec![0x51; script_len],
+                value: Amount::from_sat(10_000),
+                script_pubkey: alloc::vec![0x51; script_len].into(),
             }],
         }
     }
@@ -4667,7 +4697,7 @@ mod entry_overhead_tests {
         Tx {
             version: 2,
             // The only thing distinguishing them, so they get distinct txids.
-            lock_time: tag,
+            lock_time: LockTime::from_consensus(tag),
             inputs: alloc::vec::Vec::new(),
             outputs: alloc::vec::Vec::new(),
         }

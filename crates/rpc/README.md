@@ -2,7 +2,7 @@
 
 The synchronous, Bitcoin Core-compatible JSON-RPC and REST surface of the node: method dispatch, HTTP Basic and cookie authentication, and a wallet-free method surface — every RPC that would require private key material is simply absent.
 
-`RpcServer::bind` binds a TCP listener and `serve` (or `serve_with_shutdown` for controlled shutdown) runs the blocking accept loop, handing each connection to a bounded worker thread under a per-connection idle timeout. Each request is authenticated by `Auth`, then matched to a Core-compatible handler by `Handler::dispatch`, which reads shared node state through the dependency-injected `Context` — the boundary carrying `ChainControl` consensus-affecting operations, `PruneService`, `TxIndexQuery`, `NetworkState`, and `ZmqNotification`. Failures map to JSON-RPC error codes through `RpcError`, and Bitcoin Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are not implemented and answer `method not found`, while PSBT combination and finalization remain available because they are driven by external signers without this process holding private key material.
+`RpcServer::bind` binds a TCP listener and `serve` (or `serve_with_shutdown` for controlled shutdown) runs the blocking accept loop, handing each connection to a bounded worker thread under a per-connection idle timeout. Each request is authenticated by `Auth`, then matched to a Core-compatible handler by `Handler::dispatch`, which reads shared node state through the dependency-injected `Context` — the boundary carrying `ChainControl` consensus-affecting operations, `PruneService`, `TxIndexQuery`, `NetworkState`, and the live `ZmqPublisher`. Failures map to JSON-RPC error codes through `RpcError`, and Bitcoin Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are not implemented and answer `method not found`, while PSBT combination and finalization remain available because they are driven by external signers without this process holding private key material.
 
 ## Capability boundary
 
@@ -40,7 +40,7 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 - **Cursor Pagination**: Use immutable hash cursors (`last_seen_txid`, block hashes) rather than integer offsets for volatile datasets.
 
 ### 4. Non-blocking event notifications
-- **ZMQ Framing**: ZeroMQ notifications (`ZmqPublisher` in `crates/node/src/zmq_publisher.rs`) emit 3-part multipart frames `[topic, body, 4-byte LE sequence]`.
+- **ZMQ Framing**: ZeroMQ notifications (`ZmqPublisher` in `crates/rpc/src/zmq.rs`) emit 3-part multipart frames `[topic, body, 4-byte LE sequence]`.
 - **Non-Blocking Delivery**: Socket writes must use non-blocking sends (`zmq::DONTWAIT`). Notification buffer saturation must drop messages at the high-water mark rather than stalling block validation or consensus execution.
 - **Reorg Sequencing & Notification Order**: Chain-transition rollback and admission orchestration in `crates/node/src/apply.rs` guarantees block disconnect events (`D`, published during rollback) are emitted before block connect events (`C`, published in `apply_block_admitted`).
 
