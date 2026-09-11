@@ -447,16 +447,23 @@ fn client_supports_rule(rules: &[MiningRule], name: &str) -> bool {
     rules.iter().any(|rule| rule.as_str() == name)
 }
 
-/// Core refuses template assembly until the client lists `segwit`, and
-/// `signet` on signet. Proposal mode returns before these checks.
+pub(crate) fn required_gbt_rules(network: Network) -> &'static [&'static str] {
+    match network {
+        Network::Signet => &["segwit", "signet"],
+        _ => &["segwit"],
+    }
+}
+
+/// Enforces the GBT client-rule negotiation contract (API-10).
 fn ensure_client_rules_for_template(
     network: Network,
     client_rules: &[MiningRule],
 ) -> Result<(), RpcError> {
-    if network == Network::Signet && !client_supports_rule(client_rules, "signet") {
+    let required = required_gbt_rules(network);
+    if required.contains(&"signet") && !client_supports_rule(client_rules, "signet") {
         return Err(RpcError::InvalidParameter(GBT_REQUIRE_SIGNET.to_owned()));
     }
-    if !client_supports_rule(client_rules, "segwit") {
+    if required.contains(&"segwit") && !client_supports_rule(client_rules, "segwit") {
         return Err(RpcError::InvalidParameter(GBT_REQUIRE_SEGWIT.to_owned()));
     }
     Ok(())
@@ -970,6 +977,7 @@ mod tests {
         // GetBlockTemplate contract and are no longer emitted.
     }
 
+    /// API-10: signet must be advertised alongside segwit on signet.
     #[test]
     fn getblocktemplate_requires_signet_rule_on_signet() {
         let mut template = sample_template();
@@ -994,6 +1002,7 @@ mod tests {
         assert!(rules.iter().any(|rule| rule.as_str() == Some("!signet")));
     }
 
+    /// API-10: a template-listed mandatory rule requires explicit client support.
     #[test]
     fn getblocktemplate_rejects_template_mandatory_rule_without_client_support() {
         let mut template = sample_template();
@@ -1011,6 +1020,7 @@ mod tests {
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
 
+    /// API-10: segwit is the base client rule for template mode.
     #[test]
     fn getblocktemplate_rejects_missing_segwit_rule() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1030,6 +1040,7 @@ mod tests {
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
     }
 
+    /// API-10: proposal mode skips client-rule negotiation.
     #[test]
     fn getblocktemplate_proposal_skips_client_rule_negotiation() {
         let control = FakeMiningControl::with_template(sample_template());

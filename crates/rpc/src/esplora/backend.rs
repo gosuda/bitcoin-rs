@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{Network, OutPoint, Txid};
+use bitcoin_rs_primitives::{OutPoint, Txid};
 
 use super::http::{bad, dispatch_error, json_response, query_limit};
 use super::model::{Outspend, TransactionValue};
@@ -15,6 +15,7 @@ use super::projection::Projection;
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
 use crate::context::Context;
 use crate::handlers::Handler;
+use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
 use sonic_rs::json as sonic_json;
 
@@ -224,11 +225,8 @@ fn internal_outspend(
 }
 
 fn block_template(handler: &Handler) -> Response {
-    let request = if handler.context().chain_network == Network::Signet {
-        sonic_json!([{"rules": ["segwit", "signet"]}])
-    } else {
-        sonic_json!([{"rules": ["segwit"]}])
-    };
+    let rules = required_gbt_rules(handler.context().chain_network);
+    let request = sonic_json!([{"rules": rules}]);
     handler
         .dispatch("getblocktemplate", &request)
         .map_or_else(dispatch_error, json_response)
