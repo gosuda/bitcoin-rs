@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Export pinned source and current reorg branch
+      - name: Export refreshed source including query ownership
         shell: bash
         run: |
           set -euo pipefail
