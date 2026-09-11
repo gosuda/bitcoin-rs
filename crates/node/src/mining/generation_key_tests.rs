@@ -3,6 +3,8 @@ use super::parse_long_poll_id;
 use bitcoin_rs_mining::TemplateId;
 use bitcoin_rs_primitives::Hash256;
 
+// Contract: `TemplateId` documents the BIP22/BIP23 longpollid encoding and
+// `GenerationKey::template_id` is its node-side producer.
 #[test]
 fn long_poll_round_trips_template_id() {
     let tip = Hash256::from_le_bytes(&[0x11; 32]);
@@ -18,6 +20,8 @@ fn long_poll_round_trips_template_id() {
     assert_eq!(TemplateId::new(&tip, 7).as_str(), id.as_str());
 }
 
+// Contract: `hashes_per_second` reports work per elapsed second and returns
+// zero for non-positive durations, as specified by its function contract.
 #[test]
 fn hashes_per_second_divides_work_by_elapsed_seconds() {
     let mut work = [0_u8; 32];

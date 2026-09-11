@@ -2,6 +2,8 @@ use super::BlockValidationResult;
 use super::map_apply_error;
 use crate::apply::error::ApplyError;
 
+// Contract: `MiningCoordinator::map_apply_error` treats journal pressure as a
+// retryable operational condition, rather than a block rejection.
 #[test]
 fn journal_backpressure_is_operational() {
     assert!(matches!(
@@ -10,6 +12,8 @@ fn journal_backpressure_is_operational() {
     ));
 }
 
+// Contract: `bitcoin_rs_consensus::ConsensusError::CoinbaseAmount` documents
+// Bitcoin Core's `bad-cb-amount` consensus result.
 #[test]
 fn coinbase_amount_is_bad_cb_amount() {
     assert!(matches!(

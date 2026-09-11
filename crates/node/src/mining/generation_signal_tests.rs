@@ -69,6 +69,8 @@ impl MempoolSequenceWake for RecordingControl {
     }
 }
 
+// Contract: `MiningGenerationSignal`'s public methods document detached
+// no-op behavior, forwarding, and the lock-free sequence-wake fallback.
 #[test]
 fn detached_signal_is_a_noop() {
     let signal = MiningGenerationSignal::new();

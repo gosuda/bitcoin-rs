@@ -6,6 +6,8 @@ use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::TxOut;
 
+// Contract: `CANDIDATE_CACHE_LIMIT` and `CoordinatorState::cache_insert` in
+// `crates/node/src/mining.rs` define the bounded oldest-entry eviction policy.
 #[test]
 fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
     use alloc::sync::Arc;
@@ -116,6 +118,8 @@ fn template_for(
     )
 }
 
+// Contract: BIP22/BIP23 response fields and capability names are documented by
+// `MiningCoordinator::template_from_candidate` and the mining RPC registry.
 #[test]
 fn template_facts_follow_mutated_candidate_generation() {
     use bitcoin_rs_mining::MiningRule;
@@ -156,6 +160,8 @@ fn template_facts_follow_mutated_candidate_generation() {
     assert!(first.signet.is_none());
 }
 
+// Contract: signet challenge and the mandatory `signet` rule are the
+// BIP22/BIP23 template fields implemented by `template_from_candidate`.
 #[test]
 fn signet_template_carries_challenge_and_mandatory_rule() {
     use bitcoin_rs_mining::MiningRule;
@@ -189,6 +195,8 @@ fn signet_template_carries_challenge_and_mandatory_rule() {
     );
 }
 
+// Contract: deployment names correspond to the BIP68/112/113, BIP141 and
+// BIP341 activation flags documented on `Candidate` and `MiningRule`.
 #[test]
 fn deployment_boundary_rules_follow_candidate_flags() {
     use bitcoin_rs_mining::MiningRule;
