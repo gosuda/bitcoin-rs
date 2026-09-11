@@ -16,7 +16,8 @@ vocabulary. `API-19` is BIP22 reject-reason mapping. `API-20` is GBT
 reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 `prioritisetransaction` dummy/`fee_delta` arity. `API-24` is
 `prioritisetransaction` dust-output refusal. `API-25` is
-`getmininginfo` omitting unset optional fields.
+`getmininginfo` omitting unset optional fields. `API-26` is
+`estimatesmartfee` Core `conf_target` and `estimate_mode` gates.
 
 ## Clauses
 
@@ -404,6 +405,19 @@ owned by [wallet-facing.md](wallet-facing.md).
   only when set. Unset optionals are omitted, not JSON `null`.
 - Projection uses `typed_to_sonic_omitting_nulls`.
 
+
+### `API-26`: `estimatesmartfee` Core `conf_target` and `estimate_mode`
+
+- **Owner**: `estimatesmartfee` in `crates/rpc/src/handlers/util.rs`.
+- `conf_target` must be in `1..=1008` (Core `MAX_CONFIRM_TARGET`). Otherwise
+  `-8` `Invalid conf_target, must be between 1 and 1008`.
+- `estimate_mode` is optional, case-insensitive `UNSET` / `ECONOMICAL` /
+  `CONSERVATIVE` (Core `FeeModeFromString`). Unknown strings are `-8`
+  `Invalid estimate_mode parameter, must be UNSET, ECONOMICAL or
+  CONSERVATIVE`. A non-string is `-3`. Accepted modes are parsed only;
+  this node's estimator has one horizon.
+- Trailing parameters are refused.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -558,6 +572,10 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getmininginfo_can_include_signet_challenge`,
     `getmininginfo_projects_control_state`
 
+- `API-26`:
+  - `crates/rpc/src/handlers/util.rs` tests
+    `estimatesmartfee_rejects_conf_target_outside_core_range`,
+    `estimatesmartfee_rejects_unknown_estimate_mode`,
+    `estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing`
+
 ## Vocabulary
-
-
