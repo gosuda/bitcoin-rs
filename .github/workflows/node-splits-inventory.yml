@@ -1,0 +1,57 @@
+name: Current node split inventory
+on:
+  push:
+    branches: [automation/node-splits-finish-20260911]
+    paths: [.github/workflows/node-splits-inventory.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: a1178cc884e42b953a041d0c139bc47814b7ccae
+          persist-credentials: false
+      - name: Install pinned syntax reader
+        run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+      - name: List production items without test bodies
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,re
+          import tree_sitter,tree_sitter_rust
+          parser=tree_sitter.Parser(tree_sitter.Language(tree_sitter_rust.language()))
+          for p in sorted(Path('crates/node/src').rglob('*.rs')):
+              if 'tests' in p.parts or 'tests' in p.stem or p.parts[3] in ('apply','sync','mining'):
+                  continue
+              data=p.read_bytes()
+              if data.count(b'\n')<600:
+                  continue
+              tree=parser.parse(re.sub(rb'&(\s*)raw\b(?!\s+(?:const|mut)\b)',lambda m:b'&'+m[1]+b'r_w',data))
+              print('\nFILE',str(p),'LINES',data.count(b'\n'))
+              attrs=[]
+              for n in tree.root_node.named_children:
+                  if n.type=='attribute_item':
+                      attrs.append(n.text);continue
+                  if n.type in ('line_comment','block_comment','inner_attribute_item'):
+                      continue
+                  test=bool(re.search(rb'cfg\([^\]]*\btest\b',b' '.join(attrs)))
+                  attrs=[]
+                  if n.type in ('use_declaration','extern_crate_declaration') or test:
+                      continue
+                  name=n.child_by_field_name('name')
+                  if n.type=='impl_item':
+                      target=n.child_by_field_name('type'); trait=n.child_by_field_name('trait')
+                      body=n.child_by_field_name('body')
+                      names=[c.child_by_field_name('name').text.decode() for c in body.named_children if c.type=='function_item']
+                      print(n.start_point.row+1,'impl',target.text.decode(),('trait '+trait.text.decode()) if trait else '',json.dumps(names))
+                  elif name:
+                      print(n.start_point.row+1,n.type,name.text.decode())
+          print('\nSCANNER OWNERS')
+          p=Path('bin/bitcoin-rs/tests/support/ownership_scan.rs')
+          for no,line in enumerate(p.read_text().splitlines(),1):
+              if 'crates/node/src' in line:
+                  print(no,line)
+          PY
