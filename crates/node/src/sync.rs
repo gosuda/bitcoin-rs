@@ -1438,6 +1438,32 @@ impl BlockSync {
         );
     }
 
+    /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.
+    /// Keep fallible ancestry navigation separate from request publication.
+    fn first_connect_height(
+        tree: &bitcoin_rs_chain::BlockTree,
+        applied_hash: Hash256,
+        target: bitcoin_rs_chain::NodeId,
+    ) -> Option<u32> {
+        let applied_id = tree.lookup(applied_hash)?;
+        let height = tree.node(applied_id).ok()?.height;
+        let successor = if tree.node_at_height_from(target, height) == Some(applied_id) {
+            height
+                .checked_add(1)
+                .and_then(|height| tree.node_at_height_from(target, height))
+        } else {
+            None
+        };
+        let first = successor.or_else(|| {
+            plan_reorg(tree, applied_id, target)
+                .ok()?
+                .connect
+                .first()
+                .copied()
+        })?;
+        Some(tree.node(first).ok()?.height)
+    }
+
     fn send_getdata_for_pending_blocks(
         &self,
         sync_peer_addr: SocketAddr,
@@ -1448,40 +1474,11 @@ impl BlockSync {
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
         let tree = self.handles.block_tree.read();
-        let Some(applied_id) = tree.lookup(applied_tip.hash) else {
+        let Some(request_start_height) =
+            Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)
+        else {
             return GetdataRequestOutcome::default();
         };
-        let Ok(applied_node) = tree.node(applied_id) else {
-            return GetdataRequestOutcome::default();
-        };
-        // Only the first connect height is needed by the bounded scheduler.
-        // On linear IBD, use the existing ancestry index rather than building
-        // and discarding a connect Vec proportional to the full header gap.
-        let successor = if tree.node_at_height_from(chain_tip.tip_id, applied_node.height)
-            == Some(applied_id)
-        {
-            applied_node
-                .height
-                .checked_add(1)
-                .and_then(|height| tree.node_at_height_from(chain_tip.tip_id, height))
-        } else {
-            None
-        };
-        let first_connect = if let Some(successor) = successor {
-            successor
-        } else {
-            let Ok(plan) = plan_reorg(&tree, applied_id, chain_tip.tip_id) else {
-                return GetdataRequestOutcome::default();
-            };
-            let Some(first_connect) = plan.connect.first().copied() else {
-                return GetdataRequestOutcome::default();
-            };
-            first_connect
-        };
-        let Ok(first_connect) = tree.node(first_connect) else {
-            return GetdataRequestOutcome::default();
-        };
-        let request_start_height = first_connect.height;
 
         let mut window = self.download_window.lock();
         let request = window.next_peer_request(
@@ -2049,6 +2046,28 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    // SYNC-FRONTIER-01: an invalidated height index must preserve the
+    // unchanged parent-plan result even when public node_mut leaves a gap.
+    #[test]
+    fn request_frontier_retains_parent_plan_on_height_gaps()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
+        let root_hash = tree.node(root)?.hash;
+        let header = test_header(BlockHash::from(root_hash), 1);
+        let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;
+        tree.node_mut(child)?.height = 2;
+        let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;
+        let [first] = plan.connect.as_slice() else {
+            return Err("expected one connect node".into());
+        };
+        assert_eq!(
+            BlockSync::first_connect_height(&tree, root_hash, child),
+            Some(tree.node(*first)?.height),
+        );
         Ok(())
     }
 
