@@ -347,7 +347,8 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     } else {
         32 + 4 + 1 + 107 + 4 + 8 + script_size
     };
-    let product = dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
+    let product =
+        dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
     product.saturating_add(999) / 1000
 }
 
