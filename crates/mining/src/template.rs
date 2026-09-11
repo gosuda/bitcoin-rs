@@ -1,12 +1,13 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::compute_merkle_root;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, Tx, Txid, Wtxid, encode::double_sha256,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
+    encode::double_sha256,
 };
+use hashbrown::HashMap;
 
 use crate::MiningError;
 use crate::coinbase::{WITNESS_RESERVED_VALUE, build_coinbase};
@@ -25,7 +26,7 @@ pub struct CandidateContext {
     /// Versionbits candidate version.
     pub version: i32,
     /// Compact target the candidate header must carry (`nBits`).
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Earliest legal timestamp (previous MTP + 1).
     pub min_time: u32,
     /// Candidate header time used for the template clock.
@@ -119,7 +120,7 @@ pub struct Candidate {
     /// Candidate version.
     pub version: i32,
     /// Compact target bits.
-    pub bits: u32,
+    pub bits: CompactTarget,
     /// Minimum legal timestamp.
     pub min_time: u32,
     /// Candidate creation time.
@@ -273,7 +274,7 @@ fn coinbase_reservation(
         context.height,
         context.network.subsidy_halving_interval(),
         0,
-        payout.to_vec(),
+        payout,
         context.segwit_active.then_some(&dummy_commitment),
     )?;
     let size = u64::try_from(reservation.total_size()).map_err(|_| {
@@ -359,13 +360,13 @@ fn finish_candidate(
         context.height,
         context.network.subsidy_halving_interval(),
         body.fees,
-        payout.to_vec(),
+        payout,
         witness_commitment.as_ref(),
     )?;
     let coinbase_value = coinbase
         .outputs
         .first()
-        .map(|output| output.value)
+        .map(|output| output.value.to_sat())
         .ok_or(MiningError::CoinbaseValueOverflow)?;
     // Fees change a fixed-width amount and the witness commitment replaces a
     // fixed-width hash, so the reservation and final coinbase have the same
@@ -418,7 +419,7 @@ fn candidate_transactions(
     snapshot: &MempoolMiningSnapshot,
     ordered: &[usize],
 ) -> Result<Vec<CandidateTransaction>, MiningError> {
-    let mut tx_positions = BTreeMap::<Txid, u32>::new();
+    let mut tx_positions = HashMap::<Txid, u32>::with_capacity(ordered.len());
     for (offset, &index) in ordered.iter().enumerate() {
         let position = u32::try_from(offset.saturating_add(1)).map_err(|_| {
             MiningError::CandidateScalarOverflow {
@@ -447,7 +448,7 @@ fn candidate_transactions(
     Ok(transactions)
 }
 
-fn depends(tx: &Tx, tx_positions: &BTreeMap<Txid, u32>) -> Vec<u32> {
+fn depends(tx: &Tx, tx_positions: &HashMap<Txid, u32>) -> Vec<u32> {
     let mut depends = tx
         .inputs
         .iter()
