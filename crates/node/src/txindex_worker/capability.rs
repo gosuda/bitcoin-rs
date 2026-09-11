@@ -1,6 +1,10 @@
 //! Txindex lifecycle/progress projection for RPC capability reporting.
 
-use super::*;
+use super::{
+    Arc, ArcSwap, CapabilityState, CapabilityStatus, IndexCapabilities, IndexProgress,
+    TxIndexCapabilitySource, TxIndexLifecycle, TxIndexQueryEngine, TxIndexRuntime, TxQueryError,
+    txindex_status,
+};
 
 /// Progress reads that raced a tip or revision move before the status
 /// report gives up on a coherent answer for this snapshot.

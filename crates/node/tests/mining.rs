@@ -124,6 +124,21 @@ fn to_lower_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed`.
+const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+
+fn is_witness_commitment(script_pubkey: &[u8]) -> bool {
+    script_pubkey.len() >= 38 && script_pubkey.starts_with(&WITNESS_COMMITMENT_PREFIX)
+}
+
+fn solved_template_block(mining: &MiningCoordinator) -> anyhow::Result<Block> {
+    let template = expect_template(mining.get_block_template(template_request(None))?);
+    template
+        .candidate
+        .solve(1_000_000)
+        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))
+}
+
 fn mined_child(prev: BlockHash) -> anyhow::Result<Block> {
     mined_child_labeled(prev, 1)
 }
@@ -568,10 +583,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     })?;
     match result {
         BlockTemplateResult::Proposal(BlockValidationResult::Rejected(reason)) => {
-            assert!(
-                reason.contains("bad-cb-amount"),
-                "unexpected rejection reason: {reason}"
-            );
+            assert_eq!(reason.as_str(), "bad-cb-amount");
         }
         other => panic!("expected bad-cb-amount proposal rejection, got {other:?}"),
     }
@@ -583,6 +595,145 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     assert_eq!(before.hash, after.hash);
     assert_eq!(before_seq, state.mempool().read().sequence_number());
     assert_eq!(before_blocks, state.blocks().read().len());
+    Ok(())
+}
+
+#[test]
+fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let mut block = mined_child(genesis.block_hash())?;
+    let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+        panic!("child missing coinbase input");
+    };
+    input.previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0);
+    block.header.merkle_root = block_merkle_root(&block);
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-cb-missing");
+        }
+        other => panic!("expected bad-cb-missing, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let mut block = mined_child(genesis.block_hash())?;
+    block.header.merkle_root = Hash256::from_le_bytes(&[0x11; 32]);
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-txnmrklroot");
+        }
+        other => panic!("expected bad-txnmrklroot, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let mut block = solved_template_block(&mining)?;
+    {
+        let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+            panic!("solved candidate missing coinbase input");
+        };
+        assert!(
+            !input.witness.is_empty(),
+            "assembled candidate must carry the reserved nonce"
+        );
+        input.witness.clear();
+    }
+    assert!(
+        block.txs.first().is_some_and(|tx| tx
+            .outputs
+            .iter()
+            .any(|output| is_witness_commitment(&output.script_pubkey))),
+        "assembled candidate must carry a BIP141 commitment"
+    );
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-witness-nonce-size");
+        }
+        other => panic!("expected bad-witness-nonce-size, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let mut block = solved_template_block(&mining)?;
+    {
+        let Some(coinbase) = block.txs.first_mut() else {
+            panic!("solved candidate missing coinbase");
+        };
+        assert!(
+            coinbase
+                .inputs
+                .first()
+                .is_some_and(|input| !input.witness.is_empty()),
+            "assembled candidate must carry the reserved nonce"
+        );
+        coinbase
+            .outputs
+            .retain(|output| !is_witness_commitment(&output.script_pubkey));
+        assert!(
+            !coinbase.outputs.is_empty(),
+            "coinbase must keep a payout output after stripping the commitment"
+        );
+    }
+    block.header.merkle_root = block_merkle_root(&block);
+    mine_block_to_regtest_target(&mut block)?;
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "unexpected-witness");
+        }
+        other => panic!("expected unexpected-witness, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
+fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let mut block = solved_template_block(&mining)?;
+    {
+        let Some(output) = block.txs.first_mut().and_then(|tx| {
+            tx.outputs
+                .iter_mut()
+                .rev()
+                .find(|output| is_witness_commitment(&output.script_pubkey))
+        }) else {
+            panic!("solved candidate missing BIP141 commitment");
+        };
+        output.script_pubkey[6] ^= 0xff;
+    }
+    block.header.merkle_root = block_merkle_root(&block);
+    mine_block_to_regtest_target(&mut block)?;
+    match propose_block(&mining, block)? {
+        BlockValidationResult::Rejected(reason) => {
+            assert_eq!(reason.as_str(), "bad-witness-merkle-match");
+        }
+        other => panic!("expected bad-witness-merkle-match, got {other:?}"),
+    }
     Ok(())
 }
 
@@ -603,6 +754,43 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
         .unwrap_or_else(|| panic!("applied tip missing after submit"));
     assert_eq!(tip.hash, Hash256::from(child_hash));
     assert_eq!(tip.height, 1);
+    Ok(())
+}
+
+#[test]
+fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let template = expect_template(mining.get_block_template(template_request(None))?);
+    let mut block = template
+        .candidate
+        .solve(1_000_000)
+        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))?;
+    let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+        panic!("solved candidate missing coinbase input");
+    };
+    assert!(
+        !input.witness.is_empty(),
+        "assembled candidate must carry the reserved nonce"
+    );
+    input.witness.clear();
+    let has_commitment = block.txs[0]
+        .outputs
+        .iter()
+        .any(|output| is_witness_commitment(&output.script_pubkey));
+    assert!(
+        has_commitment,
+        "assembled candidate must carry a BIP141 commitment"
+    );
+    let block_hash = block.block_hash();
+    assert_eq!(mining.submit_block(block)?, BlockValidationResult::Accepted);
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after submit"));
+    assert_eq!(tip.hash, Hash256::from(block_hash));
     Ok(())
 }
 
@@ -844,6 +1032,7 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec!["proposal", "longpoll"]
     );
+    assert_eq!(template.version_bits_required, 0);
     assert!(template.signet.is_none());
     Ok(())
 }
@@ -1000,8 +1189,39 @@ fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn propose_block(
+    mining: &MiningCoordinator,
+    block: Block,
+) -> anyhow::Result<BlockValidationResult> {
+    match mining.get_block_template(BlockTemplateRequest {
+        mode: BlockTemplateMode::Proposal(block),
+        capabilities: Vec::new(),
+        rules: Vec::new(),
+        long_poll_id: None,
+    })? {
+        BlockTemplateResult::Proposal(result) => Ok(result),
+        other @ BlockTemplateResult::Template(_) => {
+            panic!("expected a proposal result, got {other:?}")
+        }
+    }
+}
+
 #[test]
-fn known_invalid_submit_is_duplicate_invalid() -> anyhow::Result<()> {
+fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    assert_eq!(
+        propose_block(&mining, genesis)?,
+        BlockValidationResult::Duplicate
+    );
+    Ok(())
+}
+
+#[test]
+fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1022,30 +1242,14 @@ fn known_invalid_submit_is_duplicate_invalid() -> anyhow::Result<()> {
             .insert_node(Some(genesis_id), invalid.header, NodeStatus::Invalid)?;
     }
     assert_eq!(
-        mining.submit_block(invalid)?,
+        propose_block(&mining, invalid)?,
         BlockValidationResult::DuplicateInvalid
     );
     Ok(())
 }
 
 #[test]
-fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
-    mining.publish_generation();
-    let genesis = Network::Regtest.genesis_block();
-    let child = mined_child(genesis.block_hash())?;
-    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
-    assert_eq!(
-        mining.submit_block(genesis)?,
-        BlockValidationResult::Duplicate
-    );
-    Ok(())
-}
-
-#[test]
-fn known_non_active_submit_is_duplicate_inconclusive() -> anyhow::Result<()> {
+fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1066,8 +1270,43 @@ fn known_non_active_submit_is_duplicate_inconclusive() -> anyhow::Result<()> {
             .insert_node(Some(genesis_id), side.header, NodeStatus::HeaderValid)?;
     }
     assert_eq!(
-        mining.submit_block(side)?,
+        propose_block(&mining, side)?,
         BlockValidationResult::DuplicateInconclusive
+    );
+    Ok(())
+}
+
+#[test]
+fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    let child_hash = Hash256::from(child.block_hash());
+    mining.submit_header(child.header)?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    let tip = state
+        .applied_tip()
+        .load_full()
+        .unwrap_or_else(|| panic!("applied tip missing after submit"));
+    assert_eq!(tip.hash, child_hash);
+    Ok(())
+}
+
+#[test]
+fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
+    assert_eq!(
+        mining.submit_block(genesis)?,
+        BlockValidationResult::Duplicate
     );
     Ok(())
 }

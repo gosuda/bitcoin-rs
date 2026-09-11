@@ -60,6 +60,7 @@ pub fn verify_block_rules_precomputed(
     has_witness: bool,
 ) -> Result<(), ConsensusError> {
     debug_assert_eq!(has_witness, block_has_witness(block));
+    let _ = has_witness;
     let txdata = &block.txs;
     if txdata.is_empty() {
         return Err(ConsensusError::EmptyBlock);
@@ -76,16 +77,7 @@ pub fn verify_block_rules_precomputed(
         }
     }
     verify_merkle_root_with_txids(block, txids)?;
-    if context.segwit_active && has_witness {
-        debug_assert_eq!(
-            wtxids.len(),
-            txdata.len(),
-            "witness-carrying blocks need one cached wtxid per transaction"
-        );
-        if !block_witness_commitment_matches(block, wtxids) {
-            return Err(ConsensusError::WitnessCommitment);
-        }
-    }
+    check_witness_malleation(block, context.segwit_active, wtxids)?;
     let weight = block.weight();
     if weight > MAX_BLOCK_WEIGHT {
         return Err(ConsensusError::BlockWeight {
@@ -332,29 +324,56 @@ pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
         .map(|output| &output.script_pubkey[6..38])
 }
 
-/// Checks the block witness commitment using precomputed transaction witness identities.
+/// Core `CheckWitnessMalleation`.
+///
+/// When `SegWit` is active and the coinbase has a BIP141 commitment, the
+/// coinbase witness must be a single 32-byte reserved nonce and the
+/// commitment must match. Witness data without a commitment, or before
+/// `SegWit`, is `unexpected-witness`.
+///
+/// `wtxids` must contain one witness ID per block transaction in block order
+/// when a commitment is present and the reserved nonce is well-formed.
+pub fn check_witness_malleation(
+    block: &Block,
+    expect_commitment: bool,
+    wtxids: &[Wtxid],
+) -> Result<(), ConsensusError> {
+    if expect_commitment {
+        if let Some(commitment) = witness_commitment(block) {
+            let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
+                return Err(ConsensusError::WitnessNonceSize);
+            };
+            if input.witness.len() != 1 || input.witness[0].len() != 32 {
+                return Err(ConsensusError::WitnessNonceSize);
+            }
+            if !witness_commitment_hash_matches(block, wtxids, commitment, &input.witness[0]) {
+                return Err(ConsensusError::WitnessCommitment);
+            }
+            return Ok(());
+        }
+    }
+    if block_has_witness(block) {
+        return Err(ConsensusError::UnexpectedWitness);
+    }
+    Ok(())
+}
+
+/// Returns whether the block's BIP141 commitment matches `wtxids`.
+///
+/// Callers that already require a commitment (window precheck under active
+/// `SegWit` with witness data) use this as a boolean. Full consensus uses
+/// [`check_witness_malleation`].
 #[must_use]
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
-    let Some(commitment) = witness_commitment(block) else {
-        return false;
-    };
-    // BIP141: coinbase witness must have exactly one 32-byte element (the reserved value).
-    let Some(input) = block
-        .txs
-        .first()
-        .and_then(|coinbase| coinbase.inputs.first())
-    else {
-        return false;
-    };
-    if input.witness.len() != 1 {
-        return false;
-    }
-    let reserved = &input.witness[0];
-    if reserved.len() != 32 {
-        return false;
-    }
+    check_witness_malleation(block, true, wtxids).is_ok()
+}
 
-    // Build witness merkle leaves: coinbase leaf is all-zero (its wtxid is zero per BIP141).
+fn witness_commitment_hash_matches(
+    block: &Block,
+    wtxids: &[Wtxid],
+    commitment: &[u8],
+    reserved: &[u8],
+) -> bool {
     if wtxids.len() != block.txs.len() {
         return false;
     }
@@ -500,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn contextual_rules_skip_bip141_commitment_before_segwit_activation() {
+    fn contextual_rules_reject_witness_before_segwit_activation() {
         let block = block_with_transactions(vec![coinbase_tx(), witness_spend_tx()]);
 
         assert_eq!(
@@ -510,7 +529,7 @@ mod tests {
                     segwit_active: false,
                 },
             ),
-            Ok(())
+            Err(ConsensusError::UnexpectedWitness)
         );
     }
 
@@ -525,7 +544,7 @@ mod tests {
                     segwit_active: true,
                 },
             ),
-            Err(ConsensusError::WitnessCommitment)
+            Err(ConsensusError::UnexpectedWitness)
         );
     }
 
@@ -676,7 +695,7 @@ mod tests {
                     segwit_active: true
                 }
             ),
-            Err(ConsensusError::WitnessCommitment)
+            Err(ConsensusError::WitnessNonceSize)
         );
 
         // 31-byte element → rejected.
@@ -688,7 +707,7 @@ mod tests {
                     segwit_active: true
                 }
             ),
-            Err(ConsensusError::WitnessCommitment)
+            Err(ConsensusError::WitnessNonceSize)
         );
 
         // Two elements (both 32 bytes) → rejected.
@@ -700,7 +719,7 @@ mod tests {
                     segwit_active: true
                 }
             ),
-            Err(ConsensusError::WitnessCommitment)
+            Err(ConsensusError::WitnessNonceSize)
         );
     }
 
