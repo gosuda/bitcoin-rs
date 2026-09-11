@@ -909,6 +909,15 @@ impl BlockSync {
         self.block_stager.lock().retire_applied(&hash);
     }
 
+    fn indexed_ancestor_height(
+        tree: &BlockTree,
+        ancestor: NodeId,
+        descendant: NodeId,
+    ) -> Option<u32> {
+        let height = tree.node(ancestor).ok()?.height;
+        (tree.node_at_height_from(descendant, height) == Some(ancestor)).then_some(height)
+    }
+
     /// Returns the header tip when the applied chain is not on its branch.
     ///
     /// SYNC-FRONTIER-01: ancestry is identified by node identity, not height
@@ -920,7 +929,7 @@ impl BlockSync {
     ///
     /// The applied tip is on the branch exactly when the header tip's ancestor
     /// at the applied height is the applied block itself.
-    fn outweighed_branch_target(&self) -> Option<bitcoin_rs_chain::NodeId> {
+    fn outweighed_branch_target(&self) -> Option<NodeId> {
         let chain_tip = self.handles.chain_tip.load_full()?;
         let applied = self.handles.applied_tip.load_full()?;
         if chain_tip.hash == applied.hash {
@@ -931,8 +940,7 @@ impl BlockSync {
         // Normal IBD extends the applied chain. Its trusted height index proves
         // ancestry without allocating a plan for the entire remaining chain.
         // Keep the parent-walk planner for actual forks and disconnected roots.
-        let applied_height = tree.node(applied_id).ok()?.height;
-        if tree.node_at_height_from(chain_tip.tip_id, applied_height) == Some(applied_id) {
+        if Self::indexed_ancestor_height(&tree, applied_id, chain_tip.tip_id).is_some() {
             return None;
         }
         let plan = plan_reorg(&tree, applied_id, chain_tip.tip_id).ok()?;
@@ -1441,19 +1449,14 @@ impl BlockSync {
     /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.
     /// Keep fallible ancestry navigation separate from request publication.
     fn first_connect_height(
-        tree: &bitcoin_rs_chain::BlockTree,
+        tree: &BlockTree,
         applied_hash: Hash256,
-        target: bitcoin_rs_chain::NodeId,
+        target: NodeId,
     ) -> Option<u32> {
         let applied_id = tree.lookup(applied_hash)?;
-        let height = tree.node(applied_id).ok()?.height;
-        let successor = if tree.node_at_height_from(target, height) == Some(applied_id) {
-            height
-                .checked_add(1)
-                .and_then(|height| tree.node_at_height_from(target, height))
-        } else {
-            None
-        };
+        let successor = Self::indexed_ancestor_height(tree, applied_id, target)
+            .and_then(|height| height.checked_add(1))
+            .and_then(|height| tree.node_at_height_from(target, height));
         let first = successor.or_else(|| {
             plan_reorg(tree, applied_id, target)
                 .ok()?
@@ -1964,18 +1967,12 @@ mod tests {
         let Message::GetData(inventory) = rx.try_recv()? else {
             return Err("expected witness getdata".into());
         };
-        let requested = inventory
-            .into_iter()
-            .map(|item| match item {
-                Inventory::WitnessBlock(hash) => Ok(Hash256::from_le_bytes(hash.as_byte_array())),
-                _ => Err("expected witness block inventory"),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let requested = witness_block_inventory(inventory)?;
         let tree = sync.handles.block_tree.read();
         let expected_hashes = expected_ids
             .iter()
             .take(requested.len())
-            .map(|id| tree.node(*id).map(|node| node.hash))
+            .map(|id| tree.node(*id).map(|node| BlockHash::from(node.hash)))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(requested, expected_hashes);
         assert!(!requested.is_empty());
