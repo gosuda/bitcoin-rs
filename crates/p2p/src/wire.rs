@@ -189,6 +189,7 @@ impl Message {
             self,
             Self::Tx(_)
                 | Self::Block(_)
+                | Self::BlockPayload(_)
                 | Self::Headers(_)
                 | Self::MerkleBlock(_)
                 | Self::CFilter(_)
