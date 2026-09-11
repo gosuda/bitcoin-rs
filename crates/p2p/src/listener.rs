@@ -1281,6 +1281,37 @@ mod sync_wake_tests {
 static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
+mod session_socket_tests {
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    use crate::socket::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
+
+    /// Contract: `docs/contracts/p2p-wire.md` `P2P-04`.
+    #[test]
+    fn session_sockets_disable_nagle() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+
+        configure_peer_stream(&client).expect("configure client");
+        configure_peer_stream(&server).expect("configure server");
+
+        assert!(client.nodelay().expect("client nodelay"));
+        assert!(server.nodelay().expect("server nodelay"));
+        assert_eq!(
+            client.read_timeout().expect("client read timeout"),
+            Some(STREAM_POLL_INTERVAL)
+        );
+        assert_eq!(
+            server.write_timeout().expect("server write timeout"),
+            Some(HANDSHAKE_TIMEOUT)
+        );
+    }
+}
+
+#[cfg(test)]
 static WRITER_SETUP_FAIL: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
