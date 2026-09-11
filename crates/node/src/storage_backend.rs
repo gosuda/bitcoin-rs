@@ -142,12 +142,27 @@ mod tests {
         (
             "storage_footprint.rs",
             include_str!("storage_footprint.rs"),
-            Some("mod tests {"),
+            None,
+        ),
+        (
+            "storage_footprint/budget.rs",
+            include_str!("storage_footprint/budget.rs"),
+            None,
+        ),
+        (
+            "storage_footprint/identity.rs",
+            include_str!("storage_footprint/identity.rs"),
+            None,
+        ),
+        (
+            "storage_footprint/scan.rs",
+            include_str!("storage_footprint/scan.rs"),
+            None,
         ),
         (
             "txindex_worker.rs",
             include_str!("txindex_worker.rs"),
-            Some("mod body_reader_tests {"),
+            Some("mod body_reader_tests;"),
         ),
     ];
 
