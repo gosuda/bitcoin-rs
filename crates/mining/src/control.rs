@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::vec::Vec;
 
-use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Network, Tx, Txid};
+use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
 use compact_str::CompactString;
 
 use crate::Candidate;
@@ -99,13 +99,20 @@ pub struct BlockTemplate {
     /// Optional deployments available for versionbits negotiation.
     pub version_bits_available: Vec<AvailableMiningRule>,
     /// Header-version bits the solver must preserve.
+    ///
+    /// Core v31 `getblocktemplate` always reports `vbrequired` as 0.
     pub version_bits_required: u32,
     /// Capabilities implemented by this template producer.
     pub capabilities: Vec<MiningCapability>,
     /// Candidate fields the solver may mutate.
     pub mutable: Vec<TemplateMutation>,
     /// Whether work derived from the request's prior generation remains valid.
+    ///
+    /// Present after a long-poll wait. `true` means the previous template's
+    /// parent is still the applied tip (BIP23 `submitold`).
     pub submit_old: Option<bool>,
+    /// Signet challenge, present only on signet.
+    pub signet: Option<SignetMiningInfo>,
     /// Opaque server work identity when the producer requires one on submission.
     pub work_id: Option<CompactString>,
 }
@@ -115,11 +122,17 @@ pub struct BlockTemplate {
 pub enum BlockValidationResult {
     /// The block is valid and, for submission, was synchronously applied.
     Accepted,
-    /// The block was already accepted.
+    /// The block was already accepted (its body is on the applied chain).
     Duplicate,
     /// The block duplicates one already known to be invalid.
+    ///
+    /// GBT proposal returns this after `LookupBlockIndex`. `submitblock` does
+    /// not short-circuit on an invalid header; Core v31 `ProcessNewBlock` runs.
     DuplicateInvalid,
     /// The block duplicates one whose validity is not yet conclusive.
+    ///
+    /// GBT proposal returns this for a header-only tree entry. `submitblock`
+    /// still applies the body.
     DuplicateInconclusive,
     /// Validation could not reach a conclusive result.
     Inconclusive,
@@ -193,6 +206,11 @@ pub enum MiningControlError {
     /// Candidate construction, validation, or application failed operationally.
     #[error("{0}")]
     Failed(CompactString),
+    /// Consensus or contextual verification rejected the input.
+    ///
+    /// RPC projects this as Bitcoin Core `RPC_VERIFY_ERROR` (-25).
+    #[error("{0}")]
+    Rejected(CompactString),
 }
 
 /// One `generateblock` body transaction: a mempool txid or a decoded raw tx.
@@ -262,6 +280,12 @@ pub trait MiningControl: Send + Sync {
 
     /// Synchronously validates and applies a solved block.
     fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError>;
+
+    /// Admits a header through the same tree path as inbound P2P headers.
+    ///
+    /// The previous header must already be in the tree. Duplicates succeed.
+    /// Failures are [`MiningControlError::Rejected`] with Core reject reasons.
+    fn submit_header(&self, header: Header) -> Result<(), MiningControlError>;
 
     /// Publishes a completed authoritative mutation to template waiters.
     fn publish_generation(&self);

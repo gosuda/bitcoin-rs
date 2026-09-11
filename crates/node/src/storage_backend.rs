@@ -60,6 +60,9 @@ fn open_generic<C>(
 where
     C: StoreConsumer,
 {
+    // The fallback arm below is the only reader; builds with every backend
+    // feature compiled in cfg it away, so consume the label here.
+    let _ = namespace;
     match backend {
         #[cfg(feature = "rocksdb")]
         StorageBackend::RocksDb => consumer.consume(Arc::new(match cache_bytes {
@@ -123,17 +126,43 @@ fn unsupported(namespace: &str, backend: StorageBackend) -> StorageError {
 
 #[cfg(test)]
 mod tests {
-    const RUNTIME_CONSUMERS: &[(&str, &str, &str)] = &[
-        ("state.rs", include_str!("state.rs"), "mod tests {"),
+    const RUNTIME_CONSUMERS: &[(&str, &str, Option<&str>)] = &[
+        ("state.rs", include_str!("state.rs"), None),
+        (
+            "state/checkpoint.rs",
+            include_str!("state/checkpoint.rs"),
+            None,
+        ),
+        ("state/events.rs", include_str!("state/events.rs"), None),
+        ("state/index.rs", include_str!("state/index.rs"), None),
+        ("state/open.rs", include_str!("state/open.rs"), None),
+        ("state/prune.rs", include_str!("state/prune.rs"), None),
+        ("state/restore.rs", include_str!("state/restore.rs"), None),
+        ("state/storage.rs", include_str!("state/storage.rs"), None),
         (
             "storage_footprint.rs",
             include_str!("storage_footprint.rs"),
-            "mod tests {",
+            None,
+        ),
+        (
+            "storage_footprint/budget.rs",
+            include_str!("storage_footprint/budget.rs"),
+            None,
+        ),
+        (
+            "storage_footprint/identity.rs",
+            include_str!("storage_footprint/identity.rs"),
+            None,
+        ),
+        (
+            "storage_footprint/scan.rs",
+            include_str!("storage_footprint/scan.rs"),
+            None,
         ),
         (
             "txindex_worker.rs",
             include_str!("txindex_worker.rs"),
-            "mod body_reader_tests {",
+            Some("mod body_reader_tests;"),
         ),
     ];
 
@@ -151,10 +180,15 @@ mod tests {
     #[test]
     fn runtime_backend_construction_has_one_owner() {
         for (name, source, test_module) in RUNTIME_CONSUMERS {
-            let test_start = source
-                .find(test_module)
-                .unwrap_or_else(|| panic!("{name} lost its expected test-module boundary"));
-            let production = &source[..test_start];
+            let production = match test_module {
+                Some(boundary) => {
+                    let start = source
+                        .find(boundary)
+                        .unwrap_or_else(|| panic!("{name} lost its expected test-module boundary"));
+                    &source[..start]
+                }
+                None => source,
+            };
             for token in CONCRETE_OPEN_TOKENS {
                 assert!(
                     !production.contains(token),

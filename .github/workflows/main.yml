@@ -141,11 +141,12 @@ jobs:
           cargo bench --locked -p bitcoin-rs-node --no-run \
             --no-default-features --features fjall --bench chainstate_journal
       # Retained crate-level benchmarks without kernel (this job's previous
-      # whole content): merkle, utxo_commit under fjall, and sync_pipeline are
-      # not covered by the compiles above.
+      # whole content): merkle, utxo_commit under fjall, sync_pipeline, and
+      # the mining candidate are not covered by the compiles above.
       - run: |
           cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
           cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+          cargo bench --locked -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate
           cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
 
       # Native script tests do not compile this feature-gated oracle. Exercise
@@ -204,7 +205,7 @@ jobs:
       # guaranteed on the runner.
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
       - run: |
-          for target in p2p_message block_decode tx_decode script_eval utxo_snapshot; do
+          for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
             cargo +nightly fuzz run "$target" --target x86_64-unknown-linux-gnu -- -runs=10000
           done
 
@@ -237,19 +238,19 @@ jobs:
           tool: cargo-deny
       - run: KEEP_LOCK=1 scripts/check-dep-range.sh ${{ matrix.range }}
 
-  # Main-only (issue #174): the small real feature matrix, not a powerset.
+  # Main-only (issue #174 / FEAT-01): the named combinations in
+  # scripts/feature-matrix.tsv, not a cargo-hack powerset. `--each-feature`
+  # enables empty markers and illegal singles (zmq-only).
   feature-combinations:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-hack
-      # `--each-feature` on these crates exercises the `kernel` feature,
-      # which builds libbitcoinkernel from C++ -- install its prerequisites
-      # so the matrix runs unexcluded (deep lanes own the C++ toolchain).
+      # Kernel and rocksdb rows need the C++ toolchain; the TSV's
+      # native lane is why this job lives in main.yml.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      - run: cargo hack check --locked --each-feature -p bitcoin-rs-node -p bitcoin-rs-consensus -p bitcoin-rs-storage
+      - run: scripts/check-feature-matrix.sh
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build
   # on the declared MSRV. A second compile graph, so it runs on `main` only;
@@ -361,3 +362,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture
+
+  # Main-only (issue #174 / CORE-02): a running Bitcoin Core 31.1 node vs
+  # bitcoin-rs on regtest. Complements kernel-oracle (in-process C++ engine)
+  # with observable P2P sync and chain-identity RPCs.
+  core-differential:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install pinned bitcoind 31.1
+        run: scripts/install-bitcoind.sh --print-path
+      - name: Build bitcoin-rs (quickstart, portable)
+        run: |
+          cargo build -p bitcoin-rs --profile quickstart \
+            --no-default-features --features fjall,zmq
+      - name: Core vs bitcoin-rs P2P and chain-identity differential
+        run: |
+          scripts/run-p2p-core-interop.sh \
+            --bitcoind-command "$(scripts/install-bitcoind.sh --print-path)" \
+            --bitcoin-rs-command target/quickstart/bitcoin-rs \
+            --blocks 101 \
+            --catchup-blocks 5

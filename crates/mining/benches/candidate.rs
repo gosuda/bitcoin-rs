@@ -1,0 +1,119 @@
+//! End-to-end mining candidate benchmarks for package selection and coinbase finish.
+//!
+//! Each iteration captures a mining snapshot from the mempool and assembles the
+//! observable candidate result. Budgets stay unset until a measured p95 plus
+//! run-to-run noise is recorded.
+// PERF: Criterion emits public harness items whose docs are irrelevant to the benchmark report.
+#![allow(missing_docs)]
+#![allow(clippy::expect_used)]
+
+use std::hint::black_box;
+use std::sync::Arc;
+
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
+use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness,
+};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+
+const POOL_SIZES: [usize; 4] = [0, 64, 512, 2_048];
+
+fn context() -> CandidateContext {
+    CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
+        height: 250,
+        version: 0x2000_0001,
+        bits: CompactTarget::from_consensus(0x1d00_ffff),
+        min_time: 10,
+        current_time: 20,
+        locktime_cutoff: 10,
+        network: Network::Regtest,
+        csv_active: true,
+        segwit_active: true,
+        max_weight: 4_000_000,
+        max_size: 4_000_000,
+        max_sigops: 80_000,
+    }
+}
+
+fn distinct_tx(seed: u64, parent: Option<Txid>) -> Tx {
+    let mut previous = [0_u8; 32];
+    previous[..8].copy_from_slice(&seed.to_le_bytes());
+    Tx {
+        version: 2,
+        lock_time: LockTime::from_consensus(0),
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(
+                parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&previous))),
+                0,
+            ),
+            script_sig: Script::from(Vec::new()),
+            sequence: Sequence::from_consensus(0xFFFF_FFFF),
+            witness: Witness::from_stack(Vec::new()),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from(seed.to_le_bytes().to_vec()),
+        }],
+    }
+}
+
+fn snapshot_with(count: usize) -> Mempool {
+    let mut pool = Mempool::new(MempoolLimits {
+        min_relay_fee_sat_per_kvb: 0,
+        ..MempoolLimits::default()
+    });
+    let mut last_txid = None;
+    for seed in 0..count {
+        let parent = last_txid.filter(|_| seed.is_multiple_of(8) && seed > 0);
+        let tx = distinct_tx(u64::try_from(seed).expect("pool size fits u64"), parent);
+        let txid = tx.txid();
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx),
+            200,
+            10_000 + u64::try_from(seed).expect("pool size fits u64"),
+            u64::try_from(seed).expect("pool size fits u64"),
+            100,
+        ))
+        .unwrap_or_else(|error| panic!("fixture insert {seed} failed: {error}"));
+        last_txid = Some(txid);
+    }
+    assert_eq!(
+        pool.mining_snapshot().entries.len(),
+        count,
+        "fixture pool must retain every inserted transaction"
+    );
+    pool
+}
+
+fn assemble_candidate_bench(c: &mut Criterion) {
+    let mut group = c.benchmark_group("assemble_candidate");
+    group.sample_size(10);
+    let ctx = context();
+    let payout = [0x51_u8];
+    for &count in &POOL_SIZES {
+        let pool = snapshot_with(count);
+        let snapshot = pool.mining_snapshot();
+        let assembled = assemble_candidate(&ctx, &snapshot, &payout)
+            .unwrap_or_else(|error| panic!("fixture assemble {count} failed: {error}"));
+        assert!(
+            assembled.transactions.len() <= count,
+            "selection must not invent transactions"
+        );
+        group.bench_function(BenchmarkId::new("end_to_end", count), |b| {
+            b.iter(|| {
+                let snapshot = pool.mining_snapshot();
+                black_box(
+                    assemble_candidate(&ctx, &snapshot, &payout)
+                        .unwrap_or_else(|error| panic!("assemble failed: {error}")),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, assemble_candidate_bench);
+criterion_main!(benches);

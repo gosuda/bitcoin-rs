@@ -81,6 +81,7 @@ impl MiningControl for SmokeMiningControl {
             capabilities: Vec::new(),
             mutable: Vec::new(),
             submit_old: None,
+            signet: None,
             work_id: None,
         }))
     }
@@ -104,6 +105,13 @@ impl MiningControl for SmokeMiningControl {
 
     fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Accepted)
+    }
+
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
     }
 
     fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
@@ -164,8 +172,8 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         // manifest gap), and invalidateblock requires a chain control, which
         // the dedicated invalidateblock tests wire themselves.
         ("getmininginfo", json!([])),
-        ("getblocktemplate", json!([{}])),
-        ("submitblock", json!([raw_tx.as_str()])),
+        ("getblocktemplate", json!([{"rules": ["segwit"]}])),
+        ("submitblock", json!([fixture.block_hex.as_str()])),
     ];
 
     for (method, params) in cases {
@@ -807,11 +815,14 @@ struct Fixture {
     tx: Tx,
     txid: Txid,
     block_hash: BlockHash,
+    block_hex: String,
 }
 
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let mut ctx = Context::new().with_mining_control(Arc::new(SmokeMiningControl::new()));
+
+        ctx.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
         let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
         let block = Block {
@@ -852,6 +863,7 @@ impl Fixture {
                 best_block_height: 7,
             },
         }));
+        let block_hex = hex_encode(&consensus_bytes(&block));
         let txid = ctx.add_transaction(tx.clone());
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
         ctx.mempool.pool().write().insert_entry(entry)?;
@@ -860,6 +872,7 @@ impl Fixture {
             tx,
             txid,
             block_hash,
+            block_hex,
         })
     }
 }

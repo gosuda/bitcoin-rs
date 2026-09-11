@@ -14,7 +14,7 @@ end-state evidence roles.
 - **Owner**: `fuzz/CORPUS_PROVENANCE.md` owns fuzz seed provenance (seeds
   imported from `rust-bitcoin/qa-assets`, CC0-1.0, minimized with `cargo fuzz cmin`).
 - **Scope**: seeds under `fuzz/corpus/` feeding fuzz targets
-  `fuzz/fuzz_targets/p2p_message.rs`, `block_decode.rs`, `tx_decode.rs`, and
+  `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`, `tx_validate.rs`, and
   `script_eval.rs`.
 - Provenance rows must be updated in the same commit as any corpus re-import via
   `scripts/import-qa-assets.sh`.
@@ -35,14 +35,14 @@ end-state evidence roles.
 - G5 replay and parity arms: the QA corpus feeds parser, transaction, block,
   P2P message, and script-evaluation fuzz targets. Invalid and
   nonstandard-but-consensus-valid inputs are counted and classified.
-- G6 policy and admission: the `script_eval` and `tx_decode` targets exercise
+- G6 policy and admission: the `script_eval` and `tx_validate` targets exercise
   standardness and admission edge cases in addition to consensus decoding.
 
 ### `QAC-05`: Native-consensus-codec round-trip over accepted corpus seeds
 
 - **Owner**: `crates/primitives/tests/differential.rs` enforces the contract;
   `fuzz/corpus/manifest.json` pins the expected verdict for every seed in
-  `fuzz/corpus/tx_decode/` and `fuzz/corpus/block_decode/`.
+  `fuzz/corpus/tx_validate/` and `fuzz/corpus/block_validate/`.
 - Every listed seed has exactly one expected verdict:
   - `accepted`: the native consensus codec decodes the seed under the exact-consume
     `deserialize` entry the wire codec uses, and re-encodes it byte-identically;
@@ -94,8 +94,8 @@ nonzero-status propagation; they are not stable public status-code assignments.
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
   counts and classifies invalid corpora with fixed skip reasons.
 - `crates/primitives/tests/differential.rs`: `QAC-05` gate; enforces the
-  pinned accepted/rejected verdict manifest over `tx_decode` and
-  `block_decode` seeds, including byte-identical re-encoding of accepted seeds.
+  pinned accepted/rejected verdict manifest over `tx_validate` and
+  `block_validate` seeds, including byte-identical re-encoding of accepted seeds.
 - Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see
   [fuzz/README.md](../../fuzz/README.md)).
 

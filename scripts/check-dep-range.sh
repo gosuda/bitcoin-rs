@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Resolve the workspace against the declared dependency range, not the
-# committed lockfile, and prove it still compiles and keeps one copy of
-# each consensus-stack crate.
+# Resolve the workspace against the declared dependency range, not the
+# committed lockfile, and prove it still compiles.
 #
 #   scripts/check-dep-range.sh minimal
 #     cargo +nightly update -Zdirect-minimal-versions
-#     then cargo +nightly check --workspace --all-targets
+#     then cargo +nightly check --workspace --all-targets --all-features
 #     then G20 (+ cargo deny check bans when cargo-deny is on PATH)
 #
 #   scripts/check-dep-range.sh maximum
@@ -16,9 +16,10 @@
 # Mutates Cargo.lock. CI checks out a throwaway tree. Locally, the original
 # lockfile is restored on exit unless KEEP_LOCK=1.
 #
-# Optional native storage engines (rocksdb, mdbx) and the named feature
-# matrix are owned by FEAT-01 / scripts/check-feature-matrix.sh, not this
-# script: DEP-01 proves the default workspace graph at each range endpoint.
+# The minimal endpoint uses --all-features so the resolved oldest versions
+# are also checked with every optional feature enabled. The maximum endpoint
+# uses the default feature set; the named feature matrix is owned by
+# FEAT-01 / scripts/check-feature-matrix.sh.
 #
 # Owner: docs/contracts/dependency-range.md (DEP-01, DEP-02).
 
@@ -76,15 +77,16 @@ case "${RANGE}" in
   minimal)
     log "resolving direct dependencies at their oldest allowed versions"
     "${CARGO[@]}" update -Zdirect-minimal-versions
+    log "checking the resolved minimal graph with all features"
+    "${CARGO[@]}" check --workspace --all-targets --all-features
     ;;
   maximum)
     log "resolving every crate to the newest version inside its declared range"
     "${CARGO[@]}" update
+    log "checking the resolved maximum graph"
+    "${CARGO[@]}" check --workspace --all-targets
     ;;
 esac
-
-log "checking the resolved graph"
-"${CARGO[@]}" check --workspace --all-targets
 
 # G20 reads Cargo.lock via cargo metadata; it must run while the mutated
 # lockfile is still in place.

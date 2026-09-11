@@ -177,14 +177,19 @@ impl Message {
         CommandString::try_from_static(name).expect("static P2P command")
     }
 
-    /// Whether this message carries a bulk payload that should be admitted by
-    /// a separate path from control messages.
+    /// Large relay payloads that the writer emits as their own writev.
+    ///
+    /// Control messages (`inv`, `getdata`, `ping`, `pong`, `verack`, …) are
+    /// small and latency-sensitive, so the writer coalesces a ready burst of
+    /// them. Blocks, transactions, and headers stay one frame per syscall so
+    /// a 1 MiB body cannot pin a 16-message encode behind it.
     #[must_use]
     pub const fn is_bulk_payload(&self) -> bool {
         matches!(
             self,
             Self::Tx(_)
                 | Self::Block(_)
+                | Self::BlockPayload(_)
                 | Self::Headers(_)
                 | Self::MerkleBlock(_)
                 | Self::CFilter(_)
@@ -352,7 +357,6 @@ pub fn write_message<W: Write + ?Sized>(
         }
     }
 }
-
 /// Write a burst of Bitcoin v1 network messages in one vectored pass.
 ///
 /// Returns the framed wire length of each message, in order, so the writer
@@ -401,6 +405,7 @@ pub fn write_messages<W: Write + ?Sized>(
     write_all_vectored(writer, &mut slices)?;
     Ok(sizes)
 }
+
 /// Read and validate a Bitcoin v1 network message.
 ///
 /// Returns the decoded message and the raw payload bytes (checksum-validated).
@@ -743,7 +748,7 @@ mod tests {
 
     use super::{
         HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
-        write_message,
+        write_message, write_messages,
     };
 
     /// Serves exactly one v1 wire header and fails on any read beyond it.
@@ -856,6 +861,7 @@ mod tests {
         }
     }
 
+    /// P2P-01: block payloads preserve the canonical wire frame.
     #[test]
     fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -916,6 +922,26 @@ mod tests {
             assert_eq!(wire_len(message)?, written);
             assert_eq!(written, buffer.len());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn write_messages_matches_sequential_write_message() -> Result<(), PeerError> {
+        let messages = [
+            super::Message::Ping(1),
+            super::Message::Pong(1),
+            super::Message::Verack,
+        ];
+        let mut sequential = Vec::new();
+        let mut expected = Vec::new();
+        for message in &messages {
+            expected.push(write_message(&mut sequential, Magic::REGTEST, message)?);
+        }
+
+        let mut coalesced = Vec::new();
+        let sizes = write_messages(&mut coalesced, Magic::REGTEST, &messages)?;
+        assert_eq!(sizes, expected);
+        assert_eq!(coalesced, sequential);
         Ok(())
     }
 }

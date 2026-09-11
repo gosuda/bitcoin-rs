@@ -321,6 +321,7 @@ impl MiningControl for CompatMiningControl {
                 TemplateMutation::PreviousBlock,
             ],
             submit_old: None,
+            signet: None,
             work_id: None,
         }))
     }
@@ -346,6 +347,13 @@ impl MiningControl for CompatMiningControl {
         Ok(BlockValidationResult::Accepted)
     }
 
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
+    }
+
     fn publish_generation(&self) {}
 
     fn generate(
@@ -362,12 +370,16 @@ impl MiningControl for CompatMiningControl {
 
 #[test]
 fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+    // API-12 mainnet gates (peers + IBD) live in the handler unit tests.
+    // This rendering proof runs off-mainnet so it reaches the template.
+    let mut ctx = Context::new();
+    ctx.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(
-        Context::new().with_mining_control(Arc::new(CompatMiningControl)),
+        ctx.with_mining_control(Arc::new(CompatMiningControl)),
     ));
 
     let template: corepc_types::v31::GetBlockTemplate =
-        typed(&handler.dispatch("getblocktemplate", &json!([{}]))?)?;
+        typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
     assert_eq!(template.version, 0x2000_0000);
     assert_eq!(template.height, 0);
     assert_eq!(template.bits, "1d00ffff");
@@ -385,6 +397,10 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     assert_eq!(template.size_limit, 4_000_000);
     assert_eq!(template.weight_limit, 4_000_000);
     assert_eq!(template.coinbase_value, 0);
+    assert_eq!(
+        template.coinbase_aux.get("flags").map(String::as_str),
+        Some("")
+    );
     assert!(template.transactions.is_empty());
     assert!(template.rules.is_empty());
     assert!(template.version_bits_available.is_empty());

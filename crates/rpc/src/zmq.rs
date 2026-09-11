@@ -1213,6 +1213,9 @@ mod compat_manifest_tests {
     }
 
     #[test]
+    // Allow: end-to-end fan-out coverage in one readable sequence; splitting
+    // would scatter the arrange-act-assert across helpers with no reuse.
+    #[allow(clippy::too_many_lines)]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
@@ -1258,6 +1261,13 @@ mod compat_manifest_tests {
                 &self,
                 _block: bitcoin_rs_primitives::Block,
             ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn submit_header(
+                &self,
+                _header: bitcoin_rs_primitives::Header,
+            ) -> Result<(), MiningControlError> {
                 Err(unavailable())
             }
 
@@ -1540,6 +1550,13 @@ mod sequence_observer_tests {
                 &self,
                 _block: bitcoin_rs_primitives::Block,
             ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
+                Err(unavailable())
+            }
+
+            fn submit_header(
+                &self,
+                _header: bitcoin_rs_primitives::Header,
+            ) -> Result<(), MiningControlError> {
                 Err(unavailable())
             }
 

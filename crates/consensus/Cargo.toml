@@ -14,9 +14,6 @@ workspace = true
 [features]
 default = ["kernel"]
 kernel = ["dep:bitcoinkernel"]
-rocksdb = []
-fjall = []
-redb = []
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

@@ -1,29 +1,26 @@
-
 # External API contract
 
-Target contract for the node's external surface: JSON-RPC, REST, ZMQ, and
-the two Esplora dialects. One manifest owns the inventory. Every dialect
-projects the same coherent node state and maps typed owner results to its
-own wire format. `API-07` is the recorded Core reference used by the RPC
-fixture replay gate.
-
-Owners:
-
-- `crates/rpc/src/manifest.rs`: the single `MANIFEST` registry for RPC,
-  REST, and ZMQ surfaces.
-- `crates/rpc/src/error.rs`: the typed `RpcError` envelope and the Core
-  code mapping.
-- `crates/rpc/src/rest.rs`: the REST dialect.
-- `crates/rpc/src/esplora.rs` with `esplora/{public,backend,projection}.rs`:
-  the public `/api` dialect and the `/esplora` backend superset.
-- `crates/rpc/src/zmq.rs`: ZMQ topics, sequence bytes, and
-  bounded delivery.
-- `crates/mempool/src/gateway.rs`: the admission owner behind every
-  broadcast and preview entry point.
+`API-01`–`API-04` place owners under the
+[contracts precedence rule](README.md). `API-05` is the solo-mining generate
+path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
+recorded Core reference used by the RPC fixture replay gate. `API-08` is
+bounded public exposure. `API-09` is the Esplora dialects. `API-10` is
+broadcast and preview through the admission gateway. `API-11` is the
+BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
+`API-12` is mainnet template operational gates. `API-13` is `submitheader`.
+`API-14` is GBT client-rule negotiation. `API-15` is `submitblock` decode.
+`API-16` is GBT proposal request parsing. `API-17` is `submitblock` uncommitted
+witness fill. `API-18` is Core v31 `submitblock` / GBT proposal duplicate
+vocabulary. `API-19` is BIP22 reject-reason mapping. `API-20` is GBT
+`vbrequired` always 0. `API-21` is Core `CheckWitnessMalleation`
+reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
+`prioritisetransaction` dummy/`fee_delta` arity. `API-24` is
+`prioritisetransaction` dust-output refusal.
 
 ## Clauses
 
 ### `API-01`: Single manifest owner
+
 
 - `MANIFEST` in `crates/rpc/src/manifest.rs` is the single source of truth
   for RPC, REST, and ZMQ external interfaces. A JSON-RPC method answers
@@ -49,14 +46,16 @@ Owners:
 
 ### `API-02`: JSON-RPC mechanics and the wallet-free surface
 
+
 - Parameter type and coercion rules, named and positional forms, the
   declared JSON-RPC 1 and 2 envelopes, batches, notifications,
   authentication, and error ordering follow the pinned Core 31.1
   contract.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): standard
   JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-3`
-  (invalid type), `-5` (not found), `-8` (invalid parameter), and `-25`
-  plus `-26` (submission).
+  (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
+  (not connected), `-10` (initial download), `-22` (deserialization),
+  and `-25` plus `-26` (submission).
 - Amounts are integer satoshis internally. Adapters render the exact
   external BTC or sat-per-vB units and precision.
 - The node ships no wallet and holds no private key material. Methods
@@ -68,6 +67,7 @@ Owners:
 
 ### `API-03`: REST dialect
 
+
 - REST keeps its own HTTP semantics in `crates/rpc/src/rest.rs`: status
   codes, content types, empty bodies, and not-found behavior. No generic
   everything-is-JSON-RPC error handler spans the dialects.
@@ -78,6 +78,7 @@ Owners:
   behavior.
 
 ### `API-04`: ZMQ notification contract
+
 
 - `crates/rpc/src/zmq.rs` owns the declared Core topics
   `hashblock`, `hashtx`, `rawblock`, `rawtx`, and `sequence`, with Core
@@ -93,6 +94,7 @@ Owners:
   accounting is never dropped (`MPL-04`).
 
 ### `API-05`: Solo-mining generate path
+
 
 - **Owner**: `MiningControl::generate` in `crates/mining/src/control.rs`,
   implemented by `MiningCoordinator::generate_blocks` in
@@ -116,11 +118,15 @@ Owners:
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
+
 - **Owner**: `MiningCoordinator::network_hash_ps` in `crates/node/src/mining.rs`.
   Height resolution has one owner: `resolve_hash_ps_start`.
 - The method takes the block-tree read lock, then loads one applied-tip
   snapshot. Height checks and the hash-rate walk use that snapshot and that
   locked tree, not a second tip load.
+- The hash-rate window is Core's parent walk: `lookup` parent pointers from
+  the resolved start node, min/max header time, `chainwork` delta. It does not
+  re-resolve each height through `node_at_height_from`.
 - `nblocks` (`lookup`) must be a positive count or `-1` (since the last
   difficulty retarget). Otherwise the RPC is Core `-8`
   (`RpcError::InvalidParameter`) with
@@ -134,6 +140,7 @@ Owners:
   does not use this RPC height-validation error path.
 
 ### `API-07`: RPC fixture reference provenance
+
 
 - **Owner**: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns
   `PINNED_CORE_VERSION`, `PINNED_CORE_SHA256`, and their validation. Every
@@ -154,9 +161,8 @@ Owners:
   from the selected Core build is a maintainer responsibility outside this
   automated gate.
 
-## Live gaps
-
 ### `API-08`: Bounded public exposure
+
 
 - Administrative RPC stays private and authenticated by default. Public
   read and broadcast exposure, allowed hosts and origins, and rate and
@@ -166,6 +172,7 @@ Owners:
   consume the CPU or memory quota needed to validate new blocks.
 
 ### `API-09`: Esplora dialects
+
 
 - `/api` exposes the public Esplora (electrs) contract. `/esplora` is the
   versioned mempool-backend superset of that tree. Both project the same
@@ -195,6 +202,7 @@ Owners:
 
 ### `API-10`: Broadcast and preview through the admission gateway
 
+
 - `sendrawtransaction`, `testmempoolaccept`, Esplora `POST /tx`, package
   submissions, and P2P ingress all reach the single `MempoolGateway`
   (`mempool-policy.md` `POL-02`). Each call carries an explicit
@@ -208,8 +216,189 @@ Owners:
 - Broadcast failures map to the Esplora error dialect: a rejected
   transaction is a 400 with the reject reason, not a retryable 503.
 
-The wallet-facing subset of this surface is owned by
-[wallet-facing.md](wallet-facing.md).
+### `API-11`: BIP22/BIP23 template extras
+
+
+- **Owner**: `MiningCoordinator::template_from_candidate` in
+  `crates/node/src/mining.rs`; JSON projection in
+  `crates/rpc/src/handlers/mining.rs` `render_block_template`.
+- Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
+  Client-advertised names are not echoed.
+- `submitold` is present after a long-poll wait and omitted otherwise. `workid`
+  is not emitted.
+- On signet, the template carries `signet` in `rules` (mandatory) and
+  `signet_challenge`. Other networks omit `signet_challenge`.
+  - Malformed `longpollid` values, including invalid UTF-8 split boundaries, are rejected without panicking.
+
+### `API-12`: Mainnet template operational gates
+
+
+- **Owner**: `ensure_template_ready` in `crates/rpc/src/handlers/mining.rs`.
+- Template mode on mainnet requires at least one live peer (`PeerTable`) and
+  that the node has left IBD (`Context::is_initial_block_download`). Failures
+  are Core `-9` (`bitcoin-rs is not connected!`) and `-10`
+  (`bitcoin-rs is in initial sync and waiting for blocks...`).
+- Proposal mode does not apply these gates. Networks other than mainnet skip
+  them, matching Core `IsTestChain()`.
+
+### `API-13`: `submitheader`
+
+
+- **Owner**: `MiningCoordinator::submit_header` in `crates/node/src/mining.rs`.
+  RPC decodes the hex and projects the result; it does not admit headers.
+- Decode failures (invalid hex, fewer than 80 bytes) are Core `-22`
+  (`Block header decode failed`). Extra bytes after an 80-byte header are
+  ignored, matching Core `DecodeHexBlockHeader`.
+- The previous header must already be in the block tree. Otherwise the RPC
+  returns `-25` (`Must submit previous header (HASH) first`).
+- Admission uses `accept_headers`, the same consensus gate as inbound P2P
+  headers. Duplicates succeed. Invalid headers return `-25` with Core reject
+  reasons (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`).
+- Success is JSON `null`. Header-only admission does not apply the block or
+  publish a mining generation.
+
+### `API-14`: GBT client-rule negotiation
+
+
+- **Owner**: `ensure_client_rules_for_template` and
+  `ensure_client_supports_mandatory_rules` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Template mode requires the client to list `segwit`. On signet it also
+  requires `signet`. Failures are Core `-8` with Core's exact messages:
+  `getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})`
+  and
+  `getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})`.
+  Signet is checked first, matching Core v31.0 `src/rpc/mining.cpp`.
+- These checks run before template assembly. Proposal mode skips them.
+- After assembly, any remaining mandatory template rule the client omitted
+  is Core `-8`: `Support for 'NAME' rule requires explicit client support`.
+
+### `API-15`: `submitblock` decode
+
+
+- **Owner**: `decode_submitted_block` in `crates/rpc/src/handlers/mining.rs`.
+  Admission stays on `MiningControl::submit_block`.
+- Invalid hex or a payload that is not a complete block is Core `-22`
+  (`Block decode failed`), matching Core `DecodeHexBlk`. Extra bytes after a
+  complete block are ignored.
+- A second dummy argument is accepted and ignored (BIP22). A third argument
+  is JSON-RPC `-32602`.
+
+### `API-16`: GBT proposal request parsing
+
+
+- **Owner**: `parse_block_template_request` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Unknown or non-string `mode` is Core `-8` (`Invalid mode`).
+- Proposal mode does not require the client to list the `proposal`
+  capability. Missing `data` is Core `-3`
+  (`Missing data String key for proposal`) with no `invalid type:` prefix.
+  Decode uses
+  `decode_submitted_block` (`API-15`): `-22` `Block decode failed`, leftover
+  bytes ignored.
+
+### `API-17`: `submitblock` uncommitted witness nonce
+
+
+- **Owner**: `update_uncommitted_block_structures` in
+  `crates/mining/src/coinbase.rs`, called from
+  `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
+- When the previous header is known, SegWit is active for the submitted
+  height, the coinbase already has a BIP141 commitment output, and the
+  coinbase witness is empty, `submitblock` inserts the 32-byte reserved
+  nonce. This matches Core `UpdateUncommittedBlockStructures`.
+- An existing coinbase witness is left unchanged. Proposal mode does not
+  apply this fill.
+
+### `API-18`: `submitblock` and proposal duplicate vocabulary
+
+
+- **Owner**: `MiningCoordinator::known_block_result` in
+  `crates/node/src/mining.rs`.
+- GBT proposal looks the block hash up first, matching Core
+  `LookupBlockIndex`: a node on the applied chain is `duplicate`,
+  `Invalid` is `duplicate-invalid`, and any other tree entry (including a
+  header-only tip) is `duplicate-inconclusive`.
+- `submitblock` matches Core v31 `ProcessNewBlock`: only an already
+  accepted block is `duplicate`. A header admitted by `submitheader` still
+  receives the body.
+
+### `API-19`: BIP22 reject reasons
+
+
+- **Owner**: `bip22_reject_reason` in `crates/node/src/mining.rs`.
+- Proposal and `submitblock` project apply/consensus failures as Core
+  `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`,
+  `bad-cb-amount`, `high-hash`, `time-too-old`, …). Operational apply
+  refusals (`Shutdown`, journal backpressure) stay `inconclusive`.
+- Consensus crate Display remains log text. This mapping is the BIP22
+  wire owner.
+
+### `API-20`: GBT `vbrequired` is always 0
+
+
+- **Owner**: `MiningCoordinator::version_bits_for` in
+  `crates/node/src/mining.rs`.
+- Core v31 `getblocktemplate` hardcodes `vbrequired` to 0. Signalling
+  deployments still appear in `vbavailable`; locked-in bits are not OR'd
+  into `vbrequired`.
+
+### `API-21`: BIP141 witness malleation reasons
+
+
+- **Owner**: `check_witness_malleation` in
+  `crates/consensus/src/verify_block.rs`.
+- Core `CheckWitnessMalleation` distinguishes three BIP22 strings:
+  - commitment present, coinbase witness not a single 32-byte element →
+    `bad-witness-nonce-size`
+  - commitment present, reserved nonce well-formed, hash mismatch →
+    `bad-witness-merkle-match`
+  - witness data without a commitment, or before SegWit →
+    `unexpected-witness`
+- Proposal does not fill an omitted reserved nonce (`API-17` is
+  `submitblock`-only), so an empty coinbase witness with a commitment is
+  miner-facing `bad-witness-nonce-size`.
+- `bip22_reject_reason` maps the consensus variants; consensus Display
+  remains log text.
+
+### `API-22`: GBT `coinbaseaux.flags` is empty hex
+
+
+- **Owner**: `render_block_template` in `crates/rpc/src/handlers/mining.rs`.
+- Core v31 emits `coinbaseaux: { "flags": HexStr(COINBASE_FLAGS) }`. The
+  flags bytes are empty, so the hex string is `""`. An empty object is not
+  the Core shape.
+
+### `API-23`: `prioritisetransaction` dummy and `fee_delta`
+
+
+- **Owner**: `prioritisetransaction` in `crates/rpc/src/handlers/mining.rs`.
+- Core reads `fee_delta` from params[2] (`getInt<int64_t>`). The deprecated
+  dummy (params[1]) must be omitted, null, or numeric zero; any other value
+  is `-8` `Priority is no longer supported, dummy argument to
+  prioritisetransaction must be 0.`
+- Two-argument calls do not treat params[1] as `fee_delta`.
+
+### `API-24`: `prioritisetransaction` refuses pooled dust
+
+
+- **Owner**: `prioritisetransaction` in `crates/rpc/src/handlers/mining.rs`.
+- Core v31 rejects a mempool transaction with dust outputs when
+  `require_standard` is set: `-8` `Priority is not supported for
+  transactions with dust outputs.`
+- `require_standard` follows Core's `-acceptnonstdtxn` default: enforced
+  everywhere except regtest. Absent txids (fee-delta overlay only) are
+  not checked. Dust classification uses the pool's dust-relay fee via
+  `tx_has_dust_outputs`.
+
+The wallet-facing subset of this surface — tip, fees, address/script
+queries, and broadcast over Esplora, plus the key-free node RPCs — is
+owned by [wallet-facing.md](wallet-facing.md).
+
+## Live gaps
+
+- **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
+- **Typed embedding surface**: Direct in-process application API as an alternative to localhost JSON-RPC daemon boundary is tracked under #145 (open).
 
 ## Proven by
 
@@ -263,9 +452,94 @@ The wallet-facing subset of this surface is owned by
   `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`.
 
+- `API-11`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
+    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
+    `getblocktemplate_requires_signet_rule_on_signet`
+  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
+  - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
+    `signet_template_includes_challenge_and_signet_rule`
+
+- `API-12`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
+    `getblocktemplate_rejects_mainnet_during_ibd`,
+    `getblocktemplate_proposal_skips_mainnet_connection_gates`
+- `API-13`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitheader_rejects_undecodable_headers`,
+    `submitheader_returns_null_and_forwards_decoded_header`,
+    `submitheader_maps_rejected_to_verify_error`
+  - `crates/node/tests/mining.rs` tests `submit_header_admits_a_mined_child_and_is_idempotent`,
+    `submit_header_requires_the_previous_header`,
+    `submit_header_rejects_bad_diffbits`,
+    `submit_header_rejects_time_too_new`
+  - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
+    `nbits_mismatch_is_bad_diffbits`
+    - Execution evidence: `cargo test -p bitcoin-rs-node header_reject_tests` and
+      `cargo test -p bitcoin-rs-rpc submitheader` (CI job `test`, commit `adc8e37`).
+    - Core reference: Bitcoin Core v30.0 `src/rpc/mining.cpp` (`submitheader`)
+      and `src/validation.cpp` header reject reasons (tag `v30.0`).
+
+- `API-14`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_requires_signet_rule_on_signet`,
+    `getblocktemplate_rejects_template_mandatory_rule_without_client_support`,
+    `getblocktemplate_rejects_missing_segwit_rule`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`
+
+- `API-15`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
+    `submitblock_ignores_bip22_dummy_and_trailing_bytes`
+- `API-16`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_invalid_mode`,
+    `getblocktemplate_proposal_decode_matches_core`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`
+- `API-17`:
+  - `crates/mining/src/coinbase.rs` tests `fills_reserved_nonce_when_commitment_present_and_witness_empty`,
+    `leaves_an_existing_coinbase_witness_alone`,
+    `skips_without_commitment_or_when_segwit_is_inactive`
+  - `crates/node/tests/mining.rs` test `submit_block_fills_omitted_coinbase_witness`
+- `API-18`:
+  - `crates/node/tests/mining.rs` tests `submit_block_applies_a_header_already_in_the_tree`,
+    `proposal_of_an_applied_block_is_duplicate`,
+    `proposal_of_an_invalid_header_is_duplicate_invalid`,
+    `proposal_of_a_header_only_block_is_duplicate_inconclusive`,
+    `duplicate_submit_returns_duplicate`
+- `API-19`:
+  - `crates/node/src/mining.rs` tests `consensus_failures_use_core_bip22_reasons`,
+    `header_failures_use_core_bip22_reasons`
+  - `crates/node/tests/mining.rs` tests `proposal_without_coinbase_is_bad_cb_missing`,
+    `proposal_merkle_mismatch_is_bad_txnmrklroot`,
+    `proposal_rejects_excess_coinbase_without_side_effects`
+- `API-20`:
+  - `crates/node/tests/mining.rs` test `template_does_not_echo_client_capabilities`
+- `API-21`:
+  - `crates/consensus/src/verify_block.rs` tests
+    `contextual_rules_reject_witness_before_segwit_activation`,
+    `contextual_rules_enforce_bip141_commitment_after_segwit_activation`,
+    `bip141_coinbase_witness_must_have_exactly_one_32_byte_element`,
+    `bip141_witness_commitment_last_output_wins`
+  - `crates/node/src/mining.rs` test `consensus_failures_use_core_bip22_reasons`
+  - `crates/node/tests/mining.rs` tests
+    `proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size`,
+    `proposal_witness_without_commitment_is_unexpected_witness`,
+    `proposal_wrong_witness_commitment_is_bad_witness_merkle_match`
+- `API-22`:
+  - `crates/rpc/src/handlers/mining.rs` test
+    `getblocktemplate_renders_candidate_and_reuses_control_result`
+  - `crates/rpc/tests/core_compat.rs` test `mining_responses_deserialize_into_pinned_types`
+- `API-23`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `prioritisetransaction_calls_mempool_prioritise_directly`,
+    `prioritisetransaction_rejects_nonzero_dummy_like_core`,
+    `prioritisetransaction_requires_fee_delta_as_third_parameter`,
+      inline regression coverage for extra parameters and named fee_delta
+    - Execution evidence: `cargo test -p bitcoin-rs-rpc prioritisetransaction` passes (run locally).
+- `API-24`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `prioritisetransaction_rejects_dust_outputs_like_core`,
+    `prioritisetransaction_allows_dust_overlay_on_regtest`,
+    `prioritisetransaction_allows_absent_txid_overlay`
+  - `crates/mempool/src/standardness.rs` test `dust_relay_fee_changes_the_boundary`
+
 ## Vocabulary
 
-[ReadStamp](../../CONCEPTS.md),
-[MempoolGateway](../../CONCEPTS.md),
-[CapabilityState](../../CONCEPTS.md),
-[Esplora dialects](../../CONCEPTS.md).
+

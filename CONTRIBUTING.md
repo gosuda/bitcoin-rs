@@ -134,19 +134,18 @@ Fuzz targets live under `fuzz/` and run against imported corpora:
 rustup toolchain install nightly
 cargo install cargo-fuzz
 
-# Example matching the Linux CI target
-cargo +nightly fuzz run block_decode --target x86_64-unknown-linux-gnu -- -runs=10000
+# Run a target (options: p2p_message, block_validate, tx_validate, script_eval, utxo_snapshot)
+cargo +nightly fuzz run block_validate --target x86_64-unknown-linux-gnu -- -runs=10000
 ```
 
-CI builds and runs all five targets: `p2p_message`, `block_decode`, `tx_decode`,
-`script_eval`, and `utxo_snapshot`. See [`fuzz/README.md`](fuzz/README.md) for
+CI builds and runs all five targets: `p2p_message`, `block_validate`,
+`tx_validate`, `script_eval`, and `utxo_snapshot`. See [`fuzz/README.md`](fuzz/README.md) for
 local fuzzing and corpus guidance.
 
 ### Dependency-range check
 
 Prove the declared ranges, not only the committed lockfile
 (`docs/contracts/dependency-range.md`):
-
 This lane changes `Cargo.lock`. Run it in a disposable checkout, with nightly
 and kernel build dependencies installed:
 
@@ -162,9 +161,37 @@ The original `Cargo.lock` is restored on exit unless `KEEP_LOCK=1`.
 Each lane also runs G20 against the mutated lockfile. Optional native
 storage backends are owned by the named feature matrix, not this script.
 
-The main workflow also checks individual features with `cargo-hack` (its
-`feature-combinations` job). The full-feature dependency audit runs in the
-`deny` job of `ci.yml` on every push to `main`.
+### Bitcoin Core differential
+
+Live observable-behavior check against a pinned Core 31.1 `bitcoind`
+(`docs/contracts/core-differential.md`):
+
+```sh
+scripts/run-p2p-core-interop.sh \
+  --bitcoind-command "$(scripts/install-bitcoind.sh)" \
+  --bitcoin-rs-command target/quickstart/bitcoin-rs
+```
+
+### Feature combinations
+
+The supported combinations are the rows in
+`scripts/feature-matrix.tsv`, not a feature powerset:
+
+```sh
+scripts/check-feature-matrix.sh        # every row (needs cmake/libboost for kernel)
+scripts/check-feature-matrix.sh pure   # fjall/redb/zmq only
+```
+
+### Bitcoin Core differential
+
+Live observable-behavior check against a pinned Core 31.1 `bitcoind`
+(`docs/contracts/core-differential.md`):
+
+```sh
+scripts/run-p2p-core-interop.sh \
+  --bitcoind-command "$(scripts/install-bitcoind.sh)" \
+  --bitcoin-rs-command target/quickstart/bitcoin-rs
+```
 
 ## Architecture and crate hierarchy
 

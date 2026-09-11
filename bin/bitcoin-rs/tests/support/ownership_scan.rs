@@ -22,7 +22,15 @@ const AUTHORIZED_GATEWAY_CALLS: &[(&str, &str)] = &[
     ("crates/rpc/src/handlers/mining.rs", "ctx.mempool"),
     // Block apply evicts the block's transactions through the generation
     // guarded gateway; this is the node's only production mutation site.
-    ("crates/node/src/apply.rs", "handles.mempool_gateway"),
+    (
+        "crates/node/src/apply/connect.rs",
+        "handles.mempool_gateway",
+    ),
+    // Reorg transaction reconsideration uses the same typed gateway owner.
+    (
+        "crates/node/src/reorg/execution.rs",
+        "handles.mempool_gateway",
+    ),
 ];
 
 /// Mutating methods on `Mempool` that only the mempool owner may call from
@@ -36,6 +44,7 @@ pub(crate) const MUTATING_METHODS: &[&str] = &[
     "insert_entry(",
     "replace_transaction(",
     "remove_for_block(",
+    "reconsider_disconnected(",
     "enforce_size_limit(",
     "evict_below_fee_rate(",
     "prioritise(",
@@ -350,19 +359,43 @@ fn is_authorized_gateway_call(
     }
 
     let before = &line[..method_pos];
-    let receiver = match before.rfind('.') {
+    // Resolve the receiver chain. A call split across lines leaves only a
+    // leading dot on the method line, so accumulate continuation lines above
+    // that start with '.' and anchor on the chain root's trailing expression.
+    // Single-line receivers keep their last whitespace-delimited token, which
+    // drops statement prefixes such as `let _ =`.
+    let fragment = match before.rfind('.') {
         Some(dot_pos) => before[..dot_pos].trim(),
         None => before.trim(),
     };
-    let receiver = if receiver.is_empty() {
-        lines[..line_index]
-            .iter()
-            .rev()
-            .map(|previous| previous.trim())
-            .find(|previous| !previous.is_empty())
-            .unwrap_or("")
+    let chained: String;
+    let receiver: &str = if fragment.contains(char::is_whitespace) {
+        fragment.split_whitespace().next_back().unwrap_or(fragment)
+    } else if fragment.is_empty() {
+        let mut parts: Vec<&str> = Vec::new();
+        for previous in lines[..line_index].iter().rev() {
+            let trimmed = previous.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some(link) = trimmed.strip_prefix('.') {
+                parts.push(link.trim());
+            } else {
+                parts.push(
+                    trimmed
+                        .split_whitespace()
+                        .next_back()
+                        .unwrap_or(trimmed)
+                        .trim_end_matches(';'),
+                );
+                break;
+            }
+        }
+        parts.reverse();
+        chained = parts.join(".");
+        &chained
     } else {
-        receiver
+        fragment
     };
 
     let normalized_path = path.replace('\\', "/");
@@ -430,6 +463,84 @@ mod tests {
                 path,
                 "ctx.mempool\n    .prioritise(txid, fee_delta)"
             ));
+        }
+    }
+
+    /// ARCH-07 permits this gateway call, not a second mempool mutation owner.
+    #[test]
+    fn node_connection_authorizes_only_its_typed_gateway_receiver() {
+        let owner = "/workspace/crates/node/src/apply/connect.rs";
+        for (path, call, expected_violations) in [
+            (
+                owner,
+                "handles.mempool_gateway.remove_for_block(origin, txs, txids, height);",
+                0,
+            ),
+            (
+                "crates/node/src/reorg/execution.rs",
+                "handles.mempool_gateway.reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());",
+                0,
+            ),
+            (
+                NON_OWNER,
+                "handles.mempool_gateway.reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());",
+                1,
+            ),
+            (
+                NON_OWNER,
+                "handles.mempool_gateway.remove_for_block(origin, txs, txids, height);",
+                1,
+            ),
+            (
+                owner,
+                "handles.mempool.remove_for_block(origin, txs, txids, height);",
+                1,
+            ),
+            (
+                owner,
+                "handles.mempool_gateway.write().remove_for_block(origin, txs, txids, height);",
+                1,
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(path, call, &mut result);
+            assert_eq!(
+                result.violations.len(),
+                expected_violations,
+                "{path}: {call}"
+            );
+            assert_eq!(result.mutating_calls_found, 1);
+        }
+    }
+
+    #[test]
+    fn multiline_receiver_chain_resolves_to_its_root() {
+        let owner = "/workspace/crates/node/src/reorg/execution.rs";
+        for (path, call, expected_violations) in [
+            (
+                owner,
+                "let _ = handles\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
+                0,
+            ),
+            (
+                owner,
+                "let _ = other\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
+                1,
+            ),
+            (
+                NON_OWNER,
+                "let _ = handles\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
+                1,
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(path, call, &mut result);
+            assert_eq!(
+                result.violations.len(),
+                expected_violations,
+                "{path}: {call}"
+            );
+            assert_eq!(result.mutating_calls_found, 1);
         }
     }
 
