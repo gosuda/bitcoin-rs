@@ -6,17 +6,20 @@
 //! validation path without persistence; solved-block submission returns only
 //! after validation, persistence, and chain-state application complete.
 
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use core::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use alloc::{collections::VecDeque, sync::Arc};
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
+
+use bitcoin_rs_chain::{
+    BlockTree, ChainError, NodeId, TipSnapshot, accept_headers, current_unix_seconds,
+};
+
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Header, Network, Tx, consensus_bytes};
+
 use bitcoin_rs_mempool::{
     Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
 };
+
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
     BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, GenerateRequest,
@@ -25,14 +28,21 @@ use bitcoin_rs_mining::{
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
+
 use compact_str::CompactString;
+
+use core::time::Duration;
+
+use crate::{ApplyError, apply::Chainstate, chain_effects::ChainFollowers};
+
 use hashbrown::HashMap;
+
 use parking_lot::{Condvar, Mutex, RwLock};
 
-use crate::ApplyError;
-use crate::apply::{self, Chainstate};
-use crate::chain_effects::ChainFollowers;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -645,7 +655,6 @@ impl MiningCoordinator {
     fn template_from_candidate(
         network: Network,
         candidate: Arc<Candidate>,
-        request: &BlockTemplateRequest,
         submit_old: Option<bool>,
         version_bits_available: Vec<AvailableMiningRule>,
         version_bits_required: u32,
@@ -660,31 +669,26 @@ impl MiningCoordinator {
         if network.is_taproot_active(candidate.height) {
             rules.push(MiningRule::new("taproot"));
         }
-        let mut capabilities = vec![
-            MiningCapability::new("proposal"),
-            MiningCapability::new("longpoll"),
-        ];
-        for capability in &request.capabilities {
-            if !capabilities
-                .iter()
-                .any(|known| known.as_str() == capability.as_str())
-            {
-                capabilities.push(capability.clone());
-            }
+        let signet = signet_info(network);
+        if signet.is_some() {
+            rules.push(MiningRule::new("signet"));
         }
         BlockTemplate {
             candidate,
             rules,
             version_bits_available,
             version_bits_required,
-            capabilities,
+            capabilities: vec![
+                MiningCapability::new("proposal"),
+                MiningCapability::new("longpoll"),
+            ],
             mutable: vec![
                 TemplateMutation::Time,
                 TemplateMutation::Transactions,
                 TemplateMutation::PreviousBlock,
             ],
             submit_old,
-            work_id: None,
+            signet,
         }
     }
 
@@ -719,10 +723,47 @@ impl MiningCoordinator {
     }
 
     fn propose(&self, block: &Block) -> BlockValidationResult {
-        match apply::validate_block(&self.apply_handles, block) {
+        match self.apply_handles.validate_block(block) {
             Ok(()) => BlockValidationResult::Accepted,
             Err(error) => map_apply_error(error),
         }
+    }
+
+    /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
+    fn accept_submitted_header(&self, header: Header) -> Result<(), MiningControlError> {
+        let mut tree = self.block_tree.write();
+        // Preserve accept_headers' idempotent duplicate path, including genesis.
+        if tree.lookup(header.compute_hash().into()).is_some() {
+            return accept_headers(
+                &mut tree,
+                std::slice::from_ref(&header),
+                self.network,
+                current_unix_seconds(),
+            )
+            .map(|_| ())
+            .map_err(header_reject_reason);
+        }
+        let parent = tree.lookup(header.prev_blockhash.into()).ok_or_else(|| {
+            MiningControlError::Rejected(missing_parent_reason(Hash256::from(
+                header.prev_blockhash,
+            )))
+        })?;
+        if tree
+            .node(parent)
+            .is_ok_and(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid)
+        {
+            return Err(MiningControlError::Rejected(CompactString::from(
+                "bad-prevblk",
+            )));
+        }
+        accept_headers(
+            &mut tree,
+            std::slice::from_ref(&header),
+            self.network,
+            current_unix_seconds(),
+        )
+        .map(|_| ())
+        .map_err(header_reject_reason)
     }
 
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
@@ -790,7 +831,12 @@ impl MiningCoordinator {
                     difficulty_for_bits(next.bits),
                 )
             }
-            None => (0, 0.0, 0, 0.0),
+            None => (
+                CompactTarget::from_consensus(0),
+                0.0,
+                CompactTarget::from_consensus(0),
+                0.0,
+            ),
         };
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
@@ -865,7 +911,6 @@ impl MiningControl for MiningCoordinator {
                 let template = Self::template_from_candidate(
                     self.network,
                     candidate,
-                    &request,
                     submit_old,
                     version_bits_available,
                     version_bits_required,
@@ -892,6 +937,10 @@ impl MiningControl for MiningCoordinator {
 
     fn submit_block(&self, block: Block) -> Result<BlockValidationResult, MiningControlError> {
         self.submit(&block)
+    }
+
+    fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
+        self.accept_submitted_header(header)
     }
 
     fn publish_generation(&self) {
@@ -948,10 +997,29 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     }
 }
 
+fn missing_parent_reason(prev_hash: Hash256) -> CompactString {
+    CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+}
+
+fn header_reject_reason(error: ChainError) -> MiningControlError {
+    let reason = match error {
+        ChainError::InvalidPow { .. } => CompactString::from("high-hash"),
+        ChainError::ZeroTarget { .. }
+        | ChainError::TargetExceedsLimit { .. }
+        | ChainError::NbitsMismatch { .. } => CompactString::from("bad-diffbits"),
+        ChainError::TimestampTooEarly { .. } => CompactString::from("time-too-old"),
+        ChainError::TimestampTooFarAhead { .. } => CompactString::from("time-too-new"),
+        ChainError::MissingParent { prev_hash } => missing_parent_reason(prev_hash),
+        other => CompactString::from(other.to_string()),
+    };
+    MiningControlError::Rejected(reason)
+}
+
 #[cfg(test)]
 mod apply_error_tests {
-    use super::{BlockValidationResult, map_apply_error};
-    use crate::state::ApplyError;
+    use super::BlockValidationResult;
+    use super::map_apply_error;
+    use crate::apply::error::ApplyError;
 
     #[test]
     fn journal_backpressure_is_operational() {
@@ -971,6 +1039,38 @@ mod apply_error_tests {
                 }
             )),
             BlockValidationResult::Rejected(reason) if reason == "bad-cb-amount"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod header_reject_tests {
+    use super::header_reject_reason;
+    use bitcoin_rs_chain::{ChainError, ChainWork};
+    use bitcoin_rs_mining::MiningControlError;
+    use bitcoin_rs_primitives::Hash256;
+
+    // CONTRACT: docs/contracts/external-api.md#API-13
+    #[test]
+    fn pow_failure_is_high_hash() {
+        assert!(matches!(
+            header_reject_reason(ChainError::InvalidPow {
+                hash: Hash256::default(),
+                target: ChainWork::default(),
+            }),
+            MiningControlError::Rejected(reason) if reason == "high-hash"
+        ));
+    }
+
+    #[test]
+    fn nbits_mismatch_is_bad_diffbits() {
+        assert!(matches!(
+            header_reject_reason(ChainError::NbitsMismatch {
+                actual: 1,
+                expected: 2,
+                height: 1,
+            }),
+            MiningControlError::Rejected(reason) if reason == "bad-diffbits"
         ));
     }
 }
@@ -1223,7 +1323,8 @@ fn decode_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod generation_key_tests {
-    use super::{GenerationKey, parse_long_poll_id};
+    use super::GenerationKey;
+    use super::parse_long_poll_id;
     use bitcoin_rs_mining::TemplateId;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1272,20 +1373,28 @@ mod generation_key_tests {
 /// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
 #[cfg(test)]
 mod network_hashps_oracle_tests {
-    use super::{estimate_network_hashps, hash_ps_at};
-    use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+    use super::estimate_network_hashps;
+    use super::hash_ps_at;
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::NodeId;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::TipSnapshot;
     use bitcoin_rs_mining::MiningControlError;
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::Network;
 
     const BITS: u32 = 0x207f_ffff;
 
     fn header(prev: BlockHash, time: u32) -> Header {
+        use bitcoin_rs_primitives::CompactTarget;
         Header {
             version: 1,
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time,
-            bits: BITS,
+            bits: CompactTarget::from_consensus(BITS),
             nonce: 0,
         }
     }
@@ -1448,22 +1557,27 @@ mod network_hashps_oracle_tests {
 #[cfg(test)]
 mod candidate_template_tests {
     use alloc::sync::Arc;
-    use bitcoin_rs_mining::{Candidate, TemplateId};
-    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
+    use bitcoin_rs_mining::Candidate;
+    use bitcoin_rs_mining::TemplateId;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxOut;
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
         use alloc::sync::Arc;
         use bitcoin_rs_mining::Candidate;
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
 
         let mut state = super::CoordinatorState::new();
         let coinbase = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut first_id = None;
@@ -1479,7 +1593,7 @@ mod candidate_template_tests {
                 previous_block_hash: hash,
                 height: 1,
                 version: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 min_time: 1,
                 current_time: 1,
                 csv_active: false,
@@ -1511,12 +1625,13 @@ mod candidate_template_tests {
     }
 
     fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) -> Candidate {
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
         Candidate {
             template_id: TemplateId::new(&previous, 1),
             previous_block_hash: previous,
             height: 1,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 1,
             csv_active,
@@ -1527,11 +1642,11 @@ mod candidate_template_tests {
             mempool_sequence: 1,
             coinbase: Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 50,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(50),
+                    script_pubkey: Script::new(),
                 }],
             },
             coinbase_value: 50,
@@ -1546,15 +1661,6 @@ mod candidate_template_tests {
         }
     }
 
-    fn empty_request() -> bitcoin_rs_mining::BlockTemplateRequest {
-        bitcoin_rs_mining::BlockTemplateRequest {
-            mode: bitcoin_rs_mining::BlockTemplateMode::Template,
-            capabilities: Vec::new(),
-            rules: Vec::new(),
-            long_poll_id: None,
-        }
-    }
-
     fn template_for(
         candidate: Candidate,
         submit_old: Option<bool>,
@@ -1562,7 +1668,6 @@ mod candidate_template_tests {
         super::MiningCoordinator::template_from_candidate(
             Network::Regtest,
             Arc::new(candidate),
-            &empty_request(),
             submit_old,
             Vec::new(),
             0,
@@ -1598,6 +1703,48 @@ mod candidate_template_tests {
             vec!["csv", "taproot"]
         );
         assert_eq!(mutated.submit_old, Some(false));
+        assert_eq!(
+            first
+                .capabilities
+                .iter()
+                .map(bitcoin_rs_mining::MiningCapability::as_str)
+                .collect::<Vec<_>>(),
+            vec!["proposal", "longpoll"]
+        );
+        assert!(first.signet.is_none());
+    }
+
+    #[test]
+    fn signet_template_carries_challenge_and_mandatory_rule() {
+        use bitcoin_rs_mining::MiningRule;
+
+        let template = super::MiningCoordinator::template_from_candidate(
+            Network::Signet,
+            Arc::new(sample_candidate(
+                Hash256::from_le_bytes(&[0x44; 32]),
+                true,
+                true,
+            )),
+            None,
+            Vec::new(),
+            0,
+        );
+        assert!(
+            template
+                .rules
+                .iter()
+                .map(MiningRule::as_str)
+                .any(|rule| rule == "signet")
+        );
+        assert!(template.signet.is_some());
+        assert_eq!(
+            template
+                .capabilities
+                .iter()
+                .map(bitcoin_rs_mining::MiningCapability::as_str)
+                .collect::<Vec<_>>(),
+            vec!["proposal", "longpoll"]
+        );
     }
 
     #[test]
@@ -1629,10 +1776,12 @@ mod candidate_template_tests {
 
 #[cfg(test)]
 mod generation_signal_tests {
-    use super::{MempoolSequenceWake, MiningGenerationSignal};
-    use bitcoin_rs_mining::{
-        BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
-    };
+    use super::MempoolSequenceWake;
+    use super::MiningGenerationSignal;
+    use bitcoin_rs_mining::BlockTemplateRequest;
+    use bitcoin_rs_mining::BlockTemplateResult;
+    use bitcoin_rs_mining::MiningControl;
+    use bitcoin_rs_mining::MiningControlError;
     use bitcoin_rs_primitives::Block;
     use compact_str::CompactString;
     use parking_lot::Mutex;
@@ -1670,6 +1819,13 @@ mod generation_signal_tests {
             &self,
             _block: Block,
         ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
+            Err(unavailable())
+        }
+
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_primitives::Header,
+        ) -> Result<(), MiningControlError> {
             Err(unavailable())
         }
 

@@ -2,8 +2,9 @@
 //!
 //! This module owns the download-side policy that decides which blocks to
 //! request from which peers, how to detect and recover from stalls, and how
-//! to manage the in-flight window budget. The sync *coordinator* (`BlockSync`
-//! in the node crate) drives these policy types but does not own them.
+//! to manage the in-flight window budget. [`crate::BlockStager`] owns the
+//! matching inbound staging set. The node sync coordinator drives these
+//! types; it does not own the policy.
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -149,7 +150,7 @@ pub struct SyncPeer {
     /// Peer network address.
     pub addr: SocketAddr,
     /// Best known block height the peer advertises.
-    pub start_height: i32,
+    pub best_known_height: i32,
 }
 
 /// The set of peers chosen for the current sync cycle.
