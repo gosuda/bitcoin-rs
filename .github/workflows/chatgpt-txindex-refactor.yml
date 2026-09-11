@@ -35,15 +35,14 @@ jobs:
           open_result_marker = '/// Result of opening the txindex store: writer, reader, and batch limits.\n'
           undo_marker = '/// Exact spent-coin script anchor decoded from one block\'s undo record.\n'
 
-          markers = (
+          for marker in (
               runtime_marker,
               lifecycle_marker,
               open_spec_marker,
               supervisor_marker,
               open_result_marker,
               undo_marker,
-          )
-          for marker in markers:
+          ):
               if source.count(marker) != 1:
                   raise SystemExit(f'expected exactly one marker: {marker!r}')
 
@@ -72,6 +71,15 @@ jobs:
           ).replace(
               'fn open_tx_index_with_timeout(',
               'pub(super) fn open_tx_index_with_timeout(',
+              1,
+          ).replace(
+              'fn fail_worker(',
+              'pub(super) fn fail_worker(',
+              1,
+          )
+          supervisor = supervisor.replace(
+              '                        fail_worker(',
+              '                        super::open::fail_worker(',
               1,
           )
 
