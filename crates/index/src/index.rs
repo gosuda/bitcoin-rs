@@ -1562,7 +1562,7 @@ impl<S: KvStore> Indexer<S> {
                     let Ok(vout) = u32::try_from(vout_idx) else {
                         continue;
                     };
-                    outputs.push((txid, vout, output.value, height));
+                    outputs.push((txid, vout, output.value.to_sat(), height));
                 }
             }
         }
@@ -1697,7 +1697,7 @@ impl<S: KvStore> Indexer<S> {
         let Ok(vout_idx) = usize::try_from(outpoint.vout) else {
             return Ok(None);
         };
-        Ok(tx.outputs.get(vout_idx).map(|output| output.value))
+        Ok(tx.outputs.get(vout_idx).map(|output| output.value.to_sat()))
     }
 
     /// Resolves a transaction by txid and returns it alongside the block
@@ -2415,7 +2415,7 @@ fn append_matching_outputs(
             continue;
         };
         let txid = *computed_txid.get_or_insert_with(|| tx.txid());
-        outputs.push((txid, vout, output.value, height));
+        outputs.push((txid, vout, output.value.to_sat(), height));
     }
 }
 
@@ -3565,7 +3565,7 @@ mod tests {
         };
         let scripthash = ScriptHash::from_script_bytes(&output.script_pubkey);
         let txid = tx.txid();
-        let value = output.value;
+        let value = output.value.to_sat();
         let (_dir, mut writer) = writer()?;
 
         writer.commit_block(0, &consensus_bytes(&block))?;
@@ -3772,7 +3772,7 @@ mod tests {
         };
         let scripthash = ScriptHash::from_script_bytes(&output.script_pubkey);
         let txid = tx.txid();
-        let value = output.value;
+        let value = output.value.to_sat();
         let (_dir, mut writer) = writer()?;
 
         writer.commit_block(0, &consensus_bytes(&block))?;
@@ -4073,7 +4073,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: CompactTarget::from_consensus(0),
                 nonce: 0,
             },
             txs,
@@ -4083,16 +4083,16 @@ mod tests {
     fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 5_000,
-                script_pubkey,
+                value: Amount::from_sat(5_000),
+                script_pubkey: script_pubkey.into(),
             }],
         }
     }

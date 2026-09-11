@@ -2,7 +2,10 @@
 //! These are parse/identity workloads, not signed consensus-valid blocks.
 
 use bitcoin_rs_consensus::block_view::BlockFacts;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 
 /// A zero witness modulus selects legacy transactions; otherwise the last
 /// transaction in each modulus-sized group carries one witness stack.
@@ -28,12 +31,12 @@ pub(crate) fn fixture(
                         u32::try_from(input_index)
                             .unwrap_or_else(|error| panic!("fixture input count: {error}")),
                     ),
-                    script_sig: vec![0x51; script_len],
-                    sequence: 0xffff_fffe,
+                    script_sig: Script::from_bytes(vec![0x51; script_len]),
+                    sequence: Sequence::from_consensus(0xffff_fffe),
                     witness: if witnessed && input_index == 0 {
-                        vec![vec![0x30; 72], vec![0x02; 33]]
+                        Witness::from_stack(vec![vec![0x30; 72], vec![0x02; 33]])
                     } else {
-                        Vec::new()
+                        Witness::new()
                     },
                 })
                 .collect();
@@ -42,12 +45,12 @@ pub(crate) fn fixture(
                 inputs,
                 outputs: vec![
                     TxOut {
-                        value: 1,
-                        script_pubkey: vec![0x51; script_len],
+                        value: Amount::from_sat(1),
+                        script_pubkey: Script::from_bytes(vec![0x51; script_len]),
                     };
                     output_count
                 ],
-                lock_time: identity,
+                lock_time: LockTime::from_consensus(identity),
             }
         })
         .collect();
@@ -57,7 +60,7 @@ pub(crate) fn fixture(
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 0,
-            bits: 0,
+            bits: CompactTarget::from_consensus(0),
             nonce: 0,
         },
         txs,

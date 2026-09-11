@@ -366,7 +366,10 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
-    use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
+    use bitcoin_rs_primitives::{
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
+        Witness, Wtxid,
+    };
 
     use super::{
         ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, MAX_LOCATOR_HASHES, TxInventory,
@@ -956,7 +959,7 @@ mod tests {
     }
 
     fn dummy_tx(byte: u8) -> Tx {
-        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut};
+        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut, Witness};
         Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -964,15 +967,15 @@ mod tests {
                     txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
                     vout: 0,
                 },
-                script_sig: vec![byte],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: vec![byte].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1028,7 +1031,7 @@ mod tests {
             None,
         );
         let mut tx = dummy_tx(0x42);
-        tx.inputs[0].witness = vec![vec![0x01]];
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![0x01]]);
         let txid_item =
             Inventory::Transaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
         let witness_txid_item =
@@ -1083,6 +1086,7 @@ mod tests {
 
     #[test]
     fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+        use bitcoin_rs_primitives::Script;
         use std::sync::Arc;
 
         use bitcoin_rs_mempool::{
@@ -1110,8 +1114,8 @@ mod tests {
             );
             let mut tx = dummy_tx(0x51);
             tx.inputs[0].script_sig.clear();
-            tx.inputs[0].witness = vec![vec![0x51]];
-            tx.outputs[0].script_pubkey = vec![0x6a, 4, 1, 2, 3, 4];
+            tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+            tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]);
             let tx = Arc::new(tx);
             let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
             let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
@@ -1365,7 +1369,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&[0; 32]),
             time: nonce,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce,
         }
     }

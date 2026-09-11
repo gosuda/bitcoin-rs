@@ -13,7 +13,8 @@ use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::{Network, Node, NodeConfig, NodeError};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx,
+    TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 
 const SEED_BLOCKS: u32 = 100;
@@ -244,7 +245,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
                 prev_blockhash: BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
                 time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-                bits: REGTEST_BITS,
+                bits: CompactTarget::from_consensus(REGTEST_BITS),
                 nonce: 0,
             },
             txs: vec![coinbase],
@@ -274,15 +275,17 @@ fn seed_coinbase(height: u32) -> Tx {
             previous_output: null_prevout(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
+                .concat()
+                .into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+            script_pubkey: vec![0x51].into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -294,17 +297,17 @@ fn seed_coinbase_spend() -> Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: REGTEST_SUBSIDY_SATS - MEMPOOL_TX_FEE_SATS,
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - MEMPOOL_TX_FEE_SATS),
             // P2WPKH. The prevout is anyone-can-spend, but the mempool also
             // enforces output standardness, which a bare OP_TRUE output fails.
-            script_pubkey: [vec![0x00, 0x14], vec![0x11; 20]].concat(),
+            script_pubkey: [vec![0x00, 0x14], vec![0x11; 20]].concat().into(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -353,7 +356,8 @@ fn grind_pow(block: &mut Block) -> Result<()> {
 
 /// Returns true when the header hash, read as a little-endian integer, meets
 /// the compact bits target (Core `CheckProofOfWork` shape).
-fn pow_is_met(bits: u32, hash: &Hash256) -> bool {
+fn pow_is_met(bits: CompactTarget, hash: &Hash256) -> bool {
+    let bits = bits.to_consensus();
     let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
     let mantissa = bits & 0x00ff_ffff;
     if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {

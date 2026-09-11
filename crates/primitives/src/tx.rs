@@ -3,8 +3,10 @@
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DecodeError, OutPoint, Txid, Wtxid,
-    encode::{ConsensusEncode, Sha256Writer, deserialize, encode_tx, finalize_double_sha256},
+    Amount, DecodeError, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
+    encode::{
+        ConsensusEncode, Sha256Sink, deserialize, encode_tx, finalize_double_sha256, tx_base_size,
+    },
 };
 
 /// A Bitcoin transaction input in native owned form.
@@ -13,20 +15,20 @@ pub struct TxIn {
     /// The outpoint being spent.
     pub previous_output: OutPoint,
     /// The input's scriptSig (empty for segwit spends).
-    pub script_sig: Vec<u8>,
+    pub script_sig: Script,
     /// The input sequence number.
-    pub sequence: u32,
+    pub sequence: Sequence,
     /// The BIP144 witness stack; empty when the input has no witness.
-    pub witness: Vec<Vec<u8>>,
+    pub witness: Witness,
 }
 
 /// A Bitcoin transaction output in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TxOut {
     /// The output value in satoshis.
-    pub value: u64,
+    pub value: Amount,
     /// The output scriptPubKey.
-    pub script_pubkey: Vec<u8>,
+    pub script_pubkey: Script,
 }
 
 /// A Bitcoin transaction in native owned form.
@@ -39,7 +41,7 @@ pub struct Tx {
     /// Outputs in consensus order.
     pub outputs: Vec<TxOut>,
     /// Lock time.
-    pub lock_time: u32,
+    pub lock_time: LockTime,
 }
 
 impl Tx {
@@ -53,9 +55,8 @@ impl Tx {
     #[must_use]
     pub fn txid(&self) -> Txid {
         let mut engine = Sha256::new();
-        let mut writer = Sha256Writer(&mut engine);
-        encode_tx(self, &mut writer, false)
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let mut writer = Sha256Sink(&mut engine);
+        encode_tx(self, &mut writer, false);
         Txid(finalize_double_sha256(engine))
     }
 
@@ -63,9 +64,8 @@ impl Tx {
     #[must_use]
     pub fn wtxid(&self) -> Wtxid {
         let mut engine = Sha256::new();
-        let mut writer = Sha256Writer(&mut engine);
-        ConsensusEncode::consensus_encode(self, &mut writer)
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let mut writer = Sha256Sink(&mut engine);
+        ConsensusEncode::consensus_encode(self, &mut writer);
         Wtxid(finalize_double_sha256(engine))
     }
 
@@ -77,10 +77,7 @@ impl Tx {
     /// Consensus serialization length without BIP144 witness sections (the txid layout).
     #[must_use]
     pub fn base_size(&self) -> usize {
-        let mut total = 0_usize;
-        let () = encode_tx(self, &mut crate::encode::CountWriter(&mut total), false)
-            .unwrap_or_else(|error| unreachable!("count writer is infallible: {error}"));
-        total
+        tx_base_size(self)
     }
 
     /// Full consensus serialization length, including BIP144 witness sections.
@@ -114,12 +111,10 @@ impl Tx {
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
-    use bitcoin::hashes::Hash as _;
+    use std::str::FromStr;
 
     use super::Tx;
-    use crate::{
-        DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, Wtxid, encode::consensus_bytes,
-    };
+    use crate::{DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -128,33 +123,33 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::default()), 3),
-                script_sig: vec![0x51],
-                sequence: 0xffff_fffe,
-                witness: vec![vec![0xaa; 40]],
+                script_sig: vec![0x51].into(),
+                sequence: crate::Sequence::from_consensus(0xffff_fffe),
+                witness: vec![vec![0xaa; 40]].into(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x00, 0x14, 0xab],
+                value: crate::Amount::from_sat(50_000),
+                script_pubkey: vec![0x00, 0x14, 0xab].into(),
             }],
-            lock_time: 42,
+            lock_time: crate::LockTime::from_consensus(42),
         }
     }
 
     #[test]
-    fn txid_and_wtxid_match_bitcoin_crate_for_fixture_transactions() -> Result<()> {
+    fn fixture_txids_match_golden_list_and_reencode() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/363731.bin")?;
-        let block: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
+        let block = crate::Block::consensus_decode(&bytes)?;
+        let golden = std::fs::read_to_string("tests/testdata/363731.txids.txt")?;
+        let expected: Vec<Txid> = golden
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(Txid::from_str)
+            .collect::<Result<_, _>>()?;
 
-        for bitcoin_tx in block.txdata.iter().take(10) {
-            let serialized = bitcoin::consensus::serialize(bitcoin_tx);
-            let tx = Tx::consensus_decode(&serialized)?;
-
-            let expected_txid = Hash256::from_le_bytes(bitcoin_tx.compute_txid().as_byte_array());
-            let expected_wtxid = Hash256::from_le_bytes(bitcoin_tx.compute_wtxid().as_byte_array());
-
-            assert_eq!(tx.txid(), Txid(expected_txid));
-            assert_eq!(tx.wtxid(), Wtxid(expected_wtxid));
-            assert_eq!(consensus_bytes(&tx), serialized);
+        assert_eq!(block.txs.len(), expected.len());
+        for (tx, expected_txid) in block.txs.iter().take(10).zip(expected.iter()) {
+            assert_eq!(tx.txid(), *expected_txid);
+            assert_eq!(Tx::consensus_decode(&consensus_bytes(tx))?, *tx);
         }
         Ok(())
     }

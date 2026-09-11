@@ -20,7 +20,9 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, Mempool, MempoolEntry,
     MempoolGateway, MempoolLimits, arm_admission_park, reset_admission_park,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::opcode;
 
 const P2PKH_SCRIPT: &[u8] = &[
@@ -85,16 +87,16 @@ fn tx_one_input(
 ) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: prevout,
-            script_sig,
-            sequence: 0xFFFF_FFFF,
-            witness,
+            script_sig: Script::from_bytes(script_sig),
+            sequence: Sequence::from_consensus(0xFFFF_FFFF),
+            witness: Witness::from_stack(witness),
         }],
         outputs: vec![TxOut {
-            value: output_value,
-            script_pubkey: output_script,
+            value: Amount::from_sat(output_value),
+            script_pubkey: Script::from_bytes(output_script),
         }],
     }
 }
@@ -147,8 +149,8 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     let prevouts = vec![(
         prev,
         TxOut {
-            value: 100_000,
-            script_pubkey: anyone_can_spend(),
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(anyone_can_spend()),
         },
     )];
     let request = admission_request(&gateway, &tx, context, prevouts);
@@ -223,8 +225,8 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     let prevouts = vec![(
         prev,
         TxOut {
-            value: 100_000,
-            script_pubkey: p2sh_script_pubkey(&[0x42; 20]),
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(p2sh_script_pubkey(&[0x42; 20])),
         },
     )];
     let request = admission_request(&gateway, &tx, context, prevouts);
@@ -271,8 +273,8 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
     let prevouts = vec![(
         prev,
         TxOut {
-            value: 100_000,
-            script_pubkey: p2wsh_script_pubkey(&[0x42; 32]),
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(p2wsh_script_pubkey(&[0x42; 32])),
         },
     )];
     let request = admission_request(&gateway, &tx, context, prevouts);
@@ -321,24 +323,24 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     // is non-empty and passes the empty-prevouts refusal.
     let child = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![
             TxIn {
                 previous_output: OutPoint::new(parent_txid, 0),
-                script_sig: bitcoin_rs_script::push_data(&redeem),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&redeem)),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             },
             TxIn {
                 previous_output: outpoint(6, 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             },
         ],
         outputs: vec![TxOut {
-            value: 198_000,
-            script_pubkey: P2PKH_SCRIPT.to_vec(),
+            value: Amount::from_sat(198_000),
+            script_pubkey: Script::from_bytes(P2PKH_SCRIPT.to_vec()),
         }],
     };
     let context = PackageTxContext {
@@ -351,8 +353,8 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     let prevouts = vec![(
         outpoint(6, 0),
         TxOut {
-            value: 100_000,
-            script_pubkey: anyone_can_spend(),
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(anyone_can_spend()),
         },
     )];
     let request = admission_request(&gateway, &child, context, prevouts);
@@ -403,8 +405,8 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
     let prevouts = vec![(
         prev,
         TxOut {
-            value: 100_000,
-            script_pubkey: anyone_can_spend(),
+            value: Amount::from_sat(100_000),
+            script_pubkey: Script::from_bytes(anyone_can_spend()),
         },
     )];
     let request = admission_request(&gateway, &tx, context, prevouts);

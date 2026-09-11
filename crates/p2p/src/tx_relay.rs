@@ -745,7 +745,9 @@ mod tests {
         use bitcoin_rs_mempool::{
             CompositeObserver, Mempool, MempoolEntry, MempoolLimits, PeerToken,
         };
-        use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+        use bitcoin_rs_primitives::{
+            Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        };
         use parking_lot::RwLock;
 
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
@@ -771,15 +773,15 @@ mod tests {
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(dummy_txid(marker), 0),
-                    script_sig: vec![],
-                    sequence: u32::MAX,
-                    witness: vec![vec![0x51]],
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::from_stack(vec![vec![0x51]]),
                 }],
                 outputs: vec![TxOut {
-                    value: 1_000,
-                    script_pubkey: vec![0x6a, 4, 1, 2, 3, 4],
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]),
                 }],
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
             });
             let txid = tx.txid();
             let wtxid = tx.wtxid();
@@ -825,20 +827,22 @@ mod tests {
     }
 
     fn relay_identity_tx() -> Arc<bitcoin_rs_primitives::Tx> {
-        use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
+        use bitcoin_rs_primitives::{
+            Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        };
         Arc::new(Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(dummy_txid(90), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_fffd,
-                witness: vec![vec![1]],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xffff_fffd),
+                witness: Witness::from_stack(vec![vec![1]]),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6a, 4, 1, 2, 3, 4],
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         })
     }
 
@@ -924,7 +928,8 @@ mod tests {
                 let original = relay_identity_tx();
                 let next = if alternate_witness {
                     let mut variant = (*original).clone();
-                    variant.inputs[0].witness = vec![vec![2]];
+                    variant.inputs[0].witness =
+                        bitcoin_rs_primitives::Witness::from_stack(vec![vec![2]]);
                     Arc::new(variant)
                 } else {
                     // Same allocation, not merely equal bytes: Arc identity is
@@ -991,7 +996,7 @@ mod tests {
             .expect("original peer admission");
         assert!(rx.try_recv().is_err());
         let mut replacement = (*original).clone();
-        replacement.outputs[0].value = 900;
+        replacement.outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(900);
         let replacement = Arc::new(replacement);
         let outcome = gateway
             .replace_transaction(

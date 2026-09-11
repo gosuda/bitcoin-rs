@@ -17,7 +17,8 @@ use bitcoin_rs_consensus::{
     verify_transaction, verify_transaction_non_script,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::{VerifyFlags, opcode};
 
@@ -47,15 +48,15 @@ impl WitnessFixture {
             let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[7; 32])), vout);
             inputs.push(TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: vec![script],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::from_stack(vec![script]),
             });
             prevouts.push((
                 outpoint,
                 TxOut {
-                    value: 1,
-                    script_pubkey,
+                    value: Amount::from_sat(1),
+                    script_pubkey: Script::from_bytes(script_pubkey),
                 },
             ));
         }
@@ -64,10 +65,10 @@ impl WitnessFixture {
                 version: 2,
                 inputs,
                 outputs: vec![TxOut {
-                    value: 1,
-                    script_pubkey: vec![opcode::OP_PUSHNUM_1],
+                    value: Amount::from_sat(1),
+                    script_pubkey: Script::from_bytes(vec![opcode::OP_PUSHNUM_1]),
                 }],
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
             },
             prevouts,
         }
@@ -80,7 +81,7 @@ impl WitnessFixture {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0x2000_ffff,
+                bits: CompactTarget::from_consensus(0x2000_ffff),
                 nonce: 0,
             },
             txs: vec![self.tx.clone()],
