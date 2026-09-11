@@ -21,6 +21,10 @@ pub mod opcode {
     pub const OP_PUSHNUM_1: u8 = 0x51;
     /// `OP_16`: pushes the number 16 (`OP_PUSHNUM_16`).
     pub const OP_PUSHNUM_16: u8 = 0x60;
+    /// `OP_IF`: begins a conditional branch (evaluator-owned semantics).
+    pub const OP_IF: u8 = 0x63;
+    /// `OP_ENDIF`: closes a conditional branch.
+    pub const OP_ENDIF: u8 = 0x68;
     /// `OP_RETURN`: marks an unspendable provably-prunable output.
     pub const OP_RETURN: u8 = 0x6a;
     /// `OP_DUP`: duplicates the top stack item.

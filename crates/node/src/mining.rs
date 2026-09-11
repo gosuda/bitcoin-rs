@@ -6,17 +6,16 @@
 //! validation path without persistence; solved-block submission returns only
 //! after validation, persistence, and chain-state application complete.
 
-use alloc::collections::VecDeque;
-use alloc::sync::Arc;
-use core::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use alloc::{collections::VecDeque, sync::Arc};
 
 use arc_swap::ArcSwapOption;
+
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
+
 use bitcoin_rs_mempool::{
     Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
 };
+
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
     BlockTemplateResult, BlockValidationResult, Candidate, CandidateContext, GenerateRequest,
@@ -25,14 +24,23 @@ use bitcoin_rs_mining::{
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
+
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Network, Tx, consensus_bytes};
+
 use compact_str::CompactString;
+
+use core::time::Duration;
+
+use crate::{ApplyError, apply::Chainstate, chain_effects::ChainFollowers};
+
 use hashbrown::HashMap;
+
 use parking_lot::{Condvar, Mutex, RwLock};
 
-use crate::ApplyError;
-use crate::apply::{self, Chainstate};
-use crate::chain_effects::ChainFollowers;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 /// Default number of cached candidates retained by template id.
 const CANDIDATE_CACHE_LIMIT: usize = 8;
@@ -719,7 +727,7 @@ impl MiningCoordinator {
     }
 
     fn propose(&self, block: &Block) -> BlockValidationResult {
-        match apply::validate_block(&self.apply_handles, block) {
+        match self.apply_handles.validate_block(block) {
             Ok(()) => BlockValidationResult::Accepted,
             Err(error) => map_apply_error(error),
         }
@@ -790,7 +798,12 @@ impl MiningCoordinator {
                     difficulty_for_bits(next.bits),
                 )
             }
-            None => (0, 0.0, 0, 0.0),
+            None => (
+                CompactTarget::from_consensus(0),
+                0.0,
+                CompactTarget::from_consensus(0),
+                0.0,
+            ),
         };
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
@@ -950,8 +963,9 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
 
 #[cfg(test)]
 mod apply_error_tests {
-    use super::{BlockValidationResult, map_apply_error};
-    use crate::state::ApplyError;
+    use super::BlockValidationResult;
+    use super::map_apply_error;
+    use crate::apply::error::ApplyError;
 
     #[test]
     fn journal_backpressure_is_operational() {
@@ -1223,7 +1237,8 @@ fn decode_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod generation_key_tests {
-    use super::{GenerationKey, parse_long_poll_id};
+    use super::GenerationKey;
+    use super::parse_long_poll_id;
     use bitcoin_rs_mining::TemplateId;
     use bitcoin_rs_primitives::Hash256;
 
@@ -1272,20 +1287,28 @@ mod generation_key_tests {
 /// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
 #[cfg(test)]
 mod network_hashps_oracle_tests {
-    use super::{estimate_network_hashps, hash_ps_at};
-    use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+    use super::estimate_network_hashps;
+    use super::hash_ps_at;
+    use bitcoin_rs_chain::BlockTree;
+    use bitcoin_rs_chain::NodeId;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::TipSnapshot;
     use bitcoin_rs_mining::MiningControlError;
-    use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::Network;
 
     const BITS: u32 = 0x207f_ffff;
 
     fn header(prev: BlockHash, time: u32) -> Header {
+        use bitcoin_rs_primitives::CompactTarget;
         Header {
             version: 1,
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time,
-            bits: BITS,
+            bits: CompactTarget::from_consensus(BITS),
             nonce: 0,
         }
     }
@@ -1448,22 +1471,27 @@ mod network_hashps_oracle_tests {
 #[cfg(test)]
 mod candidate_template_tests {
     use alloc::sync::Arc;
-    use bitcoin_rs_mining::{Candidate, TemplateId};
-    use bitcoin_rs_primitives::{Hash256, Network, Tx, TxOut};
+    use bitcoin_rs_mining::Candidate;
+    use bitcoin_rs_mining::TemplateId;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxOut;
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
         use alloc::sync::Arc;
         use bitcoin_rs_mining::Candidate;
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
 
         let mut state = super::CoordinatorState::new();
         let coinbase = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut first_id = None;
@@ -1479,7 +1507,7 @@ mod candidate_template_tests {
                 previous_block_hash: hash,
                 height: 1,
                 version: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 min_time: 1,
                 current_time: 1,
                 csv_active: false,
@@ -1511,12 +1539,13 @@ mod candidate_template_tests {
     }
 
     fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) -> Candidate {
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
         Candidate {
             template_id: TemplateId::new(&previous, 1),
             previous_block_hash: previous,
             height: 1,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 1,
             csv_active,
@@ -1527,11 +1556,11 @@ mod candidate_template_tests {
             mempool_sequence: 1,
             coinbase: Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 50,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(50),
+                    script_pubkey: Script::new(),
                 }],
             },
             coinbase_value: 50,
@@ -1629,10 +1658,12 @@ mod candidate_template_tests {
 
 #[cfg(test)]
 mod generation_signal_tests {
-    use super::{MempoolSequenceWake, MiningGenerationSignal};
-    use bitcoin_rs_mining::{
-        BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
-    };
+    use super::MempoolSequenceWake;
+    use super::MiningGenerationSignal;
+    use bitcoin_rs_mining::BlockTemplateRequest;
+    use bitcoin_rs_mining::BlockTemplateResult;
+    use bitcoin_rs_mining::MiningControl;
+    use bitcoin_rs_mining::MiningControlError;
     use bitcoin_rs_primitives::Block;
     use compact_str::CompactString;
     use parking_lot::Mutex;

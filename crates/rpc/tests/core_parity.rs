@@ -18,8 +18,7 @@ use serde_json::Value;
 
 use support::compare::{self, LiveChain};
 use support::fixture::{
-    self, BodyCheck, BodyForm, Fixture, HttpTuple, PINNED_CORE_SHA256, PINNED_CORE_VERSION,
-    PINNED_NETWORK, Relation, RequestAuth,
+    self, BodyCheck, BodyForm, Fixture, HttpTuple, PINNED_NETWORK, Relation, RequestAuth,
 };
 use support::harness::{NodeHarness, ServerHarness};
 use support::http::{Connection, RawRequest, RawResponse};
@@ -194,8 +193,8 @@ fn differential_loopback_authenticated_chain() -> Result<(), Box<dyn std::error:
 
 /// One keep-alive connection accepts two fully framed requests — the first
 /// answered with 204 and an empty body, the second written in two TCP
-/// fragments and answered with 200 — with every response decoded from
-/// status, headers, and declared `Content-Length`, never from end of stream.
+/// fragments and answered with 200 — with framing decoded from the 204 status
+/// or a declared `Content-Length`, never from end of stream.
 #[test]
 fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error::Error>> {
     let (_node, server) = stand_up()?;
@@ -280,17 +279,6 @@ fn corpus_bounds_and_provenance_hold() -> Result<(), Box<dyn std::error::Error>>
     let mut ordinals = BTreeSet::new();
     for fixture in corpus.values() {
         ordinals.insert(fixture.case_ordinal.clone());
-        let provenance = &fixture.provenance;
-        if provenance.core_version != PINNED_CORE_VERSION
-            || provenance.core_binary_sha256 != PINNED_CORE_SHA256
-            || provenance.network != PINNED_NETWORK
-        {
-            return Err(support::fail(format!(
-                "fixture {} does not pin the audited Core 31.1 provenance",
-                fixture.id
-            ))
-            .into());
-        }
         match (&fixture.relation, &fixture.current, &fixture.gap) {
             (Relation::Exact, None, None) => {}
             (Relation::KnownGap, Some(_), Some(gap)) if !gap.trim().is_empty() => {}

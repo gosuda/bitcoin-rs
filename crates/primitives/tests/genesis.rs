@@ -59,7 +59,8 @@ fn native_genesis_matches_published_hash_and_compiled_bytes() {
             "{network:?} genesis coinbase prevout is null"
         );
         assert_eq!(
-            native.txs[0].outputs[0].value, 5_000_000_000,
+            native.txs[0].outputs[0].value,
+            bitcoin_rs_primitives::Amount::from_sat(5_000_000_000),
             "{network:?} genesis subsidy is 50 BTC"
         );
         if has_times {

@@ -6,21 +6,29 @@
 //! vectors and published hash values; this crate does not take a `rust-bitcoin`
 //! oracle dependency.
 
-use std::io::Write as _;
-
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     Hash256, Tx, TxOut,
     encode::{
-        ConsensusEncode, Sha256Writer, compact_len, finalize_double_sha256, write_compact,
+        ConsensusEncode, Sha256Sink, Sink as _, compact_len, finalize_double_sha256, write_compact,
         write_script,
     },
     varint,
 };
 
 /// Position marker used when no `OP_CODESEPARATOR` executed before the opcodes being signed.
+///
+/// BIP341/BIP342 sentinel only: taproot commits the *position* of the last
+/// executed code separator into the sighash (`0xFFFF_FFFF` when none ran).
+/// The legacy path never uses this constant — it signs the *subscript from*
+/// the last executed separator to the script end instead, and the caller
+/// strips already-executed separator opcodes out of that subscript
+/// (deletion semantics, `remove_codeseparators` at the checker layer).
+/// `SegWit` v0 omits legacy `FindAndDelete`. The caller supplies the
+/// `BIP143` script-code suffix after the last executed `OP_CODESEPARATOR`;
+/// this method hashes that selected suffix verbatim.
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// BIP342 leaf version byte for tapscript leaves.
@@ -197,6 +205,16 @@ impl<'t> SighashCache<'t> {
     /// but the raw value is appended to the hash. The `SIGHASH_SINGLE` bug is reproduced:
     /// when the masked type is SINGLE and `input_index` has no matching output, the
     /// uint256 value 1 is returned.
+    ///
+    /// Legacy-only semantics, deliberately isolated from the other two families
+    /// (T07): `SIGHASH_SINGLE`'s out-of-range uint256-one bug, the
+    /// ANYONECANPAY single-input substitution, the zeroed sibling sequences and
+    /// blanked sibling outputs of NONE/SINGLE, and the code-separator subscript
+    /// deletion performed by the caller before this function, all live here and
+    /// nowhere else. [`Self::segwit_v0_signature_hash`] hashes its script code
+    /// verbatim and zeroes whole fields instead, and
+    /// [`Self::taproot_signature_hash`] commits to field-level aggregates with
+    /// no script-code concept at all — none of the three share a code path.
     pub fn legacy_signature_hash(
         &self,
         input_index: usize,
@@ -218,68 +236,83 @@ impl<'t> SighashCache<'t> {
         }
 
         let mut engine = Sha256::new();
-        let writer = &mut Sha256Writer(&mut engine);
-
-        let () = writer
-            .write_all(&self.tx.version.to_le_bytes())
-            .and_then(|()| {
-                if ty.is_anyone_can_pay() {
-                    write_compact(writer, 1)?;
-                    encode_legacy_input(writer, input, script_code, input.sequence)
+        let writer = &mut Sha256Sink(&mut engine);
+        writer.write_all(&self.tx.version.to_le_bytes());
+        if ty.is_anyone_can_pay() {
+            write_compact(writer, 1);
+            encode_legacy_input(writer, input, script_code, input.sequence);
+        } else {
+            write_compact(writer, compact_len(total));
+            for (n, txin) in self.tx.inputs.iter().enumerate() {
+                let sequence = if n != input_index && (ty.is_single() || ty.is_none()) {
+                    crate::Sequence::ZERO
                 } else {
-                    write_compact(writer, compact_len(total))?;
-                    for (n, txin) in self.tx.inputs.iter().enumerate() {
-                        let sequence = if n != input_index && (ty.is_single() || ty.is_none()) {
-                            0
-                        } else {
-                            txin.sequence
-                        };
-                        let script: &[u8] = if n == input_index { script_code } else { &[] };
-                        encode_legacy_input(writer, txin, script, sequence)?;
-                    }
-                    Ok(())
+                    txin.sequence
+                };
+                let script: &[u8] = if n == input_index { script_code } else { &[] };
+                encode_legacy_input(writer, txin, script, sequence);
+            }
+        }
+        match ty {
+            EcdsaType::All | EcdsaType::AllAnyoneCanPay => {
+                write_compact(writer, compact_len(self.tx.outputs.len()));
+                for output in &self.tx.outputs {
+                    output.consensus_encode(writer);
                 }
-            })
-            .and_then(|()| match ty {
-                EcdsaType::All | EcdsaType::AllAnyoneCanPay => {
-                    write_compact(writer, compact_len(self.tx.outputs.len()))?;
-                    for output in &self.tx.outputs {
-                        output.consensus_encode(writer)?;
+            }
+            EcdsaType::Single | EcdsaType::SingleAnyoneCanPay => {
+                write_compact(writer, compact_len(input_index + 1));
+                for (n, output) in self.tx.outputs.iter().enumerate().take(input_index + 1) {
+                    if n == input_index {
+                        output.consensus_encode(writer);
+                    } else {
+                        // Core blanks non-matching outputs to value -1 with an empty script.
+                        writer.write_all(&u64::MAX.to_le_bytes());
+                        write_compact(writer, 0);
                     }
-                    Ok(())
                 }
-                EcdsaType::Single | EcdsaType::SingleAnyoneCanPay => {
-                    write_compact(writer, compact_len(input_index + 1))?;
-                    for (n, output) in self.tx.outputs.iter().enumerate().take(input_index + 1) {
-                        if n == input_index {
-                            output.consensus_encode(writer)?;
-                        } else {
-                            // Core blanks non-matching outputs to value -1 with an empty script.
-                            writer.write_all(&u64::MAX.to_le_bytes())?;
-                            write_compact(writer, 0)?;
-                        }
-                    }
-                    Ok(())
-                }
-                _ => write_compact(writer, 0),
-            })
-            .and_then(|()| writer.write_all(&self.tx.lock_time.to_le_bytes()))
-            .and_then(|()| writer.write_all(&sighash_type.to_le_bytes()))
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+            }
+            _ => write_compact(writer, 0),
+        }
+        writer.write_all(&self.tx.lock_time.to_le_bytes());
+        writer.write_all(&sighash_type.to_le_bytes());
 
         Ok(finalize_double_sha256(engine))
     }
 
     /// Computes the BIP143 segwit-v0 signature hash (p2wpkh and p2wsh alike: the caller
     /// supplies the witness script / p2wpkh template as `script_code`).
+    ///
+    /// `script_code` is hashed verbatim: BIP143 has no code-separator deletion, no
+    /// SINGLE blanking of individual outputs, and no uint256-one bug — those are
+    /// legacy-only (see [`Self::legacy_signature_hash`]).
     pub fn segwit_v0_signature_hash(
         &mut self,
         input_index: usize,
         script_code: &[u8],
-        value: u64,
+        value: crate::Amount,
         sighash_type: Sighash,
     ) -> Result<Hash256, SighashError> {
-        let ty = sighash_type.to_ecdsa()?;
+        let raw = sighash_type.to_ecdsa()?.to_u32();
+        self.segwit_v0_signature_hash_raw(input_index, script_code, value, raw)
+    }
+
+    /// Computes the BIP143 digest for a raw ECDSA hash type.
+    ///
+    /// Field selection uses the low five bits and `SIGHASH_ANYONECANPAY`, while all
+    /// 32 bits are serialized into the digest. Undefined ECDSA hash types remain
+    /// valid without `STRICTENC`; enforcing that policy belongs to the script
+    /// checker, not the digest engine. Raw zero is valid here, unlike the typed
+    /// API's taproot-only [`Sighash::Default`]. The caller supplies the selected
+    /// script-code suffix verbatim.
+    pub fn segwit_v0_signature_hash_raw(
+        &mut self,
+        input_index: usize,
+        script_code: &[u8],
+        value: crate::Amount,
+        sighash_type: u32,
+    ) -> Result<Hash256, SighashError> {
+        let ty = EcdsaType::from_consensus(sighash_type);
         let total = self.tx.inputs.len();
         let input = self
             .tx
@@ -308,17 +341,13 @@ impl<'t> SighashCache<'t> {
             match self.tx.outputs.get(input_index) {
                 Some(output) => {
                     let mut single = Sha256::new();
-                    let single_writer = &mut Sha256Writer(&mut single);
-                    output
-                        .consensus_encode(single_writer)
-                        .unwrap_or_else(|error| {
-                            unreachable!("sha256 writer is infallible: {error}")
-                        });
+                    let single_writer = &mut Sha256Sink(&mut single);
+                    output.consensus_encode(single_writer);
                     finalize_double_sha256(single)
                 }
-                // BIP143 leaves this case undefined; Core rejects the signature while the
-                // rust-bitcoin oracle emits the zero hash. Either way no signature can
-                // verify, so we mirror the oracle's zero hash.
+                // BIP143 uses zero hashOutputs when SINGLE has no matching output. The
+                // complete preimage is still hashed and a signature over that digest can
+                // verify; this is not the legacy SINGLE bug.
                 None => zero,
             }
         } else {
@@ -326,19 +355,17 @@ impl<'t> SighashCache<'t> {
         };
 
         let mut engine = Sha256::new();
-        let writer = &mut Sha256Writer(&mut engine);
-        let () = writer
-            .write_all(&self.tx.version.to_le_bytes())
-            .and_then(|()| writer.write_all(prevouts_hash.as_byte_array()))
-            .and_then(|()| writer.write_all(sequences_hash.as_byte_array()))
-            .and_then(|()| input.previous_output.consensus_encode(writer))
-            .and_then(|()| write_script(writer, script_code))
-            .and_then(|()| writer.write_all(&value.to_le_bytes()))
-            .and_then(|()| writer.write_all(&input.sequence.to_le_bytes()))
-            .and_then(|()| writer.write_all(outputs_hash.as_byte_array()))
-            .and_then(|()| writer.write_all(&self.tx.lock_time.to_le_bytes()))
-            .and_then(|()| writer.write_all(&ty.to_u32().to_le_bytes()))
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let writer = &mut Sha256Sink(&mut engine);
+        writer.write_all(&self.tx.version.to_le_bytes());
+        writer.write_all(prevouts_hash.as_byte_array());
+        writer.write_all(sequences_hash.as_byte_array());
+        input.previous_output.consensus_encode(writer);
+        write_script(writer, script_code);
+        writer.write_all(&value.to_le_bytes());
+        writer.write_all(&input.sequence.to_le_bytes());
+        writer.write_all(outputs_hash.as_byte_array());
+        writer.write_all(&self.tx.lock_time.to_le_bytes());
+        writer.write_all(&sighash_type.to_le_bytes());
 
         Ok(finalize_double_sha256(engine))
     }
@@ -404,16 +431,12 @@ impl<'t> SighashCache<'t> {
         }
         msg.push(spend_type);
         if is_anyone_can_pay {
-            input
-                .previous_output
-                .consensus_encode(&mut msg)
-                .unwrap_or_else(|error| unreachable!("Vec write is infallible: {error}"));
+            input.previous_output.consensus_encode(&mut msg);
             let prevout = prevouts
                 .get(input_index)
                 .ok_or(SighashError::PrevoutsIndex { index: input_index })?;
             msg.extend_from_slice(&prevout.value.to_le_bytes());
-            write_script(&mut msg, &prevout.script_pubkey)
-                .unwrap_or_else(|error| unreachable!("Vec write is infallible: {error}"));
+            write_script(&mut msg, &prevout.script_pubkey);
             msg.extend_from_slice(&input.sequence.to_le_bytes());
         } else {
             let input_index =
@@ -442,9 +465,8 @@ impl<'t> SighashCache<'t> {
         *self.segwit_prevouts.get_or_insert_with(|| {
             double_sha256_over(|writer| {
                 for input in &tx.inputs {
-                    input.previous_output.consensus_encode(writer)?;
+                    input.previous_output.consensus_encode(writer);
                 }
-                Ok(())
             })
         })
     }
@@ -454,9 +476,8 @@ impl<'t> SighashCache<'t> {
         *self.segwit_sequences.get_or_insert_with(|| {
             double_sha256_over(|writer| {
                 for input in &tx.inputs {
-                    writer.write_all(&input.sequence.to_le_bytes())?;
+                    writer.write_all(&input.sequence.to_le_bytes());
                 }
-                Ok(())
             })
         })
     }
@@ -466,9 +487,8 @@ impl<'t> SighashCache<'t> {
         *self.segwit_outputs.get_or_insert_with(|| {
             double_sha256_over(|writer| {
                 for output in &tx.outputs {
-                    output.consensus_encode(writer)?;
+                    output.consensus_encode(writer);
                 }
-                Ok(())
             })
         })
     }
@@ -478,9 +498,8 @@ impl<'t> SighashCache<'t> {
         *self.taproot_prevouts.get_or_insert_with(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
-                    input.previous_output.consensus_encode(writer)?;
+                    input.previous_output.consensus_encode(writer);
                 }
-                Ok(())
             })
         })
     }
@@ -489,9 +508,8 @@ impl<'t> SighashCache<'t> {
         *self.taproot_amounts.get_or_insert_with(|| {
             sha256_over(|writer| {
                 for prevout in prevouts {
-                    writer.write_all(&prevout.value.to_le_bytes())?;
+                    writer.write_all(&prevout.value.to_le_bytes());
                 }
-                Ok(())
             })
         })
     }
@@ -500,9 +518,8 @@ impl<'t> SighashCache<'t> {
         *self.taproot_scriptpubkeys.get_or_insert_with(|| {
             sha256_over(|writer| {
                 for prevout in prevouts {
-                    write_script(writer, &prevout.script_pubkey)?;
+                    write_script(writer, &prevout.script_pubkey);
                 }
-                Ok(())
             })
         })
     }
@@ -512,9 +529,8 @@ impl<'t> SighashCache<'t> {
         *self.taproot_sequences.get_or_insert_with(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
-                    writer.write_all(&input.sequence.to_le_bytes())?;
+                    writer.write_all(&input.sequence.to_le_bytes());
                 }
-                Ok(())
             })
         })
     }
@@ -524,9 +540,8 @@ impl<'t> SighashCache<'t> {
         *self.taproot_outputs.get_or_insert_with(|| {
             sha256_over(|writer| {
                 for output in &tx.outputs {
-                    output.consensus_encode(writer)?;
+                    output.consensus_encode(writer);
                 }
-                Ok(())
             })
         })
     }
@@ -552,7 +567,7 @@ impl Sighash {
         tx: &Tx,
         input_idx: usize,
         script_code: &[u8],
-        value: u64,
+        value: crate::Amount,
         sighash_type: Self,
     ) -> Result<Hash256, SighashError> {
         SighashCache::new(tx).segwit_v0_signature_hash(input_idx, script_code, value, sighash_type)
@@ -664,32 +679,30 @@ const fn uint256_one() -> Hash256 {
 }
 
 fn encode_legacy_input(
-    writer: &mut Sha256Writer<'_>,
+    writer: &mut Sha256Sink<'_>,
     input: &crate::TxIn,
     script: &[u8],
-    sequence: u32,
-) -> std::io::Result<()> {
-    input.previous_output.consensus_encode(writer)?;
-    write_script(writer, script)?;
-    writer.write_all(&sequence.to_le_bytes())
+    sequence: crate::Sequence,
+) {
+    input.previous_output.consensus_encode(writer);
+    write_script(writer, script);
+    writer.write_all(&sequence.to_le_bytes());
 }
 
-fn sha256_over(encode: impl FnOnce(&mut Sha256Writer<'_>) -> std::io::Result<()>) -> Hash256 {
+fn sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {
     let mut engine = Sha256::new();
-    let writer = &mut Sha256Writer(&mut engine);
-    encode(writer).unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+    let writer = &mut Sha256Sink(&mut engine);
+    encode(writer);
     let first = engine.finalize();
     let mut out = [0_u8; 32];
     out.copy_from_slice(&first);
     Hash256::from_le_bytes(&out)
 }
 
-fn double_sha256_over(
-    encode: impl FnOnce(&mut Sha256Writer<'_>) -> std::io::Result<()>,
-) -> Hash256 {
+fn double_sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {
     let mut engine = Sha256::new();
-    let writer = &mut Sha256Writer(&mut engine);
-    encode(writer).unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+    let writer = &mut Sha256Sink(&mut engine);
+    encode(writer);
     finalize_double_sha256(engine)
 }
 
@@ -722,9 +735,6 @@ mod tests {
     };
     use crate::{Hash256, OutPoint, Tx, Txid};
 
-    /// BIP125 opt-in sequence (`ENABLE_RBF_NO_LOCKTIME`).
-    const RBF_SEQUENCE: u32 = 0xffff_fffd;
-
     fn pin(hex: &str) -> Hash256 {
         Hash256::from_str_be(hex).expect("pinned hash hex")
     }
@@ -732,22 +742,25 @@ mod tests {
     fn synthetic_tx(output_count: usize) -> Tx {
         let input = crate::TxIn {
             previous_output: OutPoint::new(Txid(Hash256::default()), 0xffff_ffff),
-            script_sig: Vec::new(),
-            sequence: RBF_SEQUENCE,
-            witness: Vec::new(),
+            script_sig: crate::Script::new(),
+            // BIP125 opt-in sequence (`ENABLE_RBF_NO_LOCKTIME`).
+            sequence: crate::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: crate::Witness::new(),
         };
         let mut outputs = Vec::new();
         for value in 0..output_count {
             outputs.push(crate::TxOut {
-                value: 1_000 + u64::try_from(value).unwrap_or_else(|_| unreachable!("small count")),
-                script_pubkey: Vec::new(),
+                value: crate::Amount::from_sat(
+                    1_000 + u64::try_from(value).unwrap_or_else(|_| unreachable!("small count")),
+                ),
+                script_pubkey: crate::Script::new(),
             });
         }
         Tx {
             version: 2,
             inputs: vec![input],
             outputs,
-            lock_time: 0,
+            lock_time: crate::LockTime::ZERO,
         }
     }
 
@@ -798,7 +811,13 @@ mod tests {
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8, 0x51];
         assert_eq!(
-            Sighash::compute_bip143(&tx, 0, &script, 50_000, Sighash::Single),
+            Sighash::compute_bip143(
+                &tx,
+                0,
+                &script,
+                crate::Amount::from_sat(50_000),
+                Sighash::Single
+            ),
             Ok(pin(
                 "c9bb107a16a13d1a8ad4ebc540978164a7d92b4a26d388d26fa8eed79e10ebec"
             ))
@@ -812,8 +831,8 @@ mod tests {
     fn bip341_key_path_and_bip342_script_path_pins() {
         let tx = synthetic_tx(2);
         let prevouts = vec![crate::TxOut {
-            value: 50_000,
-            script_pubkey: Vec::new(),
+            value: crate::Amount::from_sat(50_000),
+            script_pubkey: crate::Script::new(),
         }];
         assert_eq!(
             Sighash::compute_bip341(&tx, 0, &prevouts, Sighash::AllAnyoneCanPay, None, None),
@@ -853,7 +872,13 @@ mod tests {
         let tx = synthetic_tx(1);
 
         assert_eq!(
-            Sighash::compute_bip143(&tx, 0, &[], 50_000, Sighash::Default),
+            Sighash::compute_bip143(
+                &tx,
+                0,
+                &[],
+                crate::Amount::from_sat(50_000),
+                Sighash::Default
+            ),
             Err(SighashError::DefaultOnlyTaproot)
         );
     }
@@ -862,8 +887,8 @@ mod tests {
     fn taproot_sighash_reports_invalid_annex() {
         let tx = synthetic_tx(1);
         let prevouts = vec![crate::TxOut {
-            value: 50_000,
-            script_pubkey: Vec::new(),
+            value: crate::Amount::from_sat(50_000),
+            script_pubkey: crate::Script::new(),
         }];
 
         assert!(matches!(

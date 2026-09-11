@@ -3,8 +3,10 @@
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DecodeError, OutPoint, Txid, Wtxid,
-    encode::{ConsensusEncode, Sha256Writer, deserialize, encode_tx, finalize_double_sha256},
+    Amount, DecodeError, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
+    encode::{
+        ConsensusEncode, Sha256Sink, deserialize, encode_tx, finalize_double_sha256, tx_base_size,
+    },
 };
 
 /// A Bitcoin transaction input in native owned form.
@@ -13,20 +15,20 @@ pub struct TxIn {
     /// The outpoint being spent.
     pub previous_output: OutPoint,
     /// The input's scriptSig (empty for segwit spends).
-    pub script_sig: Vec<u8>,
+    pub script_sig: Script,
     /// The input sequence number.
-    pub sequence: u32,
+    pub sequence: Sequence,
     /// The BIP144 witness stack; empty when the input has no witness.
-    pub witness: Vec<Vec<u8>>,
+    pub witness: Witness,
 }
 
 /// A Bitcoin transaction output in native owned form.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TxOut {
     /// The output value in satoshis.
-    pub value: u64,
+    pub value: Amount,
     /// The output scriptPubKey.
-    pub script_pubkey: Vec<u8>,
+    pub script_pubkey: Script,
 }
 
 /// A Bitcoin transaction in native owned form.
@@ -39,7 +41,7 @@ pub struct Tx {
     /// Outputs in consensus order.
     pub outputs: Vec<TxOut>,
     /// Lock time.
-    pub lock_time: u32,
+    pub lock_time: LockTime,
 }
 
 impl Tx {
@@ -53,9 +55,8 @@ impl Tx {
     #[must_use]
     pub fn txid(&self) -> Txid {
         let mut engine = Sha256::new();
-        let mut writer = Sha256Writer(&mut engine);
-        encode_tx(self, &mut writer, false)
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let mut writer = Sha256Sink(&mut engine);
+        encode_tx(self, &mut writer, false);
         Txid(finalize_double_sha256(engine))
     }
 
@@ -63,9 +64,8 @@ impl Tx {
     #[must_use]
     pub fn wtxid(&self) -> Wtxid {
         let mut engine = Sha256::new();
-        let mut writer = Sha256Writer(&mut engine);
-        ConsensusEncode::consensus_encode(self, &mut writer)
-            .unwrap_or_else(|error| unreachable!("sha256 writer is infallible: {error}"));
+        let mut writer = Sha256Sink(&mut engine);
+        ConsensusEncode::consensus_encode(self, &mut writer);
         Wtxid(finalize_double_sha256(engine))
     }
 
@@ -77,10 +77,7 @@ impl Tx {
     /// Consensus serialization length without BIP144 witness sections (the txid layout).
     #[must_use]
     pub fn base_size(&self) -> usize {
-        let mut total = 0_usize;
-        let () = encode_tx(self, &mut crate::encode::CountWriter(&mut total), false)
-            .unwrap_or_else(|error| unreachable!("count writer is infallible: {error}"));
-        total
+        tx_base_size(self)
     }
 
     /// Full consensus serialization length, including BIP144 witness sections.
@@ -98,10 +95,16 @@ impl Tx {
             .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
     }
 
+    /// Derives BIP141 virtual size from a transaction weight, rounded up.
+    #[must_use]
+    pub const fn vsize_from_weight(weight: u64) -> u64 {
+        weight.div_ceil(4)
+    }
+
     /// BIP141 virtual size: weight divided by four, rounded up.
     #[must_use]
     pub fn vsize(&self) -> u64 {
-        self.weight().div_ceil(4)
+        Self::vsize_from_weight(self.weight())
     }
 }
 
@@ -120,15 +123,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::default()), 3),
-                script_sig: vec![0x51],
-                sequence: 0xffff_fffe,
-                witness: vec![vec![0xaa; 40]],
+                script_sig: vec![0x51].into(),
+                sequence: crate::Sequence::from_consensus(0xffff_fffe),
+                witness: vec![vec![0xaa; 40]].into(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x00, 0x14, 0xab],
+                value: crate::Amount::from_sat(50_000),
+                script_pubkey: vec![0x00, 0x14, 0xab].into(),
             }],
-            lock_time: 42,
+            lock_time: crate::LockTime::from_consensus(42),
         }
     }
 
