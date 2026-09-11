@@ -99,6 +99,8 @@ pub struct BlockTemplate {
     /// Optional deployments available for versionbits negotiation.
     pub version_bits_available: Vec<AvailableMiningRule>,
     /// Header-version bits the solver must preserve.
+    ///
+    /// Core v31 `getblocktemplate` always reports `vbrequired` as 0.
     pub version_bits_required: u32,
     /// Capabilities implemented by this template producer.
     pub capabilities: Vec<MiningCapability>,
@@ -120,11 +122,17 @@ pub struct BlockTemplate {
 pub enum BlockValidationResult {
     /// The block is valid and, for submission, was synchronously applied.
     Accepted,
-    /// The block was already accepted.
+    /// The block was already accepted (its body is on the applied chain).
     Duplicate,
     /// The block duplicates one already known to be invalid.
+    ///
+    /// GBT proposal returns this after `LookupBlockIndex`. `submitblock` does
+    /// not short-circuit on an invalid header; Core v31 `ProcessNewBlock` runs.
     DuplicateInvalid,
     /// The block duplicates one whose validity is not yet conclusive.
+    ///
+    /// GBT proposal returns this for a header-only tree entry. `submitblock`
+    /// still applies the body.
     DuplicateInconclusive,
     /// Validation could not reach a conclusive result.
     Inconclusive,

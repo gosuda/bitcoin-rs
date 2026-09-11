@@ -173,7 +173,7 @@ fn all_required_handlers_return_core_shapes() -> Result<(), Box<dyn std::error::
         // the dedicated invalidateblock tests wire themselves.
         ("getmininginfo", json!([])),
         ("getblocktemplate", json!([{"rules": ["segwit"]}])),
-        ("submitblock", json!([raw_tx.as_str()])),
+        ("submitblock", json!([fixture.block_hex.as_str()])),
     ];
 
     for (method, params) in cases {
@@ -815,11 +815,14 @@ struct Fixture {
     tx: Tx,
     txid: Txid,
     block_hash: BlockHash,
+    block_hex: String,
 }
 
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let mut ctx = Context::new().with_mining_control(Arc::new(SmokeMiningControl::new()));
+
+        ctx.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
         let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
         let block = Block {
@@ -860,6 +863,7 @@ impl Fixture {
                 best_block_height: 7,
             },
         }));
+        let block_hex = hex_encode(&consensus_bytes(&block));
         let txid = ctx.add_transaction(tx.clone());
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
         ctx.mempool.pool().write().insert_entry(entry)?;
@@ -868,6 +872,7 @@ impl Fixture {
             tx,
             txid,
             block_hash,
+            block_hex,
         })
     }
 }

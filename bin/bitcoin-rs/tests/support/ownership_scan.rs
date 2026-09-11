@@ -529,6 +529,37 @@ mod tests {
     }
 
     #[test]
+    fn multiline_receiver_chain_resolves_to_its_root() {
+        let owner = "/workspace/crates/node/src/reorg/execution.rs";
+        for (path, call, expected_violations) in [
+            (
+                owner,
+                "let _ = handles\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
+                0,
+            ),
+            (
+                owner,
+                "let _ = other\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
+                1,
+            ),
+            (
+                NON_OWNER,
+                "let _ = handles\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
+                1,
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(path, call, &mut result);
+            assert_eq!(
+                result.violations.len(),
+                expected_violations,
+                "{path}: {call}"
+            );
+            assert_eq!(result.mutating_calls_found, 1);
+        }
+    }
+
+    #[test]
     fn a_raw_write_chain_is_never_authorized() {
         assert!(!authorized(
             MINING_HANDLER,
