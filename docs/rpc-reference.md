@@ -69,7 +69,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `clearbanned` | 0.4.0 |  |
 | `setnetworkactive` | 0.4.0 |  |
 | `getnodeaddresses` | 0.4.0 |  |
-| `getblocktemplate` | 0.4.0 | Pinned v17 template contract; BIP23 submitold/workid extras are not emitted. |
+| `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
 | `submitblock` | 0.4.0 |  |
 | `prioritisetransaction` | 0.4.0 |  |
@@ -234,6 +234,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `hashtx` | 0.4.0 | Requires the zmq feature and a --zmqpubhashtx endpoint. |
 | `rawblock` | 0.4.0 | Requires the zmq feature and a --zmqpubrawblock endpoint. |
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
-| `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/node/src/zmq_publisher.rs). |
+| `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
 Row counts: Implemented 70, Deviation 8, Extension 2, Unimplemented 94 - total 174.

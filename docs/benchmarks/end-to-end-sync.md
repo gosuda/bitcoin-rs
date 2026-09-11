@@ -1,14 +1,66 @@
-# End-to-end sync benchmarks
+# End-to-end synchronization lanes
 
-> **Evidence status:** This page publishes completed historical runs and their raw JSON. All numbers and artifacts below reflect historical runs performed prior to the Task 16 cutover, where `bitcoinkernel` (`libbitcoinkernel`) became the default production consensus engine in `bitcoin-rs-consensus` and `bitcoin-rs-node`. The `bin/bitcoin-rs` binary later dropped `kernel` from its defaults (`default = ["fjall", "redb", "zmq"]`), so `cargo build -p bitcoin-rs` no longer links `bitcoinkernel`; pass `--features kernel` for the kernel consensus engine.
+This document owns the two synchronization lanes of the target node: offline replay (blocks local, wall is validation plus durable commit) and live IBD over loopback peers (wall includes download scheduling under `P2pService`). Both lanes are product cells of [`overhaul-product-cells.md`](overhaul-product-cells.md): `replay.offline_full_validation` and `replay.live_ibd_loopback`. Historical live-network and bounded 0-150,000 results are retained below as candidate evidence; they describe superseded engines and are not end-state proof.
+
+## Lanes
+
+| Lane | Boundary | Owner path | Comparator |
+|---|---|---|---|
+| Offline replay | spawn to durable clean exit over a hash-pinned Core-framed archive | `bounded ingress -> parse once -> contextual preparation -> parallel proof -> ordered durable commit -> coherent publication` | [`offline-full-validation.md`](offline-full-validation.md) |
+| Live IBD, loopback | start to pinned stop over deterministic loopback peers, no public nodes | `P2pService` download window plus the same commit spine | [`p2p-loopback.md`](p2p-loopback.md) |
+
+Both lanes run under full validation (`--assume-valid-height 0`), strict-Rust cryptography, default unpruned fjall, optional indexes off, on the final artifact. Every run records the six sample identities and the pinned stop identity. Restart and reorg recovery to each intermediate committed ancestor is exercised in the same lanes (T12, T13).
+
+## End-state cells
+
+| Cell | Metric | Status |
+|---|---|---|
+| Offline replay, C150 and Cmodern, bitcoin-rs versus Core `v31.1` | p50/p95/p99/max wall, CPU, peak RSS, per-owner storage bytes; ratio only after gates | `planned_not_executed` |
+| Offline replay, full mainnet to pinned stop | same, plus certified end state and physical high-water | `planned_not_executed` |
+| Live IBD loopback, bounded range, one peer and multi-peer | wall, blocks/s, peak RSS, requeue exactness on disconnect | `planned_not_executed` |
+| Restart at intermediate committed ancestor | recovered tip and coins equal; fence reopened only after reconciliation | `planned_not_executed` |
+| Stage histograms (`node.apply_block.*`) | inclusive per-stage histograms reported beside the wall, never summed | `planned_not_executed` |
+
+Targets are contracts, not measurements: no regression against the T02 baseline on any applicable cell (cost, latency, RSS, bytes not greater; throughput not less), and promotion of any optimization only by the acceptance rule below.
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (historical runs indexed before the rewrite; raw JSON retired by #224)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
+
+> **Evidence status:** This page indexes completed historical runs. The raw JSON attachments were removed from the tree by #224; their SHA-256 digests remain in [Raw artifact integrity](#raw-artifact-integrity) so an external copy can be checked. All numbers below reflect runs performed prior to the Task 16 cutover, where `bitcoinkernel` (`libbitcoinkernel`) became the default production consensus engine in `bitcoin-rs-consensus` and `bitcoin-rs-node`. The `bin/bitcoin-rs` binary later dropped `kernel` from its defaults (`default = ["fjall", "redb", "zmq"]`), so `cargo build -p bitcoin-rs` does not link `bitcoinkernel`; pass `--features kernel` for the kernel consensus engine.
 >
 > The obsolete `bitcoinconsensus` backend was removed in Task 16 after fresh mainnet IBD stopped at block 938344 (exposing missing complete prevouts and unsupported Taproot script-path verification in the portable path). Builds with `kernel` require system dependencies (`cmake` and `libboost-dev`).
 >
 > Historical `bitcoinconsensus` and early experimental `kernel` numbers published here serve as historical records and are non-comparable with kernel-default production builds. No full-tip (height 957,600+) live IBD run or G14 performance-gate pass has been completed under the landed kernel default. Final performance claims remain pending fresh measurements.
 
-The machine-readable attachments preserve every recorded field and stage timer. The source artifacts do not record the exact command line, compiler flags, CPU affinity, cache state, host identity, exit code, or replication count. Those missing fields prevent a reproducible controlled claim.
+The retired machine-readable artifacts preserved every recorded field and stage timer. They did not record the exact command line, compiler flags, CPU affinity, cache state, host identity, exit code, or replication count. Those missing fields prevent a reproducible controlled claim.
 
-## Completed machine-readable runs
+### Completed machine-readable runs
 
 | Run | Range | Validation | Block source | Commit | Elapsed | Throughput | Peak RSS | Raw artifact |
 |---|---:|---|---|---|---:|---:|---:|---|
@@ -18,9 +70,9 @@ The machine-readable attachments preserve every recorded field and stage timer. 
 | Inferred `parverify` full-validation replay, 0–150,000 | 0–150,000 | Full (`assume_valid_height=0`) | `rest` | `3023eb0` | 296.211s | 506.399 blocks/s | 2.210 GiB | rs-replay-150k-parverify (retired) |
 | Inferred `kernel` full-validation replay, 0–150,000 | 0–150,000 | Full (`assume_valid_height=0`) | `rest` | `fb2227e` | 232.208s | 645.977 blocks/s | 2.219 GiB | rs-replay-150k-kernel (retired) |
 
-All five artifacts pass these structural checks: schema `mainnet-prefix-replay-v1`, genesis start hash, positive elapsed time and throughput, non-empty stage list, and `block_count = stop_height - start_height + 1`.
+All five artifacts passed these structural checks when they were in the tree: schema `mainnet-prefix-replay-v1`, genesis start hash, positive elapsed time and throughput, non-empty stage list, and `block_count = stop_height - start_height + 1`.
 
-## Same-range observations
+### Same-range observations
 
 The two current-campaign 150,000-block files share the same recorded commit, height and hash window, `bitcoin-cli` source, fjall backend, and full-validation posture. The files do not record the command or treatment that distinguishes “candidate” from “control.” Each is a single run:
 
@@ -32,7 +84,7 @@ These are observed differences only. They do not establish a regression, a causa
 
 The older `parverify` and `kernel` replays share the 0–150,000 range, REST source, full-validation posture, and stop hash, but use different commits and the `kernel`/`parverify` engine labels are inferred from filenames and run notes, not recorded Cargo features. They are useful historical results, not a controlled A/B. The 642,000-block replay uses an assume-valid posture and a local legacy fjall chainstate, so it is not comparable to either 150,000-block group.
 
-## Historical live-network results
+### Historical live-network results
 
 These values were recorded in campaign verdict notes, not in the attached JSON. Their raw logs remain outside the repository, so this table is an index, not immutable evidence.
 
@@ -48,7 +100,7 @@ These values were recorded in campaign verdict notes, not in the attached JSON. 
 
 The live runs were sequential single samples. Peer conditions and validation posture differ across implementations. Do not use the table as a controlled cross-node ranking.
 
-## Excluded incomplete evidence
+### Excluded incomplete evidence
 
 | Artifact | Observed range | Why it is excluded |
 |---|---:|---|
@@ -59,7 +111,7 @@ The live runs were sequential single samples. Peer conditions and validation pos
 
 Later code changed both failed bitcoin-rs paths, but no completed rerun is attached. This report does not infer results from those fixes.
 
-## Historical performance evidence
+### Historical performance evidence
 
 | Budget | Required evidence | Status in this publication |
 |---|---|---|
@@ -69,7 +121,7 @@ Later code changed both failed bitcoin-rs paths, but no completed rerun is attac
 
 These historical measurements do not establish a current performance claim.
 
-## Bounded current evidence
+### Bounded 0–150,000 comparator evidence (commit `de8001e`, historical)
 
 A disk-bounded campaign at commit `de8001e83bd4e09077d4cebbbdd23d0cebade194`
 used the exact mainnet range 0–150,000. Both implementations used full validation,
@@ -95,13 +147,13 @@ and 4,000,000-row candidates, plus the Fjall `bytes_1` feature-only and
 Every bitcoin-rs TxIndex run produced the same logical digest.
 
 The full corpus, treatment, binary, timing, memory, free-space, restore, and rejected
-candidate custody is in
-bounded-performance-custody-v1 (retired).
+candidate custody was recorded in `bounded-performance-custody-v1.json` (retired by
+#224; digest below).
 The campaign retained one bounded corpus root with one canonical archive per
 implementation and deleted each disposable fixture before the next run. These bounded
 results do not satisfy the live-IBD or current-tip RSS gates above.
 
-## Bounded daemon IBD comparison
+### Bounded daemon IBD comparison
 
 A bounded daemon IBD benchmark compared bitcoin-rs and Bitcoin Core over mainnet blocks 0–150,000. Both nodes ran under full validation (`assume_valid_height=0`), P2P v1 transport, and CPU set 0–31 on an Intel Xeon Gold 6138 host. One local Bitcoin Core seed at `127.0.0.1:18444` ran on CPU set 32–39, pre-warmed with 747,001,853 bytes per arm. The run executed three interleaved matched blocks with 30s cooldowns, fresh output directories, 16 GiB RSS limits, and 64 GiB disk-reserve guards.
 
@@ -114,22 +166,24 @@ Bitcoin Core median elapsed time was 73.458771289s. bitcoin-rs median elapsed ti
 
 Every run reached the exact height 150,000 endpoint (block hash `0000000000000a3290f20e75860d505ce0e948a1d1d846bec7e39015d242884b`, chainwork `0000000000000000000000000000000000000000000000080560a73313fe59c2`) and exited with code 0. All runs passed the 16 GiB RSS guard, 64 GiB disk reserve, and fixture bounds.
 
-### Limitations
+#### Limitations
 
 - The range ends at height 150,000 and does not represent SegWit, Taproot, or current-tip peer conditions.
 - Both nodes downloaded from one local warmed seed. The benchmark measures single-peer request and apply throughput, not Internet bandwidth aggregation across peers.
 - The checked-in custody condenses external raw summaries; SHA-256 digests bind omitted arm files.
 - ARM parity remains unmeasured because no OpenSSH ARM host alias was available.
 
-### Follow-up outcomes (not landed)
+#### Follow-up outcomes (not landed)
 
 - The `w256` window experiment measured 59.225400502s against a matched 89.972329151s control (1.519151046× speedup). It did not land because the temporary code lacked required safety gates and missed the pre-declared header-read threshold.
 - The PGO (`w128`) candidate measured 89.266232737s (1.003470356× wall ratio vs the 89.576018374s baseline) and was rejected below the 1.05× continuation threshold.
 - The eight-proxy same-seed run measured 115.429379346s (28.861922467% slower than the one-peer median) and was rejected as topology reconnaissance only.
 
-The complete machine-readable custody is in daemon-ibd-custody-v1 (retired).
+The complete machine-readable custody was recorded in `daemon-ibd-custody-v1.json` (retired by #224; digest below).
 
-## Raw artifact integrity
+### Raw artifact integrity
+
+SHA-256 digests of the retired JSON artifacts, kept so an external copy can be matched to the numbers on this page.
 
 | Artifact | SHA-256 |
 |---|---|
@@ -141,9 +195,9 @@ The complete machine-readable custody is in daemon-ibd-custody-v1 (retired).
 | `bounded-performance-custody-v1.json` | `ce3e561dbd2119579f359b7cf55f8b84211c4c1eec3953cf40762f07faabb3cf` |
 | `daemon-ibd-custody-v1.json` | `3eb68821cb2e389be5ed5391f5671fae527212a0e2129fcb85fe9676e4d396c8` |
 
-## Full recorded stage timers
+### Full recorded stage timers
 
-### Current-campaign control, 0–150,000
+#### Current-campaign control, 0–150,000
 
 Artifact: rs-parprep-current-control-r1 (retired). Stage timers are nested and are not additive.
 
@@ -172,7 +226,7 @@ Artifact: rs-parprep-current-control-r1 (retired). Stage timers are nested and a
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.002723 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.001598 |
 
-### Current-campaign candidate, 0–150,000
+#### Current-campaign candidate, 0–150,000
 
 Artifact: rs-parprep-current-candidate-r2 (retired). Stage timers are nested and are not additive.
 
@@ -201,7 +255,7 @@ Artifact: rs-parprep-current-candidate-r2 (retired). Stage timers are nested and
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.002540 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.001991 |
 
-### Long local replay, 0–642,000
+#### Long local replay, 0–642,000
 
 Artifact: rs-spendable-local-nobody-a014 (retired). Stage timers are nested and are not additive.
 
@@ -227,7 +281,7 @@ Artifact: rs-spendable-local-nobody-a014 (retired). Stage timers are nested and 
 | `node.apply_block.tx_index_ingest_seconds` | 642,001 | 0.007908 |
 | `node.apply_block.script_verify_coinbase_only_seconds` | 88,956 | 0.005354 |
 
-### Portable full-validation replay, 0–150,000
+#### Portable full-validation replay, 0–150,000
 
 Artifact: rs-replay-150k-parverify (retired). Stage timers are nested and are not additive.
 
@@ -253,7 +307,7 @@ Artifact: rs-replay-150k-parverify (retired). Stage timers are nested and are no
 | `node.apply_block.bip68_seconds` | 150,001 | 0.009737 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.005914 |
 
-### Kernel full-validation replay, 0–150,000
+#### Kernel full-validation replay, 0–150,000
 
 Artifact: rs-replay-150k-kernel (retired). Stage timers are nested and are not additive.
 
@@ -279,6 +333,6 @@ Artifact: rs-replay-150k-kernel (retired). Stage timers are nested and are not a
 | `node.apply_block.script_verify_coinbase_only_seconds` | 82,110 | 0.008839 |
 | `node.apply_block.tx_index_ingest_seconds` | 150,001 | 0.006004 |
 
-## Harness
+### Harness
 
-The attached JSON was emitted by the former `mainnet_prefix_replay` campaign executable. The artifacts record the range, boundary hashes, backend, index flags, source kind, data directory, elapsed/fetch/decode time, block and transaction counts, peak RSS, commit, and stage timers. They do not capture enough launch or host state to reconstruct the exact original command. The replay executable and G14 artifact adapters have been retired; these files are historical evidence, not inputs to a supported runner.
+The retired JSON was emitted by the former `mainnet_prefix_replay` campaign executable. The artifacts recorded the range, boundary hashes, backend, index flags, source kind, data directory, elapsed/fetch/decode time, block and transaction counts, peak RSS, commit, and stage timers. They did not capture enough launch or host state to reconstruct the exact original command. The replay executable and G14 artifact adapters have been retired; the digests above are historical evidence, not inputs to a supported runner.
