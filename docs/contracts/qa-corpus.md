@@ -38,6 +38,26 @@ end-state evidence roles.
 - G6 policy and admission: the `script_eval` and `tx_decode` targets exercise
   standardness and admission edge cases in addition to consensus decoding.
 
+### `QAC-05`: Native-consensus-codec round-trip over accepted corpus seeds
+
+- **Owner**: `crates/primitives/tests/differential.rs` enforces the contract;
+  `fuzz/corpus/manifest.json` pins the expected verdict for every seed in
+  `fuzz/corpus/tx_decode/` and `fuzz/corpus/block_decode/`.
+- Every listed seed has exactly one expected verdict:
+  - `accepted`: the native consensus codec decodes the seed under the exact-consume
+    `deserialize` entry the wire codec uses, and re-encodes it byte-identically;
+  - `rejected:<kind>`: the native codec rejects the seed with that typed error
+    (`end_of_data`, `varint`, `invalid_segwit_flag`, `superfluous_witness`,
+    `trailing_bytes`). The `superfluous_witness` family is the documented
+    exception class of this contract: a BIP144 marker/flag with an all-empty
+    witness section cannot re-encode byte-identically, so the codec rejects it
+    before the lock time, at the same check position as Core and rust-bitcoin.
+- A seed on disk without a manifest entry, or a manifest entry without a seed,
+  fails the gate; the corpus cannot grow or decay silently past the contract.
+- `CORPUS_MANIFEST_WRITE=1 cargo test -p bitcoin-rs-primitives` regenerates the
+  manifest from observed verdicts; the regeneration is a test-local write path,
+  and the committed manifest is the verdict record for review.
+
 ### `QAC-03`: Importer acquisition and provenance publication
 
 After the setup contract in `CONSTRAINTS.md` succeeds, `scripts/import-qa-assets.sh`
@@ -73,6 +93,9 @@ nonzero-status propagation; they are not stable public status-code assignments.
   a QA corpus with a missing or mismatched upstream commit.
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
   counts and classifies invalid corpora with fixed skip reasons.
+- `crates/primitives/tests/differential.rs`: `QAC-05` gate; enforces the
+  pinned accepted/rejected verdict manifest over `tx_decode` and
+  `block_decode` seeds, including byte-identical re-encoding of accepted seeds.
 - Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see
   [fuzz/README.md](../../fuzz/README.md)).
 

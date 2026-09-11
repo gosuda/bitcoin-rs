@@ -1,6 +1,6 @@
 //! Finite setban expiry and rejection without state mutation.
 //!
-//! Contract: SETBAN-EXPIRY-01 on `ban_until` in
+//! Contracts: SETBAN-EXPIRY-01 and SETBAN-ABSOLUTE-01 on `ban_until` in
 //! `crates/rpc/src/handlers/network.rs`. The permanent-ban sentinel is owned
 //! by `BannedSubnet` in `crates/p2p/src/subnet.rs`, not by timestamp arithmetic.
 //! The default of 24 hours is independently specified by Bitcoin Core v31.1
@@ -9,7 +9,7 @@
 //! these tests do not claim full Bitcoin Core setban compatibility.
 
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_p2p::BannedSubnet;
 use bitcoin_rs_rpc::{Handler, RpcError, context::Context};
@@ -107,8 +107,15 @@ fn relative_defaults_and_explicit_durations_remain_finite() -> Result<(), RpcErr
 
 #[test]
 fn absolute_expiry_uses_epoch_not_creation_time() -> Result<(), RpcError> {
-    // A fixed, representable epoch timestamp, not a timing threshold.
-    let seconds = 2_000_000_000_u64;
+    // Keep the real-dispatch fixture in the future rather than giving it a
+    // fixed calendar expiry. The one-day lead is not a latency assertion;
+    // exact whole-second boundaries use a synthetic clock in the owner tests.
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|error| panic!("test clock must follow the epoch: {error}"))
+        .as_secs()
+        .checked_add(86_400)
+        .unwrap_or_else(|| panic!("test timestamp must fit u64"));
     let handler = handler();
     assert!(
         handler
@@ -121,5 +128,45 @@ fn absolute_expiry_uses_epoch_not_creation_time() -> Result<(), RpcError> {
         entry.banned_until,
         UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
     );
+    Ok(())
+}
+
+// SETBAN-ABSOLUTE-01 and Bitcoin Core v31.1 `src/rpc/net.cpp::setban`:
+// null defaults to zero; both zero and one are past absolute epoch seconds.
+// Invalid requests must preserve full records, not just the entry count.
+fn assert_past_absolute_expiry(handler: &Handler, target: &str) {
+    for bantime in [json!(null), json!(0), json!(1)] {
+        let before = handler.context().banned.read().clone();
+        let Err(error) = handler.dispatch("setban", &json!([target, "add", bantime, true])) else {
+            panic!("past absolute timestamp must not succeed");
+        };
+        assert_eq!(error.code(), -8);
+        assert!(matches!(
+            error,
+            RpcError::InvalidParameter(message)
+                if message == "Error: Absolute timestamp is in the past"
+        ));
+        assert_eq!(
+            handler.context().banned.read().as_slice(),
+            before.as_slice()
+        );
+    }
+}
+
+#[test]
+fn past_absolute_expiry_does_not_create_a_ban() {
+    let handler = handler();
+    assert_past_absolute_expiry(&handler, "192.0.2.1");
+    assert!(handler.context().banned.read().is_empty());
+}
+
+#[test]
+fn past_absolute_expiry_preserves_existing_entries_and_order() -> Result<(), RpcError> {
+    for target in ["192.0.2.1", "203.0.113.99"] {
+        let handler = handler();
+        handler.dispatch("setban", &json!(["192.0.2.1", "add", 60]))?;
+        handler.dispatch("setban", &json!(["198.51.100.0/24", "add", 120]))?;
+        assert_past_absolute_expiry(&handler, target);
+    }
     Ok(())
 }

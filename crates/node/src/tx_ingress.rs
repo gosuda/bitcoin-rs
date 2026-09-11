@@ -164,7 +164,9 @@ mod tests {
         Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
     };
     use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
-    use bitcoin_rs_primitives::{Block, OutPoint, Tx, TxIn, TxOut};
+    use bitcoin_rs_primitives::{
+        Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    };
     use parking_lot::{Mutex, RwLock};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::AtomicUsize;
@@ -245,15 +247,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: vec![0x51],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(vec![0x51]),
+                sequence: Sequence::from_consensus(0xFFFF_FFFF),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(value),
+                script_pubkey: Script::from_bytes(vec![0x6A]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -270,15 +272,15 @@ mod tests {
                     txid: parent_txid,
                     vout: 0,
                 },
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xFFFF_FFFF),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 49_000,
-                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+                value: Amount::from_sat(49_000),
+                script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -298,8 +300,8 @@ mod tests {
                 vout: 0,
             },
             TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             },
             false,
             100,
@@ -499,15 +501,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x00],
-                sequence: 0xFFFF_FFFF,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(vec![0x00]),
+                sequence: Sequence::from_consensus(0xFFFF_FFFF),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x6A],
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x6A]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let txid = coinbase.txid();
         consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
@@ -532,8 +534,8 @@ mod tests {
         let mining = Arc::new(RecordingMining::new());
         let consumer = make_consumer_with_utxo(&gateway, mining);
         let mut tx = spending_tx();
-        tx.lock_time = 100;
-        tx.inputs[0].sequence = 0xFFFF_FFFE;
+        tx.lock_time = LockTime::from_consensus(100);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
         let txid = tx.txid();
         consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
         assert!(
@@ -560,15 +562,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(parent, 0),
-                script_sig: Vec::new(),
-                sequence: 0xFFFF_FFFF,
-                witness: vec![vec![0; 400_000]],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xFFFF_FFFF),
+                witness: Witness::from_stack(vec![vec![0; 400_000]]),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         assert!(
             tx.weight() > 400_000,

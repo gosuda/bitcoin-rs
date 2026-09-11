@@ -8,7 +8,7 @@ mod fixtures;
 
 use bitcoin_rs_consensus::{BlockView, block_view::BlockFacts};
 use bitcoin_rs_primitives::layout::ParsedBlock;
-use bitcoin_rs_primitives::{Block, Tx, consensus_bytes};
+use bitcoin_rs_primitives::{Block, LockTime, Tx, Witness, consensus_bytes};
 
 fn facts(block: &Block) -> BlockFacts {
     let bytes = consensus_bytes(block);
@@ -61,7 +61,7 @@ fn zero_outputs_and_empty_last_script_preserve_base_body_end() {
 fn witness_only_mutations_leave_txids_and_merkle_root_unchanged() {
     let mut block = fixtures::fixture(3, 2, 2, 7, 2);
     let original = facts(&block);
-    block.txs[1].inputs[0].witness = vec![Vec::new(), vec![0xab; 253]];
+    block.txs[1].inputs[0].witness = Witness::from_stack(vec![Vec::new(), vec![0xab; 253]]);
     let mutated = facts(&block);
     assert_eq!(original.txids(), mutated.txids());
     assert_eq!(original.merkle_root(), mutated.merkle_root());
@@ -72,7 +72,7 @@ fn witness_only_mutations_leave_txids_and_merkle_root_unchanged() {
 #[test]
 fn a_single_empty_witness_item_is_not_a_legacy_transaction() {
     let mut block = fixtures::fixture(3, 2, 0, 0, 0);
-    block.txs[1].inputs[1].witness = vec![Vec::new()];
+    block.txs[1].inputs[1].witness = Witness::from_stack(vec![Vec::new()]);
     let result = facts(&block);
     assert!(result.has_witness());
     let ids = result
@@ -166,7 +166,7 @@ fn version_and_lock_time_bytes_remain_in_the_transaction_id() {
     let mut block = fixtures::fixture(3, 1, 1, 0, 2);
     let original = facts(&block);
     block.txs[1].version = -1;
-    block.txs[1].lock_time = u32::MAX;
+    block.txs[1].lock_time = LockTime::from_consensus(u32::MAX);
     let changed = facts(&block);
     assert_ne!(original.txids()[1], changed.txids()[1]);
     assert_eq!(original.txids()[0], changed.txids()[0]);

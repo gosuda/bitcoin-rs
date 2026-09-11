@@ -380,13 +380,32 @@ fn tip_from_node(
     })
 }
 
+/// Bounded byte-slice sink for fixed-layout header encoding.
+struct ByteSliceSink<'a>(&'a mut [u8]);
+
+impl bitcoin_rs_primitives::Sink for ByteSliceSink<'_> {
+    fn write_all(&mut self, bytes: &[u8]) {
+        let len = bytes.len().min(self.0.len());
+        let empty: &mut [u8] = &mut [];
+        let rest = core::mem::replace(&mut self.0, empty);
+        let (head, tail) = rest.split_at_mut(len);
+        head.copy_from_slice(&bytes[..len]);
+        self.0 = tail;
+    }
+}
+
+impl ByteSliceSink<'_> {
+    /// The not-yet-written tail of the buffer.
+    fn remaining(&self) -> &[u8] {
+        self.0
+    }
+}
+
 pub(super) fn encode_header(header: &Header) -> Result<[u8; HEADER_LEN], HeaderCheckpointError> {
     let mut encoded = [0_u8; HEADER_LEN];
-    let mut cursor = &mut encoded[..];
-    header
-        .consensus_encode(&mut cursor)
-        .map_err(|error| HeaderCheckpointError::Codec(error.to_string()))?;
-    if !cursor.is_empty() {
+    let mut sink = ByteSliceSink(&mut encoded[..]);
+    header.consensus_encode(&mut sink);
+    if !sink.remaining().is_empty() {
         return Err(HeaderCheckpointError::Codec(
             "Bitcoin header did not encode to 80 bytes".to_owned(),
         ));

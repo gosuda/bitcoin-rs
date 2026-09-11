@@ -7,7 +7,8 @@ use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 use bitcoin_rs_node::{BlockSync, Network, apply::Chainstate};
 use bitcoin_rs_primitives::{
-    Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid, encode::double_sha256,
+    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, encode::double_sha256,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
@@ -290,13 +291,13 @@ fn child_coinbase_block(parent: &Block, height: u8) -> Result<Block, Box<dyn std
 fn child_coinbase_block_with_script(
     parent: &Block,
     height: u8,
-    script_pubkey: Vec<u8>,
+    script_pubkey: Script,
 ) -> Result<Block, Box<dyn std::error::Error>> {
     let mut block = parent.clone();
     block.header.prev_blockhash = parent.block_hash();
     block.header.time = parent.header.time.saturating_add(1);
     block.txs.truncate(1);
-    block.txs[0].inputs[0].script_sig = vec![1, height];
+    block.txs[0].inputs[0].script_sig = vec![1, height].into();
     block.txs[0].outputs[0].script_pubkey = script_pubkey;
     block.header.merkle_root = compute_merkle_root(&block)
         .ok_or_else(|| std::io::Error::other("child block should have merkle root"))?;
@@ -319,30 +320,31 @@ fn child_block_with_transactions(
 
 fn spend_to_op_true(
     previous_output: OutPoint,
-    previous_value: u64,
+    previous_value: Amount,
     fee: u64,
 ) -> Result<Tx, Box<dyn std::error::Error>> {
     let value = previous_value
+        .to_sat()
         .checked_sub(fee)
         .ok_or_else(|| std::io::Error::other("spend fee exceeds previous output value"))?;
     Ok(Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output,
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value,
+            value: Amount::from_sat(value),
             script_pubkey: op_true_script(),
         }],
     })
 }
 
-fn op_true_script() -> Vec<u8> {
-    vec![0x51]
+fn op_true_script() -> Script {
+    vec![0x51].into()
 }
 
 fn primitive_outpoint(outpoint: OutPoint) -> OutPoint {
@@ -387,7 +389,7 @@ fn mine_block_to_declared_target(block: &mut Block) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-fn pow_met(bits: u32, hash: Hash256) -> bool {
+fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
     let target = uint_be(&compact_to_target(bits));
     if target == [0_u8; 32] {
         return false;
@@ -395,7 +397,8 @@ fn pow_met(bits: u32, hash: Hash256) -> bool {
     uint_be(&hash.to_le_bytes()) <= target
 }
 
-fn compact_to_target(bits: u32) -> [u8; 32] {
+fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
+    let bits = bits.to_consensus();
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mantissa = u64::from(bits & 0x007f_ffff);
     let mut target = [0_u8; 32];

@@ -12,7 +12,7 @@
 
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
-use bitcoin_rs_primitives::{Tx, TxOut, deserialize};
+use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize};
 use bitcoin_rs_script::checker::{SigVersion, TxSignatureChecker};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{PublicKey, SECP256K1, SecretKey};
@@ -51,8 +51,8 @@ fn test_key() -> SecretKey {
 
 fn p2wpkh_prevout() -> TxOut {
     TxOut {
-        value: VALUE,
-        script_pubkey: hex(PROGRAM),
+        value: Amount::from_sat(VALUE),
+        script_pubkey: Script::from_bytes(hex(PROGRAM)),
     }
 }
 
@@ -95,8 +95,8 @@ fn empty_signature_cannot_bypass_legacy_key_encoding() {
     for multisig in [false, true] {
         let script = negative_check_script(&[], multisig);
         let prevout = TxOut {
-            value: VALUE,
-            script_pubkey: script.clone(),
+            value: Amount::from_sat(VALUE),
+            script_pubkey: Script::from_bytes(script.clone()),
         };
         let script_sig = if multisig {
             vec![0x00, 0x00]
@@ -141,8 +141,8 @@ fn empty_signature_cannot_bypass_witness_compressed_key_policy() {
         let mut program = vec![0x00, 0x20]; // witness v0, 32-byte script hash
         program.extend_from_slice(&Sha256::digest(&script));
         let prevout = TxOut {
-            value: VALUE,
-            script_pubkey: program,
+            value: Amount::from_sat(VALUE),
+            script_pubkey: Script::from_bytes(program),
         };
         let mut witness = vec![Vec::new()];
         if multisig {
@@ -171,7 +171,7 @@ fn empty_signature_cannot_bypass_witness_compressed_key_policy() {
 fn encoding_error_precedence_matches_core() {
     let tx = fixture();
     let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
-    let mut checker = TxSignatureChecker::new(&tx, INPUT, VALUE, &prevouts);
+    let mut checker = TxSignatureChecker::new(&tx, INPUT, Amount::from_sat(VALUE), &prevouts);
     for version in [SigVersion::Base, SigVersion::WitnessV0] {
         assert_eq!(
             checker.check_ecdsa_signature(&[], &[], &[], version, VerifyFlags::DERSIG),
@@ -203,7 +203,7 @@ fn encoding_error_precedence_matches_core() {
 fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
     let tx = fixture();
     let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
-    let mut checker = TxSignatureChecker::new(&tx, INPUT, VALUE, &prevouts);
+    let mut checker = TxSignatureChecker::new(&tx, INPUT, Amount::from_sat(VALUE), &prevouts);
     let public = PublicKey::from_secret_key(SECP256K1, &test_key());
     // The last entry is deliberately off-curve but correctly encoded. Empty
     // signatures must not require cryptographic parsing of an unused key.
@@ -270,8 +270,8 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
         .union(VerifyFlags::WITNESS_PUBKEYTYPE)
         .union(VerifyFlags::NULLFAIL);
     let legacy_prevout = TxOut {
-        value: VALUE,
-        script_pubkey: script.clone(),
+        value: Amount::from_sat(VALUE),
+        script_pubkey: Script::from_bytes(script.clone()),
     };
     assert_eq!(
         Interpreter.execute(&script, &[0x00], &[], flags, &legacy_prevout, &tx, INPUT),
@@ -280,8 +280,8 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
     let mut program = vec![0x00, 0x20];
     program.extend_from_slice(&Sha256::digest(&script));
     let witness_prevout = TxOut {
-        value: VALUE,
-        script_pubkey: program,
+        value: Amount::from_sat(VALUE),
+        script_pubkey: Script::from_bytes(program),
     };
     assert_eq!(
         Interpreter.execute(

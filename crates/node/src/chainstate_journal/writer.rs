@@ -1438,7 +1438,7 @@ mod tests {
     use parking_lot::Mutex;
 
     use super::*;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 
     use crate::chainstate_journal::record::{Coin, Mutation};
 
@@ -1592,8 +1592,8 @@ mod tests {
                             height,
                         ),
                         txout: TxOut {
-                            value: u64::from(height),
-                            script_pubkey: vec![0x51],
+                            value: Amount::from_sat(u64::from(height)),
+                            script_pubkey: vec![0x51].into(),
                         },
                         height,
                         coinbase: true,
@@ -1608,8 +1608,8 @@ mod tests {
                             height.wrapping_sub(1),
                         ),
                         txout: TxOut {
-                            value: u64::from(height),
-                            script_pubkey: vec![0x51],
+                            value: Amount::from_sat(u64::from(height)),
+                            script_pubkey: vec![0x51].into(),
                         },
                         height: height.wrapping_sub(1),
                         coinbase: false,

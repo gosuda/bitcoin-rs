@@ -8,8 +8,11 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
+    Block, BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, Script};
 use compact_str::CompactString;
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1161,7 +1164,7 @@ impl Context {
     /// changing the repeated 256 scaling into an equivalent exponentiation can
     /// change the final floating-point bit.
     #[must_use]
-    pub fn difficulty_for_bits(&self, bits: u32) -> f64 {
+    pub fn difficulty_for_bits(&self, bits: CompactTarget) -> f64 {
         bitcoin_rs_mining::difficulty_for_bits(bits)
     }
 
@@ -1785,8 +1788,8 @@ mod tests {
         let ctx = Context::new();
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[1_u8; 32])), 0);
         let txout = TxOut {
-            value: 125_000,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(125_000),
+            script_pubkey: Script::new(),
         };
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(outpoint, txout, true, 7));
@@ -1995,7 +1998,7 @@ mod tests {
             prev_blockhash: BlockHash::default(),
             merkle_root: Hash256::default(),
             time: 1_000_000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 7,
         };
         let hash = {
@@ -2039,7 +2042,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -2048,7 +2051,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_000_900,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             child.nonce = 1;
@@ -2092,7 +2095,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1_000_000,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             };
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -2101,7 +2104,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_000_900,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 1,
             };
             let applied_id = tree.insert_node(Some(genesis_id), applied, NodeStatus::Active)?;
@@ -2115,7 +2118,7 @@ mod tests {
                 prev_blockhash: genesis.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_000_901,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
             };
             let fork_id = tree.insert_node(Some(genesis_id), fork, NodeStatus::HeaderValid)?;
@@ -2124,7 +2127,7 @@ mod tests {
                 prev_blockhash: fork.compute_hash(),
                 merkle_root: Hash256::default(),
                 time: 1_001_800,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 3,
             };
             let header_tip_id =
@@ -2161,7 +2164,7 @@ mod tests {
 mod admission_chain_tests {
     use anyhow::Context as _;
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::{Header, TxIn, TxOut};
+    use bitcoin_rs_primitives::{Header, LockTime, Sequence, TxIn, TxOut, Witness};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sha2::{Digest as _, Sha256};
 
@@ -2178,15 +2181,15 @@ mod admission_chain_tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: vec![vec![0x51]],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::from_stack(vec![vec![0x51]]),
             }],
             outputs: vec![TxOut {
-                value: 9_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -2205,7 +2208,7 @@ mod admission_chain_tests {
                     prev_blockhash: previous_hash,
                     merkle_root: Hash256::default(),
                     time,
-                    bits: 0x207f_ffff,
+                    bits: CompactTarget::from_consensus(0x207f_ffff),
                     nonce: time,
                 },
                 NodeStatus::Active,
@@ -2231,8 +2234,8 @@ mod admission_chain_tests {
         changes.add(UtxoAdd::new(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             },
             false,
             0,
@@ -2262,8 +2265,8 @@ mod admission_chain_tests {
         changes.add(UtxoAdd::new(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: spendable_script(),
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
             },
             false,
             0,
@@ -2332,8 +2335,8 @@ mod admission_chain_tests {
         changes.add(UtxoAdd::new(
             outpoint,
             TxOut {
-                value: 10_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             },
             false,
             0,

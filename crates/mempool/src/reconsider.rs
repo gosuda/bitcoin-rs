@@ -92,7 +92,7 @@ impl DisconnectedCandidates {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::{Hash256, TxIn};
+    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Witness};
     use bitcoin_rs_script::script::{opcode, push_data};
 
     fn spend(previous_output: OutPoint, value: u64) -> Tx {
@@ -100,15 +100,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output,
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(value),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 
@@ -125,8 +125,8 @@ mod tests {
         assert!(
             batch.offer(&parent, |outpoint| (*outpoint == funded()).then_some(
                 TxOut {
-                    value: 10_000,
-                    script_pubkey: Vec::new()
+                    value: Amount::from_sat(10_000),
+                    script_pubkey: Script::new()
                 }
             ))
         );
@@ -157,16 +157,17 @@ mod tests {
     #[test]
     fn restored_coin_takes_precedence_over_an_offered_output() {
         let mut parent = spend(funded(), 9_000);
-        parent.outputs[0].script_pubkey = [vec![0x00, 0x14], vec![2; 20]].concat();
+        parent.outputs[0].script_pubkey =
+            Script::from_bytes([vec![0x00, 0x14], vec![2; 20]].concat());
         let child = spend(OutPoint::new(parent.txid(), 0), 8_000);
         let mut batch = DisconnectedCandidates::new(0, 0);
         assert!(batch.offer(&parent, |_| Some(TxOut {
-            value: 10_000,
-            script_pubkey: Vec::new()
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::new()
         })));
         assert!(batch.offer(&child, |_| Some(TxOut {
-            value: 8_500,
-            script_pubkey: Vec::new()
+            value: Amount::from_sat(8_500),
+            script_pubkey: Script::new()
         })));
         let entries = batch.into_entries();
         assert_eq!(entries[1].fee, 500);
@@ -212,11 +213,11 @@ mod tests {
         ];
         for (prevout_script, script_sig, witness, output_script, expected) in cases {
             let mut parent = spend(funded(), 9_000);
-            parent.outputs[0].script_pubkey = prevout_script;
+            parent.outputs[0].script_pubkey = Script::from_bytes(prevout_script);
             let mut child = spend(OutPoint::new(parent.txid(), 0), 8_000);
-            child.inputs[0].script_sig = script_sig;
-            child.inputs[0].witness = witness;
-            child.outputs[0].script_pubkey = output_script;
+            child.inputs[0].script_sig = Script::from_bytes(script_sig);
+            child.inputs[0].witness = Witness::from_stack(witness);
+            child.outputs[0].script_pubkey = Script::from_bytes(output_script);
 
             let mut restored = DisconnectedCandidates::new(42, 100);
             assert!(restored.offer(&child, |_| Some(parent.outputs[0].clone())));
@@ -226,8 +227,8 @@ mod tests {
 
             let mut offered = DisconnectedCandidates::new(42, 100);
             assert!(offered.offer(&parent, |_| Some(TxOut {
-                value: 10_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             })));
             assert!(offered.offer(&child, |_| None));
             let entry = &offered.into_entries()[1];

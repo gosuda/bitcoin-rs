@@ -1,6 +1,9 @@
 use alloc::sync::Arc;
 
 use bitcoin_rs_primitives::{Tx, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Witness};
 use bitcoin_rs_script::count_tx_legacy;
 
 /// Stable mempool entry identifier.
@@ -156,7 +159,7 @@ impl MempoolEntry {
         self.tx
             .inputs
             .iter()
-            .any(|input| input.sequence < RBF_FLAG_THRESHOLD)
+            .any(|input| input.sequence.to_consensus() < RBF_FLAG_THRESHOLD)
     }
 }
 
@@ -176,18 +179,18 @@ fn signed_fee_rate(fee: i128, vsize: u64) -> i128 {
 #[cfg(test)]
 mod is_replaceable_tests {
     use super::*;
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxIn};
+    use bitcoin_rs_primitives::{OutPoint, Sequence, Tx, TxIn};
     use std::sync::Arc;
 
     fn entry_with_sequence(sequence: u32) -> MempoolEntry {
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: Vec::new(),
-                sequence,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(sequence),
+                witness: Witness::new(),
             }],
             outputs: vec![],
         };
@@ -216,7 +219,7 @@ mod is_replaceable_tests {
     fn is_replaceable_false_for_no_inputs() {
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![],
         };
@@ -234,7 +237,7 @@ mod mining_metadata_tests {
     fn bare_entry() -> MempoolEntry {
         let tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![],
         };
@@ -251,13 +254,13 @@ mod mining_metadata_tests {
 
         let mut tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![],
             outputs: vec![],
         };
         tx.outputs.push(TxOut {
-            value: 1_000,
-            script_pubkey: alloc::vec![0xac],
+            value: Amount::from_sat(1_000),
+            script_pubkey: alloc::vec![0xac].into(),
         });
         let counted = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
         assert_eq!(counted.sigop_cost, count_tx_legacy(&counted.tx));
@@ -285,7 +288,10 @@ mod mining_metadata_tests {
 mod wire_metadata_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Wtxid,
+    };
 
     use super::MempoolEntry;
 
@@ -295,32 +301,32 @@ mod wire_metadata_tests {
             inputs: vec![
                 TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0),
-                    script_sig: vec![0x51],
-                    sequence: 0xffff_fffe,
-                    witness: Vec::new(),
+                    script_sig: Script::from_bytes(vec![0x51]),
+                    sequence: Sequence::from_consensus(0xffff_fffe),
+                    witness: Witness::new(),
                 },
                 TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x22; 32])), 7),
-                    script_sig: Vec::new(),
-                    sequence: u32::MAX,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(u32::MAX),
+                    witness: Witness::new(),
                 },
             ],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: 9,
+            lock_time: LockTime::from_consensus(9),
         };
         match mode {
             0 => {}
-            1 => tx.inputs[0].witness = vec![Vec::new()],
-            2..=4 => tx.inputs[1].witness = vec![vec![0xaa; mode - 1]],
+            1 => tx.inputs[0].witness = Witness::from_stack(vec![Vec::new()]),
+            2..=4 => tx.inputs[1].witness = Witness::from_stack(vec![vec![0xaa; mode - 1]]),
             5 => {
-                tx.inputs[0].witness = vec![Vec::new(), vec![0xbb; 253]];
-                tx.inputs[1].witness = vec![Vec::new()];
+                tx.inputs[0].witness = Witness::from_stack(vec![Vec::new(), vec![0xbb; 253]]);
+                tx.inputs[1].witness = Witness::from_stack(vec![Vec::new()]);
             }
-            6 => tx.inputs[1].witness = vec![Vec::new(); 253],
+            6 => tx.inputs[1].witness = Witness::from_stack(vec![Vec::new(); 253]),
             _ => panic!("unknown fixture mode"),
         }
         tx

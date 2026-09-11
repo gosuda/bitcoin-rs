@@ -505,11 +505,9 @@ fn mempool_recent(ctx: &Context) -> Response {
                 txid: entry.txid.to_string(),
                 fee: entry.fee,
                 vsize: entry.vsize,
-                value: entry
-                    .tx
-                    .outputs
-                    .iter()
-                    .fold(0_u64, |sum, output| sum.saturating_add(output.value)),
+                value: entry.tx.outputs.iter().fold(0_u64, |sum, output| {
+                    sum.saturating_add(output.value.to_sat())
+                }),
             })
             .collect::<Vec<_>>(),
     )

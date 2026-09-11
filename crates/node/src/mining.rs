@@ -25,7 +25,7 @@ use bitcoin_rs_mining::{
     difficulty_for_bits,
 };
 
-use bitcoin_rs_primitives::{Block, Hash256, Network, Tx, consensus_bytes};
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Network, Tx, consensus_bytes};
 
 use compact_str::CompactString;
 
@@ -798,7 +798,12 @@ impl MiningCoordinator {
                     difficulty_for_bits(next.bits),
                 )
             }
-            None => (0, 0.0, 0, 0.0),
+            None => (
+                CompactTarget::from_consensus(0),
+                0.0,
+                CompactTarget::from_consensus(0),
+                0.0,
+            ),
         };
         let pooled_transactions = u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX);
         let minimum_fee_rate = self.mempool.read().min_relay_fee_sat_per_kvb();
@@ -1297,12 +1302,13 @@ mod network_hashps_oracle_tests {
     const BITS: u32 = 0x207f_ffff;
 
     fn header(prev: BlockHash, time: u32) -> Header {
+        use bitcoin_rs_primitives::CompactTarget;
         Header {
             version: 1,
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time,
-            bits: BITS,
+            bits: CompactTarget::from_consensus(BITS),
             nonce: 0,
         }
     }
@@ -1476,15 +1482,16 @@ mod candidate_template_tests {
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
         use alloc::sync::Arc;
         use bitcoin_rs_mining::Candidate;
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
 
         let mut state = super::CoordinatorState::new();
         let coinbase = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut first_id = None;
@@ -1500,7 +1507,7 @@ mod candidate_template_tests {
                 previous_block_hash: hash,
                 height: 1,
                 version: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 min_time: 1,
                 current_time: 1,
                 csv_active: false,
@@ -1532,12 +1539,13 @@ mod candidate_template_tests {
     }
 
     fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) -> Candidate {
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
         Candidate {
             template_id: TemplateId::new(&previous, 1),
             previous_block_hash: previous,
             height: 1,
             version: 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1,
             current_time: 1,
             csv_active,
@@ -1548,11 +1556,11 @@ mod candidate_template_tests {
             mempool_sequence: 1,
             coinbase: Tx {
                 version: 2,
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
                 inputs: Vec::new(),
                 outputs: vec![TxOut {
-                    value: 50,
-                    script_pubkey: Vec::new(),
+                    value: Amount::from_sat(50),
+                    script_pubkey: Script::new(),
                 }],
             },
             coinbase_value: 50,
