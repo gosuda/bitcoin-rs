@@ -4,7 +4,8 @@
 //! applied. Slot-count eviction and byte-budget backpressure live here;
 //! [`crate::DownloadWindow`] owns in-flight assignment. The node sync
 //! coordinator stages arrivals and drains a contiguous apply prefix; it does
-//! not own this policy.
+//! not own this policy. The ownership boundary is defined by the
+//! [architecture contract](../../../docs/contracts/architecture.md).
 
 use std::{
     collections::VecDeque,
@@ -118,7 +119,7 @@ impl BlockStager {
         self.received_blocks_high_water
     }
 
-    /// Highest staged-byte total observed; feeds the high-water gauge.
+    /// Highest staged-byte total ever observed this run; feeds the high-water gauge.
     #[must_use]
     pub const fn received_bytes_high_water(&self) -> usize {
         self.received_bytes_high_water
@@ -955,6 +956,9 @@ mod tests {
         assert_eq!(dropped[0].hash, first);
         assert!(stager.contains(&second));
     }
+
+    // Architecture Contract (`docs/contracts/architecture.md`): the staging
+    // budget evicts a same-height fork before the expected hash.
 
     #[test]
     fn insert_evicts_same_height_fork_before_expected_hash() {
