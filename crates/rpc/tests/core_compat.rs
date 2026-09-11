@@ -370,8 +370,12 @@ impl MiningControl for CompatMiningControl {
 
 #[test]
 fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+    // API-12 mainnet gates (peers + IBD) live in the handler unit tests.
+    // This rendering proof runs off-mainnet so it reaches the template.
+    let mut ctx = Context::new();
+    ctx.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(
-        Context::new().with_mining_control(Arc::new(CompatMiningControl)),
+        ctx.with_mining_control(Arc::new(CompatMiningControl)),
     ));
 
     let template: corepc_types::v31::GetBlockTemplate =
