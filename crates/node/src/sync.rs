@@ -83,6 +83,8 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// identity stays on the shared [`PeerTable`]; this orchestrator calls
 /// identity-checked table methods. The P2P service does not hold a second
 /// window.
+/// Production download-window ownership: see
+/// `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
 pub struct BlockSync {
     handles: crate::apply::Chainstate,
     followers: crate::chain_effects::ChainFollowers,
