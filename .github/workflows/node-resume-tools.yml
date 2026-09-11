@@ -1,0 +1,41 @@
+name: node-resume-tools
+
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths: [.github/workflows/node-resume-tools.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  tools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 0e10cd7e
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt,clippy
+      - name: Export compiler and locked public dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/node-tools
+          cargo +1.98.1 vendor --locked --versioned-dirs /tmp/node-vendor > /tmp/node-tools/vendor-config.toml
+          tar -C /tmp -czf /tmp/node-tools/vendor.tgz node-vendor
+          sysroot=$(rustc +1.98.1 --print sysroot)
+          tar -C "$sysroot" --exclude=share/doc -czf /tmp/node-tools/rust.tgz .
+          rustc +1.98.1 --version --verbose > /tmp/node-tools/compiler.txt
+          git rev-parse HEAD > /tmp/node-tools/source.txt
+          sha256sum Cargo.lock /tmp/node-tools/rust.tgz /tmp/node-tools/vendor.tgz > /tmp/node-tools/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-offline-tools
+          path: /tmp/node-tools/
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
