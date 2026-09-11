@@ -13,30 +13,27 @@ jobs:
         with:
           ref: e6c5eae02738260b5b7240738323098afd6d7c5b
           persist-credentials: false
-      - name: Export pinned source
-        run: git archive --format=tar.gz HEAD > "$RUNNER_TEMP/node-owner-source.tar.gz"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: node-owner-source
-          path: ${{ runner.temp }}/node-owner-source.tar.gz
-          retention-days: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           components: rustfmt, clippy
       - name: Export compiler and dependency sources for offline validation
         run: |
-          set -eux
+          set -eu
           rustc --version
           cargo --version
           cargo fetch --locked
           SYSROOT="$(rustc --print sysroot)"
-          tar -czf "$RUNNER_TEMP/node-owner-rust.tar.gz" -C "$SYSROOT" bin lib libexec share
+          tar -czf "$RUNNER_TEMP/node-owner-rust.tar.gz" -C "$SYSROOT" bin lib libexec
+          mkdir -p "$HOME/.cargo/git"
           tar -czf "$RUNNER_TEMP/node-owner-cargo.tar.gz" -C "$HOME/.cargo" registry git
+          python3 -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/python-wheels" tree-sitter==0.25.2 tree-sitter-rust==0.24.0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
           name: node-owner-build-inputs
           path: |
             ${{ runner.temp }}/node-owner-rust.tar.gz
             ${{ runner.temp }}/node-owner-cargo.tar.gz
+            ${{ runner.temp }}/python-wheels
           compression-level: 0
           retention-days: 1
