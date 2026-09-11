@@ -345,9 +345,18 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     }
     let (_, content_length, authorization, keep_alive) = read_headers(reader, request_line.len())?;
 
-    // Unsupported methods still reach the demux.  If a body is framed, consume it;
-    // otherwise a missing Content-Length is valid for methods such as HEAD and PUT.
-    let content_length = content_length.unwrap_or(0);
+    // A POST without Content-Length is a framing error: the JSON-RPC path is
+    // body-carrying by definition. Other methods reach the demux and 404 there.
+    let content_length = match (method, content_length) {
+        ("POST", None) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "missing content-length",
+            ));
+        }
+        (_, Some(len)) => len,
+        (_, None) => 0,
+    };
     let mut body = vec![0_u8; content_length];
     reader.read_exact(&mut body)?;
     Ok(Some(HttpRequest {
@@ -886,6 +895,51 @@ mod tests {
         assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
         assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
         assert_eq!(classify("GET", "/blocks/tip/height"), HttpRoute::NotFound);
+    }
+
+    /// WF-02: a body-carrying POST without Content-Length is a framing
+    /// error, not an empty JSON-RPC request.
+    #[test]
+    fn post_without_content_length_is_a_framing_error() -> std::io::Result<()> {
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let server = RpcServer::bind(
+            "127.0.0.1:0",
+            auth,
+            handler,
+            4,
+            core::time::Duration::from_millis(500),
+            false,
+        )?;
+        let addr = server.listener.local_addr()?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || server.serve_with_shutdown(shutdown_clone));
+
+        let mut stream = TcpStream::connect(addr)?;
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )?;
+        stream.flush()?;
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf)?;
+        let text = String::from_utf8_lossy(&buf);
+        let code: u16 = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|token| token.parse().ok())
+            .expect("HTTP status");
+        // The connection-level framing error surfaces as a bad-request-class
+        // response before any JSON-RPC authentication or parsing runs.
+        assert!(
+            (400..500).contains(&code) && code != 401,
+            "expected a framing error status, got {code}"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        handle.join().expect("server thread");
+        Ok(())
     }
 
     #[test]
