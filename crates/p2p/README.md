@@ -2,7 +2,7 @@
 
 The Bitcoin peer-to-peer network surface: the wire codec, peer lifecycle and
 handshaking, inbound dispatch, connection management, and block-download
-policy (`DownloadWindow` plus `BlockStager`).
+policy (`DownloadWindow`, `BlockStager`, and `SyncPlanner`).
 
 Each `Peer` owns one connection's stream and handshake state. Live connections are
 identified by a `ConnectionId`, cleaned up through a `PeerLease`, and tracked with
