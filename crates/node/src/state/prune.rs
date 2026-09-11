@@ -111,10 +111,10 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             .ok_or_else(|| PruneServiceError::failed("prune height overflow"))?;
 
         let durable_tip_height = self.durable_tip_height.load(Ordering::Acquire);
-          let effective_prune_below = pruner_tip
-              .min(durable_tip_height)
-              .saturating_sub(policy.retention_depth());
-          let prune_candidates: Vec<(u32, bitcoin_rs_primitives::BlockHash, usize)> = {
+        let effective_prune_below = pruner_tip
+            .min(durable_tip_height)
+            .saturating_sub(policy.retention_depth());
+        let prune_candidates: Vec<(u32, bitcoin_rs_primitives::BlockHash, usize)> = {
             let blocks = self.blocks.read();
             blocks
                 .iter()

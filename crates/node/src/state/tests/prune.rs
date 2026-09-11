@@ -416,6 +416,19 @@ fn manual_prune_removes_pruned_block_transactions_from_cache() -> anyhow::Result
     let Some(service) = state.prune_service() else {
         anyhow::bail!("prune service should exist when prune_target_mb > 0");
     };
+    // Pruning cannot evict cached transactions while their block still lies
+    // above the durable checkpoint's reorg-retention floor (ARCH-07).
+    service
+        .prune_to_height(11)
+        .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
+    assert!(state.transactions.read().contains_key(&pruned_txid));
+    assert!(state.transactions.read().contains_key(&unrelated_txid));
+
+    // The synthetic applied-tip fixture must also publish durability before
+    // any block below the requested height becomes eligible for pruning.
+    state
+        .durable_tip_height
+        .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
     service
         .prune_to_height(11)
         .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
@@ -558,8 +571,13 @@ fn prune_refuses_after_apply_admission_closes() -> anyhow::Result<()> {
 #[allow(clippy::too_many_lines)]
 #[test]
 fn prune_to_height_serializes_overlapping_calls() -> anyhow::Result<()> {
+    use super::super::prune::load_pruneheight;
+    use bitcoin_rs_rpc::context::{BlockLog, PruneService};
+    use bitcoin_rs_storage::FlatFileBlockStore;
+    use parking_lot::RwLock;
     use std::sync::Barrier;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::time::Duration;
 
     struct BlockingPruneBodyStore {
