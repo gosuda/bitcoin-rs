@@ -19,6 +19,7 @@ redb = ["bitcoin-rs-storage/redb"]
 
 [dependencies]
 bitcoin-rs-chain.workspace = true
+bitcoin-rs-mempool.workspace = true
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin.workspace = true

@@ -79,17 +79,37 @@ fn epoch_seconds(time: SystemTime) -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Option<SystemTime> {
-    if absolute {
-        return UNIX_EPOCH.checked_add(Duration::from_secs(bantime));
+/// Resolves the finite expiry requested by `setban`.
+///
+/// SETBAN-EXPIRY-01: zero relative bantime uses `DEFAULT_BAN_TIME_SECS`;
+/// absolute bantime is measured from `UNIX_EPOCH`. An unrepresentable expiry
+/// returns `RpcError::InvalidParameter` (-8) before any ban-list mutation.
+/// It must never become `BannedSubnet::banned_until = None`, which means a
+/// permanent ban. Signed-input policy is unchanged.
+///
+/// SETBAN-ABSOLUTE-01: Bitcoin Core v31.1 `src/rpc/net.cpp::setban` rejects
+/// absolute bantime below the current whole epoch second with
+/// `RpcError::InvalidParameter` (-8), before any ban-list mutation. Equality
+/// is allowed, including when `now` has subsecond precision.
+fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Result<SystemTime, RpcError> {
+    if absolute && bantime < epoch_seconds(now) {
+        return Err(RpcError::InvalidParameter(
+            "Error: Absolute timestamp is in the past".to_owned(),
+        ));
     }
-
-    let duration = if bantime == 0 {
-        Duration::from_secs(DEFAULT_BAN_TIME_SECS)
+    let until = if absolute {
+        UNIX_EPOCH.checked_add(Duration::from_secs(bantime))
     } else {
-        Duration::from_secs(bantime)
+        let duration = if bantime == 0 {
+            Duration::from_secs(DEFAULT_BAN_TIME_SECS)
+        } else {
+            Duration::from_secs(bantime)
+        };
+        now.checked_add(duration)
     };
-    now.checked_add(duration)
+    until.ok_or_else(|| {
+        RpcError::InvalidParameter("bantime exceeds supported timestamp range".to_owned())
+    })
 }
 
 fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcError> {
@@ -185,7 +205,7 @@ fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
     // site in `net_processing.cpp`: "Don't use timedata samples from inbound
     // peers to make it harder for others to create false warnings about our
     // clock being out of sync." Anyone can open an inbound connection and
-    // declare any time they like; medianing over all peers hands that
+    // declare any time they like; medianing over all of them hands that
     // attacker the node's reported clock offset, and with it the operator's
     // belief about whether the machine's clock is wrong.
     let mut offsets: Vec<i64> = peers
@@ -320,11 +340,12 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             let now = SystemTime::now();
             let bantime = optional_u64(params, 2, 0)?;
             let absolute = optional_bool(params, 3, false)?;
+            let banned_until = ban_until(now, bantime, absolute)?;
             let mut banned = ctx.banned.write();
             banned.retain(|entry| entry.subnet != subnet);
             banned.push(BannedSubnet {
                 subnet,
-                banned_until: ban_until(now, bantime, absolute),
+                banned_until: Some(banned_until),
                 ban_created: now,
                 reason: "manual".to_owned(),
             });
@@ -610,11 +631,13 @@ mod tests {
         use bitcoin_rs_p2p::PeerInfo;
 
         let info = PeerInfo {
+            wtxid_relay: false,
             addr: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
             version: 70_016,
             services: (1_u64 << 0) | (1_u64 << 3),
             user_agent: "stub".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound: false,
             addr_bind: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
@@ -797,11 +820,13 @@ mod addnode_validation_tests {
         let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
         let ctx = Context::new();
         let info = PeerInfo {
+            wtxid_relay: false,
             addr,
             version: 70_016,
             services: 9,
             user_agent: "test".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound: false,
             addr_bind: addr,
@@ -1139,11 +1164,13 @@ mod peer_counter_tests {
                 .unwrap_or_else(|_| panic!("test address {text} must parse"))
         };
         PeerInfo {
+            wtxid_relay: false,
             addr: parse(addr),
             version: 70_016,
             services: 0,
             user_agent: "/test/".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 0,
             inbound,
             addr_bind: parse(bind),
@@ -1511,11 +1538,13 @@ mod getnodeaddresses_tests {
     fn peer(addr: &str, services: u64) -> PeerInfo {
         let parsed: SocketAddr = addr.parse().expect("addr");
         PeerInfo {
+            wtxid_relay: false,
             addr: parsed,
             version: 70_016,
             services,
             user_agent: "test".to_owned(),
             start_height: 0,
+            best_known_height: 0,
             conn_time: 100,
             inbound: false,
             addr_bind: parsed,
@@ -1638,5 +1667,44 @@ mod getnodeaddresses_tests {
             arr[0].get("services").and_then(JsonValueTrait::as_u64),
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod setban_absolute_time_tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use super::ban_until;
+    use crate::error::RpcError;
+
+    // SETBAN-ABSOLUTE-01 on `ban_until` above; independent reference:
+    // Bitcoin Core v31.1 `src/rpc/net.cpp::setban` compares banTime < GetTime().
+    // Synthetic clock values cover the strict whole-second boundary without
+    // sleeps or changing any process-global clock.
+    #[test]
+    fn absolute_bantime_compares_whole_epoch_seconds() -> Result<(), RpcError> {
+        let now_seconds = 1_000;
+        for nanos in [0, 1, 999_999_999] {
+            let now = UNIX_EPOCH + Duration::new(now_seconds, nanos);
+            for seconds in [0, now_seconds - 1] {
+                let Err(error) = ban_until(now, seconds, true) else {
+                    panic!("past absolute timestamp must be rejected");
+                };
+                assert_eq!(error.code(), -8);
+                assert!(matches!(
+                    error,
+                    RpcError::InvalidParameter(message)
+                        if message == "Error: Absolute timestamp is in the past"
+                ));
+            }
+            for seconds in [now_seconds, now_seconds + 1] {
+                assert_eq!(
+                    ban_until(now, seconds, true)?,
+                    UNIX_EPOCH + Duration::from_secs(seconds),
+                    "current whole second and future timestamps are accepted"
+                );
+            }
+        }
+        Ok(())
     }
 }

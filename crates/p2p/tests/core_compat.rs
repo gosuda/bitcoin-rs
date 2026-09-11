@@ -38,7 +38,7 @@ use bitcoin_rs_p2p::{
     PINNED_CORE_VERSION, Peer, PeerState, PeerTable,
 };
 use bitcoin_rs_primitives::{
-    Block, BlockHash as NativeBlockHash, Hash256, Header, consensus_bytes,
+    Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
@@ -48,6 +48,7 @@ use hashbrown::HashMap;
 // ---------------------------------------------------------------------------
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
+
 /// Convert native `BlockHash` to bitcoin `BlockHash` for envelope types.
 fn btc_bh(hash: NativeBlockHash) -> BlockHash {
     BlockHash::from_byte_array(*hash.as_bytes())
@@ -73,12 +74,12 @@ fn genesis_block() -> Result<Block, Box<dyn Error>> {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut chunks = hex.as_bytes().chunks_exact(2);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("odd hex length".into());
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in &mut chunks {
+    for pair in chunks {
         let high = hex_nibble(pair[0])?;
         let low = hex_nibble(pair[1])?;
         bytes.push((high << 4) | low);
@@ -104,7 +105,7 @@ fn child_headers(parent: &Header, count: usize) -> Vec<Header> {
             prev_blockhash: current.compute_hash(),
             merkle_root: Hash256::default(),
             time: current.time + 1,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         headers.push(next);
@@ -205,7 +206,7 @@ impl ChainQuery for FakeChain {
         &self,
         items: &[Inventory],
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError> {
         let mut outcome = InventoryServing::default();
         for item in items {
@@ -224,7 +225,7 @@ impl ChainQuery for FakeChain {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(self.bodies[&native].clone())?;
+                serve(consensus_bytes(&self.bodies[&native]).into())?;
             } else {
                 outcome.not_found.push(*item);
             }
@@ -261,12 +262,13 @@ fn serve_collect(
     items: &[Inventory],
 ) -> Result<(Vec<Block>, Vec<Inventory>), PeerError> {
     let blocks = std::cell::RefCell::new(Vec::new());
-    let outcome = chain.serve_inventory_blocks(items, &|| true, &mut |block| {
-        blocks.borrow_mut().push(block);
+    let outcome = chain.serve_inventory_blocks(items, &|| true, &mut |payload| {
+        blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
         Ok(())
     })?;
     Ok((blocks.into_inner(), outcome.not_found))
 }
+
 /// Drives an outbound handshake as if the remote peer sent `version`.
 fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
     let mut peer = Peer::new(Cursor::new(Vec::new()), magic);
@@ -573,7 +575,8 @@ fn outbound_handshake_sends_version_then_core_feature_set() {
 
 #[test]
 fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), Box<dyn Error>> {
-    let mut peer = ready_peer(Magic::REGTEST)?;
+    let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
+    dispatch_inbound(&mut peer, &version_for_handshake())?;
     assert!(!peer.capabilities.send_headers);
     assert!(!peer.capabilities.addr_v2);
 
@@ -584,6 +587,17 @@ fn remote_feature_messages_flip_negotiated_capabilities() -> Result<(), Box<dyn 
     assert!(peer.capabilities.send_headers);
     assert!(peer.capabilities.addr_v2);
     assert!(peer.wtxid_relay.peer_supported());
+    dispatch_inbound(&mut peer, &Message::Verack)?;
+    assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
+}
+
+#[test]
+fn late_wtxidrelay_is_ignored_after_verack() -> Result<(), Box<dyn Error>> {
+    let mut peer = ready_peer(Magic::REGTEST)?;
+    assert!(!peer.wtxid_relay.peer_supported());
+    dispatch_inbound(&mut peer, &Message::WtxidRelay)?;
+    assert!(!peer.wtxid_relay.peer_supported());
     assert_eq!(peer.state, PeerState::Ready);
     Ok(())
 }
@@ -768,11 +782,15 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     bodies.insert(genesis.block_hash(), genesis.clone());
     let chain = FakeChain::new(active, bodies);
     let mut peer = ready_peer(Magic::REGTEST)?;
-    // Inbound inv announcements are answered with getdata echoing the items
-    // verbatim (a wtxid-relay peer announces MSG_WTX and is asked for MSG_WTX).
-    let tx_inv = Inventory::Transaction(Txid::from_byte_array([9u8; 32]));
+    // P2P-01 / BIP144: this handshake advertises NODE_WITNESS, so request
+    // witness serialization without changing the announced transaction's txid.
+    let txid = Txid::from_byte_array([9u8; 32]);
+    let tx_inv = Inventory::Transaction(txid);
     let response = dispatch_collect(&mut peer, &Message::Inv(vec![tx_inv]), Some(&chain))?;
-    assert_eq!(response, vec![Message::GetData(vec![tx_inv])]);
+    assert_eq!(
+        response,
+        vec![Message::GetData(vec![Inventory::WitnessTransaction(txid)])],
+    );
 
     // getdata over known + missing inventory serves blocks and notfounds the rest.
     let genesis_hash = genesis.block_hash();
@@ -786,7 +804,9 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
         Some(&chain),
     )?;
     let (served, not_found) = match response.as_slice() {
-        [Message::Block(block), Message::NotFound(items)] => (block, items),
+        [Message::BlockPayload(payload), Message::NotFound(items)] => {
+            (Block::consensus_decode(payload)?, items)
+        }
         other => return Err(format!("unexpected relay response {other:?}").into()),
     };
     assert_eq!(served.block_hash(), genesis.block_hash());
@@ -1077,7 +1097,8 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
         Some(&state),
     )?;
     match response.as_slice() {
-        [Message::Block(block), Message::NotFound(items)] => {
+        [Message::BlockPayload(payload), Message::NotFound(items)] => {
+            let block = Block::consensus_decode(payload)?;
             assert_eq!(block.block_hash(), branch_b[0].compute_hash());
             assert_eq!(
                 items,
