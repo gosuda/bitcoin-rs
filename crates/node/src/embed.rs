@@ -80,6 +80,12 @@ pub struct Node {
     pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
 }
 
+// Keep these async methods compatible with supported Clippy versions.
+#[allow(
+    unknown_lints,
+    clippy::unused_async_trait_impl,
+    reason = "the method bodies run when the futures are polled"
+)]
 impl Node {
     /// Starts an owned node after configuration validation and crash recovery.
     ///

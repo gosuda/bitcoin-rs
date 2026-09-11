@@ -143,8 +143,8 @@ This is an evidence tool pin. No checker run is claimed by this page.
     successful exit before readiness.
   - `REF-07c`: readiness and each reference request are deadline-bounded;
     expiration reports the deadline and reaps startup children.
-  - `REF-07d`: malformed HTTP or JSON replies are transport/protocol errors,
-    not behavioral comparisons.
+  - `REF-07d`: malformed HTTP, JSON, or P2P envelopes are transport/protocol
+    errors, not behavioral comparisons.
 
 ## Proven by
 
@@ -156,6 +156,32 @@ This is an evidence tool pin. No checker run is claimed by this page.
   custody, and pins `corpus_custody()` honesty.
 - `crates/rpc/tests/support/fixture.rs`: rejects missing or stale capture
   provenance against the same selected release.
+
+- `bin/bitcoin-rs/tests/overhaul_process_harness.rs`: ordinary binary startup,
+  signed RPC admission/confirmation/query, missing/substituted reference,
+  deliberate reply difference, early exit, malformed response, and total
+  request-deadline controls (REF-07a–d). The RPC scenario verifies through
+  `getindexinfo` that txindex is disabled on both nodes before confirmed lookup.
+- `bin/bitcoin-rs/tests/overhaul_process_p2p.rs`: the same signed transaction
+  enters each real binary through its loopback P2P listener, is observed in
+  its public mempool, and is confirmed by identical Core-mined block bytes.
+  RPC compares tip, transaction, and spent-output state; the candidate's
+  explorer HTTP status is checked against that public chain evidence. This
+  scenario alone enables the candidate's txindex and waits for public
+  `getindexinfo` to report synchronization at the confirming height under
+  one fixed deadline before querying confirmed explorer status. This is
+  not a claim to execute an independent Esplora server.
+- `bin/bitcoin-rs/tests/support/process_peer.rs`: independent rust-bitcoin v1
+  framing, one deadline per handshake/transaction barrier, bounded frames,
+  message count and transcript, and socket custody. Fault cases cover
+  malformed/truncated frames, wrong network/checksum, oversized lengths,
+  fragmented responses, and cleanup after a connected-peer timeout.
+- `target/process-harness/run-*/`: `launch.json` records both loopback binds,
+  binary digest and arguments; `transcript.jsonl` records RPC/explorer calls;
+  `p2p.jsonl` records ordered wire attempts, completed sends and receives.
+  Both transcripts use the same process-relative `at_micros` clock. The
+  existing required PR test profile runs these scenarios without an opt-in
+  flag and preserves this directory as a CI artifact, including on failure.
 
 ## Vocabulary
 

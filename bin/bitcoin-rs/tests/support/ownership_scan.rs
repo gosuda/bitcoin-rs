@@ -529,6 +529,44 @@ mod tests {
     }
 
     #[test]
+    fn only_the_current_connect_gateway_path_is_authorized() {
+        for (path, receiver, permitted) in [
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "handles.mempool_gateway",
+                true,
+            ),
+            (
+                "/workspace/crates/node/src/apply.rs",
+                "handles.mempool_gateway",
+                false,
+            ),
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "handles.mempool",
+                false,
+            ),
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "handles.mempool_gateway.pool().write()",
+                false,
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(
+                path,
+                &format!("{receiver}.remove_for_block(block_txs, block_txids, height);"),
+                &mut result,
+            );
+            assert_eq!(
+                result.violations.is_empty(),
+                permitted,
+                "{path}: {receiver}"
+            );
+        }
+    }
+
+    #[test]
     fn multiline_receiver_chain_resolves_to_its_root() {
         let owner = "/workspace/crates/node/src/reorg/execution.rs";
         for (path, call, expected_violations) in [

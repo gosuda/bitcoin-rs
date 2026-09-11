@@ -9,10 +9,13 @@ identified by a `ConnectionId`, cleaned up through a `PeerLease`, and tracked wi
 ready metadata by the shared `PeerTable`. Inbound accept and outbound connect
 share one socket policy in `socket::configure_peer_stream` (`TCP_NODELAY`,
 blocking I/O, handshake/poll timeouts). `P2pService` owns workers and the
-session store; `BlockSync` owns the production download window. The node
+session store. `BlockSync` is the sole owner of the production download window.
+The node
 supplies chain queries and coordinates chain application. A connection
 negotiates version/verack in `handshake`, then runs the peer finite-state machine
-in `fsm`; `wire` is the protocol codec. Inbound traffic reaches the host through
+in `fsm`; `wire` is the protocol codec. The per-connection writer coalesces a ready
+burst of control messages into one `write_messages` writev; blocks and transactions
+stay one frame. Inbound traffic reaches the host through
 `dispatch_inbound_with_chain`, which streams getdata responses behind the outbound
 budget's pre-load production headroom gate and reads the active chain through the
 `ChainQuery` trait. Served block bodies are the stored consensus bytes
