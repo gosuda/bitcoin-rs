@@ -81,7 +81,7 @@ impl MiningControl for SmokeMiningControl {
             capabilities: Vec::new(),
             mutable: Vec::new(),
             submit_old: None,
-            work_id: None,
+            signet: None,
         }))
     }
 

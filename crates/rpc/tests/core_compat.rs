@@ -321,7 +321,7 @@ impl MiningControl for CompatMiningControl {
                 TemplateMutation::PreviousBlock,
             ],
             submit_old: None,
-            work_id: None,
+            signet: None,
         }))
     }
 

@@ -5,7 +5,8 @@ Target contract for the node's external surface: JSON-RPC, REST, ZMQ, and
 the two Esplora dialects. One manifest owns the inventory. Every dialect
 projects the same coherent node state and maps typed owner results to its
 own wire format. `API-07` is the recorded Core reference used by the RPC
-fixture replay gate.
+fixture replay gate. `API-11` is the BIP22/BIP23
+`getblocktemplate` extras the pinned corepc type does not model.
 
 Owners:
 
@@ -211,6 +212,18 @@ Owners:
 The wallet-facing subset of this surface is owned by
 [wallet-facing.md](wallet-facing.md).
 
+### `API-11`: BIP22/BIP23 template extras
+
+- **Owner**: `MiningCoordinator::template_from_candidate` in
+  `crates/node/src/mining.rs`; JSON projection in
+  `crates/rpc/src/handlers/mining.rs` `render_block_template`.
+- Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
+  Client-advertised names are not echoed.
+- `submitold` is present after a long-poll wait and omitted otherwise. `workid`
+  is not emitted.
+- On signet, the template carries `signet` in `rules` (mandatory) and
+  `signet_challenge`. Other networks omit `signet_challenge`.
+
 ## Proven by
 
 - `API-07`: `crates/rpc/tests/core_parity.rs` test
@@ -262,6 +275,14 @@ The wallet-facing subset of this surface is owned by
   `crates/mining/tests/template_shape.rs` tests
   `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`.
+
+- `API-11`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
+    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
+    `getblocktemplate_requires_signet_rule_on_signet`
+  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
+  - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
+    `signet_template_includes_challenge_and_signet_rule`
 
 ## Vocabulary
 
