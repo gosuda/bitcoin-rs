@@ -89,7 +89,7 @@ pub(crate) const JOURNAL_DIR_NAME: &str = "chainstate-journal";
 /// treat a published checkpoint as finished while this returns `Err`.
 pub(crate) fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), JournalWriterError> {
     let path = data_dir.join(JOURNAL_DIR_NAME);
-    let dir = match crate::checkpoint_fs::open_data_dir(&path) {
+    let dir = match crate::checkpoint::fs::open_data_dir(&path) {
         Ok(dir) => dir,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
@@ -98,7 +98,7 @@ pub(crate) fn clear_full_revalidation_marker_at(data_dir: &Path) -> Result<(), J
 }
 
 fn clear_full_revalidation_marker(dir: &cap_std::fs::Dir) -> Result<(), JournalWriterError> {
-    clear_full_revalidation_marker_with_sync(dir, crate::checkpoint_fs::sync_dir)
+    clear_full_revalidation_marker_with_sync(dir, crate::checkpoint::fs::sync_dir)
 }
 
 fn clear_full_revalidation_marker_with_sync(

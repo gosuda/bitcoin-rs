@@ -144,8 +144,8 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::from)?;
     guard.services.checkpoint_worker = Some(state.start_periodic_checkpoint(
-        crate::checkpoint_worker::CHECKPOINT_INTERVAL_BLOCKS,
-        Duration::from_secs(crate::checkpoint_worker::CHECKPOINT_INTERVAL_SECS),
+        crate::checkpoint::worker::CHECKPOINT_INTERVAL_BLOCKS,
+        Duration::from_secs(crate::checkpoint::worker::CHECKPOINT_INTERVAL_SECS),
     )?);
     guard.services.event_loop = Some(
         std::thread::Builder::new()

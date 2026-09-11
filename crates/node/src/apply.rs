@@ -548,7 +548,7 @@ pub struct Chainstate {
     pub(crate) journal: Option<crate::chainstate_journal::SharedJournalWriter>,
     /// Publishes checkpoints to settle rolled-back disconnect debt after a
     /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
-    pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint_worker::CheckpointPublisher>>,
+    pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::worker::CheckpointPublisher>>,
     /// Capture per-transaction wire bytes for a derived `rawtx` consumer.
     pub(crate) capture_rawtx: bool,
     /// Serialize the full block for a derived consumer (body store, index, rawblock).

@@ -50,13 +50,13 @@ fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
         Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
     }
     std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
-    crate::checkpoint_fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
+    crate::checkpoint::fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
 }
 
 pub(super) fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
     let path = data_dir.join(CHAINSTATE_JOURNAL_DIR);
     std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
-    crate::checkpoint_fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
+    crate::checkpoint::fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
 }
 
 fn checkpoint_bootstrap(
