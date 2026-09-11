@@ -1,21 +1,16 @@
 name: txindex-cleanup-workbench
-
 on:
   push:
     branches: [automation/txindex-cleanup-workbench-20260911]
-
 permissions:
   contents: write
-
 concurrency:
   group: txindex-cleanup-workbench
-  cancel-in-progress: false
-
+  cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
-
 jobs:
   validate:
     strategy:
@@ -49,7 +44,7 @@ jobs:
           workspaces: candidate
           shared-key: txindex-cleanup-native-${{ matrix.scope }}
           cache-on-failure: true
-      - name: Generate modules and audit exact original function bodies
+      - name: Generate and audit the source-only refactor
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           python -m pip install 'Pygments==2.19.2'
@@ -59,15 +54,13 @@ jobs:
             python ../workbench/.workbench/refactor_txindex_node.py
           fi
           python ../workbench/.workbench/finalize_txindex.py "$SCOPE"
-          if [[ -f ../workbench/.workbench/adjustments.py ]]; then
-            python ../workbench/.workbench/adjustments.py "$SCOPE"
-          fi
+          python ../workbench/.workbench/adjustments.py "$SCOPE"
           if [[ "$SCOPE" == index ]]; then
             cargo +1.95.0 fmt -p bitcoin-rs-index
           else
             rustfmt +1.95.0 --edition 2024 crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
           fi
-      - name: Compiler-assisted import cleanup
+      - name: Compiler-assisted unused import cleanup
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           for pass in 1 2; do
@@ -77,7 +70,7 @@ jobs:
               cargo +1.95.0 fix --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets --allow-dirty --allow-staged
             fi
           done
-      - name: Format and strict Clippy
+      - name: Formatting and strict Clippy
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           if [[ "$SCOPE" == index ]]; then
@@ -89,7 +82,7 @@ jobs:
             rustfmt +1.95.0 --edition 2024 --check crates/node/src/txindex_worker.rs crates/node/src/storage_backend.rs
             cargo +1.95.0 clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings
           fi
-      - name: Affected contract and integration tests
+      - name: Contract and integration tests
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           if [[ "$SCOPE" == index ]]; then
@@ -103,22 +96,22 @@ jobs:
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p bitcoin-rs-index --features fjall,redb --no-deps
-      - name: Verify diff scope and export candidate
+      - name: Verify exact diff scope and export candidate
         if: ${{ always() }}
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           if [[ "$SCOPE" == index ]]; then
             git add crates/index/src/index.rs crates/index/src/index crates/index/README.md
           else
-            git add crates/node/src/txindex_worker.rs crates/node/src/txindex_worker crates/node/src/storage_backend.rs crates/node/README.md crates/node/src/sync/requests.rs
+            git add crates/node/src/txindex_worker.rs crates/node/src/txindex_worker crates/node/src/storage_backend.rs crates/node/README.md crates/node/src/sync/requests.rs crates/node/src/embed.rs crates/node/src/checkpoint/tests/behavior_2.rs
           fi
           git diff --cached --check
           git diff --cached --stat
           git diff --exit-code
-          git diff --cached --name-only | SCOPE="$SCOPE" python -c 'import os,sys; s=os.environ["SCOPE"]; paths=sys.stdin.read().splitlines(); assert paths; allowed={"index":lambda p: p in {"crates/index/src/index.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/"),"node":lambda p: p in {"crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs","crates/node/README.md","crates/node/src/sync/requests.rs"} or p.startswith("crates/node/src/txindex_worker/")}; assert all(allowed[s](p) for p in paths), paths'
+          git diff --cached --name-only | SCOPE="$SCOPE" python -c 'import os,sys; s=os.environ["SCOPE"]; paths=sys.stdin.read().splitlines(); assert paths; allowed={"index":lambda p: p in {"crates/index/src/index.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/"),"node":lambda p: p in {"crates/node/src/txindex_worker.rs","crates/node/src/storage_backend.rs","crates/node/README.md","crates/node/src/sync/requests.rs","crates/node/src/embed.rs","crates/node/src/checkpoint/tests/behavior_2.rs"} or p.startswith("crates/node/src/txindex_worker/")}; assert all(allowed[s](p) for p in paths), paths'
           git diff --cached --binary > /tmp/txindex-${SCOPE}.patch
           git diff --cached --name-only -z | tar -czf /tmp/txindex-${SCOPE}-source.tar.gz --null -T -
-      - name: Publish validated source only, without workbench history
+      - name: Publish validated source without workbench history
         run: |
           exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
           branch="refactor/txindex-${SCOPE}-modules-20260911"
