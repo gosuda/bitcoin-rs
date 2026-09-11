@@ -166,11 +166,16 @@ pub fn plan_from_identity(
     target: ChainTip,
     chain: &impl ActiveChainView,
 ) -> ReconcilePlan {
+    // Allow: `ConsumerCursor` names the mirrored tip `hash`/`height` while
+    // `ChainIdentity` names the applied tip `tip_hash`/`tip_height`; the
+    // cross-named comparison is the intended positional check, not a typo.
+    #[allow(clippy::suspicious_operation_groupings)]
     let identity_matches_cursor = cursor.epoch == identity.epoch
         && cursor.sequence == identity.sequence
         && cursor.hash == identity.tip_hash
         && cursor.height == identity.tip_height;
-    let identity_matches_target = identity.tip_hash == target.hash && identity.tip_height == target.height;
+    let identity_matches_target =
+        identity.tip_hash == target.hash && identity.tip_height == target.height;
     if identity_matches_cursor && identity_matches_target {
         return ReconcilePlan::CaughtUp;
     }
