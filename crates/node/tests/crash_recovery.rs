@@ -1,16 +1,21 @@
 //! Process-level crash and upgrade compatibility tests for chainstate recovery.
 
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
 use anyhow::{Context as _, Result, bail};
+
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
+
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
+
 use sha2::{Digest, Sha256};
+
+use std::{
+    path::PathBuf,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 const CHILD_ENV: &str = "BITCOIN_RS_CRASH_TEST_CHILD";
 const DATA_DIR_ENV: &str = "BITCOIN_RS_CRASH_TEST_DATADIR";
@@ -94,7 +99,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             let tip1 = state.apply_block(&block1)?;
             let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
             state.apply_block(&block2)?;
-            bitcoin_rs_node::apply::disconnect_block(&state.apply_handles(), &block2)?;
+            state.chainstate().disconnect_block(&block2)?;
         }
         "publication" => {
             state.apply_block(&genesis)?;
@@ -201,11 +206,11 @@ fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Re
 fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![1, u8::try_from(height)?].into(),
-            sequence: Sequence::MAX,
+            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?]),
+            sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
@@ -226,7 +231,7 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
     };
     block.header.merkle_root = merkle_root(&block.txs)
         .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits, block.block_hash().0) {
+    while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
         block.header.nonce = block
             .header
             .nonce
@@ -262,8 +267,7 @@ fn double_sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(first).into()
 }
 
-fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
-    let bits = bits.to_consensus();
+fn pow_met(bits: u32, hash: Hash256) -> bool {
     let exponent = u8::try_from(bits >> 24).unwrap_or(0);
     let mantissa = bits & 0x007f_ffff;
     if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {

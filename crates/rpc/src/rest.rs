@@ -10,9 +10,11 @@ use alloc::sync::Arc;
 use std::str::FromStr;
 
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Script, Sequence, TxOut,
-    Txid, Witness, consensus_bytes, deserialize,
+    Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
 use crate::context::{BlockRecord, Context};
@@ -807,7 +809,7 @@ fn hex_decode(hex: &str) -> Vec<u8> {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let hi = nibble(chunk[0]);
         let lo = nibble(chunk[1]);
         if hi == 0xff || lo == 0xff {

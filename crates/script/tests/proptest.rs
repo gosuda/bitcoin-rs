@@ -12,7 +12,7 @@ use bitcoin::{
     Amount as OracleAmount, OutPoint, ScriptBuf, Sequence as OracleSequence, Transaction, TxIn,
     TxOut as OracleTxOut, Txid, Witness as OracleWitness, absolute, transaction,
 };
-use bitcoin_rs_primitives::{Amount, LockTime, Sequence, Tx, TxOut, Witness};
+use bitcoin_rs_primitives::{Tx, TxOut};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use proptest::prelude::*;
 

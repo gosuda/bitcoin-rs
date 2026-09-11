@@ -34,7 +34,7 @@ impl Header {
         out[4..36].copy_from_slice(self.prev_blockhash.as_bytes());
         out[36..68].copy_from_slice(self.merkle_root.as_byte_array());
         out[68..72].copy_from_slice(&self.time.to_le_bytes());
-        out[72..76].copy_from_slice(&self.bits.to_consensus().to_le_bytes());
+        out[72..76].copy_from_slice(&self.bits.to_le_bytes());
         out[76..80].copy_from_slice(&self.nonce.to_le_bytes());
         out
     }

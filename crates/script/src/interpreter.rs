@@ -9,9 +9,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use bitcoin_rs_primitives::{
-    Amount, LockTime, Script, Sequence, Sighash, SighashCache, Tx, TxOut, Witness,
-};
+use bitcoin_rs_primitives::{Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness};
 use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use thiserror::Error;
 

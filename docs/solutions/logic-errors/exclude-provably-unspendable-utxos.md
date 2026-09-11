@@ -40,7 +40,7 @@ Changing the admission rule also changes the meaning of a persisted UTXO snapsho
 
 ## Solution
 
-Reuse the consensus limit and reject only outputs that are provably unspendable while building block changes:
+Reuse the consensus limit and reject only outputs that are provably unspendable while building block changes. The snippet shows the check as written for this fix; the filter now lives in `build_block_changes` (`crates/utxo/src/connect.rs`), which receives the limit as its `max_script_size` parameter, and `crates/node/src/apply.rs` passes `MAX_SCRIPT_SIZE`:
 
 ```rust
 if txout.script_pubkey.is_op_return() || txout.script_pubkey.len() > MAX_SCRIPT_SIZE {

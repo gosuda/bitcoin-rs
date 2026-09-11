@@ -25,12 +25,6 @@ impl Script {
         &self.0
     }
 
-    /// Unwraps the consensus script bytes.
-    #[must_use]
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.0
-    }
-
     /// Returns true when the script is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -142,18 +136,6 @@ impl Witness {
     #[must_use]
     pub fn from_stack(stack: Vec<Vec<u8>>) -> Self {
         Self(stack)
-    }
-
-    /// Returns the witness items.
-    #[must_use]
-    pub fn as_stack(&self) -> &[Vec<u8>] {
-        &self.0
-    }
-
-    /// Unwraps the witness items.
-    #[must_use]
-    pub fn into_stack(self) -> Vec<Vec<u8>> {
-        self.0
     }
 
     /// Returns true when the stack is empty.

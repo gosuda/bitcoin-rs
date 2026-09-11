@@ -84,6 +84,16 @@ mod enabled {
                 .transaction(index)
                 .map_err(|error| ConsensusError::Kernel(error.to_string()))
         }
+
+        /// Derives the shared block facts (weight, Merkle root, and mutation
+        /// flag) by reducing the caller's already-surfaced transaction IDs
+        /// in one pass over the decoded transactions — the same IDs the
+        /// parse produced, without a second kernel FFI crossing. Byte
+        /// positions are a native-layout fact and stay empty on this path.
+        #[must_use]
+        pub fn derive_facts(&self, txs: &[Tx], txids: &[Txid]) -> crate::block_view::BlockFacts {
+            crate::block_view::BlockFacts::from_txids(txs, txids.to_vec())
+        }
     }
 
     /// Kernel transaction plus sighash precompute retained for parallel
@@ -139,7 +149,9 @@ mod enabled {
             Some(amount),
             &prepared.kernel_tx,
             input_index,
-            Some(flags.kernel_bits()),
+            // Fill implications before policy bits are stripped: CLEANSTACK
+            // still activates WITNESS and P2SH in the native driver and counter.
+            Some(flags.filled().kernel_bits()),
             &prepared.precomputed,
         )
         .map_err(|error| ConsensusError::Script {
@@ -223,22 +235,68 @@ pub struct KernelContext;
 #[cfg(not(feature = "kernel"))]
 /// Portable-build stand-in for the kernel's one-shot block parse.
 ///
-/// The native apply path computes every transaction ID directly from the
-/// decoded block it already owns, so this marker carries no data. It keeps
-/// the prepared-apply shape identical across backends without taking a
-/// second owned copy of the block's txids.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct KernelBlock;
+/// The native path parses the serialized block once through the checked
+/// borrowed layout and keeps every fact derived from that single pass:
+/// transaction IDs, witness IDs, weight, byte positions, and the Merkle
+/// root with its mutation flag. Later stages consume those facts through
+/// [`KernelBlock::derive_facts`] instead of re-walking or re-hashing the
+/// decoded block, so the production native path decodes the transaction
+/// tree exactly once.
+#[derive(Debug, Clone)]
+pub struct KernelBlock {
+    facts: crate::block_view::BlockFacts,
+}
 
 #[cfg(not(feature = "kernel"))]
 impl KernelBlock {
-    /// Decodes `raw_block` to validate preserved block bytes.
+    /// Parses `raw_block` once through the checked layout and derives every
+    /// fact the later stages share.
     ///
     /// # Errors
     /// Returns [`ConsensusError::Kernel`] if `raw_block` is not a valid block.
     pub fn parse(raw_block: &[u8]) -> Result<Self, crate::ConsensusError> {
-        bitcoin_rs_primitives::Block::consensus_decode(raw_block)
+        // `parse_exact` keeps the old owned decoder's contract: trailing
+        // bytes are a typed error, and the whole pass validates shape
+        // without materializing a transaction tree.
+        let parsed = bitcoin_rs_primitives::layout::ParsedBlock::parse_exact(raw_block)
             .map_err(|error| crate::ConsensusError::Kernel(error.to_string()))?;
-        Ok(Self)
+        Ok(Self {
+            facts: crate::block_view::BlockFacts::from_parsed(&parsed),
+        })
+    }
+
+    /// Transaction IDs derived in the single parse pass.
+    #[must_use]
+    pub fn txids(&self) -> &[bitcoin_rs_primitives::Txid] {
+        self.facts.txids()
+    }
+
+    /// Transaction count as parsed.
+    #[must_use]
+    pub fn transaction_count(&self) -> usize {
+        self.facts.tx_count()
+    }
+
+    /// The facts derived in the one parse pass.
+    #[must_use]
+    pub const fn facts(&self) -> &crate::block_view::BlockFacts {
+        &self.facts
+    }
+
+    /// The shared block facts for a view that owns them.
+    ///
+    /// The native parse already derived everything in one pass, so this
+    /// clones the derived facts; the kernel build reduces the caller's
+    /// already-surfaced transaction IDs through the production walker
+    /// instead of re-crossing the kernel FFI per transaction. One call
+    /// shape keeps the node uniform across backends; the arguments exist
+    /// for that kernel shape and are unused here.
+    #[must_use]
+    pub fn derive_facts(
+        &self,
+        _txs: &[bitcoin_rs_primitives::Tx],
+        _txids: &[bitcoin_rs_primitives::Txid],
+    ) -> crate::block_view::BlockFacts {
+        self.facts.clone()
     }
 }

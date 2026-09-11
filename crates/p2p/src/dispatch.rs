@@ -2,15 +2,13 @@ use std::cell::RefCell;
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
-    Witness, Wtxid,
-};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
 use crate::inv::{
     inventory_tx_hash, is_within_inventory_bound, request_inventory, request_inventory_filtered,
+    request_transaction_witness,
 };
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
@@ -46,31 +44,32 @@ pub trait ChainQuery: Send + Sync {
     /// Serves block inventory one body at a time, in `items` order. For each
     /// block-typed item `headroom` is consulted EXACTLY ONCE, immediately
     /// BEFORE its body load; `false` halts production and sets `halted`
-    /// (I7, I9). Each loaded body is delivered through `serve`; a `serve`
+    /// (I7, I9). Each loaded body is the stored consensus payload, delivered
+    /// through `serve` without a decode/re-encode round trip. A `serve`
     /// error aborts production and propagates. Non-block / unservable items
     /// are collected into `not_found` and never loaded.
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the
 /// `getdata` tx responder.
 ///
-/// Implemented by the node's admission layer ([`TxAdmission`] in the node
-/// crate); the p2p crate never owns mempool, orphan, or rejection state.
+/// Implemented here for the mempool gateway; the p2p crate owns the protocol
+/// adapter while mempool owns admission, orphan, and rejection state.
 /// The dispatch path consults this trait to suppress redundant `getdata`
 /// requests for transactions the node already holds and to serve
 /// transaction bodies in reply to `getdata`.
 pub trait TxInventory: Send + Sync {
     /// Returns `true` when the node already holds the transaction identified
     /// by `hash` — in the mempool, the orphan map, or the recent-rejects
-    /// cache. `wtxid_relay` is `true` when the peer negotiated BIP339, in
-    /// which case `hash` is a wtxid; otherwise it is a txid.
-    fn have_tx(&self, hash: Hash256, wtxid_relay: bool) -> bool;
+    /// cache. `hash_is_wtxid` follows the inventory item's type: `WTx`
+    /// carries a wtxid, while `Transaction`/`WitnessTransaction` carry a txid.
+    fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
     /// Returns the witness transaction body for `txid`, or `None` when the
     /// node does not have it. Used to answer `getdata` for txid-typed items.
@@ -79,6 +78,20 @@ pub trait TxInventory: Send + Sync {
     /// Returns the witness transaction body for `wtxid`, or `None` when the
     /// node does not have it. Used to answer BIP339 `getdata` (`WTx`) items.
     fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx>;
+}
+
+impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
+    fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool {
+        Self::have_tx(self, hash, hash_is_wtxid)
+    }
+
+    fn get_tx(&self, txid: Txid) -> Option<Tx> {
+        Self::get_tx(self, txid)
+    }
+
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        Self::get_tx_by_wtxid(self, wtxid)
+    }
 }
 
 /// Chainless dispatch: collects the protocol responses and returns them.
@@ -125,9 +138,8 @@ pub fn dispatch_inbound_with_chain<S>(
 /// When `tx_inventory` is `Some`, the `inv` arm suppresses `getdata` for
 /// transactions the node already holds (mempool, orphan map, or
 /// recent-rejects) and the `getdata` arm serves tx bodies for tx-typed
-/// items the node has, reporting the rest as `notfound`. BIP339: when the
-/// peer advertised wtxid relay, tx inventory hashes are interpreted as
-/// wtxids; otherwise as txids.
+/// items the node has, reporting the rest as `notfound`. Inventory types
+/// identify txids or wtxids independently of the peer's outbound preference.
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -151,15 +163,20 @@ pub fn dispatch_inbound_full<S>(
         Message::Inv(items) => {
             step(peer, message)?;
             let response = match tx_inventory {
-                Some(inv) => {
-                    let wtxid_relay = peer.wtxid_relay.peer_supported();
-                    request_inventory_filtered(items, &|item| {
-                        inventory_tx_hash(item).is_some_and(|hash| inv.have_tx(hash, wtxid_relay))
-                    })
-                }
+                Some(inv) => request_inventory_filtered(items, &|item| {
+                    inventory_tx_hash(item)
+                        .is_some_and(|hash| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
+                }),
                 None => request_inventory(items),
             };
-            if let Some(response) = response {
+            if let Some(mut response) = response {
+                if let Message::GetData(items) = &mut response {
+                    let witness = peer.remote_version.as_ref().is_some_and(|version| {
+                        version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64()
+                            != 0
+                    });
+                    request_transaction_witness(items, witness);
+                }
                 send(response)?;
             }
         }
@@ -216,8 +233,9 @@ fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage)
 ///
 /// When `tx_inventory` is `Some`, tx-typed items are served from the
 /// transaction inventory (the node's mempool): a held tx is emitted as a
-/// `tx` message (witness serialization), and a tx the node does not have is
-/// collected into the trailing `notfound`. Block-typed items continue to
+/// `tx` message with the serialization requested by its inventory type
+/// (P2P-01 / BIP144). Unknown transactions enter the trailing `notfound`.
+/// Block-typed items continue to
 /// stream through the chain query behind the headroom gate. BIP339 `WTx`
 /// items are resolved by wtxid; `Transaction`/`WitnessTransaction` items by
 /// txid.
@@ -247,7 +265,12 @@ fn serve_getdata(
         match item {
             Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
                 let native = Txid::from(Hash256::from_le_bytes(txid.as_byte_array()));
-                if let Some(tx) = inv.get_tx(native) {
+                if let Some(mut tx) = inv.get_tx(native) {
+                    if matches!(item, Inventory::Transaction(_)) {
+                        for input in &mut tx.inputs {
+                            input.witness.clear();
+                        }
+                    }
                     send(Message::Tx(tx))?;
                 } else {
                     not_found.push(*item);
@@ -270,7 +293,7 @@ fn serve_getdata(
                     let outcome = chain.serve_inventory_blocks(
                         std::slice::from_ref(block_item),
                         headroom,
-                        &mut |block| send(Message::Block(block)),
+                        &mut |payload| send(Message::BlockPayload(payload)),
                     )?;
                     if outcome.halted {
                         return Err(PeerError::Protocol(
@@ -301,8 +324,8 @@ fn serve_getdata_blocks(
     match chain {
         None => send(Message::NotFound(items.to_vec()))?,
         Some(chain) => {
-            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |block| {
-                send(Message::Block(block))
+            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |payload| {
+                send(Message::BlockPayload(payload))
             })?;
             if outcome.halted {
                 return Err(PeerError::Protocol(
@@ -344,8 +367,8 @@ mod tests {
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Script, Sequence, Tx,
-        Txid, Witness, Wtxid,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
+        Witness, Wtxid,
     };
 
     use super::{
@@ -356,6 +379,14 @@ mod tests {
     use crate::inv::MAX_INV_PER_MSG;
     use crate::peer::{Peer, PeerState};
     use crate::wire::{Message, PeerError};
+
+    fn block_payload_bytes(block: &Block) -> bytes::Bytes {
+        bytes::Bytes::from(bitcoin_rs_primitives::consensus_bytes(block))
+    }
+
+    fn block_payload(block: &Block) -> Message {
+        Message::BlockPayload(block_payload_bytes(block))
+    }
 
     #[derive(Default)]
     struct FakeChain {
@@ -398,7 +429,7 @@ mod tests {
             &self,
             items: &[Inventory],
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -414,7 +445,7 @@ mod tests {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(found.clone())?;
+                serve(block_payload_bytes(found))?;
             }
             Ok(outcome)
         }
@@ -452,7 +483,7 @@ mod tests {
             &self,
             _items: &[Inventory],
             _headroom: &dyn Fn() -> bool,
-            _serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            _serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             Ok(InventoryServing::default())
         }
@@ -585,9 +616,12 @@ mod tests {
 
         let responses = dispatch_collect(&mut peer, &message, Some(&chain))?;
 
-        let [Message::Block(found), Message::NotFound(not_found)] = responses.as_slice() else {
-            panic!("expected block plus notfound, got {responses:?}");
+        let [Message::BlockPayload(found), Message::NotFound(not_found)] = responses.as_slice()
+        else {
+            panic!("expected block payload plus notfound, got {responses:?}");
         };
+        let found = Block::consensus_decode(found)
+            .unwrap_or_else(|error| panic!("served payload must decode: {error}"));
         assert_eq!(found.block_hash(), chain.headers[0].compute_hash());
         assert_eq!(not_found, &vec![missing]);
         Ok(())
@@ -634,7 +668,7 @@ mod tests {
             &self,
             items: &[Inventory],
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(Block) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -658,7 +692,7 @@ mod tests {
                     );
                 }
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                serve(found.clone())?;
+                serve(block_payload_bytes(found))?;
             }
             Ok(outcome)
         }
@@ -700,8 +734,8 @@ mod tests {
         assert_eq!(
             emitted,
             vec![
-                Message::Block(block_a),
-                Message::Block(block_b),
+                block_payload(&block_a),
+                block_payload(&block_b),
                 Message::NotFound(vec![tx_inv, unknown]),
             ],
             "streamed emission must equal the pre-change batch shape (I8)"
@@ -909,7 +943,7 @@ mod tests {
     }
 
     impl TxInventory for FakeTxInventory {
-        fn have_tx(&self, hash: Hash256, _wtxid_relay: bool) -> bool {
+        fn have_tx(&self, hash: Hash256, _hash_is_wtxid: bool) -> bool {
             self.have_hashes.contains(hash.as_byte_array())
         }
 
@@ -925,7 +959,7 @@ mod tests {
     }
 
     fn dummy_tx(byte: u8) -> Tx {
-        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut};
+        use bitcoin_rs_primitives::{OutPoint, TxIn, TxOut, Witness};
         Tx {
             version: 2,
             inputs: vec![TxIn {
@@ -942,6 +976,211 @@ mod tests {
                 script_pubkey: vec![0x6A].into(),
             }],
             lock_time: LockTime::ZERO,
+        }
+    }
+
+    /// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not hashes.
+    /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
+    #[test]
+    fn announced_transactions_request_witness_without_changing_hashes() {
+        let inventory = FakeTxInventory::empty();
+        for witness in [false, true] {
+            for filtered in [false, true] {
+                let mut peer = ready_peer();
+                let mut version = crate::handshake::version_message(1, 0);
+                version.services = if witness {
+                    bitcoin::p2p::ServiceFlags::WITNESS
+                } else {
+                    bitcoin::p2p::ServiceFlags::NETWORK
+                };
+                peer.remote_version = Some(version);
+                let txid = bitcoin::Txid::from_byte_array([1; 32]);
+                let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
+                let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+                let requested = if witness {
+                    Inventory::WitnessTransaction(txid)
+                } else {
+                    Inventory::Transaction(txid)
+                };
+                let view: Option<&dyn TxInventory> = filtered.then_some(&inventory);
+                assert_eq!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+                        None,
+                        view,
+                    ),
+                    vec![Message::GetData(vec![requested, wtxid, block])],
+                );
+            }
+        }
+    }
+
+    /// P2P-01 / BIP144 / BIP339: requested serialization must preserve stored witnesses.
+    #[test]
+    fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
+        use std::sync::Arc;
+
+        use bitcoin_rs_mempool::{
+            AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits,
+        };
+        use parking_lot::RwLock;
+
+        let gateway = MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+        );
+        let mut tx = dummy_tx(0x42);
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![0x01]]);
+        let txid_item =
+            Inventory::Transaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
+        let witness_txid_item =
+            Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array(*tx.txid().as_bytes()));
+        let wtxid_item = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes()));
+        assert_ne!(tx.txid().as_bytes(), tx.wtxid().as_bytes());
+        assert!(
+            gateway
+                .insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::new(tx.clone()), 100, 10_000, 1, 0),
+                )
+                .is_ok()
+        );
+
+        for (item, wtxid_relay) in [(txid_item, false), (wtxid_item, true)] {
+            let mut peer = ready_peer();
+            if wtxid_relay {
+                peer.wtxid_relay.mark_peer_supported();
+            }
+            assert!(
+                dispatch_collect_full(&mut peer, &Message::Inv(vec![item]), None, Some(&gateway),)
+                    .is_empty()
+            );
+        }
+
+        // BIP339 MSG_WTX resolves the witness hash; txid requests keep their
+        // own lookup even on a wtxid-relay connection. Unknowns remain notfound.
+        let mut stripped = tx.clone();
+        for input in &mut stripped.inputs {
+            input.witness.clear();
+        }
+        let missing = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xFF; 32]));
+        let mut peer = ready_peer();
+        peer.wtxid_relay.mark_peer_supported();
+        assert_eq!(
+            dispatch_collect_full(
+                &mut peer,
+                &Message::GetData(vec![txid_item, witness_txid_item, wtxid_item, missing]),
+                None,
+                Some(&gateway),
+            ),
+            vec![
+                Message::Tx(stripped),
+                Message::Tx(tx.clone()),
+                Message::Tx(tx.clone()),
+                Message::NotFound(vec![missing])
+            ],
+        );
+        assert_eq!(gateway.get_tx_by_wtxid(tx.wtxid()), Some(tx));
+    }
+
+    #[test]
+    fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+        use bitcoin_rs_primitives::Script;
+        use std::sync::Arc;
+
+        use bitcoin_rs_mempool::{
+            AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry,
+            MempoolGateway, MempoolLimits, PeerToken, SubmitOutcome,
+        };
+        use parking_lot::RwLock;
+
+        struct MissingCoins;
+        impl AdmissionChain for MissingCoins {
+            fn snapshot(&self, _tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+                Some(ChainAdmissionSnapshot {
+                    prevouts: Vec::new(),
+                    height: 0,
+                    locktime_cutoff: 0,
+                    confirmed: false,
+                })
+            }
+        }
+
+        for orphan in [false, true] {
+            let gateway = MempoolGateway::new(
+                Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+                None,
+            );
+            let mut tx = dummy_tx(0x51);
+            tx.inputs[0].script_sig.clear();
+            tx.inputs[0].witness = Witness::from_stack(vec![vec![0x51]]);
+            tx.outputs[0].script_pubkey = Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]);
+            let tx = Arc::new(tx);
+            let txid = bitcoin::Txid::from_byte_array(*tx.txid().as_bytes());
+            let wtxid = bitcoin::Wtxid::from_byte_array(*tx.wtxid().as_bytes());
+            assert_ne!(txid.as_byte_array(), wtxid.as_byte_array());
+            if orphan {
+                let source = PeerToken {
+                    addr: std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
+                    connection_id: 1,
+                };
+                assert!(matches!(
+                    gateway.submit_transaction(
+                        Arc::clone(&tx),
+                        AdmissionOrigin::Peer(source),
+                        None,
+                        0,
+                        &MissingCoins,
+                    ),
+                    Ok(SubmitOutcome::Held { .. })
+                ));
+                assert_eq!(gateway.orphan_count(), 1);
+                assert_eq!(gateway.get_tx(tx.txid()).as_ref(), Some(tx.as_ref()));
+            } else {
+                assert!(
+                    gateway
+                        .insert_entry(
+                            AdmissionOrigin::Rpc,
+                            MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0),
+                        )
+                        .is_ok()
+                );
+            }
+            for (local_requested, remote_requested, item) in [
+                (true, false, Inventory::WTx(wtxid)),
+                (false, true, Inventory::Transaction(txid)),
+                (false, true, Inventory::WitnessTransaction(txid)),
+            ] {
+                let mut peer = ready_peer();
+                if local_requested {
+                    peer.wtxid_relay.mark_local_advertised();
+                }
+                if remote_requested {
+                    peer.wtxid_relay.mark_peer_supported();
+                }
+                assert!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::Inv(vec![item]),
+                        None,
+                        Some(&gateway),
+                    )
+                    .is_empty(),
+                    "inventory type must select the held body's identity in either relay direction"
+                );
+
+                let unknown = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xff; 32]));
+                assert_eq!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::Inv(vec![item, unknown]),
+                        None,
+                        Some(&gateway),
+                    ),
+                    vec![Message::GetData(vec![unknown])]
+                );
+            }
         }
     }
 

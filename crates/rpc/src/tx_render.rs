@@ -8,10 +8,10 @@
 // the sanctioned rust-bitcoin compat seam (`Address<T>`/`Script` disassembly);
 // all transaction/amount/hash plumbing here is native.
 use bitcoin::Address;
-use bitcoin_rs_primitives::{
-    Amount, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness, consensus_bytes,
-};
+use bitcoin_rs_primitives::{BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use sonic_rs::{Value, json};
 
 use crate::script_util::{
@@ -393,6 +393,41 @@ mod tests {
             Some("51")
         );
         assert!(first.get("txid").is_none());
+    }
+
+    #[test]
+    fn non_coinbase_input_renders_outpoint_and_script_sig() {
+        let tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(Txid::default(), 7),
+                script_sig: vec![0x51].into(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
+            }],
+        };
+        let value = transaction_json(&tx, Network::Regtest, None);
+        let first = &value.get("vin").expect("vin present")[0];
+        assert_eq!(
+            first.get("txid").and_then(JsonValueTrait::as_str),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
+        assert_eq!(first.get("vout").and_then(JsonValueTrait::as_u64), Some(7));
+        let script_sig = first.get("scriptSig").expect("scriptSig present");
+        assert_eq!(
+            script_sig.get("hex").and_then(JsonValueTrait::as_str),
+            Some("51")
+        );
+        assert_eq!(
+            first.get("sequence").and_then(JsonValueTrait::as_u64),
+            Some(u64::from(Sequence::ENABLE_RBF_NO_LOCKTIME.to_consensus()))
+        );
+        assert!(first.get("coinbase").is_none());
     }
 
     #[test]

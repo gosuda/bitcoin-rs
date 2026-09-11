@@ -17,6 +17,9 @@ impl Amount {
     pub const SAT: Self = Self(1);
     /// One bitcoin in satoshis.
     pub const COIN: Self = Self(100_000_000);
+    /// Consensus maximum money (21 million bitcoin).
+    pub const MAX_MONEY: Self = Self(21_000_000 * Self::COIN.0);
+
     /// Constructs an amount from satoshis.
     #[must_use]
     pub const fn from_sat(sat: u64) -> Self {
@@ -38,25 +41,10 @@ impl Amount {
         }
     }
 
-    /// Checked subtraction.
-    #[must_use]
-    pub const fn checked_sub(self, rhs: Self) -> Option<Self> {
-        match self.0.checked_sub(rhs.0) {
-            Some(diff) => Some(Self(diff)),
-            None => None,
-        }
-    }
-
     /// Saturating addition.
     #[must_use]
     pub const fn saturating_add(self, rhs: Self) -> Self {
         Self(self.0.saturating_add(rhs.0))
-    }
-
-    /// Saturating subtraction.
-    #[must_use]
-    pub const fn saturating_sub(self, rhs: Self) -> Self {
-        Self(self.0.saturating_sub(rhs.0))
     }
 
     /// Little-endian consensus encoding of the satoshi count.
@@ -332,6 +320,10 @@ mod tests {
     fn amount_sat_roundtrip_and_overflow() {
         assert_eq!(Amount::from_sat(50_000).to_sat(), 50_000);
         assert_eq!(Amount::COIN.to_sat(), 100_000_000);
+        assert_eq!(
+            Amount::MAX_MONEY.to_sat(),
+            21_000_000 * Amount::COIN.to_sat()
+        );
         assert_eq!(Amount::from_sat(u64::MAX).checked_add(Amount::SAT), None);
         assert_eq!(
             Amount::from_sat(2)

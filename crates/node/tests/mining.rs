@@ -1,28 +1,36 @@
 //! Focused behavioral tests for the node-owned mining coordinator.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
-
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningControl,
     MiningControlError,
 };
+
 use bitcoin_rs_node::{
     MiningCoordinator, MiningOverrides, Network, NetworkSelection, NodeConfig, UserConfig, resolve,
     state::NodeState,
 };
-use bitcoin_rs_primitives::encode::double_sha256;
+
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
 };
+
 use compact_str::CompactString;
+
 use crossbeam_channel::bounded;
+
 use parking_lot::Mutex;
-use std::str::FromStr as _;
+
+use std::{
+    str::FromStr as _,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 fn open_regtest() -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
@@ -42,7 +50,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.applied_tip(),
         state.block_tree(),
         state.mempool(),
-        state.apply_handles(),
+        state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
@@ -124,16 +132,16 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
     let script_opcode = u8::try_from(label + 0x50)?;
     let coinbase = Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: vec![script_opcode, 0x51].into(),
-            sequence: Sequence::MAX,
+            script_sig: Script::from_bytes(vec![script_opcode, 0x51]),
+            sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(50 * 100_000_000),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
     };
     let mut block = Block {
@@ -164,7 +172,7 @@ fn excess_coinbase_child(prev: BlockHash) -> anyhow::Result<Block> {
 }
 
 fn mine_block_to_regtest_target(block: &mut Block) -> anyhow::Result<()> {
-    while !pow_met(block.header.bits, &block.block_hash()) {
+    while !pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
         block.header.nonce = block
             .header
             .nonce
@@ -196,8 +204,7 @@ fn block_merkle_root(block: &Block) -> Hash256 {
 
 /// Decodes a 256-bit compact target into little-endian bytes. Negative,
 /// overflowed, and zero-mantissa encodings decode to an unreachable zero.
-fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
-    let bits = bits.to_consensus();
+fn compact_to_target(bits: u32) -> [u8; 32] {
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mantissa = u64::from(bits & 0x007f_ffff);
     let mut target = [0_u8; 32];
@@ -221,7 +228,7 @@ fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
 
 /// Returns true when `hash` is at or below the compact target, comparing the
 /// little-endian byte arrays from the most significant end.
-fn pow_met(bits: CompactTarget, hash: &BlockHash) -> bool {
+fn pow_met(bits: u32, hash: &BlockHash) -> bool {
     let target = compact_to_target(bits);
     let hash_le = hash.as_bytes();
     for index in (0..32).rev() {
@@ -239,16 +246,16 @@ fn pow_met(bits: CompactTarget, hash: &BlockHash) -> bool {
 fn mempool_sequence_tx() -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
             script_sig: Script::new(),
-            sequence: Sequence::MAX,
+            sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(1_000),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
     }
 }
@@ -608,7 +615,7 @@ fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     // Ensure PoW still valid for the mutated prev hash by remine.
     block.header.merkle_root = block_merkle_root(&block);
     block.header.nonce = 0;
-    while !pow_met(block.header.bits, &block.block_hash()) {
+    while !pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
         block.header.nonce = block
             .header
             .nonce
@@ -639,7 +646,7 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -676,7 +683,7 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             Arc::clone(&shutdown),
@@ -758,7 +765,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> anyhow::Result<()> {
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let mut block = mined_child(genesis.block_hash())?;
-    while pow_met(block.header.bits, &block.block_hash()) {
+    while pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
         block.header.nonce = block
             .header
             .nonce
@@ -841,16 +848,16 @@ fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
 
     let tx = Tx {
         version: 2,
-        lock_time: LockTime::ZERO,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x42; 32])), 0),
             script_sig: Script::new(),
-            sequence: Sequence::MAX,
+            sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(1_000),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
     };
     {
@@ -1043,7 +1050,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
             state.applied_tip(),
             state.block_tree(),
             state.mempool(),
-            state.apply_handles(),
+            state.chainstate(),
             state.chain_followers(),
             state.config().mining.payout_script.clone(),
             state.shutdown(),
@@ -1118,7 +1125,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
     assert_eq!(tip.height, 2);
     assert_eq!(
         tip.hash,
-        Hash256::from(hashes.last().expect("two hashes").hash)
+        Hash256::from(hashes.last().unwrap_or_else(|| panic!("two hashes")).hash)
     );
     Ok(())
 }
@@ -1138,7 +1145,8 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
             selection: GenerateSelection::Ordered(vec![GenerateTx::Mempool(missing)]),
             submit: true,
         })
-        .expect_err("missing mempool txid must fail");
+        .err()
+        .unwrap_or_else(|| panic!("missing mempool txid must fail"));
     assert!(matches!(error, MiningControlError::InvalidRequest(_)));
     Ok(())
 }
@@ -1156,14 +1164,14 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[0x11; 32])), 0),
             script_sig: Script::new(),
-            sequence: Sequence::MAX,
+            sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(50_000),
-            script_pubkey: vec![0x51].into(),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: LockTime::ZERO,
+        lock_time: LockTime::from_consensus(0),
     };
     let error = mining
         .generate(GenerateRequest {
@@ -1173,7 +1181,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
             selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(raw)]),
             submit: false,
         })
-        .expect_err("invalid raw spend must fail validation, not mempool lookup");
+        .err()
+        .unwrap_or_else(|| panic!("invalid raw spend must fail validation, not mempool lookup"));
     assert!(
         matches!(error, MiningControlError::Failed(_)),
         "raw generateblock txs skip mempool membership: {error:?}"
@@ -1181,6 +1190,8 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
     Ok(())
 }
 
+/// CONTRACT: API-06 — getmininginfo's networkhashps mirrors the default
+/// getnetworkhashps window.
 #[test]
 fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1188,7 +1199,11 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     let rate = mining.network_hash_ps(120, -1)?;
-    assert_eq!(rate, info.network_hashes_per_second);
+    assert!(
+        (rate - info.network_hashes_per_second).abs() < f64::EPSILON,
+        "default-window hash rate must match mining info: {rate} vs {}",
+        info.network_hashes_per_second
+    );
     Ok(())
 }
 

@@ -5,9 +5,11 @@ use core::{fmt, fmt::Write as _};
 use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, Script, Sequence,
-    TxOut, Witness, consensus_bytes, deserialize,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
 };
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use corepc_types::v31::{self, ChainTips, ChainTipsStatus};
 use hashbrown::HashMap;
 use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, Value, json};
@@ -843,7 +845,7 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
     let total_weight = per_tx
         .iter()
         .fold(0_u64, |sum, (_fee, weight)| sum.saturating_add(*weight));
-    let tx_count = u64::try_from(per_tx.len()).map_or(1, |count| count);
+    let tx_count = u64::try_from(per_tx.len()).unwrap_or(1);
     let avgfee = totalfee / tx_count;
     let avgfeerate = totalfee
         .saturating_mul(4)
@@ -858,19 +860,11 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
         rates.push((rate, *weight));
     }
 
-    let minfee = fees.iter().copied().min().map_or(0, |fee| fee);
-    let maxfee = fees.iter().copied().max().map_or(0, |fee| fee);
+    let minfee = fees.iter().copied().min().unwrap_or(0);
+    let maxfee = fees.iter().copied().max().unwrap_or(0);
     let medianfee = truncated_median(&mut fees);
-    let minfeerate = rates
-        .iter()
-        .map(|(rate, _weight)| *rate)
-        .min()
-        .map_or(0, |rate| rate);
-    let maxfeerate = rates
-        .iter()
-        .map(|(rate, _weight)| *rate)
-        .max()
-        .map_or(0, |rate| rate);
+    let minfeerate = rates.iter().map(|(rate, _weight)| *rate).min().unwrap_or(0);
+    let maxfeerate = rates.iter().map(|(rate, _weight)| *rate).max().unwrap_or(0);
     let feerate_percentiles = percentiles_by_weight(&mut rates, total_weight);
 
     Ok(FeeFields {
@@ -4053,7 +4047,7 @@ mod verifychain_tests {
         let ctx = Arc::new(Context::new());
         let result = verifychain(&ctx, &json!([0, 6]))
             .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
-        assert!(result.as_bool() == Some(true));
+        assert_eq!(result.as_bool(), Some(true));
     }
 }
 
@@ -5418,7 +5412,6 @@ mod scantxoutset_tests {
     use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
     use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
-    use sonic_rs::JsonValueTrait as _;
 
     use super::*;
 
