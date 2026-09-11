@@ -1,0 +1,67 @@
+name: Preserve recovery contract numbering
+on:
+  push:
+    branches: [automation/traceability-current-20260911]
+    paths: [.github/workflows/recovery-contract-numbering.yml]
+permissions:
+  contents: write
+jobs:
+  validate-and-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Restore the colliding recovery clause under a unique identifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          product=docs/node-contract-traceability-20260911
+          git fetch origin "$product"
+          work="$RUNNER_TEMP/recovery-contract-numbering"
+          git worktree add --detach "$work" "origin/$product"
+          cd "$work"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('docs/contracts/recovery.md')
+          text = p.read_text()
+          clause = '''### `RCV-13`: Chain transaction count recovery
+
+The in-memory chain transaction count uses zero as the durable-compatible
+sentinel for unknown. Legacy datadirs that predate the counter, rewinds that
+would underflow, and additions that would overflow must preserve or restore
+zero; they must never clamp or wrap into a plausible known total. A known
+count advances and rewinds by the exact transaction delta.
+
+'''
+          if clause not in text:
+              marker = '## Proven by\n'
+              if text.count(marker) != 1:
+                  raise SystemExit('recovery contract insertion point changed')
+              text = text.replace(marker, clause + marker, 1)
+              p.write_text(text)
+          PY
+          test "$(grep -c '^### `RCV-06`:' docs/contracts/recovery.md)" -eq 1
+          test "$(grep -c '^### `RCV-12`:' docs/contracts/recovery.md)" -eq 1
+          test "$(grep -c '^### `RCV-13`:' docs/contracts/recovery.md)" -eq 1
+          grep -q 'Chain transaction count recovery' docs/contracts/recovery.md
+          git diff --check
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib recovery_evidence:: -- --test-threads=1
+          git add docs/contracts/recovery.md
+          git commit -m 'docs(recovery): give chain transaction count recovery a unique clause' -m 'Preserve the #930 chain-transaction-count recovery rule without colliding with the existing RCV-06 tip-change-during-rebuild contract.'
+          git push origin HEAD:refs/heads/$product
+          echo "UPDATED $product $(git rev-parse HEAD)"
