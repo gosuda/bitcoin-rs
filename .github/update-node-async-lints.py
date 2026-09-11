@@ -1,4 +1,4 @@
-"""Validate the annotation-only correction and fast-forward the existing PR stack."""
+"""Validate embedding lint compatibility and preserve the existing PR graph."""
 import hashlib
 import json
 from pathlib import Path
@@ -9,10 +9,10 @@ PATH = 'crates/node/src/embed.rs'
 OLD_BLOB = 'b6e4104e9023c9f3bf54276c2b4f8a5c51bf6640'
 NEW_BLOB = 'dcd8bb5a3fb8b76d6af6468fdc864e4e2f6eb5fc'
 STAGES = [
-    ('validation', 'refactor/node-validation-729f0e86', '11ac6140ce7a8c60d5e72d393829485b90a29a11', '703b3aaec8e399b926c7b054969cc96181c7449d'),
-    ('txindex', 'refactor/node-txindex-729f0e86', '0e014de740f482a2d25c7d98889e78b5f98c2699', '2d1a2d90eded31aba847c98ec6242bc8bf92fe11'),
-    ('checkpoint', 'refactor/node-checkpoint-729f0e86', 'c0fc97c3778faacc180ebd04113167b0f24fe08f', 'a7dd95871214e18a0e9de44add73c91953d9ccf2'),
-    ('mining', 'fix/node-mining-capabilities-729f0e86', 'bb069d23c4714ef32fd0a37c5e5083b2639d6519', '9bafee1d51a5ac65b6143a8318cad976fc9303fb'),
+    ('validation', 'refactor/node-validation-729f0e86', 'f3284c1fcfbb7fa0bf9298bf0ccfcb97f19bcf49', '6a034dd15e84286c5e7ea495adf31b8c313cf2da'),
+    ('txindex', 'refactor/node-txindex-729f0e86', '0e014de740f482a2d25c7d98889e78b5f98c2699', '14dfd0779bcc315b9b8afe63e7d6b5953b16e6c3'),
+    ('checkpoint', 'refactor/node-checkpoint-729f0e86', 'c0fc97c3778faacc180ebd04113167b0f24fe08f', 'faba6464dcd7ddfa235631d19c45f1d34e1f4831'),
+    ('mining', 'fix/node-mining-capabilities-729f0e86', 'bb069d23c4714ef32fd0a37c5e5083b2639d6519', '485c199bb398edf1bbd5d4e0b4c09e8bac40e869'),
 ]
 OLD = '    #[allow(clippy::unused_async)]'
 NEW = '''    #[allow(
@@ -21,6 +21,8 @@ NEW = '''    #[allow(
         clippy::unused_async_trait_impl,
         reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
     )]'''
+REVIEW_PATHS = ['bin/bitcoin-rs/tests/support/ownership_scan.rs', 'crates/node/src/state/tests/prune.rs', 'docs/contracts/architecture.md']
+EXTRA_CHECKS = {'final-workspace-format', 'final-standard-clippy', 'final-redb-clippy', 'final-stable-unit', 'final-stable-integration', 'final-stable-owner-gates'}
 
 
 def git(*args):
@@ -42,6 +44,20 @@ def check(argv, name, output):
     return {'name': name, 'argv': argv, 'rc': 0, 'sha256': sha(path)}
 
 
+def verify_delta(old, new, previous):
+    changed = git('diff', '--name-only', old, new).decode().splitlines()
+    if changed != sorted([PATH] + (REVIEW_PATHS if previous else [])):
+        raise ValueError('Unexpected change scope')
+    before = git('show', old + ':' + PATH).decode()
+    after = git('show', new + ':' + PATH).decode()
+    if before.count(OLD) != 5 or before.replace(OLD, NEW) != after:
+        raise ValueError('Embedding runtime behavior changed')
+    if previous:
+        merged = git('merge-tree', '--write-tree', old, previous).decode().splitlines()[0]
+        if git('rev-parse', new + '^{tree}').decode().strip() != merged:
+            raise ValueError('Not the exact non-destructive parent merge')
+
+
 def prepare(output):
     if git('status', '--porcelain').strip():
         raise ValueError('Dirty input checkout')
@@ -55,36 +71,41 @@ def prepare(output):
         if git('ls-remote', '--heads', 'origin', ref).decode().split() != [old, ref]:
             raise ValueError('Concurrent branch update: ' + branch)
         sp.run(['git', 'checkout', '--detach', old], check=True)
-        if git('rev-parse', 'HEAD:' + PATH).decode().strip() != OLD_BLOB:
-            raise ValueError('Embedding source identity changed')
-        p = Path(PATH)
-        text = p.read_text()
-        if text.count(OLD) != 5:
-            raise ValueError('Unexpected async annotation count')
-        updated = text.replace(OLD, NEW)
-        if updated.replace(NEW, OLD) != text:
-            raise ValueError('Non-annotation source change')
-        p.write_text(updated)
+        if previous is None:
+            if git('rev-parse', 'HEAD:' + PATH).decode().strip() != OLD_BLOB:
+                raise ValueError('Embedding source identity changed')
+            p = Path(PATH)
+            text = p.read_text()
+            if text.count(OLD) != 5:
+                raise ValueError('Unexpected async annotation count')
+            p.write_text(text.replace(OLD, NEW))
+            sp.run(['git', 'add', PATH], check=True)
+        else:
+            merged = git('merge-tree', '--write-tree', old, previous).decode().splitlines()[0]
+            sp.run(['git', 'read-tree', '--reset', '-u', merged], check=True)
         if git('hash-object', PATH).decode().strip() != NEW_BLOB:
             raise ValueError('Reviewed correction differs')
-        sp.run(['git', 'add', PATH], check=True)
         tree = git('write-tree').decode().strip()
-        if tree != expected_tree or git('diff', '--cached', '--name-only').decode().splitlines() != [PATH]:
-            raise ValueError('Unexpected changed source tree')
-        checks.append(check(['rustfmt', '+1.95.0', '--edition', '2024', '--config', 'skip_children=true', '--check', PATH], label + '-format', output))
-        checks.append(check(['git', 'diff', '--cached', '--check'], label + '-whitespace', output))
-        for toolchain in ('1.95.0', 'stable'):
-            checks.append(check(['cargo', '+' + toolchain, 'clippy', *node, '--all-targets', '--', '-D', 'warnings'], label + '-clippy-' + toolchain, output))
+        if tree != expected_tree:
+            raise ValueError('Unexpected resulting tree: ' + label + ' ' + tree)
         parents = [old] if previous is None else [old, previous]
         argv = ['git', '-c', 'user.name=github-actions[bot]', '-c', 'user.email=41898282+github-actions[bot]@users.noreply.github.com', 'commit-tree', tree]
         for parent in parents:
             argv += ['-p', parent]
-        message = 'Keep intentional async embedding lint-compatible across Rust versions' if previous is None else 'Propagate validated embedding lint compatibility through node cleanup'
+        message = 'Keep intentional async embedding lint-compatible across Rust versions' if previous is None else 'Preserve reviewed ownership gates and embedding lint compatibility'
         commit = sp.check_output(argv, input=(message + '\n').encode()).decode().strip()
-        sp.run(['git', 'update-ref', 'refs/heads/checked-async-' + label, commit, '0' * 40], check=True)
+        verify_delta(old, commit, previous)
         sp.run(['git', 'checkout', '--detach', commit], check=True)
+        if git('status', '--porcelain').strip():
+            raise ValueError('Reconstruction left uncommitted files')
+        checks.append(check(['rustfmt', '+1.95.0', '--edition', '2024', '--config', 'skip_children=true', '--check', PATH], label + '-format', output))
+        checks.append(check(['git', 'diff', '--check', old, commit], label + '-whitespace', output))
+        for toolchain in ('1.95.0', 'stable'):
+            checks.append(check(['cargo', '+' + toolchain, 'clippy', *node, '--all-targets', '--', '-D', 'warnings'], label + '-clippy-' + toolchain, output))
+        local = 'refs/heads/checked-async-' + label
+        sp.run(['git', 'update-ref', local, commit, '0' * 40], check=True)
         records.append({'label': label, 'branch': branch, 'old': old, 'commit': commit, 'tree': tree, 'parents': parents})
-        refs.append('refs/heads/checked-async-' + label)
+        refs.append(local)
         previous = commit
         print('VALIDATED', label, commit, tree, flush=True)
     checks.append(check(['cargo', '+stable', 'fmt', '--all', '--', '--check'], 'final-workspace-format', output))
@@ -102,12 +123,11 @@ def prepare(output):
     print(json.dumps(record), flush=True)
 
 
-def publish(root):
+def stage(root):
     record = json.loads((root / 'publication.json').read_text())
     if record['validated'] is not True or len(record['stages']) != len(STAGES):
         raise ValueError('Incomplete source record')
-    required = {label + '-' + suffix for label, *_ in STAGES for suffix in ('format', 'whitespace', 'clippy-1.95.0', 'clippy-stable')}
-    required |= {'final-workspace-format', 'final-standard-clippy', 'final-redb-clippy', 'final-stable-unit', 'final-stable-integration', 'final-stable-owner-gates'}
+    required = {label + '-' + suffix for label, *_ in STAGES for suffix in ('format', 'whitespace', 'clippy-1.95.0', 'clippy-stable')} | EXTRA_CHECKS
     if {c['name'] for c in record['checks']} != required:
         raise ValueError('Missing native checks')
     for c in record['checks']:
@@ -117,7 +137,6 @@ def publish(root):
     if sha(bundle) != record['bundle_sha256']:
         raise ValueError('Source bundle differs')
     previous = None
-    pushes = []
     for s, (label, branch, old, tree) in zip(record['stages'], STAGES):
         if (s['label'], s['branch'], s['old'], s['tree']) != (label, branch, old, tree):
             raise ValueError('Unexpected destination')
@@ -132,28 +151,21 @@ def publish(root):
             raise ValueError('Invalid fast-forward graph')
         if git('rev-parse', commit + '^{tree}').decode().strip() != tree:
             raise ValueError('Unexpected source tree')
-        if git('diff', '--name-only', old, commit).decode().splitlines() != [PATH]:
-            raise ValueError('Unexpected source scope')
-        before = git('show', old + ':' + PATH).decode()
-        after = git('show', commit + ':' + PATH).decode()
-        if before.count(OLD) != 5 or before.replace(OLD, NEW) != after:
-            raise ValueError('Correction changes runtime behavior')
+        verify_delta(old, commit, previous)
         sp.run(['git', 'merge-base', '--is-ancestor', old, commit], check=True)
-        pushes.append(commit + ':' + ref)
         previous = commit
-    for start in range(0, len(pushes), 3):
-        sp.run(['git', 'push', '--atomic', 'origin', *pushes[start:start + 3]], check=True)
+    ref = 'refs/heads/agent/node-async-validated-v2-20260911'
+    if git('ls-remote', '--heads', 'origin', ref).strip():
+        raise ValueError('Validation ref already exists')
+    sp.run(['git', 'push', '--atomic', 'origin', previous + ':' + ref], check=True)
     for s in record['stages']:
-        ref = 'refs/heads/' + s['branch']
-        if git('ls-remote', '--heads', 'origin', ref).decode().split() != [s['commit'], ref]:
-            raise ValueError('Published ref changed')
-        print('UPDATED', s['branch'], s['commit'], s['tree'], flush=True)
+        print('VALIDATED FOR FAST-FORWARD', s['branch'], s['old'], s['commit'], s['tree'], flush=True)
 
 
 if __name__ == '__main__':
     if sys.argv[1] == 'prepare':
         prepare(Path(sys.argv[2]).resolve())
-    elif sys.argv[1] == 'publish':
-        publish(Path(sys.argv[2]).resolve())
+    elif sys.argv[1] == 'stage':
+        stage(Path(sys.argv[2]).resolve())
     else:
         raise ValueError('Unknown mode')
