@@ -186,7 +186,6 @@ mod tests {
     use super::*;
     use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Block;
     use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::{Block, CompactTarget};
     use std::cell::RefCell;

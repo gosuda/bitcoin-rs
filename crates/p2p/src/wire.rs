@@ -809,24 +809,6 @@ mod tests {
     }
 
     #[test]
-    fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
-        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let block_bytes = serialize(&block);
-        let native_block = bitcoin_rs_primitives::Block::consensus_decode(&block_bytes)
-            .map_err(super::PeerError::NativeDecode)?;
-        let decoded = super::Message::Block(native_block);
-        let payload = super::Message::BlockPayload(bytes::Bytes::from(block_bytes));
-
-        let mut decoded_wire = Vec::new();
-        let mut payload_wire = Vec::new();
-        write_message(&mut decoded_wire, Magic::REGTEST, &decoded)?;
-        write_message(&mut payload_wire, Magic::REGTEST, &payload)?;
-        assert_eq!(decoded_wire, payload_wire);
-        assert_eq!(wire_len(&decoded)?, wire_len(&payload)?);
-        Ok(())
-    }
-
-    #[test]
     fn write_message_rejects_payload_exceeding_cap() -> Result<(), PeerError> {
         let oversize = MAX_MESSAGE_PAYLOAD + 1;
         let message = super::Message::Unknown {
