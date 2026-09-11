@@ -37,6 +37,7 @@ jobs:
           git -C candidate add -A
           git -C candidate write-tree | tee evidence/pre-format-tree.txt
           test "$(git -C candidate write-tree)" = 6083387425d6d1db366bda8e56e4d66ed59317ef
+          python workbench/.workbench/index-query/lint.py candidate
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.95.0
@@ -47,6 +48,7 @@ jobs:
           key: index-query-owner-742
           cache-on-failure: true
       - name: Format the candidate and check it
+        id: format
         working-directory: candidate
         run: |
           cargo +1.95.0 fmt --all
@@ -57,31 +59,70 @@ jobs:
           rustc +1.95.0 --version --verbose | tee ../evidence/toolchain.txt
           sha256sum Cargo.lock | tee ../evidence/lock-sha256.txt
       - name: Clippy for the changed owners and all their targets
+        id: clippy
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 clippy --locked -p bitcoin-rs-index -p bitcoin-rs-node -p bitcoin-rs-rpc --no-default-features --features bitcoin-rs-node/fjall --all-targets -- -D warnings 2>&1 | tee ../evidence/clippy.log
       - name: Independent index tests without a backend
+        id: independent
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --lib 2>&1 | tee ../evidence/index-independent.log
       - name: Index storage and query tests on Fjall
+        id: index_fjall
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --features fjall --tests 2>&1 | tee ../evidence/index-fjall.log
       - name: Node library regression suite
+        id: node
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall --lib 2>&1 | tee ../evidence/node-lib.log
       - name: RPC library regression suite
+        id: rpc
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs-rpc --no-default-features --lib 2>&1 | tee ../evidence/rpc-lib.log
+      - name: RPC handler integration regression suite
+        id: rpc_handlers
+        continue-on-error: true
+        working-directory: candidate
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-rpc --no-default-features --test handler_smoke 2>&1 | tee ../evidence/rpc-handlers.log
       - name: Dependency and ownership gates
+        id: ownership
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture 2>&1 | tee ../evidence/ownership.log
       - name: Index tests on Redb
+        id: index_redb
+        continue-on-error: true
         working-directory: candidate
         run: cargo +1.95.0 test --locked -p bitcoin-rs-index --no-default-features --features redb --tests 2>&1 | tee ../evidence/index-redb.log
       - name: Verify tests did not mutate the candidate source
+        id: identity
         working-directory: candidate
         run: |
           git add -A
           test "$(git write-tree)" = "$(cat ../evidence/tested-tree.txt)"
+      - name: Require every check to pass, including continued diagnostic failures
+        if: always()
+        working-directory: candidate
+        run: |
+          printf '%s\n' \
+            'format:${{ steps.format.outcome }}' \
+            'clippy:${{ steps.clippy.outcome }}' \
+            'independent:${{ steps.independent.outcome }}' \
+            'index_fjall:${{ steps.index_fjall.outcome }}' \
+            'node:${{ steps.node.outcome }}' \
+            'rpc:${{ steps.rpc.outcome }}' \
+            'rpc_handlers:${{ steps.rpc_handlers.outcome }}' \
+            'ownership:${{ steps.ownership.outcome }}' \
+            'index_redb:${{ steps.index_redb.outcome }}' \
+            'identity:${{ steps.identity.outcome }}' | tee ../evidence/results.txt
+          if grep -v ':success$' ../evidence/results.txt; then
+            echo 'At least one mandatory check failed or did not run' >&2
+            exit 1
+          fi
       - name: Preserve exact candidate and checks, including failures
         if: always()
         working-directory: candidate
@@ -99,18 +140,6 @@ jobs:
           path: evidence
           retention-days: 3
           if-no-files-found: error
-      - name: Export only public compiler and registry cache for offline diagnostics
-        if: failure()
-        run: |
-          mkdir -p native-tools
-          tar -czf native-tools/rust-offline.tar.gz -C "$HOME" .rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu .cargo/registry
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: failure()
-        with:
-          name: index-query-offline-tools-${{ github.run_id }}
-          path: native-tools/rust-offline.tar.gz
-          retention-days: 1
-          if-no-files-found: warn
   publish:
     needs: validate
     runs-on: ubuntu-latest
