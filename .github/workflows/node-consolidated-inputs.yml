@@ -1,0 +1,35 @@
+name: node-consolidated-inputs
+
+on:
+  push:
+    branches: [agent/node-finish-publication-20260911]
+    paths: [.github/workflows/node-consolidated-inputs.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export pinned main and consolidated cleanup PR
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/node-consolidated
+          git fetch origin 953395c1797f4ab911a1a6a136132bb9fe8b0a91
+          git update-ref refs/heads/checked-main 953395c1797f4ab911a1a6a136132bb9fe8b0a91
+          git fetch origin 250ce87287fe751a82e315775d81e45d2bae8fd8
+          git update-ref refs/heads/checked-pr 250ce87287fe751a82e315775d81e45d2bae8fd8
+          git bundle create /tmp/node-consolidated/source.bundle refs/heads/checked-main refs/heads/checked-pr
+          sha256sum /tmp/node-consolidated/source.bundle > /tmp/node-consolidated/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-consolidated-inputs
+          path: /tmp/node-consolidated/
+          retention-days: 3
