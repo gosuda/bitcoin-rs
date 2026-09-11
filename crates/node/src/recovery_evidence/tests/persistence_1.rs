@@ -1,4 +1,4 @@
-// CONTRACT: `docs/contracts/recovery.md#RCV-12` owns bounded evidence I/O,
+// CONTRACT: `docs/contracts/recovery.md#RCV-12` owns evidence size validation,
 // atomic marker publication, and warning-before-marker failure semantics.
 use super::*;
 
