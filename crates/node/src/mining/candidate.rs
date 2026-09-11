@@ -165,16 +165,15 @@ impl MiningCoordinator {
             Err(error) => Err(error.clone()),
         };
         if let Some(flight) = state.in_flight.as_mut()
-            && flight.key == key && flight.id == flight_id
+            && flight.key == key
+            && flight.id == flight_id
         {
             flight.result = Some(returned.clone());
         }
         self.wake.notify_all();
-        if state
-            .in_flight
-            .as_ref()
-            .is_some_and(|flight| flight.key == key && flight.id == flight_id && flight.result.is_some())
-        {
+        if state.in_flight.as_ref().is_some_and(|flight| {
+            flight.key == key && flight.id == flight_id && flight.result.is_some()
+        }) {
             state.in_flight = None;
         }
         flight_guard.armed = false;
