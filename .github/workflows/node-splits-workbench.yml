@@ -10,7 +10,7 @@ concurrency:
 jobs:
   refactor:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 55
     permissions:
       contents: write
     env:
@@ -35,22 +35,33 @@ jobs:
             ${{ runner.temp }}/node-split-target
           key: node-splits-a1178cc-rust195-${{ github.run_id }}
           restore-keys: node-splits-a1178cc-rust195-
-      - name: Install pinned syntax parser
-        run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-      - name: Refactor and validate independent source groups
+      - name: Install parser and export bounded workbench inputs
+        run: |
+          python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+          mkdir -p /tmp/node-remaining-input
+          python3 -m pip download --only-binary=:all: --python-version 313 --platform manylinux2014_x86_64 --implementation cp --abi cp313 --no-deps --dest /tmp/node-remaining-input tree-sitter==0.25.2
+          git fetch origin c4dd58b93c180f55b0be98cf6499cb8678756445
+          git archive --format=tar.gz --output=/tmp/node-remaining-input/source.tar.gz c4dd58b93c180f55b0be98cf6499cb8678756445
+          cp .github/node-splits/*.py /tmp/node-remaining-input/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: node-remaining-input
+          path: /tmp/node-remaining-input
+          retention-days: 1
+      - name: Refactor and validate remaining source groups
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/node-split-target
-        run: python3 .github/node-splits/repair.py
-      - name: Publish only commits that passed native validation
+        run: python3 .github/node-splits/remaining.py
+      - name: Publish only native-validated commits without force-pushes
         if: always()
         env:
           NODE_SPLIT_PUBLISH_TOKEN: ${{ github.token }}
-        run: python3 .github/node-splits/repair.py publish
+        run: python3 .github/node-splits/remaining.py publish
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: node-split-validation
-          path: ${{ runner.temp }}/node-split-results
+          name: node-remaining-validation
+          path: ${{ runner.temp }}/node-remaining-results
           retention-days: 1
       - uses: actions/cache/save@v4
         if: always()
