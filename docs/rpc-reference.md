@@ -71,13 +71,13 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getnodeaddresses` | 0.4.0 |  |
 | `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: client must advertise segwit (and signet on signet); submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll, coinbaseaux.flags empty hex. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
-| `submitblock` | 0.4.0 | Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (including after reorg) is duplicate. |
-| `submitheader` | 0.4.0 | Header-only admission through the same tree path as inbound P2P headers. Decode failures are -22; missing previous or invalid headers are -25. |
-| `prioritisetransaction` | 0.4.0 | Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. |
-| `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. A non-address is Core -5 Error: Invalid address. |
-| `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag. Unknown 64-hex txids are -5; raw-tx decode failures are -22. Invalid output is -5 Error: Invalid address or descriptor. Consensus failure before solve is -25 TestBlockValidity failed: {reason}. Multipath is -8 Multipath descriptor not accepted; ranged is -8 Ranged descriptor not accepted…; Expand without private keys is -5 Cannot derive script without private keys. |
+| `submitblock` | 0.4.0 | Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (scripts-valid), including after a later reorg, is duplicate. |
+| `submitheader` | 0.4.0 | See API-13 in docs/contracts/external-api.md for submitheader behavior. |
+| `prioritisetransaction` | 0.4.0 | Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. See API-23 in docs/contracts/external-api.md for dummy and fee_delta compatibility. |
+| `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. Invalid-output behavior is defined in docs/contracts/external-api.md#API-29. |
+| `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order. See the canonical contract: docs/contracts/external-api.md#API-31. |
 | `getnetworkhashps` | 0.4.0 | Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip. |
-| `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. modified_fee is satoshis like Core mining RPCs, not BTC. |
+| `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#API-28 for modified_fee units. |
 
 ### Deviation
 
@@ -85,7 +85,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 |---|---|---|
 | `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
 | `getmempoolinfo` | 0.4.0 | Policy fields project the enforced MempoolPolicySnapshot (crates/mempool/src/policy.rs): fullrbf always reports the enforced BIP125 signaling requirement (false) where Core 31.1 emits the field only under -deprecatedrpc=fullrbf; limitclustercount and limitclustersize project the cluster limits admission enforces; optimal is always true because the fee-rate index is rewritten under the pool write lock (crates/rpc/src/handlers/mempool.rs). |
-| `estimatesmartfee` | 0.4.0 | Parses estimate_mode (UNSET/ECONOMICAL/CONSERVATIVE) and conf_target 1-1008 like Core. The estimate itself comes from this node's mempool horizon, not Core's confirmation estimator (crates/rpc/src/handlers/util.rs). |
+| `estimatesmartfee` | 0.4.0 | See docs/contracts/external-api.md#API-26 for estimate_mode and conf_target validation. The estimate itself comes from this node's mempool horizon, not Core's confirmation estimator (crates/rpc/src/handlers/util.rs). |
 | `getmemoryinfo` | 0.4.0 | mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). |
 | `estimaterawfee` | 0.4.0 | local_shape: the fee estimator does not expose Core decay/scale/pass/fail internals, so horizon objects carry feerate only and the no-estimate branch stays {} (crates/rpc/src/handlers/util.rs). |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
@@ -234,6 +234,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `hashtx` | 0.4.0 | Requires the zmq feature and a --zmqpubhashtx endpoint. |
 | `rawblock` | 0.4.0 | Requires the zmq feature and a --zmqpubrawblock endpoint. |
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
-| `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/node/src/zmq_publisher.rs). |
+| `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
 Row counts: Implemented 71, Deviation 8, Extension 2, Unimplemented 93 - total 174.

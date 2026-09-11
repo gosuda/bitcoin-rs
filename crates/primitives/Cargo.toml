@@ -20,6 +20,4 @@ tinyvec.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
-bitcoin.workspace = true
-proptest.workspace = true
 serde_json.workspace = true
