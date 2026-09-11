@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 pub use pow::compact_is_met_by;
 use pow::{compact_to_target, target_to_compact};
@@ -153,7 +153,7 @@ pub fn next_work_required(
     parent_id: NodeId,
     candidate_time: u32,
     network: Network,
-) -> Result<u32, ChainError> {
+) -> Result<CompactTarget, ChainError> {
     let parent = tree.node(parent_id)?;
     let height = parent
         .height
@@ -231,7 +231,7 @@ fn expected_non_retarget_bits(
     parent_id: NodeId,
     candidate_time: u32,
     retarget_interval: u32,
-) -> Result<u32, ChainError> {
+) -> Result<CompactTarget, ChainError> {
     let parent = tree.node(parent_id)?;
     if !network.allow_min_difficulty_blocks() {
         return Ok(parent.header.bits);
@@ -267,7 +267,7 @@ fn expected_retarget_bits(
     parent_id: NodeId,
     height: u32,
     retarget_interval: u32,
-) -> Result<u32, ChainError> {
+) -> Result<CompactTarget, ChainError> {
     let prev_node = tree.node(parent_id)?;
     if network.pow_no_retargeting() {
         return Ok(prev_node.header.bits);
@@ -317,20 +317,20 @@ fn expected_retarget_bits(
 fn compare_expected_bits(
     header: &BlockHeader,
     height: u32,
-    expected: u32,
+    expected: CompactTarget,
 ) -> Result<(), ChainError> {
     let actual = header.bits;
     if actual != expected {
         return Err(ChainError::NbitsMismatch {
-            actual,
-            expected,
+            actual: actual.to_consensus(),
+            expected: expected.to_consensus(),
             height,
         });
     }
     Ok(())
 }
 
-fn pow_limit_bits(network: Network) -> u32 {
+fn pow_limit_bits(network: Network) -> CompactTarget {
     target_to_compact(network.max_target())
 }
 
@@ -339,7 +339,7 @@ fn pow_limit_bits(network: Network) -> u32 {
 /// These mirror Bitcoin Core's `arith_uint256::SetCompact`/`GetCompact`
 /// exactly, including sign-bit normalization and overflow classification.
 pub(crate) mod pow {
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::{CompactTarget, Hash256};
 
     use crate::node::{BlockHeader, ChainWork};
 
@@ -369,8 +369,8 @@ pub(crate) mod pow {
 
     /// Decodes a compact target, returning zero for negative encodings.
     #[must_use]
-    pub(crate) fn compact_to_target(bits: u32) -> ChainWork {
-        let decoded = decode_compact(bits);
+    pub(crate) fn compact_to_target(bits: CompactTarget) -> ChainWork {
+        let decoded = decode_compact(bits.to_consensus());
         if decoded.negative {
             ChainWork::ZERO
         } else {
@@ -381,7 +381,7 @@ pub(crate) mod pow {
     /// Returns `true` when a valid nonzero compact target is met by `hash`.
     /// The consensus hash bytes are interpreted as a little-endian integer.
     #[must_use]
-    pub fn compact_is_met_by(bits: u32, hash: Hash256) -> bool {
+    pub fn compact_is_met_by(bits: CompactTarget, hash: Hash256) -> bool {
         let target = compact_to_target(bits);
         target != ChainWork::ZERO && ChainWork::from_le_bytes(hash.to_le_bytes()) <= target
     }
@@ -398,8 +398,8 @@ pub(crate) mod pow {
 
     /// Encodes a non-negative 256-bit target into compact consensus form.
     #[must_use]
-    pub(crate) fn target_to_compact(target: ChainWork) -> u32 {
-        get_compact(target, false)
+    pub(crate) fn target_to_compact(target: ChainWork) -> CompactTarget {
+        CompactTarget::from_consensus(get_compact(target, false))
     }
 
     fn get_compact(target: ChainWork, negative: bool) -> u32 {
@@ -439,7 +439,7 @@ mod timestamp_tests {
         node::{BlockHeader, NodeStatus},
         tree::{BlockTree, hash_from_header},
     };
-    use bitcoin_rs_primitives::{BlockHash, Hash256};
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
 
     const REGTEST_BITS: u32 = 0x207f_ffff;
 
@@ -451,7 +451,7 @@ mod timestamp_tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&merkle),
             time,
-            bits: REGTEST_BITS,
+            bits: CompactTarget::from_consensus(REGTEST_BITS),
             nonce: 0,
         };
         while !compact_is_met_by(header.bits, header.compute_hash().0) {
