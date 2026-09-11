@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
+use std::collections::HashMap;
 
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
@@ -394,6 +395,7 @@ fn parse_generateblock_transactions(
         return Err(RpcError::InvalidType("transactions must be an array"));
     };
     let mut transactions = Vec::with_capacity(entries.len());
+    let mut mempool_entries = None;
     for entry in entries {
         let Some(text) = entry.as_str() else {
             return Err(RpcError::InvalidType(
@@ -402,12 +404,16 @@ fn parse_generateblock_transactions(
         };
         // CONTRACT: docs/contracts/external-api.md#API-27
         if let Ok(txid) = Txid::from_str(text) {
-            let snapshot = ctx.mempool.read().mining_snapshot();
-            let Some(entry) = snapshot
-                .entries
-                .into_iter()
-                .find(|entry| entry.txid == txid)
-            else {
+            let entries_by_txid = mempool_entries.get_or_insert_with(|| {
+                ctx.mempool
+                    .read()
+                    .mining_snapshot()
+                    .entries
+                    .into_iter()
+                    .map(|entry| (entry.txid, entry))
+                    .collect::<HashMap<_, _>>()
+            });
+            let Some(entry) = entries_by_txid.get(&txid).cloned() else {
                 return Err(generateblock_unknown_txid(text));
             };
             transactions.push(GenerateTx::ResolvedMempool(entry));
