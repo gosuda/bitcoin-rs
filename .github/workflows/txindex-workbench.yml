@@ -1,0 +1,27 @@
+name: txindex-refactor-workbench
+on:
+  push:
+    branches: [automation/txindex-workbench-20260911]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Export pinned source for local inspection
+        run: |
+          mkdir -p /tmp/txindex-evidence
+          git archive --format=tar.gz HEAD > /tmp/txindex-evidence/source.tar.gz
+          git rev-parse HEAD > /tmp/txindex-evidence/source-commit.txt
+          find crates -name AGENTS.md
+          wc -l crates/node/src/txindex_worker.rs
+          grep -nE '^(pub(\([^)]*\))? )?(struct|enum|trait|impl|fn|mod|const|type|static) ' crates/node/src/txindex_worker.rs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: txindex-source
+          path: /tmp/txindex-evidence/
+          retention-days: 1
