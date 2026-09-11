@@ -10,8 +10,9 @@ use super::MAX_BLOCK_WEIGHT;
 use super::MiningCoordinator;
 use super::control::signet_info;
 use super::hex_encode;
-use super::submission::test_block_validity_error;
 use alloc::sync::Arc;
+use crate::apply::error::ApplyError;
+use super::submission::test_block_validity_error;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
@@ -306,12 +307,30 @@ impl MiningCoordinator {
                     "node is shutting down",
                 )));
             }
-            let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
-            let mut block = candidate.into_unsolved_block();
-            if matches!(request.selection, GenerateSelection::Ordered(_)) {
-                // CONTRACT: docs/contracts/external-api.md#API-30
-                self.test_generateblock_validity(&block)?;
-            }
+            let mut block = loop {
+                let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
+                let block = candidate.into_unsolved_block();
+                if matches!(request.selection, GenerateSelection::Ordered(_)) {
+                    // CONTRACT: docs/contracts/external-api.md#API-30
+                    match self.test_generateblock_validity(&block) {
+                        Ok(()) => {}
+                        Err(ApplyError::PrevHashMismatch { .. }) => {
+                            if self.shutdown.load(Ordering::Acquire) {
+                                return Err(MiningControlError::Unavailable(CompactString::from(
+                                    "node is shutting down",
+                                )));
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(MiningControlError::Failed(CompactString::from(
+                                test_block_validity_error(error).to_string(),
+                            )));
+                        }
+                    }
+                }
+                break block;
+            };
             solve_block(&mut block, request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             })?;
@@ -346,11 +365,8 @@ impl MiningCoordinator {
     /// not use [`Self::propose`], which owns GBT `LookupBlockIndex` duplicate
     /// vocabulary (`API-18`).
     /// CONTRACT: docs/contracts/external-api.md#API-30
-    fn test_generateblock_validity(&self, block: &Block) -> Result<(), MiningControlError> {
-        match self.apply_handles.validate_block(block) {
-            Ok(()) => Ok(()),
-            Err(error) => Err(test_block_validity_error(error)),
-        }
+    fn test_generateblock_validity(&self, block: &Block) -> Result<(), ApplyError> {
+        self.apply_handles.validate_block(block)
     }
 
     pub(super) fn template_from_candidate(
