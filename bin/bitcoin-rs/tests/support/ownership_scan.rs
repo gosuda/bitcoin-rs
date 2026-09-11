@@ -378,18 +378,17 @@ fn is_authorized_gateway_call(
             if trimmed.is_empty() {
                 continue;
             }
-            match trimmed.strip_prefix('.') {
-                Some(link) => parts.push(link.trim()),
-                None => {
-                    parts.push(
-                        trimmed
-                            .split_whitespace()
-                            .next_back()
-                            .unwrap_or(trimmed)
-                            .trim_end_matches(';'),
-                    );
-                    break;
-                }
+            if let Some(link) = trimmed.strip_prefix('.') {
+                parts.push(link.trim());
+            } else {
+                parts.push(
+                    trimmed
+                        .split_whitespace()
+                        .next_back()
+                        .unwrap_or(trimmed)
+                        .trim_end_matches(';'),
+                );
+                break;
             }
         }
         parts.reverse();
