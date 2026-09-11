@@ -15,7 +15,8 @@ vocabulary. `API-19` is BIP22 reject-reason mapping. `API-20` is GBT
 `vbrequired` always 0. `API-21` is Core `CheckWitnessMalleation`
 reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 `prioritisetransaction` dummy/`fee_delta` arity. `API-24` is
-`prioritisetransaction` dust-output refusal.
+`prioritisetransaction` dust-output refusal. `API-25` is
+`getmininginfo` omitting unset optional fields.
 
 ## Clauses
 
@@ -395,6 +396,14 @@ The wallet-facing subset of this surface — tip, fees, address/script
 queries, and broadcast over Esplora, plus the key-free node RPCs — is
 owned by [wallet-facing.md](wallet-facing.md).
 
+
+### `API-25`: `getmininginfo` omits unset optional fields
+
+- **Owner**: `render_mining_info` in `crates/rpc/src/handlers/mining.rs`.
+- Core pushes `currentblockweight`, `currentblocktx`, and `signet_challenge`
+  only when set. Unset optionals are omitted, not JSON `null`.
+- Projection uses `typed_to_sonic_omitting_nulls`.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -542,6 +551,12 @@ owned by [wallet-facing.md](wallet-facing.md).
     `prioritisetransaction_allows_dust_overlay_on_regtest`,
     `prioritisetransaction_allows_absent_txid_overlay`
   - `crates/mempool/src/standardness.rs` test `dust_relay_fee_changes_the_boundary`
+
+- `API-25`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `getmininginfo_omits_unset_optional_fields`,
+    `getmininginfo_can_include_signet_challenge`,
+    `getmininginfo_projects_control_state`
 
 ## Vocabulary
 
