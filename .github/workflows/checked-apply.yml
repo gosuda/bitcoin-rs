@@ -1,0 +1,113 @@
+name: checked-apply
+
+on:
+  push:
+    branches: [agent/node-checked-publication-20260911]
+    paths:
+      - .github/checked-apply.py
+      - .github/workflows/checked-apply.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+      RUSTUP_TOOLCHAIN: 1.95.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Capture refreshed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin pull/928/head:refs/heads/current-sync-pr
+          git bundle create /tmp/node-refresh.bundle HEAD refs/remotes/origin/main refs/heads/current-sync-pr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-refresh-source
+          path: /tmp/node-refresh.bundle
+          retention-days: 2
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt,clippy
+      - name: Reconstruct reviewed sources and run native gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/checked-input /tmp/apply-validation
+          cp .github/checked-apply.py /tmp/checked-apply.py
+          cp .github/node-final/plan-*.b64 /tmp/checked-input/
+          python /tmp/checked-apply.py /tmp/checked-input /tmp/apply-validation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-apply-checked
+          path: /tmp/apply-validation/
+          retention-days: 7
+          if-no-files-found: warn
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-apply-checked
+          path: /tmp/apply-validation
+      - name: Verify and atomically create the source branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, re, subprocess as sp
+          from pathlib import Path
+          root = Path('/tmp/apply-validation')
+          record = json.loads((root / 'publication.json').read_text())
+          base = 'b59ce9160bb031d623b37cf798e53b963d18ef00'
+          branch = 'refactor/node-apply-owners-20260911'
+          if record['base'] != base or record['branch'] != branch or record['validated'] is not True:
+              raise ValueError('Unexpected publication identity')
+          if not re.fullmatch('[0-9a-f]{40}', record['commit']):
+              raise ValueError('Invalid source commit')
+          required = {'format', 'whitespace', 'clippy', 'apply-tests', 'node-tests', 'owner-gates'}
+          if {c['name'] for c in record['checks']} != required:
+              raise ValueError('Missing validation gate')
+          for check in record['checks']:
+              if check['rc'] != 0 or hashlib.sha256((root / (check['name'] + '.log')).read_bytes()).hexdigest() != check['sha256']:
+                  raise ValueError('Invalid validation evidence')
+          bundle = root / 'apply.bundle'
+          if hashlib.sha256(bundle.read_bytes()).hexdigest() != record['bundle_sha256']:
+              raise ValueError('Bundle identity mismatch')
+          ref = 'refs/heads/' + branch
+          if sp.check_output(['git', 'ls-remote', '--heads', 'origin', ref]).strip():
+              raise ValueError('Destination exists; refusing to overwrite')
+          sp.run(['git', 'fetch', str(bundle), ref + ':' + ref], check=True)
+          commit = sp.check_output(['git', 'rev-parse', ref]).decode().strip()
+          if commit != record['commit']:
+              raise ValueError('Unexpected bundled head')
+          if sp.check_output(['git', 'rev-list', '--parents', '-1', commit]).decode().split() != [commit, base]:
+              raise ValueError('Unexpected source parent')
+          if sp.check_output(['git', 'rev-parse', commit + '^{tree}']).decode().strip() != record['tree']:
+              raise ValueError('Unexpected source tree')
+          if sp.check_output(['git', 'diff', '--name-only', base, commit]).decode().splitlines() != record['paths']:
+              raise ValueError('Unexpected source paths')
+          sp.run(['git', 'push', '--atomic', 'origin', commit + ':' + ref], check=True)
+          print('PUBLISHED', branch, commit)
+          PY
