@@ -34,13 +34,11 @@ pub(super) fn apply_window_admitted(
         return Err(WindowApplyError {
             applied: 0,
             committed: Vec::new(),
-            source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(
-                format!(
-                    "window has {} blocks but {} serialized bodies",
-                    blocks.len(),
-                    serialized.len()
-                ),
-            )),
+            source: ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Kernel(format!(
+                "window has {} blocks but {} serialized bodies",
+                blocks.len(),
+                serialized.len()
+            ))),
             disposition: WindowApplyDisposition::Operational,
             invalidated: Box::default(),
         });
