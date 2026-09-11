@@ -1,4 +1,63 @@
-# Native validation default (issue #213)
+# Native validation default: promotion record
+
+This document is the promotion record for the native strict-Rust validation default. The owner of the default is [`docs/contracts/validation-default.md`](../contracts/validation-default.md), proven by `g19_validation_default`. The end-state decision is recorded here after T16 and T17 run; until then the recorded verdict stays `KeepKernel` and this page states the contract only.
+
+## Decision it owns
+
+Whether `bitcoin-rs-consensus`, `bitcoin-rs-node`, `bin/bitcoin-rs` and the container image ship strict-Rust validation as their default. The decision is one coordinated cut across binary, library and image with matching manifests and packaging. `bitcoinkernel` remains an explicit opt-in oracle only. It is never a silent fallback and it is never the default after promotion.
+
+## Ordering
+
+1. T16 (strict-Rust cryptography lane) must pass first. The verifier is one general BIP340 operation composed over maintained `k256 0.14.0` arithmetic and ECDSA primitives. The `k256` high-level Schnorr signature type is withdrawn because its `Signature` stores a `NonZeroScalar` and cannot represent the whole BIP340 input domain. No custom field or group arithmetic. Overflowing TapTweak is canonically rejected, never reduced. Hybrid-key parity and historical DER and high-S rules are preserved.
+2. T17 then measures the actual final strict artifact. Earlier candidate measurements, including every number in the prior-evidence section, are not promotion proof.
+3. Promotion happens in one changeset: flip `RECORDED_VERDICT` in `g19_validation_default`, drop `kernel` from the two library defaults, update `Dockerfile`, and prove kernel-free transitive closure in `bin/bitcoin-rs/tests/overhaul_default_closure.rs`.
+
+## End-state cells
+
+| Cell | Required evidence | Command | Status |
+|---|---|---|---|
+| Core vector parity | Zero mismatches on runnable rows; pinned skip counts and skip reasons per corpus | `cargo test --locked -p bitcoin-rs-script --test core_vectors` | `planned_not_executed` |
+| Contextual and script matrix (T15) | Every §5.1 family, active and inactive boundaries, mandatory versus policy flags; zero unexplained mismatches; every exclusion counted and classified | `cargo test --locked -p bitcoin-rs-consensus --test overhaul_consensus_matrix -- --nocapture` | `planned_not_executed` |
+| Strict-Rust crypto lane (T16) | Valid and invalid ECDSA, Schnorr and tweak vectors; integer and point boundary cases; independent oracle agreement; audited dependency closure | `cargo test --locked -p bitcoin-rs-script --test overhaul_native_crypto -- --nocapture` | `planned_not_executed` |
+| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | `cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_default_closure -- --nocapture` | `planned_not_executed` |
+| Full mainnet replay | Genesis to the pinned stop identity with sampled and exact coin comparison against Core `v31.1` | offline comparator, see [`offline-full-validation.md`](offline-full-validation.md) | `planned_not_executed` |
+| Invalid and contextual corpora | Rejection parity on invalid local corpora; a passing valid chain alone does not prove rejection | T15 matrix | `planned_not_executed` |
+| Kernel-free closure | `cargo --locked tree -p bitcoin-rs --no-default-features --features fjall -e features` shows no `bitcoinkernel` on any transitive path; native and oracle lanes built under separate `CARGO_TARGET_DIR` | `overhaul_default_closure` | `planned_not_executed` |
+
+Reference identity for the comparison arm: Bitcoin Core release `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, x86_64 linux archive SHA-256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind` SHA-256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`. The kernel oracle is the `31.99.0` development tree through `bitcoinkernel 0.2.1` with `differential_harness = false`; it is oracle evidence only and never a policy pin.
+
+## Refusal conditions
+
+Promotion is refused when any cell above is `BLOCKED`, when signed-spend evidence is not measured on the final strict artifacts, when either arm exceeds the 5% stability rule, or when a feature-unified workspace build supplied the closure claim. On refusal the last-green `secp256k1` product is retained and the verdict stays `KeepKernel`.
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (2026-09-04 signed-spend run and earlier)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
 
 This note records the #213 measurements. The owner of the default is
 [`docs/contracts/validation-default.md`](../contracts/validation-default.md),
@@ -9,14 +68,14 @@ A **measured observation** copies a field from a cited artifact or an
 in-tree test pin. An **inference** interprets those observations. Promotion
 requires every gate in the issue, not a subset.
 
-## Decision
+### Decision
 
 Keep `kernel` as the `bitcoin-rs-consensus` and `bitcoin-rs-node` default,
 and in the Compose image. Leave `bin/bitcoin-rs` kernel-free. The native
 interpreter is a complete consensus script engine; it is not yet the
 measured winner. Recorded verdict: `KeepKernel`.
 
-## Decision rule (issue #213)
+### Decision rule (issue #213)
 
 The native path becomes the library default only after:
 
@@ -38,7 +97,7 @@ that freeze does not run the comparator. A missing replay does not weaken
 the signed-spend or vector gates. A failed signed-spend measurement does
 not flip the default.
 
-## Current ownership of the default
+### Current ownership of the default
 
 | Surface | Script engine |
 |---|---|
@@ -52,9 +111,9 @@ no C++ toolchain. Promoting native is one coordinated change: flip
 `RECORDED_VERDICT` in `g19_validation_default` and drop `kernel` from the
 two library defaults in the same commit.
 
-## Measured observations
+### Measured observations
 
-### Correctness (in-tree Core vectors)
+#### Correctness (in-tree Core vectors)
 
 `crates/script/tests/core_vectors.rs` pins
 
@@ -82,7 +141,7 @@ established by the Core-vector lane.
 The earlier stub (`verify_non_taproot_portable`, bare `OP_TRUE` only) is
 gone.
 
-### Performance, signed-spend apply-path (2026-09-04)
+#### Performance, signed-spend apply-path (2026-09-04)
 
 This is the in-tree apply-path comparison: `NodeState::apply_block` over a
 generated signed-spend corpus (P2PKH, P2WPKH, P2WSH 2-of-3, real ECDSA).
@@ -108,7 +167,7 @@ context reuse is why this host sits near 50 ms, not a claim that the two
 hosts are comparable. The vacuous `OP_TRUE` apply-path numbers do not
 license promotion: that corpus verifies no signatures.
 
-### Attributed lever
+#### Attributed lever
 
 Production CHECKSIG, Schnorr, and Taproot tweak checks constructed
 `Secp256k1::verification_only()` per signature. That rebuilds secp256k1's
@@ -116,12 +175,12 @@ verification tables on every input. Those paths now share
 `secp256k1::SECP256K1`, which `batch.rs` and `taproot::verify_taproot_keypath`
 already used.
 
-### Peak RSS
+#### Peak RSS
 
 Profile-time child rusage: native 14.3 MiB, kernel 15.6 MiB. Allocation
 count is not reported by this harness.
 
-## Disposition
+### Disposition
 
 | Gate | Status |
 |---|---|

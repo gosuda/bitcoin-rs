@@ -48,6 +48,8 @@ pub mod kernel;
 pub mod rust_path;
 /// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
+/// Shared transaction-level BIP141 sigop accounting.
+mod sigops;
 /// Block rule checks.
 pub mod verify_block;
 /// Transaction rule checks.
@@ -60,8 +62,10 @@ pub use bip9::{
 pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 pub use block_view::BlockView;
 pub use rust_path::{TipState, UtxoView};
+pub use sigops::transaction_sigop_cost;
+pub use sigops::transaction_sigop_cost as total_sigop_cost;
 pub use verify_block::{
-    BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
+    BlockRuleContext, compute_merkle_root, verify_block_rules, verify_block_rules_precomputed,
     verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
@@ -199,7 +203,11 @@ pub enum ConsensusError {
 }
 
 /// Maximum valid money supply in satoshis.
-pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+///
+/// The 21-million-BTC rule is owned by
+/// [`bitcoin_rs_primitives::Amount::MAX_MONEY`]; consensus checks use this
+/// satoshi view of that constant.
+pub const MAX_MONEY: u64 = bitcoin_rs_primitives::Amount::MAX_MONEY.to_sat();
 
 /// Coinbase subsidy at `height`, in satoshis.
 ///
