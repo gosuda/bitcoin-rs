@@ -46,7 +46,20 @@ jobs:
           cd "$work"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git cherry-pick "$source_commit"
+          if ! git cherry-pick "$source_commit"; then
+            unmerged="$(git diff --name-only --diff-filter=U)"
+            test "$unmerged" = "crates/node/src/txindex_worker.rs"
+            # Keep the validated split's modularized root; #906's two semantic
+            # cursor changes are ported below into the new cursor owner.
+            git checkout --theirs crates/node/src/txindex_worker.rs
+            git add crates/node/src/txindex_worker.rs
+            git cherry-pick --continue
+          fi
+          cursor=crates/node/src/txindex_worker/cursor.rs
+          test "$(grep -c 'ConsumerCursor::from_snapshot' "$cursor")" -eq 2
+          sed -i 's/crate::reconcile::ConsumerCursor::from_snapshot/crate::reconcile::cursor_from_snapshot/g' "$cursor"
+          git add "$cursor"
+          git commit --amend --no-edit
           cargo fmt -p bitcoin-rs-node
           if ! git diff --quiet; then
             git add crates/node/src
