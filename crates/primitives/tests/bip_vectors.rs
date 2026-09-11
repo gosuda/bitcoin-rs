@@ -9,7 +9,6 @@
 //! Provenance and the script-path coverage story live in
 //! `tests/vectors/PROVENANCE.md`.
 #![expect(clippy::expect_used, reason = "test assertions")]
-#![expect(clippy::unwrap_used, reason = "test assertions")]
 
 use std::path::PathBuf;
 
@@ -55,19 +54,21 @@ fn hex_decode(hex: &str) -> Vec<u8> {
         .collect()
 }
 
-/// BIP143 examples: SighashCache must reproduce the spec digests for both the
-/// P2WPKH and the P2SH-P2WSH 6-of-6 multisig examples, across all six base
-/// SIGHASH modes of the multisig example.
-
 /// BIP test vectors publish digests in computation (internal) byte order.
 fn digest_hex(digest: &bitcoin_rs_primitives::Hash256) -> String {
     digest
         .as_byte_array()
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+        .fold(String::new(), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
+/// BIP143 examples: the `SighashCache` must reproduce the spec digests for
+/// both the P2WPKH and the P2SH-P2WSH 6-of-6 multisig examples, across all
+/// six base `SIGHASH` modes of the multisig example.
 #[test]
 fn bip143_examples_match_spec_digests() -> Result<()> {
     let vectors = load_json("bip143.json")?;
@@ -82,10 +83,11 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
         // prefix itself; the checked-in vectors store scriptCode raw.
         let script_code = hex_decode(example["script_code"].as_str().expect("script code"));
         let value_sats = example["value_sats"].as_u64().expect("value sats");
-        let input_index = example["input_index"].as_u64().expect("input index") as usize;
+        let input_index = usize::try_from(example["input_index"].as_u64().expect("input index"))
+            .expect("input index fits usize");
         let mut cache = SighashCache::new(&tx);
 
-        for vector in example["vectors"].as_array().expect("vectors array").iter() {
+        for vector in example["vectors"].as_array().expect("vectors array") {
             let hash_type = u32::try_from(vector["hash_type"].as_u64().expect("hash type"))
                 .expect("hash type fits u32");
             let expected = vector["sighash"].as_str().expect("sighash hex");
@@ -175,9 +177,9 @@ fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
         for input in case["inputSpending"]
             .as_array()
             .expect("inputSpending array")
-            .iter()
         {
-            let index = input["given"]["txinIndex"].as_u64().expect("txin index") as usize;
+            let index = usize::try_from(input["given"]["txinIndex"].as_u64().expect("txin index"))
+                .expect("txin index fits usize");
             let hash_type = input["given"]["hashType"].as_u64().expect("hash type");
             let expected = input["intermediary"]["sigHash"]
                 .as_str()
