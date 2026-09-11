@@ -1,4 +1,9 @@
-//! Recovery event construction and warning publication after durable evidence succeeds.
+//! Recovery event construction and warning publication.
+//!
+//! Reporting constructs and emits the recovery warning, updates the in-memory
+//! warning snapshot, and then attempts durable marker publication. This order
+//! intentionally keeps the warning process-visible when marker publication
+//! fails.
 
 use super::ChainRollbackEvent;
 use super::EvidenceError;
