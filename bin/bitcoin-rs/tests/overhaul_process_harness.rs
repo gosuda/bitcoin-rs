@@ -209,6 +209,11 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         json!([]),
     );
     assert_eq!(
+        compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
+            .expect("confirmed lookup must run with txindex disabled on both nodes"),
+        json!({}),
+    );
+    assert_eq!(
         compare_rpc(
             &mut core,
             &mut node,

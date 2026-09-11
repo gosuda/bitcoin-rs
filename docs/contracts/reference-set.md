@@ -160,13 +160,17 @@ This is an evidence tool pin. No checker run is claimed by this page.
 - `bin/bitcoin-rs/tests/overhaul_process_harness.rs`: ordinary binary startup,
   signed RPC admission/confirmation/query, missing/substituted reference,
   deliberate reply difference, early exit, malformed response, and total
-  request-deadline controls (REF-07a–d).
+  request-deadline controls (REF-07a–d). The RPC scenario verifies through
+  `getindexinfo` that txindex is disabled on both nodes before confirmed lookup.
 - `bin/bitcoin-rs/tests/overhaul_process_p2p.rs`: the same signed transaction
   enters each real binary through its loopback P2P listener, is observed in
   its public mempool, and is confirmed by identical Core-mined block bytes.
   RPC compares tip, transaction, and spent-output state; the candidate's
   explorer HTTP status is checked against that public chain evidence. This
-  is not a claim to execute an independent Esplora server.
+  scenario alone enables the candidate's txindex and waits for public
+  `getindexinfo` to report synchronization at the confirming height under
+  one fixed deadline before querying confirmed explorer status. This is
+  not a claim to execute an independent Esplora server.
 - `bin/bitcoin-rs/tests/support/process_peer.rs`: independent rust-bitcoin v1
   framing, one deadline per handshake/transaction barrier, bounded frames,
   message count and transcript, and socket custody. Fault cases cover

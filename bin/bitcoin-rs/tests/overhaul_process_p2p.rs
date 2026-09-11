@@ -210,7 +210,12 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
 #[test]
 fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
     let mut core = ProcessNode::start(NodeBinary::ReferenceCore).expect("reference process");
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs).expect("candidate process");
+    let mut node = ProcessNode::start_with_options(
+        NodeBinary::BitcoinRs,
+        &["--txindex", "true"],
+        Duration::from_secs(30),
+    )
+    .expect("candidate process with explorer transaction lookup enabled");
     let funds = mine_common_chain(&mut core, &mut node, 101).expect("identical mature funds");
     let transaction = funds.signed_spend().expect("signed spend");
     let txid = transaction.compute_txid().to_string();
@@ -287,6 +292,8 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         .expect("confirmed funding spend"),
         json!(null)
     );
+    // Block acceptance publishes the chain tip before the derived index catches up.
+    wait_for_txindex(&mut node, 102);
     assert_eq!(
         node.http_get_json(&format!("/api/tx/{txid}/status"))
             .expect("public explorer confirmed status"),
@@ -296,6 +303,31 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
     );
     core.stop().expect("reap reference");
     node.stop().expect("reap candidate");
+}
+
+fn wait_for_txindex(node: &mut ProcessNode, height: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = node
+            .rpc_until("getindexinfo", &json!(["txindex"]), deadline)
+            .expect("public transaction index progress");
+        let synced = status["txindex"]["synced"]
+            .as_bool()
+            .expect("enabled txindex must report its synchronization state");
+        if synced {
+            assert_eq!(status["txindex"]["best_block_height"], json!(height));
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "txindex did not catch up: {status}"
+        );
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20)),
+        );
+    }
 }
 
 /// A valid envelope is a positive control for each independent rejection.

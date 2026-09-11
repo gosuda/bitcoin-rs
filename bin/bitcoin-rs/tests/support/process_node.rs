@@ -254,8 +254,6 @@ fn launch(
                     "parity",
                     "--dbcache-mb",
                     "64",
-                    "--txindex",
-                    "true",
                 ])
                 .arg("--data-dir")
                 .arg(datadir.join("node"))
@@ -400,7 +398,7 @@ impl ProcessNode {
         self.started
     }
 
-    fn rpc_until(
+    pub(crate) fn rpc_until(
         &mut self,
         method: &str,
         params: &Value,
