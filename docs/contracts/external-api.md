@@ -314,14 +314,14 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 
 
 - **Owner**: `MiningCoordinator::known_block_result` in
-  `crates/node/src/mining.rs`.
+  `crates/node/src/mining/submission.rs`.
 - GBT proposal looks the block hash up first, matching Core
-  `LookupBlockIndex`: a node on the applied chain is `duplicate`,
-  `Invalid` is `duplicate-invalid`, and any other tree entry (including a
-  header-only tip) is `duplicate-inconclusive`.
-- `submitblock` matches Core v31 `ProcessNewBlock`: only an already
-  accepted block is `duplicate`. A header admitted by `submitheader` still
-  receives the body.
+  `LookupBlockIndex`: a node whose body is connected (scripts-valid) is
+  `duplicate`, `Invalid` is `duplicate-invalid`, and any other tree entry
+  (including a header-only tip) is `duplicate-inconclusive`.
+- `submitblock` matches Core v31 `ProcessNewBlock`: a previously connected
+  body (scripts-valid), including after a later reorg, is `duplicate`. A
+  header admitted by `submitheader` still receives the body.
 
 ### `API-19`: BIP22 reject reasons
 
@@ -502,6 +502,9 @@ owned by [wallet-facing.md](wallet-facing.md).
     `proposal_of_an_applied_block_is_duplicate`,
     `proposal_of_an_invalid_header_is_duplicate_invalid`,
     `proposal_of_a_header_only_block_is_duplicate_inconclusive`,
+    `proposal_of_a_disconnected_scripts_valid_block_is_duplicate`,
+    `submit_of_a_disconnected_scripts_valid_block_is_duplicate`,
+    `applied_ancestor_with_unset_chain_tx_count_is_duplicate`,
     `duplicate_submit_returns_duplicate`
 - `API-19`:
   - `crates/node/src/mining.rs` tests `consensus_failures_use_core_bip22_reasons`,
