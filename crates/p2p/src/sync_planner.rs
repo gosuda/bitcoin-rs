@@ -1,10 +1,8 @@
 //! Download planner: window, staging, and conviction policy.
 //!
-//! [`SyncPlanner`] owns the in-flight [`crate::DownloadWindow`] and inbound
-//! [`crate::BlockStager`]. It consumes identity-bearing snapshots and produces
-//! [`SyncAction`] values. It does not send on sockets, mutate [`crate::PeerTable`],
-//! or apply blocks. The node `BlockSync` executor routes actions and feeds
-//! outcomes back.
+//! Ownership constraints are defined by the normative architecture contract
+//! (`docs/contracts/architecture.md`).
+
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -175,12 +173,21 @@ impl SyncPlanner {
                 );
             }
             if let Some((owner, front_hash)) = hedge {
-                return (None, Some(ColdFrontHedge { owner, front_hash }));
+                // evaluated after pending-timeout conviction below
             }
         }
         let timed_out = self.window.observe_pending_timeout(apply_side_busy, now);
+          if let Some(addr) = timed_out {
+              return (Some(SyncAction::Disconnect {
+                  addr,
+                  reason: SyncDisconnectReason::PendingTimeout,
+              }), None);
+          }
         (
-            timed_out.map(|addr| SyncAction::Disconnect {
+            if let Some((owner, front_hash)) = hedge {
+              return (None, Some(ColdFrontHedge { owner, front_hash }));
+          }
+          timed_out.map(|addr| SyncAction::Disconnect {
                 addr,
                 reason: SyncDisconnectReason::PendingTimeout,
             }),
@@ -195,6 +202,7 @@ mod tests {
     use crate::default_sync_budget;
     use std::time::Instant;
 
+    /// ARCH-07: planner policy produces no conviction for an empty plan.
     #[test]
     fn empty_planner_plans_no_conviction() {
         let mut planner = SyncPlanner::new(default_sync_budget());
