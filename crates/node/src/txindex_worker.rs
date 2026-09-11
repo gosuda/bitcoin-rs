@@ -141,17 +141,9 @@ const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
-/// Maximum time the txindex worker waits for the storage engine to open and
-/// recover the index store. A store open that exceeds this deadline is
-/// treated as a wedge — the worker publishes `Failed` so the node stays
-/// operable without the index rather than spinning one thread at 100% CPU
-/// indefinitely. The deadline is a backstop, not a tight bound: the issue's
-/// own data shows fjall/lsm-tree manifest recovery of a 139 GiB store logs
-/// progress within seconds and then, when wedged, freezes block I/O for
-/// hours. Thirty minutes is far below the observed wedge and far above any
-/// legitimate recovery, so it cannot falsely kill a slow-but-progressing
-/// open while still surfacing a stuck one. The 30-second heartbeat already
-/// makes a slow open observable to an operator watching logs.
+/// Upper bound on waiting for backend recovery. Timeout isolates the index
+/// failure from the node; it does not prove recovery stopped making progress.
+/// The backend helper cannot be cancelled, so abandonment poisons its namespace.
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
@@ -558,6 +550,8 @@ enum ReconcileAction {
 enum TxIndexWorkerError {
     #[error("txindex worker stopped")]
     Stopped,
+    #[error("txindex store open abandoned on shutdown")]
+    OpenStopped,
     #[error("txindex durable watermark changed while a forward batch was pending")]
     PendingDurableChanged,
     #[error("txindex storage error: {0}")]
@@ -585,6 +579,11 @@ enum TxIndexWorkerError {
 }
 
 impl TxIndexWorkerError {
+    /// The backend helper may still hold or acquire the store after this error.
+    fn abandoned_open(&self) -> bool {
+        matches!(self, Self::OpenStopped | Self::OpenTimeout { .. })
+    }
+
     fn requires_capability_rebuild(&self) -> bool {
         matches!(
             self,
