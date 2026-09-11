@@ -22,8 +22,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/node-resume
-          git bundle create /tmp/node-resume/repository.bundle HEAD refs/remotes/origin/main refs/remotes/origin/agent/node-state-owners refs/remotes/origin/agent/node-apply-workbench refs/remotes/origin/agent/node-sync-workbench refs/remotes/origin/agent/node-mining-workbench refs/remotes/origin/agent/node-checkpoint-workbench refs/remotes/origin/agent/node-txindex-workbench
-          git for-each-ref --format='%(refname) %(objectname)' refs/remotes/origin/agent/node- refs/remotes/origin/main > /tmp/node-resume/refs.txt
+          mapfile -t refs < <(git for-each-ref --format='%(refname)' 'refs/remotes/origin/agent/node-*' refs/remotes/origin/main)
+          git bundle create /tmp/node-resume/repository.bundle HEAD "${refs[@]}"
+          git for-each-ref --format='%(refname) %(objectname)' 'refs/remotes/origin/agent/node-*' refs/remotes/origin/main > /tmp/node-resume/refs.txt
           sha256sum /tmp/node-resume/repository.bundle > /tmp/node-resume/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
