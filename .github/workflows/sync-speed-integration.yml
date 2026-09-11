@@ -1,0 +1,108 @@
+name: sync-speed-integration
+on:
+  push:
+    branches: [automation/sync-speed-integration-20260911]
+permissions:
+  contents: write
+concurrency:
+  group: sync-speed-integration-20260911
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+  RUST_BACKTRACE: 1
+  SOURCE: 0077a96f8ff27ffba4c4d4864874006c1faa8419
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+      - name: Isolate source from workbench tooling
+        run: |
+          mkdir -p "$RUNNER_TEMP/sync-speed-evidence"
+          git fetch --no-tags origin "$SOURCE"
+          git checkout --detach "$SOURCE"
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: sync-speed-native-stable
+      - name: Record identities and repair the source-created lint
+        run: |
+          { git rev-parse HEAD; rustc +stable -Vv; cargo +stable -V; sha256sum Cargo.lock; uname -a; lscpu; } > "$RUNNER_TEMP/sync-speed-evidence/identity.txt"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p = Path('crates/node/src/sync.rs')
+          data = p.read_bytes()
+          assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == '6a4b0bd7aa68f1f2185e4411c539568bab2c93ae'
+          s = data.decode()
+          needle = '    fn send_getdata_for_pending_blocks('
+          assert s.count(needle) == 1
+          start = s.index('        let Some(applied_id)', s.index(needle))
+          end = s.index('        let mut window = self.download_window.lock();', start)
+          s = s[:start] + '''        let Some(request_start_height) =
+              Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)
+          else {
+              return GetdataRequestOutcome::default();
+          };
+
+          '''.replace('\n          ', '\n        ') + s[end:]
+          helper = "    /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.\n    /// Keep fallible ancestry navigation separate from request publication.\n    fn first_connect_height(\n        tree: &bitcoin_rs_chain::BlockTree,\n        applied_hash: Hash256,\n        target: bitcoin_rs_chain::NodeId,\n    ) -> Option<u32> {\n        let applied_id = tree.lookup(applied_hash)?;\n        let height = tree.node(applied_id).ok()?.height;\n        let successor = if tree.node_at_height_from(target, height) == Some(applied_id) {\n            height\n                .checked_add(1)\n                .and_then(|height| tree.node_at_height_from(target, height))\n        } else {\n            None\n        };\n        let first = successor.or_else(|| {\n            plan_reorg(tree, applied_id, target)\n                .ok()?\n                .connect\n                .first()\n                .copied()\n        })?;\n        Some(tree.node(first).ok()?.height)\n    }\n\n"
+          s = s.replace(needle, helper + needle, 1)
+          test = '    // SYNC-FRONTIER-01: an invalidated height index must preserve the\n    // unchanged parent-plan result even when public node_mut leaves a gap.\n    #[test]\n    fn request_frontier_retains_parent_plan_on_height_gaps(\n    ) -> Result<(), Box<dyn std::error::Error>> {\n        let mut tree = BlockTree::new();\n        let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;\n        let root_hash = tree.node(root)?.hash;\n        let header = test_header(BlockHash::from(root_hash), 1);\n        let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;\n        tree.node_mut(child)?.height = 2;\n        let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;\n        let [first] = plan.connect.as_slice() else {\n            return Err("expected one connect node".into());\n        };\n        assert_eq!(\n            BlockSync::first_connect_height(&tree, root_hash, child),\n            Some(tree.node(*first)?.height),\n        );\n        Ok(())\n    }\n\n'
+          test_needle = "    #[test]\n    fn tick_sends_getdata_for_headers_above_applied_tip()"
+          assert s.count(test_needle) == 1
+          s = s.replace(test_needle, test + test_needle, 1)
+          p.write_text(s)
+          PY
+          rustfmt +stable --edition 2024 --config skip_children=true crates/node/src/sync.rs
+          git diff --check
+          test "$(git diff --name-only)" = 'crates/node/src/sync.rs'
+          git diff > "$RUNNER_TEMP/sync-speed-evidence/lint-repair.patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/node/src/sync.rs
+          git commit -m 'refactor(sync): isolate fallible frontier selection from request publication'
+          git diff "$SOURCE" HEAD > "$RUNNER_TEMP/sync-speed-evidence/candidate.patch"
+          { git rev-parse HEAD; git rev-parse HEAD^{tree}; git ls-tree HEAD crates/node/src/sync.rs; sha256sum Cargo.lock; } > "$RUNNER_TEMP/sync-speed-evidence/candidate-identity.txt"
+      - name: Strict native node Clippy (pipefail enforced)
+        run: |
+          cargo +stable clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-clippy.log"
+      - name: Native unit, sync smoke, and evidence tests (pipefail enforced)
+        run: |
+          cargo +stable test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-tests.log"
+          cargo +stable test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test sync_smoke -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/candidate-sync-smoke.log"
+          cargo +stable test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence -- --nocapture 2>&1 | tee "$RUNNER_TEMP/sync-speed-evidence/overhaul_evidence.log"
+          git diff --exit-code
+      - name: Fast-forward only the reviewed feature branch
+        run: |
+          branch=perf/sync-indexed-linear-frontier-20260911
+          remote=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          test "$remote" = "$SOURCE"
+          test "$(git diff --name-only "$SOURCE" HEAD)" = 'crates/node/src/sync.rs'
+          test "$(git rev-list --count "$SOURCE"..HEAD)" = 1
+          git diff --exit-code
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'PUBLISHED_SOURCE %s %s\n' "$branch" "$(git rev-parse HEAD)"
+      - name: Preserve raw evidence even on a failed gate
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: sync-speed-integration-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/sync-speed-evidence/*.txt
+            ${{ runner.temp }}/sync-speed-evidence/*.log
+            ${{ runner.temp }}/sync-speed-evidence/*.patch
+          if-no-files-found: error
+          retention-days: 7
