@@ -1,0 +1,82 @@
+name: Local evaluation feedback
+description: Report a setup, documentation, or public-interface evaluation result.
+title: "Evaluation: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report a bounded developer task, including a successful run with a confusing step.
+        Search existing issues and pull requests before submitting.
+
+        This is a public form. Do not include seeds, private keys, RPC credentials,
+        cookies, personal information, or sensitive logs. Do not disclose suspected
+        vulnerabilities here. Use private vulnerability reporting from the Security
+        tab if enabled; otherwise ask maintainers for a private route without exploit details.
+  - type: input
+    id: revision
+    attributes:
+      label: Source revision
+      description: Paste git rev-parse HEAD, or state why the exact revision is unknown.
+      placeholder: Full commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and build
+      description: Include OS, CPU architecture, rustc/cargo versions, profile, and Cargo features. Do not include credentials.
+      placeholder: |
+        OS and architecture:
+        rustc --version:
+        cargo --version:
+        Build command, profile, and features:
+        Network and index mode:
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: Task and reproduction steps
+      description: What were you trying to do? Include the documentation path or URL and redacted commands.
+      placeholder: |
+        Task:
+        Documentation followed:
+        Steps:
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: Describe the expected behavior and its source, rather than assuming the whole ecosystem is supported.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result and redacted evidence
+      description: Include the first relevant error and exit status. HTTP 200 alone is not a successful JSON-RPC result.
+      placeholder: |
+        Build: succeeded / failed / not attempted
+        Startup: succeeded / failed / not attempted
+        JSON-RPC read: succeeded / failed / not attempted
+        Public tip read: succeeded / failed / not attempted
+        Clean shutdown: succeeded / failed / not attempted
+        Same-directory reopen: succeeded / failed / not attempted
+        Redacted output:
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: Suggested clarification
+      description: Optional. Name one setup step, example, or module boundary that should be clearer.
+  - type: checkboxes
+    id: disclosure
+    attributes:
+      label: Public-report checks
+      options:
+        - label: I removed secrets and sensitive information and am not disclosing a suspected vulnerability in this public form.
+          required: true
+        - label: I distinguished actual results from failed or unattempted steps.
+          required: true

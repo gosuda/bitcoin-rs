@@ -361,8 +361,8 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
             prevouts.push((
                 outpoint,
                 TxOut {
-                    value: amount,
-                    script_pubkey,
+                    value: bitcoin_rs_primitives::Amount::from_sat(amount),
+                    script_pubkey: script_pubkey.into(),
                 },
             ));
         }

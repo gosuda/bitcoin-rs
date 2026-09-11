@@ -10,6 +10,9 @@ use alloc::vec::Vec;
 use hashbrown::HashSet;
 
 use bitcoin_rs_primitives::{Tx, TxOut, Txid, Wtxid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::{
     Instruction, is_multisig, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh,
     is_p2wsh, is_push_only, minimal_non_dust, opcode, script::instructions,
@@ -172,6 +175,10 @@ pub struct PackageAcceptanceFacts {
     pub results: Vec<TxAcceptanceFact>,
 }
 
+/// Per-transaction relay sigop limit: one fifth of the block limit,
+/// matching Core v31.1's `MAX_STANDARD_TX_SIGOPS_COST`.
+pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
+
 /// Policy rejection reason for dry-run package acceptance.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AcceptanceRejectReason {
@@ -199,6 +206,9 @@ pub enum AcceptanceRejectReason {
     /// Transaction exceeds ancestor or descendant package limits.
     #[error(transparent)]
     PackageLimit(#[from] PolicyError),
+    /// Prevout-aware sigop cost exceeds the per-transaction relay limit.
+    #[error("too-many-sigops")]
+    TooManySigops,
     /// Next-block BIP68 relative sequence locks are unmet.
     #[error("non-BIP68-final")]
     NonBip68Final,
@@ -278,56 +288,11 @@ pub fn evaluate_package_acceptance(
     }
 }
 
-/// Evaluates all transactions in a package without stopping after the first
-/// rejection. Each row gets its own independent verdict.
-///
-/// This is the `testmempoolaccept` form: it reports every row's acceptance
-/// status, including rows after an earlier rejected row.
-#[must_use]
-pub fn evaluate_package_acceptance_all(
-    pool: &Mempool,
-    policy: &StandardnessPolicy,
-    txs: &[Tx],
-    contexts: &[PackageTxContext],
-    max_feerate_sat_per_kvb: Option<u64>,
-    incremental_relay_fee_sat_per_kvb: u64,
-) -> PackageAcceptanceFacts {
-    assert_eq!(
-        txs.len(),
-        contexts.len(),
-        "package txs and contexts must align"
-    );
-
-    if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
-        return PackageAcceptanceFacts {
-            package_error: Some(AcceptanceRejectReason::PackageTooLarge),
-            results: Vec::new(),
-        };
-    }
-
-    let mempool_min_fee =
-        crate::eviction::mempool_min_fee_sat_per_kvb(pool, incremental_relay_fee_sat_per_kvb);
-
-    let results = txs
-        .iter()
-        .zip(contexts.iter())
-        .map(|(tx, context)| {
-            evaluate_one(
-                pool,
-                policy,
-                tx,
-                *context,
-                max_feerate_sat_per_kvb,
-                mempool_min_fee,
-                incremental_relay_fee_sat_per_kvb,
-            )
-        })
-        .collect();
-
-    PackageAcceptanceFacts {
-        package_error: None,
-        results,
-    }
+/// Caller fee guard shared by policy-only evaluation and verified admission.
+/// Callers choose its place in their contract; the rate arithmetic remains
+/// owned by the same helper that computes mempool entry fee rates.
+pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) -> bool {
+    maximum.is_some_and(|max| crate::entry::fee_rate(fee, u64::from(vsize)) > max)
 }
 
 pub(crate) fn evaluate_one(
@@ -343,11 +308,7 @@ pub(crate) fn evaluate_one(
     let wtxid = tx.wtxid();
     let weight = tx.weight();
     let vsize = context.vsize;
-    let fee_rate = if vsize == 0 {
-        0
-    } else {
-        context.fee.saturating_mul(1_000) / u64::from(vsize)
-    };
+    let fee_rate = crate::entry::fee_rate(context.fee, u64::from(vsize));
 
     let reject = if pool.contains_txid(&txid) {
         Some(AcceptanceRejectReason::AlreadyInMempool)
@@ -357,7 +318,7 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::NonStandard(err))
     } else if fee_rate < mempool_min_fee_sat_per_kvb {
         Some(AcceptanceRejectReason::MinRelayFeeNotMet)
-    } else if max_feerate_sat_per_kvb.is_some_and(|max| fee_rate > max) {
+    } else if exceeds_max_feerate(context.fee, vsize, max_feerate_sat_per_kvb) {
         Some(AcceptanceRejectReason::MaxFeeExceeded)
     } else {
         let candidate = ReplacementCandidate::new(
@@ -526,7 +487,7 @@ fn multisig_key_count(script: &[u8]) -> Option<u8> {
 
 /// Returns `true` if a non-`OP_RETURN` output is dust.
 fn is_dust(output: &TxOut, dust_relay_fee: u64) -> bool {
-    output.value < minimal_non_dust(&output.script_pubkey, dust_relay_fee)
+    output.value.to_sat() < minimal_non_dust(&output.script_pubkey, dust_relay_fee)
 }
 
 #[inline]
@@ -598,16 +559,16 @@ mod tests {
     fn standard_tx(version: i32) -> Tx {
         Tx {
             version,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 100_000,
-                script_pubkey: p2pkh(&[7_u8; 20]),
+                value: Amount::from_sat(100_000),
+                script_pubkey: p2pkh(&[7_u8; 20]).into(),
             }],
         }
     }
@@ -669,12 +630,12 @@ mod tests {
     #[test]
     fn accepts_op_return_followed_by_a_numeric_push() {
         let mut tx = standard_tx(1);
-        tx.outputs[0].value = 0;
-        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, opcode::OP_PUSHNUM_1];
+        tx.outputs[0].value = Amount::ZERO;
+        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, opcode::OP_PUSHNUM_1].into();
         // Padded to clear the relay minimum, which is a different rule.
         tx.outputs.push(TxOut {
-            value: 50_000,
-            script_pubkey: p2pkh(&[9_u8; 20]),
+            value: Amount::from_sat(50_000),
+            script_pubkey: p2pkh(&[9_u8; 20]).into(),
         });
         assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
     }
@@ -683,8 +644,8 @@ mod tests {
     #[test]
     fn rejects_op_return_followed_by_an_opcode() {
         let mut tx = standard_tx(1);
-        tx.outputs[0].value = 0;
-        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, opcode::OP_DUP];
+        tx.outputs[0].value = Amount::ZERO;
+        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, opcode::OP_DUP].into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)
@@ -708,7 +669,7 @@ mod tests {
         );
 
         let mut tx = standard_tx(1);
-        tx.outputs[0].script_pubkey = script;
+        tx.outputs[0].script_pubkey = script.into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)
@@ -724,7 +685,7 @@ mod tests {
         script.extend([opcode::OP_PUSHNUM_1, opcode::OP_CHECKMULTISIG]);
 
         let mut tx = standard_tx(1);
-        tx.outputs[0].script_pubkey = script;
+        tx.outputs[0].script_pubkey = script.into();
         assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
     }
 
@@ -741,7 +702,7 @@ mod tests {
         ]);
 
         let mut tx = standard_tx(1);
-        tx.outputs[0].script_pubkey = script;
+        tx.outputs[0].script_pubkey = script.into();
         assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
     }
 
@@ -758,7 +719,7 @@ mod tests {
         ]);
 
         let mut tx = standard_tx(1);
-        tx.outputs[0].script_pubkey = script;
+        tx.outputs[0].script_pubkey = script.into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)
@@ -774,8 +735,8 @@ mod tests {
     fn accepts_a_pay_to_anchor_output() {
         let mut tx = standard_tx(1);
         tx.outputs.push(TxOut {
-            value: 240,
-            script_pubkey: vec![0x51, 0x02, 0x4e, 0x73],
+            value: Amount::from_sat(240),
+            script_pubkey: vec![0x51, 0x02, 0x4e, 0x73].into(),
         });
         assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
     }
@@ -786,8 +747,8 @@ mod tests {
     #[test]
     fn rejects_a_transaction_below_the_non_witness_minimum() {
         let mut tx = standard_tx(1);
-        tx.outputs[0].value = 0;
-        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN];
+        tx.outputs[0].value = Amount::ZERO;
+        tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN].into();
         assert!(
             tx.base_size() < super::MIN_NON_WITNESS_TX_SIZE,
             "the fixture must be undersized or this test proves nothing"
@@ -802,7 +763,7 @@ mod tests {
     fn rejects_non_pushonly_scriptsig() {
         let mut tx = standard_tx(1);
         // OP_DUP is not a push opcode.
-        tx.inputs[0].script_sig = vec![opcode::OP_DUP];
+        tx.inputs[0].script_sig = vec![opcode::OP_DUP].into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::ScriptSigNotPushOnly)
@@ -814,7 +775,7 @@ mod tests {
         let mut tx = standard_tx(1);
         // Build a push-only scriptSig that exceeds 1650 bytes.
         let big = vec![0_u8; super::MAX_STANDARD_SCRIPTSIG_SIZE];
-        tx.inputs[0].script_sig = push_data(&big);
+        tx.inputs[0].script_sig = push_data(&big).into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::ScriptSigTooLarge)
@@ -833,12 +794,12 @@ mod tests {
             });
         tx.outputs = vec![
             TxOut {
-                value: 0,
-                script_pubkey: first,
+                value: Amount::from_sat(0),
+                script_pubkey: first.into(),
             },
             TxOut {
-                value: 0,
-                script_pubkey: second,
+                value: Amount::from_sat(0),
+                script_pubkey: second.into(),
             },
         ];
         let aggregate = StandardnessPolicy {
@@ -869,7 +830,7 @@ mod tests {
     fn dust_relay_fee_changes_the_boundary() {
         let mut tx = standard_tx(1);
         let threshold = minimal_non_dust(&tx.outputs[0].script_pubkey, DUST_RELAY_FEE_SAT_PER_KVB);
-        tx.outputs[0].value = threshold - 1;
+        tx.outputs[0].value = Amount::from_sat(threshold - 1);
 
         assert_eq!(
             is_standard_tx(&tx, &policy()),
@@ -887,8 +848,8 @@ mod tests {
         let mut tx = standard_tx(1);
         let script = [vec![opcode::OP_RETURN], push_data(b"ok")].concat();
         tx.outputs.push(TxOut {
-            value: 0,
-            script_pubkey: script,
+            value: Amount::from_sat(0),
+            script_pubkey: script.into(),
         });
         assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
     }
@@ -897,7 +858,7 @@ mod tests {
     fn rejects_dust_output() {
         let mut tx = standard_tx(1);
         // 1 sat to a P2PKH output is dust.
-        tx.outputs[0].value = 1;
+        tx.outputs[0].value = Amount::from_sat(1);
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::DustOutput)
@@ -908,7 +869,7 @@ mod tests {
     fn rejects_non_standard_output_script() {
         let mut tx = standard_tx(1);
         // A random non-standard script.
-        tx.outputs[0].script_pubkey = vec![0x74]; // OP_DEPTH
+        tx.outputs[0].script_pubkey = vec![0x74].into(); // OP_DEPTH
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::NonStandardOutput)
@@ -937,7 +898,7 @@ mod tests {
             .map(|i| {
                 let mut tx = standard_tx(1);
                 tx.outputs[0].script_pubkey =
-                    vec![0x51, u8::try_from(i).expect("package index fits u8")];
+                    vec![0x51, u8::try_from(i).expect("package index fits u8")].into();
                 tx
             })
             .collect();
@@ -979,7 +940,7 @@ mod tests {
         let pool = crate::Mempool::new(crate::MempoolLimits::default());
         let first = standard_tx(1);
         let mut second = standard_tx(1);
-        second.outputs[0].script_pubkey = vec![0x51, 0x99];
+        second.outputs[0].script_pubkey = vec![0x51, 0x99].into();
         let facts = evaluate_package_acceptance(
             &pool,
             &policy(),
@@ -1048,15 +1009,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![0x51],
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: vec![0x51].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50 * 100_000_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50 * 100_000_000),
+                script_pubkey: vec![0x51].into(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
         };
         let facts = evaluate_package_acceptance(
             &pool,
@@ -1071,30 +1032,5 @@ mod tests {
             Some(AcceptanceRejectReason::MissingInputs),
             "coinbase maps to MissingInputs"
         );
-    }
-
-    #[test]
-    fn package_acceptance_all_evaluates_after_rejection() {
-        let pool = crate::Mempool::new(crate::MempoolLimits::default());
-        let first = standard_tx(1);
-        let second = standard_tx(2);
-        let facts = evaluate_package_acceptance_all(
-            &pool,
-            &policy(),
-            &[first, second.clone()],
-            &[ctx(1_000, 100, true), ctx(1_000, 100, false)],
-            None,
-            1_000,
-        );
-        assert_eq!(
-            facts.results[0].reject_reason,
-            Some(AcceptanceRejectReason::MissingInputs)
-        );
-        assert_eq!(
-            facts.results[1].allowed,
-            Some(true),
-            "evaluate-all must still evaluate the second row after the first rejects"
-        );
-        assert_eq!(facts.results[1].txid, second.txid());
     }
 }
