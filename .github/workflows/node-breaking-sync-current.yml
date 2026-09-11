@@ -1,0 +1,77 @@
+name: node-breaking-sync-current
+
+on:
+  push:
+    branches: [automation/node-breaking-sync-current-20260911]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: node-breaking-sync-current
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  BASE_SHA: 0e10cd7e1cfc3d37654c1d622be19cebc2dda196
+  TARGET_BRANCH: refactor/node-sync-staging-owner-20260911
+
+jobs:
+  transform-validate-publish:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Reset to publication base and restore transform
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/node-breaking-sync-current.py "$RUNNER_TEMP/transform.py"
+          git reset --hard "$BASE_SHA"
+          mkdir -p scripts
+          cp "$RUNNER_TEMP/transform.py" scripts/node-breaking-sync-current.py
+      - name: Apply hard ownership cut
+        run: python3 scripts/node-breaking-sync-current.py
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: P2P strict Clippy
+        run: cargo clippy --locked -p bitcoin-rs-p2p --all-targets -- -D warnings
+      - name: Node strict Clippy
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings
+      - name: P2P unit tests
+        run: cargo test --locked -p bitcoin-rs-p2p --lib
+      - name: Node sync tests
+        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib sync:: -- --test-threads=1
+      - name: Ownership gate
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture
+      - name: Publish clean source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f scripts/node-breaking-sync-current.py
+          git add -A
+          changed=$(git diff --cached --name-only "$BASE_SHA")
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -Ev '^(crates/node/src/sync.rs|crates/node/src/sync/stage.rs|crates/p2p/src/lib.rs|crates/p2p/src/block_stager.rs)$'; then
+            echo 'unexpected changed path' >&2
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo 'transform produced no source diff' >&2
+            exit 1
+          fi
+          tree=$(git write-tree)
+          commit=$(printf '%s\n\n%s\n' \
+            'refactor(sync)!: move block staging into p2p ownership' \
+            'Delete node::sync::stage without an alias. P2P now owns BlockStager, eviction/backpressure, expiry, and contiguous-prefix draining beside DownloadWindow; node BlockSync only drives that owner.' \
+            | git commit-tree "$tree" -p "$BASE_SHA")
+          git push origin "$commit:refs/heads/$TARGET_BRANCH"
+          echo "published_commit=$commit" >> "$GITHUB_STEP_SUMMARY"
