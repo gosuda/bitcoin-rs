@@ -1,0 +1,133 @@
+name: finish-node
+
+on:
+  push:
+    branches: [agent/node-finish-publication-20260911]
+    paths:
+      - .github/finish-node.py
+      - .github/workflows/finish-node.yml
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt,clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: node-finish-${{ runner.os }}-rust195-${{ hashFiles('Cargo.lock') }}
+      - name: Reconstruct exact reviewed trees and run native gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin 80ab1f18f43ea1f32ef4c27169fcd98063ec482f
+          git fetch origin 729f0e8691ec25401b8150ea9934c890a37e988a
+          cp .github/finish-node.py /tmp/finish-node.py
+          mkdir -p /tmp/node-remaining-checked
+          python /tmp/finish-node.py /tmp/node-remaining-checked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-remaining-checked
+          path: /tmp/node-remaining-checked/
+          retention-days: 7
+          if-no-files-found: warn
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-remaining-checked
+          path: /tmp/node-remaining-checked
+      - name: Verify evidence and atomically create four source branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, re, subprocess as sp
+          from pathlib import Path
+          root = Path('/tmp/node-remaining-checked')
+          record = json.loads((root / 'publication.json').read_text())
+          base = '729f0e8691ec25401b8150ea9934c890a37e988a'
+          expected = [
+              ('validation', 'refactor/node-validation-729f0e86', '891163a6f5f9e4c80c7c8e82736961e20ffc1864'),
+              ('txindex', 'refactor/node-txindex-729f0e86', '52a17119ece5fd3b0a7e768adda9ab0865c027f1'),
+              ('checkpoint', 'refactor/node-checkpoint-729f0e86', 'a0539b0dd6859b944de9a95fba23458c256154eb'),
+              ('mining', 'fix/node-mining-capabilities-729f0e86', '474d0bf1a9bb876e8d62c09fefaa6f9987736be0'),
+          ]
+          if record['base'] != base or record['validated'] is not True or len(record['stages']) != 4:
+              raise ValueError('Unexpected publication identity')
+          bundle = root / 'sources.bundle'
+          if hashlib.sha256(bundle.read_bytes()).hexdigest() != record['bundle_sha256']:
+              raise ValueError('Bundle checksum mismatch')
+          refs = []
+          parent = base
+          for stage, (label, branch, tree) in zip(record['stages'], expected):
+              if (stage['label'], stage['branch'], stage['tree']) != (label, branch, tree) or stage['parent'] != parent:
+                  raise ValueError('Unexpected source stage')
+              commit = stage['commit']
+              if not re.fullmatch('[0-9a-f]{40}', commit):
+                  raise ValueError('Invalid commit')
+              required = {label + '-' + suffix for suffix in ('format', 'whitespace', 'clippy', 'tests')}
+              if label == 'validation':
+                  required.add('validation-owner-gates')
+              if label == 'mining':
+                  required |= {'final-matrix-clippy', 'final-node-tests', 'final-owner-gates', 'final-integration'}
+              if {c['name'] for c in stage['checks']} != required:
+                  raise ValueError('Missing validation gates')
+              for check in stage['checks']:
+                  log = root / (check['name'] + '.log')
+                  if check['rc'] != 0 or hashlib.sha256(log.read_bytes()).hexdigest() != check['sha256']:
+                      raise ValueError('Invalid validation evidence')
+              ref = 'refs/heads/' + branch
+              if sp.check_output(['git', 'ls-remote', '--heads', 'origin', ref]).strip():
+                  raise ValueError('Destination exists; refusing to overwrite')
+              sp.run(['git', 'fetch', str(bundle), ref + ':' + ref], check=True)
+              if sp.check_output(['git', 'rev-parse', ref]).decode().strip() != commit:
+                  raise ValueError('Unexpected bundled head')
+              if sp.check_output(['git', 'rev-parse', commit + '^{tree}']).decode().strip() != tree:
+                  raise ValueError('Unexpected source tree')
+              if sp.check_output(['git', 'rev-list', '--parents', '-1', commit]).decode().split() != [commit, parent]:
+                  raise ValueError('Unexpected source parent')
+              paths = sp.check_output(['git', 'diff', '--no-renames', '--name-only', parent, commit]).decode().splitlines()
+              if paths != stage['paths']:
+                  raise ValueError('Unexpected changed paths')
+              extras = {'bin/bitcoin-rs/tests/support/ownership_scan.rs', 'docs/contracts/indexing.md', 'docs/contracts/external-api.md'}
+              if any(not p.startswith('crates/node/') and p not in extras for p in paths):
+                  raise ValueError('Non-source workbench file in proposed PR')
+              refs.append(commit + ':' + ref)
+              parent = commit
+          sp.run(['git', 'push', '--atomic', 'origin', *refs], check=True)
+          for stage in record['stages']:
+              print('PUBLISHED', stage['branch'], stage['commit'], stage['tree'])
+          PY
