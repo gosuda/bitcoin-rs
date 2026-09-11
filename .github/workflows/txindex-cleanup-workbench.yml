@@ -1,0 +1,35 @@
+name: txindex-cleanup-workbench
+
+on:
+  push:
+    branches: [automation/txindex-cleanup-workbench-20260911]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: txindex-cleanup-workbench
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d4392c35858bce7626cec35fea905ebe97b554c0
+          persist-credentials: false
+      - name: Export pinned source and source inventory
+        run: |
+          git archive --format=tar HEAD > /tmp/txindex-source.tar
+          find . -name AGENTS.md -print
+          grep -nE '^(pub(\([^)]*\))? )?(const|struct|enum|trait|fn|impl|mod) ' crates/index/src/index.rs
+          find crates/node -iname '*index*' -print
+          cat crates/index/Cargo.toml rust-toolchain.toml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: txindex-source
+          path: /tmp/txindex-source.tar
+          retention-days: 1
+          if-no-files-found: error
