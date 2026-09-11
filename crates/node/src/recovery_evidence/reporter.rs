@@ -1,4 +1,8 @@
-//! Recovery event construction and warning publication after durable evidence succeeds.
+//! Recovery event construction, warning publication, and durable marker persistence.
+//!
+//! `RCV-12` requires warnings to become process-visible before the marker
+//! write is attempted. A marker failure is still returned to the caller; it
+//! does not erase the warning already exposed by this process.
 
 use super::ChainRollbackEvent;
 use super::EvidenceError;

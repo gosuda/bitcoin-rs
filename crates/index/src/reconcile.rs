@@ -2,7 +2,7 @@
 //!
 //! The index owner decides how durable derived state reaches consistency with a
 //! supplied active chain. The caller owns the authoritative chain representation
-//! and implements [`ActiveChainView`]; agreement between index watermarks alone
+//! and implements [`crate::reconcile::ActiveChainView`]; agreement between index watermarks alone
 //! never prove query readiness.
 
 use bitcoin_rs_primitives::Hash256;
