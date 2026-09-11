@@ -1,4 +1,4 @@
-name: Replay validated txindex split on current main
+name: Replay validated txindex split on clean current node branch
 on:
   push:
     branches: [automation/txindex-current-replay-20260911]
@@ -38,7 +38,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base="$(git rev-parse origin/main)"
+          clean_base=docs/node-contract-traceability-20260911
+          git fetch origin "$clean_base"
+          base="$(git rev-parse origin/$clean_base)"
           work="$RUNNER_TEMP/txindex-current-product"
           product="refactor/node-split-current-txindex-20260911"
           source_commit="312493827abb3c0f9ca67817604d040ff97eaa70"
