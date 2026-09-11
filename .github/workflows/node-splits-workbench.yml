@@ -40,16 +40,16 @@ jobs:
       - name: Refactor and validate apply plus dependent reorg
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/node-split-target
-        run: python3 .github/node-splits/apply_finish.py
+        run: python3 .github/node-splits/reorg_finish.py
       - name: Publish only native-validated commits without force-pushes
         if: always()
         env:
           NODE_SPLIT_PUBLISH_TOKEN: ${{ github.token }}
-        run: python3 .github/node-splits/apply_finish.py publish
+        run: python3 .github/node-splits/reorg_finish.py publish
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: node-apply-reorg-validation
+          name: node-reorg-validation
           path: ${{ runner.temp }}/node-remaining-results
           retention-days: 1
       - uses: actions/cache/save@v4
