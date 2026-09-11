@@ -1,6 +1,6 @@
 # Indexing contract
 
-**Contract version: 1.1** (2025-02-14)
+**Contract version: 1.2** (2025-02-14)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
@@ -40,6 +40,14 @@ Owners:
 
 These are behavioral requirements, not timing guarantees; test durations are
 only scheduling mechanics.
+
+### `IDX-10`: Block-body reader session
+
+- A forward reconciliation pass opens one `BlockBodyReader` session and uses
+  that session to prefetch and load each body it processes. It must not fall
+  back to direct `BlockBodyStore::load_block_body` calls during the pass.
+  The session may be reused across bounded batches, but each requested body
+  is prefetched and loaded exactly once.
 
 ### `IDX-01`: Capability configuration and internal enablement
 
