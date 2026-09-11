@@ -10,7 +10,11 @@ use alloc::{collections::VecDeque, sync::Arc};
 
 use arc_swap::ArcSwapOption;
 
-use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockTree, ChainError, NodeId, TipSnapshot, accept_headers, current_unix_seconds,
+};
+
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Header, Network, Tx, consensus_bytes};
 
 use bitcoin_rs_mempool::{
     Mempool, MempoolMiningSnapshot, MempoolObserver, MutationEnvelope, SnapshotEntry,
@@ -24,8 +28,6 @@ use bitcoin_rs_mining::{
     SignetMiningInfo, TemplateId, TemplateMutation, assemble_candidate, assemble_ordered_candidate,
     difficulty_for_bits,
 };
-
-use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Network, Tx, consensus_bytes};
 
 use compact_str::CompactString;
 
@@ -727,6 +729,43 @@ impl MiningCoordinator {
         }
     }
 
+    /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
+    fn accept_submitted_header(&self, header: Header) -> Result<(), MiningControlError> {
+        let mut tree = self.block_tree.write();
+        // Preserve accept_headers' idempotent duplicate path, including genesis.
+        if tree.lookup(header.compute_hash().into()).is_some() {
+            return accept_headers(
+                &mut tree,
+                std::slice::from_ref(&header),
+                self.network,
+                current_unix_seconds(),
+            )
+            .map(|_| ())
+            .map_err(header_reject_reason);
+        }
+        let parent = tree.lookup(header.prev_blockhash.into()).ok_or_else(|| {
+            MiningControlError::Rejected(missing_parent_reason(Hash256::from(
+                header.prev_blockhash,
+            )))
+        })?;
+        if tree
+            .node(parent)
+            .is_ok_and(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid)
+        {
+            return Err(MiningControlError::Rejected(CompactString::from(
+                "bad-prevblk",
+            )));
+        }
+        accept_headers(
+            &mut tree,
+            std::slice::from_ref(&header),
+            self.network,
+            current_unix_seconds(),
+        )
+        .map(|_| ())
+        .map_err(header_reject_reason)
+    }
+
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
         {
@@ -900,6 +939,10 @@ impl MiningControl for MiningCoordinator {
         self.submit(&block)
     }
 
+    fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
+        self.accept_submitted_header(header)
+    }
+
     fn publish_generation(&self) {
         Self::publish_generation(self);
     }
@@ -954,6 +997,24 @@ fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     }
 }
 
+fn missing_parent_reason(prev_hash: Hash256) -> CompactString {
+    CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+}
+
+fn header_reject_reason(error: ChainError) -> MiningControlError {
+    let reason = match error {
+        ChainError::InvalidPow { .. } => CompactString::from("high-hash"),
+        ChainError::ZeroTarget { .. }
+        | ChainError::TargetExceedsLimit { .. }
+        | ChainError::NbitsMismatch { .. } => CompactString::from("bad-diffbits"),
+        ChainError::TimestampTooEarly { .. } => CompactString::from("time-too-old"),
+        ChainError::TimestampTooFarAhead { .. } => CompactString::from("time-too-new"),
+        ChainError::MissingParent { prev_hash } => missing_parent_reason(prev_hash),
+        other => CompactString::from(other.to_string()),
+    };
+    MiningControlError::Rejected(reason)
+}
+
 #[cfg(test)]
 mod apply_error_tests {
     use super::BlockValidationResult;
@@ -978,6 +1039,38 @@ mod apply_error_tests {
                 }
             )),
             BlockValidationResult::Rejected(reason) if reason == "bad-cb-amount"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod header_reject_tests {
+    use super::header_reject_reason;
+    use bitcoin_rs_chain::{ChainError, ChainWork};
+    use bitcoin_rs_mining::MiningControlError;
+    use bitcoin_rs_primitives::Hash256;
+
+    // CONTRACT: docs/contracts/external-api.md#API-13
+    #[test]
+    fn pow_failure_is_high_hash() {
+        assert!(matches!(
+            header_reject_reason(ChainError::InvalidPow {
+                hash: Hash256::default(),
+                target: ChainWork::default(),
+            }),
+            MiningControlError::Rejected(reason) if reason == "high-hash"
+        ));
+    }
+
+    #[test]
+    fn nbits_mismatch_is_bad_diffbits() {
+        assert!(matches!(
+            header_reject_reason(ChainError::NbitsMismatch {
+                actual: 1,
+                expected: 2,
+                height: 1,
+            }),
+            MiningControlError::Rejected(reason) if reason == "bad-diffbits"
         ));
     }
 }
@@ -1726,6 +1819,13 @@ mod generation_signal_tests {
             &self,
             _block: Block,
         ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
+            Err(unavailable())
+        }
+
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_primitives::Header,
+        ) -> Result<(), MiningControlError> {
             Err(unavailable())
         }
 

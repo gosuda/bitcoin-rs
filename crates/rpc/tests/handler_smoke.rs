@@ -106,6 +106,13 @@ impl MiningControl for SmokeMiningControl {
         Ok(BlockValidationResult::Accepted)
     }
 
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
+    }
+
     fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
         Ok(0.0)
     }
