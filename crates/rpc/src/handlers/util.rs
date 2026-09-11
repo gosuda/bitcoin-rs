@@ -324,6 +324,9 @@ fn descriptor_error(error: DescriptorError) -> RpcError {
     match error {
         DescriptorError::Range(message) => RpcError::InvalidParameter(message.to_owned()),
         DescriptorError::Parse(message) => RpcError::InvalidAddressOrKey(message),
+        DescriptorError::Derivation => RpcError::InvalidAddressOrKey(
+            "Cannot derive script without private keys".to_owned(),
+        ),
     }
 }
 
@@ -522,6 +525,8 @@ struct DescriptorInfo {
 enum DescriptorError {
     /// The text is not a descriptor.
     Parse(String),
+    /// A parsed descriptor could not be expanded or derived.
+    Derivation,
     /// The derivation range does not match the descriptor.
     Range(&'static str),
 }
@@ -530,6 +535,7 @@ impl core::fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Parse(message) => write!(f, "{message}"),
+            Self::Derivation => write!(f, "Cannot derive script without private keys"),
             Self::Range(message) => write!(f, "{message}"),
         }
     }
@@ -972,7 +978,10 @@ pub(crate) fn generateblock_payout_script(
     match script_from_descriptor(text, network) {
         Ok(script) => Ok(script),
         Err(error @ DescriptorError::Range(_)) => Err(descriptor_error(error)),
-        Err(_) => payout_script_from_address(text, network, GENERATEBLOCK_INVALID_OUTPUT),
+        Err(error @ DescriptorError::Derivation) => Err(descriptor_error(error)),
+        Err(DescriptorError::Parse(_)) => {
+            payout_script_from_address(text, network, GENERATEBLOCK_INVALID_OUTPUT)
+        }
     }
 }
 
@@ -1024,7 +1033,7 @@ fn script_from_descriptor(
     ensure_secret_keys_match_network(keys, network)?;
     let derived = descriptor
         .at_derivation_index(0)
-        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+        .map_err(|_| DescriptorError::Derivation)?;
     Ok(derived.script_pubkey().as_bytes().to_vec())
 }
 
@@ -1039,7 +1048,7 @@ fn combo_payout_script(key: &str, network: bitcoin::Network) -> Result<Vec<u8>, 
         .ok_or_else(|| DescriptorError::Parse("Invalid combo descriptor".into()))?;
     let derived = path
         .at_derivation_index(0)
-        .map_err(|error| DescriptorError::Parse(error.to_string()))?;
+        .map_err(|_| DescriptorError::Derivation)?;
     // Core's combo Expand emits P2PK first and generateblock uses scripts[0].
     let pk = MiniscriptDescriptor::new_pk(combo_key(&derived)?);
     Ok(pk.script_pubkey().as_bytes().to_vec())
