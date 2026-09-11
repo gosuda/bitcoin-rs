@@ -153,16 +153,36 @@ pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     }
 }
 pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid_str = required_str(params, 0, "txid is required")?;
+    let (txid_str, fee_delta, dummy) = if let Some(array) = params.as_array() {
+        if array.len() > 3 {
+            return Err(RpcError::InvalidParams("too many parameters"));
+        }
+        // Core reads `fee_delta` from params[2] before rejecting a non-zero dummy.
+        let fee_delta = array
+            .get(2)
+            .and_then(JsonValueTrait::as_i64)
+            .ok_or(RpcError::InvalidType("parameter must be an integer"))?;
+        (
+            array.first().and_then(JsonValueTrait::as_str),
+            fee_delta,
+            array.get(1),
+        )
+    } else if params.is_object() {
+        (
+            params.get("txid").and_then(JsonValueTrait::as_str),
+            params
+                .get("fee_delta")
+                .and_then(JsonValueTrait::as_i64)
+                .ok_or(RpcError::InvalidType("parameter must be an integer"))?,
+            params.get("dummy"),
+        )
+    } else {
+        return Err(RpcError::InvalidParams("params must be an array or object"));
+    };
+    let txid_str = txid_str.ok_or(RpcError::InvalidParams("txid is required"))?;
     let txid = Txid::from_str(txid_str)
         .map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))?;
-    let array = params_array(params)?;
-    // Core reads `fee_delta` from params[2] before rejecting a non-zero dummy.
-    let fee_delta = array
-        .get(2)
-        .and_then(JsonValueTrait::as_i64)
-        .ok_or(RpcError::InvalidType("parameter must be an integer"))?;
-    if let Some(dummy) = array.get(1)
+    if let Some(dummy) = dummy
         && !dummy.is_null()
     {
         // Core `MaybeArg<double>`: JSON 0 and 0.0 are both zero.
@@ -1499,6 +1519,14 @@ mod tests {
         let result = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
             .unwrap_or_else(|err| panic!("prioritisetransaction failed: {err}"));
         assert_eq!(result.as_bool(), Some(true));
+        let error = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500, "unexpected"]))
+            .expect_err("extra parameters must fail");
+        assert!(matches!(
+            error,
+            RpcError::InvalidParams("too many parameters")
+        ));
+        prioritisetransaction(&ctx, &json!({"txid": txid_hex, "fee_delta": 600}))
+            .unwrap_or_else(|err| panic!("named fee_delta must be accepted: {err}"));
         prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0.0, 0]))
             .unwrap_or_else(|err| panic!("zero dummy float must be accepted: {err}"));
         prioritisetransaction(&ctx, &json!([txid_hex.as_str(), null, 0]))
@@ -1507,7 +1535,8 @@ mod tests {
         let entry = pool
             .entry_by_txid(&txid)
             .expect("entry remains after prioritise");
-        assert_eq!(entry.fee_delta, 500);
+        // fee_delta overlay is additive across calls: 500 then 600.
+        assert_eq!(entry.fee_delta, 1_100);
         assert_eq!(entry.fee, 1_000);
     }
 
