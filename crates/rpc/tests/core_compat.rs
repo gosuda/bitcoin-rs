@@ -321,6 +321,7 @@ impl MiningControl for CompatMiningControl {
                 TemplateMutation::PreviousBlock,
             ],
             submit_old: None,
+            signet: None,
             work_id: None,
         }))
     }
@@ -346,6 +347,13 @@ impl MiningControl for CompatMiningControl {
         Ok(BlockValidationResult::Accepted)
     }
 
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
+    }
+
     fn publish_generation(&self) {}
 
     fn generate(
@@ -367,7 +375,7 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     ));
 
     let template: corepc_types::v31::GetBlockTemplate =
-        typed(&handler.dispatch("getblocktemplate", &json!([{}]))?)?;
+        typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
     assert_eq!(template.version, 0x2000_0000);
     assert_eq!(template.height, 0);
     assert_eq!(template.bits, "1d00ffff");

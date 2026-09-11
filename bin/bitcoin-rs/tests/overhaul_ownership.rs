@@ -79,6 +79,90 @@ fn synthetic_storage_engine_leak_fails() {
 }
 
 #[test]
+fn synthetic_empty_backend_marker_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    graph.set_feature("bitcoin-rs-chain", "rocksdb", &[]);
+
+    let err = graph
+        .validate()
+        .expect_err("empty backend marker on an approved adapter must fail");
+    assert!(
+        err.iter().any(|line| {
+            line.contains("empty backend marker")
+                && line.contains("bitcoin-rs-chain")
+                && line.contains("rocksdb")
+        }),
+        "expected empty-marker violation, got: {err:?}"
+    );
+}
+
+#[test]
+fn synthetic_unauthorized_backend_feature_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    graph.set_feature(
+        "bitcoin-rs-mempool",
+        "rocksdb",
+        &["bitcoin-rs-storage/rocksdb"],
+    );
+
+    let err = graph
+        .validate()
+        .expect_err("a non-approved crate must not define a backend feature");
+    assert!(
+        err.iter().any(|line| {
+            line.contains("must not define or forward the backend feature")
+                && line.contains("bitcoin-rs-mempool")
+                && line.contains("rocksdb")
+        }),
+        "expected unauthorized backend-feature violation, got: {err:?}"
+    );
+}
+
+#[test]
+fn synthetic_core_backend_feature_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    graph.set_feature("bitcoin-rs-script", "fjall", &["bitcoin-rs-storage/fjall"]);
+
+    let err = graph
+        .validate()
+        .expect_err("a layer-0 crate defining a backend feature must fail");
+    assert!(
+        err.iter().any(|line| {
+            line.contains("must not define or forward the backend feature")
+                && line.contains("bitcoin-rs-script")
+                && line.contains("fjall")
+        }),
+        "expected core backend-feature violation, got: {err:?}"
+    );
+}
+
+#[test]
+fn synthetic_backend_feature_mismatch_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    graph.set_feature("bitcoin-rs-node", "rocksdb", &["bitcoin-rs-chain/fjall"]);
+
+    let err = graph
+        .validate()
+        .expect_err("mismatched backend feature forwarding must fail");
+    assert!(
+        err.iter().any(|line| {
+            line.contains("without matching forwarding")
+                && line.contains("bitcoin-rs-node")
+                && line.contains("rocksdb")
+        }),
+        "expected backend-feature mismatch violation, got: {err:?}"
+    );
+}
+
+#[test]
+fn real_adapters_forward_their_backend_features() {
+    let graph = WorkspaceGraph::from_cargo_metadata();
+    graph
+        .validate()
+        .expect("real workspace feature tables must satisfy the forwarding rules");
+}
+
+#[test]
 fn mempool_writer_source_scan_passes() {
     let WriterScanResult {
         violations,

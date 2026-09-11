@@ -95,10 +95,19 @@ Owners:
   confined to:
   1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
      backend selection to operators and packaging scripts.
-  2. Services-tier adapter crates (Layer 2) whose features exist solely so `-p`
+  2. Services-tier adapter crates (`bitcoin-rs-chain`, `bitcoin-rs-utxo`,
+     `bitcoin-rs-p2p`, `bitcoin-rs-index`) whose features exist solely so `-p`
      package builds propagate backend selection into `bitcoin-rs-storage`.
+  3. `bitcoin-rs-storage` itself, which owns the concrete backend engine
+     dependencies and exposes them through the `KvStore` facade.
 - Crates in Layer 0 (Core) and Layer 3 (Surface / RPC) must never define or
   forward storage backend features.
+- `bitcoin-rs-mempool` and `bitcoin-rs-mining` do not own storage and must not
+  define or forward backend feature names; an empty `rocksdb = []` marker
+  counts as defining a backend feature and is forbidden.
+- `bitcoin-rs-node` and `bitcoin-rs` may forward backend selection only into
+  engine-selecting crates (`bitcoin-rs-storage`, `bitcoin-rs-chain`,
+  `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-index`).
 - `fjall` is the default shipped product backend. `redb` and `rocksdb` are
   retained shipped alternatives and independent product-matrix comparisons.
   MDBX had only a diagnostic role and no current consumer; it is removed as a
@@ -240,7 +249,8 @@ Owners:
     layer table, verifies `bitcoin-rs-storage` exclusively owns storage engine
     dependencies, confirms `bitcoin-rs-rpc` has no dependency on storage and
     forwards no backend features, and verifies backend feature forwarding is
-    confined to operator tiers and service adapters.
+    confined to operator tiers and service adapters, and rejects empty
+    backend markers on crates that do not own an engine.
     It also rejects mempool dependencies on transaction consumers, including
     the same-layer P2P edge; `transaction_consumers_can_depend_on_mempool`
     and `mempool_cannot_depend_on_transaction_consumers` exercise the allowed

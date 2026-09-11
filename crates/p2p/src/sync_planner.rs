@@ -3,7 +3,6 @@
 //! Ownership constraints are defined by the normative architecture contract
 //! (`docs/contracts/architecture.md`).
 
-
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -159,8 +158,9 @@ impl SyncPlanner {
         now: Instant,
     ) -> (Option<SyncAction>, Option<ColdFrontHedge>) {
         let apply_side_busy = self.apply_side_busy(next_expected);
+        let mut cold_front_hedge = None;
         if let Some(height) = next_apply_height {
-            let hedge = self.window.observe_cold_front(height, apply_side_busy, now);
+            cold_front_hedge = self.window.observe_cold_front(height, apply_side_busy, now);
             if let Some(addr) = self.window.observe_stall(height, apply_side_busy, now) {
                 return (
                     Some(SyncAction::Disconnect {
@@ -172,26 +172,19 @@ impl SyncPlanner {
                     None,
                 );
             }
-            if let Some((owner, front_hash)) = hedge {
-                // evaluated after pending-timeout conviction below
-            }
         }
-        let timed_out = self.window.observe_pending_timeout(apply_side_busy, now);
-          if let Some(addr) = timed_out {
-              return (Some(SyncAction::Disconnect {
-                  addr,
-                  reason: SyncDisconnectReason::PendingTimeout,
-              }), None);
-          }
+        if let Some(addr) = self.window.observe_pending_timeout(apply_side_busy, now) {
+            return (
+                Some(SyncAction::Disconnect {
+                    addr,
+                    reason: SyncDisconnectReason::PendingTimeout,
+                }),
+                None,
+            );
+        }
         (
-            if let Some((owner, front_hash)) = hedge {
-              return (None, Some(ColdFrontHedge { owner, front_hash }));
-          }
-          timed_out.map(|addr| SyncAction::Disconnect {
-                addr,
-                reason: SyncDisconnectReason::PendingTimeout,
-            }),
             None,
+            cold_front_hedge.map(|(owner, front_hash)| ColdFrontHedge { owner, front_hash }),
         )
     }
 }
