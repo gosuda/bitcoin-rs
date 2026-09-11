@@ -57,7 +57,7 @@ Owners:
     network, or filesystem I/O.
   - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
     batching primitives, and backend engine drivers.
-  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-utxo`,
+  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
     `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
     `bitcoin-rs-mining`. Domain services and capability runtimes.
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
@@ -65,8 +65,14 @@ Owners:
     depends on `consensus` for BIP9 parameters and the BIP113 locktime
     cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
     candidate selection and `chain` for candidate header/work/time context.
+    `p2p` depends on `mempool` for the transaction inventory view and
+    committed-mutation relay consumer. This same-layer edge keeps peer
+    protocol mechanics with their consumer; `mempool` must not depend on
+    `p2p`, `rpc`, `node`, or the binary. Admission retains peer attribution
+    as data without owning connections or runtime assembly. The
+    `g17_dependency_direction` gate checks this boundary explicitly.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
-    handlers.
+    handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`. Daemon assembly,
     subsystem lifecycle coordination, and CLI binary entry points.
 - **Explicit non-goal**: Layer numbers do not justify speculative new crates or
@@ -77,8 +83,7 @@ Owners:
 ### `ARCH-02`: Exclusive storage engine dependency ownership
 
 - `bitcoin-rs-storage` is the sole crate in the workspace permitted to depend on
-  underlying storage engine crates (`fjall`, `redb`, `rust-rocksdb`,
-  `signet-libmdbx`).
+  underlying storage engine crates (`fjall`, `redb`, `rust-rocksdb`).
 - No crate outside `bitcoin-rs-storage` may name a storage engine dependency in
   `[dependencies]`, `[build-dependencies]`, or `[dev-dependencies]`.
 - All higher layers interact with persistent state through the `KvStore` facade
@@ -86,7 +91,7 @@ Owners:
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
-- Backend feature forwarding (`fjall`, `redb`, `rocksdb`, `mdbx`) is strictly
+- Backend feature forwarding (`fjall`, `redb`, `rocksdb`) is strictly
   confined to:
   1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
      backend selection to operators and packaging scripts.
@@ -94,6 +99,17 @@ Owners:
      package builds propagate backend selection into `bitcoin-rs-storage`.
 - Crates in Layer 0 (Core) and Layer 3 (Surface / RPC) must never define or
   forward storage backend features.
+- `fjall` is the default shipped product backend. `redb` and `rocksdb` are
+  retained shipped alternatives and independent product-matrix comparisons.
+  MDBX had only a diagnostic role and no current consumer; it is removed as a
+  complete ownership unit. Existing MDBX datadirs are not migrated or opened.
+- `crates/node/src/storage_backend.rs` is the sole owner of concrete runtime
+  backend construction in the node. Chainstate and txindex each cross that
+  boundary once, then immediately compose backend-neutral capabilities for
+  undo, pruning, journal, indexing, and footprint inspection. The consumer
+  visitor is only a composition seam; `KvStore` remains the owner of reads,
+  writes, batches, and durability. The txindex redb lane retains its specialized
+  fixed-width store rather than being widened to the generic redb adapter.
 
 ### `ARCH-04`: RPC surface independence from storage
 
@@ -118,6 +134,16 @@ Owners:
   schemas in their owning crates. `bitcoin-rs-mining` owns `Candidate`,
   `BlockTemplate`, `MiningInfo`, and `MiningControl`. RPC maps those types onto
   BIP22/BIP23 JSON and does not cache templates or long-poll.
+- `bitcoin-rs-mempool` owns transaction admission preparation and retry,
+  orphan bodies and their indexes, ready-orphan work, and recent rejects
+  through the shared `MempoolGateway`. `bitcoin-rs-p2p` owns the transaction
+  inventory implementation, missing-parent requests, source-connection checks,
+  and the bounded transaction relay queue, worker, and saturation policy.
+  Node supplies the chain view, connects committed admission results to relay
+  and mining, and owns channel wiring and worker startup/shutdown. It keeps no
+  second admission-state store or transaction policy implementation. Admission
+  sequencing follows [MPL-04](mempool-mutations.md); wire behavior and its
+  deviations follow [P2P-01](p2p-wire.md).
 - `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
   resolution and validation (`UserConfig` layers → `NodeConfig`), the mining
   generation coordinator keyed by `(applied_tip_hash, mempool_sequence)`,
@@ -126,6 +152,14 @@ Owners:
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
   TOML parsing. Applied-tip mutation is owned by the chainstate facade
   (`ARCH-07`), not by a public field bag of subsystem handles.
+- `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
+  transport, mempool sequence projection, and live notifier enumeration.
+  `bitcoin-rs-node` constructs and wires the publisher and continues to own when
+  committed chain effects are emitted. The same live publisher is the source for
+  `getzmqnotifications`; node does not keep a parallel notifier metadata model.
+  The `g17_dependency_direction` gate pins the external `zmq` dependency to the
+  surface crate and permits node only to forward `bitcoin-rs-rpc/zmq`.
+- The composition root (`NodeState`, `BlockSync`, reorg logic, mining) dispatches `ChainFollowers` while the `ChainTransition` is still held, then calls `finish` to release the chain transition reservation. Convenience methods that finish before returning (`apply_block`, `disconnect_block`) do not dispatch followers. RPC, `BlockLog`, hash/zmq, `TxIndex` wake, sequence `C`/`D`, mining generation, and admission run from that dispatch. Mempool eviction stays inside `apply`.
 - `UserConfig::overlay` applies a later layer field-wise: a set field replaces
   the earlier value; an unset field leaves it. Nested override structs merge
   the same way, including `ChainstateJournalOverrides` and `MiningOverrides`. Proof:
@@ -207,6 +241,10 @@ Owners:
     dependencies, confirms `bitcoin-rs-rpc` has no dependency on storage and
     forwards no backend features, and verifies backend feature forwarding is
     confined to operator tiers and service adapters.
+    It also rejects mempool dependencies on transaction consumers, including
+    the same-layer P2P edge; `transaction_consumers_can_depend_on_mempool`
+    and `mempool_cannot_depend_on_transaction_consumers` exercise the allowed
+    and forbidden directions.
 - Manifest enforcement:
   - Root `Cargo.toml`: workspace member list and package versions.
   - `crates/storage/Cargo.toml`: engine dependency definitions.

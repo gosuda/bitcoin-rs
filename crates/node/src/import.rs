@@ -6,7 +6,11 @@
 //! file declares the contract those commits fill in.
 
 use anyhow::{Context as _, Result};
+
 use bitcoin_rs_primitives::{Block, Hash256};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 
 use crate::state::NodeState;
 
@@ -44,11 +48,19 @@ pub fn import_block(state: &NodeState, block_bytes: &[u8]) -> Result<ImportOutco
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin_rs_primitives::Block;
+    use bitcoin_rs_primitives::BlockHash;
+    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::Header;
+    use bitcoin_rs_primitives::OutPoint;
+    use bitcoin_rs_primitives::Tx;
+    use bitcoin_rs_primitives::TxIn;
+    use bitcoin_rs_primitives::TxOut;
+    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::consensus_bytes;
     use bitcoin_rs_primitives::encode::double_sha256;
-    use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    };
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
     use tempfile::tempdir;
 
     const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
@@ -201,7 +213,7 @@ mod tests {
     }
 
     fn mine_header_to_declared_target(header: &mut Header) -> Result<()> {
-        while !pow_met(header.bits, header.compute_hash().0) {
+        while !pow_met(header.bits.to_consensus(), header.compute_hash().0) {
             header.nonce = header
                 .nonce
                 .checked_add(1)
@@ -211,7 +223,7 @@ mod tests {
     }
 
     fn mine_block_to_declared_target(block: &mut Block) -> Result<()> {
-        while !pow_met(block.header.bits, block.block_hash().0) {
+        while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
             block.header.nonce = block
                 .header
                 .nonce
@@ -227,7 +239,7 @@ mod tests {
         let mut block = Block::consensus_decode(&genesis_bytes)?;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.header.bits = 0x0010_0001;
+        block.header.bits = CompactTarget::from_consensus(0x0010_0001);
 
         let block_bytes = consensus_bytes(&block);
 
@@ -245,8 +257,8 @@ mod tests {
         assert!(
             error.chain().any(|cause| {
                 matches!(
-                    cause.downcast_ref::<crate::state::ApplyError>(),
-                    Some(crate::state::ApplyError::ProofOfWork { .. })
+                    cause.downcast_ref::<crate::apply::error::ApplyError>(),
+                    Some(crate::apply::error::ApplyError::ProofOfWork { .. })
                 )
             }),
             "error chain should contain ProofOfWork rejection: {error:?}"
@@ -271,8 +283,8 @@ mod tests {
         let mut block = genesis_block.clone();
         block.header.prev_blockhash = genesis_block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.header.bits = 0x207f_ffff;
-        block.txs[0].inputs[0].script_sig = vec![1, 1];
+        block.header.bits = CompactTarget::from_consensus(0x207f_ffff);
+        block.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 1]);
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         mine_block_to_declared_target(&mut block)?;
@@ -292,8 +304,8 @@ mod tests {
         assert!(
             error.chain().any(|cause| {
                 matches!(
-                    cause.downcast_ref::<crate::state::ApplyError>(),
-                    Some(crate::state::ApplyError::TargetAboveLimit)
+                    cause.downcast_ref::<crate::apply::error::ApplyError>(),
+                    Some(crate::apply::error::ApplyError::TargetAboveLimit)
                 )
             }),
             "error chain should contain TargetAboveLimit rejection: {error:?}"
@@ -316,8 +328,8 @@ mod tests {
         let mut block = Block::consensus_decode(&genesis_bytes)?;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.header.bits = 0x207e_ffff;
-        block.txs[0].inputs[0].script_sig = vec![1, 1];
+        block.header.bits = CompactTarget::from_consensus(0x207e_ffff);
+        block.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 1]);
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         mine_block_to_declared_target(&mut block)?;
@@ -337,8 +349,8 @@ mod tests {
         assert!(
             error.chain().any(|cause| {
                 matches!(
-                    cause.downcast_ref::<crate::state::ApplyError>(),
-                    Some(crate::state::ApplyError::NbitsNonRetargetMismatch {
+                    cause.downcast_ref::<crate::apply::error::ApplyError>(),
+                    Some(crate::apply::error::ApplyError::NbitsNonRetargetMismatch {
                         actual: 0x207e_ffff,
                         expected: 0x207f_ffff,
                         height: 1,
@@ -365,7 +377,7 @@ mod tests {
         let mut follow_up = Block::consensus_decode(&genesis_bytes)?;
         follow_up.header.prev_blockhash = follow_up.block_hash();
         follow_up.header.time = follow_up.header.time.saturating_add(1);
-        follow_up.txs[0].inputs[0].script_sig = vec![1, 1];
+        follow_up.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 1]);
         follow_up.header.merkle_root = compute_merkle_root(&follow_up)
             .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
         mine_block_to_declared_target(&mut follow_up)?;
@@ -395,7 +407,7 @@ mod tests {
         let mut follow_up = Block::consensus_decode(&genesis_bytes)?;
         follow_up.header.prev_blockhash = follow_up.block_hash();
         follow_up.header.time = follow_up.header.time.saturating_add(1);
-        follow_up.txs[0].inputs[0].script_sig = vec![1, 1];
+        follow_up.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 1]);
         follow_up.header.merkle_root = compute_merkle_root(&follow_up)
             .ok_or_else(|| anyhow::anyhow!("follow-up block should have merkle root"))?;
         mine_block_to_declared_target(&mut follow_up)?;
@@ -421,20 +433,20 @@ mod tests {
         let mut block = Block::consensus_decode(&genesis_bytes)?;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.txs[0].inputs[0].script_sig = vec![1, 1];
+        block.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 1]);
         block.txs.push(Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0_u8; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         });
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
@@ -486,7 +498,7 @@ mod tests {
         let mut coinbase_block = genesis_block.clone();
         coinbase_block.header.prev_blockhash = genesis_block.block_hash();
         coinbase_block.header.time = coinbase_block.header.time.saturating_add(1);
-        coinbase_block.txs[0].inputs[0].script_sig = vec![1, 1];
+        coinbase_block.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 1]);
         coinbase_block.header.merkle_root = compute_merkle_root(&coinbase_block)
             .ok_or_else(|| anyhow::anyhow!("height-1 block should have merkle root"))?;
         mine_block_to_declared_target(&mut coinbase_block)?;
@@ -497,20 +509,20 @@ mod tests {
         let mut block = coinbase_block;
         block.header.prev_blockhash = block.block_hash();
         block.header.time = block.header.time.saturating_add(1);
-        block.txs[0].inputs[0].script_sig = vec![1, 2];
+        block.txs[0].inputs[0].script_sig = Script::from_bytes(vec![1, 2]);
         block.txs.push(Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(immature_coinbase_txid, 0),
-                script_sig: Vec::new(),
-                sequence: u32::MAX,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         });
 
         let Err(error) = state.check_coinbase_maturity(&block, 2) else {
@@ -520,10 +532,12 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::state::ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip {
-                    bip: "COINBASE_MATURITY",
-                    ..
-                })
+                crate::apply::error::ApplyError::Consensus(
+                    bitcoin_rs_consensus::ConsensusError::Bip {
+                        bip: "COINBASE_MATURITY",
+                        ..
+                    }
+                )
             ),
             "error should be COINBASE_MATURITY rejection: {error:?}"
         );
@@ -597,7 +611,7 @@ mod tests {
         let synthetic_tip = seed_synthetic_header_tip(&state, 499)?;
 
         block.header.prev_blockhash = BlockHash(synthetic_tip.hash);
-        block.txs[0].inputs[0].script_sig = Vec::new();
+        block.txs[0].inputs[0].script_sig = Script::from_bytes(Vec::new());
         block.header.merkle_root = compute_merkle_root(&block)
             .ok_or_else(|| anyhow::anyhow!("mutated block should have merkle root"))?;
         mine_block_to_declared_target(&mut block)?;
@@ -649,7 +663,7 @@ mod tests {
                 prev_blockhash,
                 merkle_root: Hash256::from_le_bytes(&merkle),
                 time: current_height,
-                bits,
+                bits: CompactTarget::from_consensus(bits),
                 nonce: 0,
             };
             mine_header_to_declared_target(&mut header)?;

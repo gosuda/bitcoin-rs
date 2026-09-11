@@ -1,7 +1,7 @@
 //! Shared support for the Core parity vertical gate.
 //!
 //! Module map: [`limits`] holds the enforced ceilings, [`fixture`] the strict
-//! bounded corpus loader, [`http`] the Content-Length-driven response
+//! bounded corpus loader, [`http`] the status-or-Content-Length response
 //! decoder, [`chain`] the deterministic regtest seed chain, [`harness`] the
 //! RAII node/server pair, [`compare`] the structural comparator, and
 //! [`manifest_check`] the authority check against the const `MANIFEST`.

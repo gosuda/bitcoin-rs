@@ -37,8 +37,12 @@ pub mod peer_info;
 pub mod peer_table;
 /// Runtime owner for P2P control state and workers.
 pub mod service;
+/// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
+pub mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
+/// Bounded transaction announcements and their peer relay worker.
+pub mod tx_relay;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
@@ -50,6 +54,7 @@ pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, PeerSta
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
+pub use inv::request_missing_parents;
 pub use listener::{ListenerExtras, spawn_outbound_connection};
 pub use peer::{
     AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
@@ -63,7 +68,12 @@ pub use service::{
     P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
     apply_network_active,
 };
+pub use socket::configure_peer_stream;
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
+pub use tx_relay::{
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
+    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+};
 pub use wire::{Message, PeerError};
 
 pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};

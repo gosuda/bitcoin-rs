@@ -234,7 +234,7 @@ pub(crate) fn write_bounded(
         Err(e) => return Err(EvidenceError::Io(e)),
     }
 
-    // 2-4. Create temp, write, fsync.
+    // 2-7. Stage and publish the replacement.
     let result = (|| -> Result<(), EvidenceError> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -245,39 +245,38 @@ pub(crate) fn write_bounded(
         file.write_all(b"\n")?;
         file.sync_all()?;
         drop(file);
+
+        // 5. Validate current; rotate valid current to `.prev`.
+        // Never overwrite a known-valid `.prev` with an invalid current.
+        if current_path.exists() {
+            match std::fs::read(&current_path) {
+                Ok(data) if data.len() <= MAX_FILE_BYTES && validate(&data) => {
+                    // Current is valid; rotate to .prev.
+                    let _ = std::fs::remove_file(&prev_path);
+                    std::fs::rename(&current_path, &prev_path)?;
+                }
+                _ => {
+                    // Current is invalid or oversized; remove it.
+                    // Keep existing .prev (never overwrite valid .prev with invalid current).
+                    let _ = std::fs::remove_file(&current_path);
+                }
+            }
+        }
+
+        // 6. Rename temp to current.
+        std::fs::rename(&tmp_path, &current_path)?;
+
+        // 7. Fsync the data-dir root.
+        sync_dir(dir)?;
+
         Ok(())
     })();
 
-    if let Err(e) = result {
-        // 8. Best-effort temp cleanup on error.
+    if result.is_err() {
+        // 8. Best-effort temp cleanup on every returned failure.
         let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
     }
-
-    // 5. Validate current; rotate valid current to `.prev`.
-    // Never overwrite a known-valid `.prev` with an invalid current.
-    if current_path.exists() {
-        match std::fs::read(&current_path) {
-            Ok(data) if data.len() <= MAX_FILE_BYTES && validate(&data) => {
-                // Current is valid; rotate to .prev.
-                let _ = std::fs::remove_file(&prev_path);
-                std::fs::rename(&current_path, &prev_path)?;
-            }
-            _ => {
-                // Current is invalid or oversized; remove it.
-                // Keep existing .prev (never overwrite valid .prev with invalid current).
-                let _ = std::fs::remove_file(&current_path);
-            }
-        }
-    }
-
-    // 6. Rename temp to current.
-    std::fs::rename(&tmp_path, &current_path)?;
-
-    // 7. Fsync the data-dir root.
-    sync_dir(dir)?;
-
-    Ok(())
+    result
 }
 /// missing or invalid (oversized or unreadable). Never selects by greater
 /// height or newer time.
@@ -733,6 +732,34 @@ mod tests {
     // -----------------------------------------------------------------------
     // A2.1: Bounded file protocol tests
     // -----------------------------------------------------------------------
+
+    // `write_bounded` protocol step 8 and recovery contract RCV-03 require
+    // staged, non-authoritative tails not to survive a returned failure.
+    #[test]
+    fn witness_rotation_failure_removes_staged_temp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let genesis = "aaaa";
+        let w1 = AppliedTipWitness::new(genesis, 1, 100, "aaa", 1000);
+        write_witness(dir.path(), &w1).expect("write current");
+
+        // A directory at the .prev path makes current -> .prev rotation fail
+        // after the replacement has already been staged and fsynced.
+        std::fs::create_dir(dir.path().join(WITNESS_PREV)).expect("block prev rotation");
+        let w2 = AppliedTipWitness::new(genesis, 2, 200, "bbb", 2000);
+        assert!(
+            write_witness(dir.path(), &w2).is_err(),
+            "rotation failure must propagate"
+        );
+        assert!(
+            !dir.path().join(WITNESS_TMP).exists(),
+            "returned failure must remove staged temp"
+        );
+        assert_eq!(
+            read_witness(dir.path(), genesis),
+            Some(w1),
+            "failed rotation keeps the current witness readable"
+        );
+    }
 
     #[test]
     fn witness_stage_failure_preserves_bounded_current_prev() {

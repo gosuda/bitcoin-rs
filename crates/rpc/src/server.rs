@@ -13,8 +13,16 @@ use crate::error::RpcError;
 use crate::handlers::Handler;
 
 const MAX_HEADER_BYTES: usize = 16 * 1_024;
+
 const MAX_BODY_BYTES: usize = 16 * 1_024 * 1_024;
+
 const POLL_INTERVAL: core::time::Duration = core::time::Duration::from_millis(100);
+
+const PUBLIC_ESPLORA_METHODS: &[&str] = &["GET", "POST", "OPTIONS"];
+
+const PUBLIC_ESPLORA_HEADERS: &[&str] = &["Content-Type"];
+
+const PUBLIC_ESPLORA_EXPOSE_HEADERS: &[&str] = &["X-Total-Results"];
 
 /// Synchronous HTTP/1.1 JSON-RPC server.
 pub struct RpcServer {
@@ -97,6 +105,7 @@ impl RpcServer {
     }
 
     fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
+        configure_rpc_stream(&stream)?;
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
@@ -129,6 +138,12 @@ impl RpcServer {
     }
 }
 
+/// Applies HTTP-session socket policy: `TCP_NODELAY` so a small response is
+/// not delayed by Nagle after the status line.
+fn configure_rpc_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)
+}
+
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
@@ -136,6 +151,7 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
 ) -> io::Result<()> {
+    configure_rpc_stream(&stream)?;
     stream.set_read_timeout(Some(idle_timeout))?;
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(stream);
@@ -152,54 +168,79 @@ fn serve_connection(
             }
         };
         let keep_alive = request.keep_alive;
-        match classify(&request.method, &request.path) {
-            HttpRoute::Rest { path, query } => {
-                let response = crate::rest::route(handler.context(), path, query, rest_enabled);
-                write_response(reader.get_mut(), &response, keep_alive)?;
-            }
-            HttpRoute::EsploraGet { path, query } => {
-                let response = crate::esplora::route(handler, path, query);
-                write_response(reader.get_mut(), &response, keep_alive)?;
-            }
-            HttpRoute::EsploraPost { path } => {
-                match crate::esplora::route_post(handler, path, &request.body) {
-                    Some(response) => {
-                        write_response(reader.get_mut(), &response, keep_alive)?;
-                    }
-                    None => {
-                        write_status(reader.get_mut(), 404, "Not Found", b"not found", keep_alive)?;
-                    }
-                }
-            }
-            HttpRoute::JsonRpc => {
-                if !auth.validate_header(request.authorization.as_deref()) {
-                    write_status(
-                        reader.get_mut(),
-                        401,
-                        "Unauthorized",
-                        b"unauthorized",
-                        false,
-                    )?;
-                    return Ok(());
-                }
-                let response = handle_json(handler, &request.body);
-                if let Some(body) = response.body.as_ref() {
-                    write_json(
-                        reader.get_mut(),
-                        response.status,
-                        response.reason,
-                        body,
-                        keep_alive,
-                    )?;
-                } else {
-                    write_status(reader.get_mut(), 204, "No Content", b"", keep_alive)?;
-                }
-            }
+        if dispatch_http_request(reader.get_mut(), &request, auth, handler, rest_enabled)? {
+            return Ok(());
         }
         if !keep_alive {
             return Ok(());
         }
     }
+}
+
+fn dispatch_http_request(
+    stream: &mut TcpStream,
+    request: &HttpRequest,
+    auth: &Auth,
+    handler: &Handler,
+    rest_enabled: bool,
+) -> io::Result<bool> {
+    let keep_alive = request.keep_alive;
+    match classify(&request.method, &request.path) {
+        HttpRoute::Rest { path, query } => {
+            let response = crate::rest::route(handler.context(), path, query, rest_enabled);
+            write_response(
+                stream,
+                &response,
+                keep_alive,
+                HttpSurface::CoreRest.cors_policy(),
+            )?;
+        }
+        HttpRoute::EsploraGet {
+            surface,
+            path,
+            query,
+        } => {
+            let response = crate::esplora::route(handler, path, query);
+            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+        }
+        HttpRoute::EsploraPost { surface, path } => {
+            let response =
+                crate::esplora::route_post(handler, path, &request.body).unwrap_or_else(|| {
+                    crate::rest::Response {
+                        status: 404,
+                        reason: "Not Found",
+                        content_type: "text/plain",
+                        body: b"not found".to_vec(),
+                    }
+                });
+            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+        }
+        HttpRoute::Preflight { surface } => {
+            let response = crate::rest::Response {
+                status: 204,
+                reason: "No Content",
+                content_type: "text/plain",
+                body: Vec::new(),
+            };
+            write_response(stream, &response, keep_alive, surface.cors_policy())?;
+        }
+        HttpRoute::NotFound => {
+            write_status(stream, 404, "Not Found", b"not found", keep_alive)?;
+        }
+        HttpRoute::JsonRpc => {
+            if !auth.validate_header(request.authorization.as_deref()) {
+                write_status(stream, 401, "Unauthorized", b"unauthorized", false)?;
+                return Ok(true);
+            }
+            let response = handle_json(handler, &request.body);
+            if let Some(body) = response.body.as_ref() {
+                write_json(stream, response.status, response.reason, body, keep_alive)?;
+            } else {
+                write_status(stream, 204, "No Content", b"", keep_alive)?;
+            }
+        }
+    }
+    Ok(false)
 }
 
 struct HttpRequest {
@@ -237,7 +278,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
             "invalid request line",
         ));
     };
-    if !matches!(method, "POST" | "GET") {
+    if !matches!(method, "POST" | "GET" | "OPTIONS") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid request method",
@@ -286,7 +327,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequ
     }
 
     let content_length = match (method, content_length) {
-        ("GET", length) => length.unwrap_or(0),
+        ("GET" | "OPTIONS", length) => length.unwrap_or(0),
         (_, Some(length)) => length,
         (_, None) => {
             return Err(io::Error::new(
@@ -504,12 +545,15 @@ fn write_status(
     body: &[u8],
     keep_alive: bool,
 ) -> io::Result<()> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    write!(
-        stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
-        body.len()
-    )?;
+    let head = ResponseHead {
+        status,
+        reason,
+        content_type: "application/json",
+        content_length: body.len(),
+        keep_alive,
+        cors_policy: CorsPolicy::Disabled,
+    };
+    write_headers(stream, &head)?;
     stream.write_all(body)?;
     stream.flush()
 }
@@ -523,19 +567,86 @@ fn split_path_query(path: &str) -> (&str, &str) {
 /// Core REST owns `/rest/`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
-    Rest { path: &'a str, query: &'a str },
-    EsploraGet { path: &'a str, query: &'a str },
-    EsploraPost { path: &'a str },
+    Rest {
+        path: &'a str,
+        query: &'a str,
+    },
+    EsploraGet {
+        surface: HttpSurface,
+        path: &'a str,
+        query: &'a str,
+    },
+    EsploraPost {
+        surface: HttpSurface,
+        path: &'a str,
+    },
+    Preflight {
+        surface: HttpSurface,
+    },
+    NotFound,
     JsonRpc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpSurface {
+    JsonRpc,
+    CoreRest,
+    EsploraPublic,
+    EsploraBackend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CorsPolicy {
+    Disabled,
+    Public {
+        methods: &'static [&'static str],
+        headers: &'static [&'static str],
+        expose: &'static [&'static str],
+    },
+}
+
+impl HttpSurface {
+    const fn cors_policy(self) -> CorsPolicy {
+        match self {
+            Self::EsploraPublic => CorsPolicy::Public {
+                methods: PUBLIC_ESPLORA_METHODS,
+                headers: PUBLIC_ESPLORA_HEADERS,
+                expose: PUBLIC_ESPLORA_EXPOSE_HEADERS,
+            },
+            Self::JsonRpc | Self::CoreRest | Self::EsploraBackend => CorsPolicy::Disabled,
+        }
+    }
+}
+
+fn surface(path: &str) -> HttpSurface {
+    if path.starts_with("/rest/") {
+        return HttpSurface::CoreRest;
+    }
+    match crate::esplora::namespace(path) {
+        Some((crate::esplora::Surface::Public, _)) => HttpSurface::EsploraPublic,
+        Some((crate::esplora::Surface::Backend, _)) => HttpSurface::EsploraBackend,
+        None => HttpSurface::JsonRpc,
+    }
 }
 
 fn classify<'a>(method: &str, raw_path: &'a str) -> HttpRoute<'a> {
     let (path, query) = split_path_query(raw_path);
-    match method {
-        "GET" if path.starts_with("/rest/") => HttpRoute::Rest { path, query },
-        "GET" => HttpRoute::EsploraGet { path, query },
-        _ if crate::esplora::namespace(path).is_some() => HttpRoute::EsploraPost { path },
-        _ => HttpRoute::JsonRpc,
+    let surface = surface(path);
+    match (method, surface) {
+        ("GET", HttpSurface::CoreRest) => HttpRoute::Rest { path, query },
+        ("GET", HttpSurface::EsploraPublic | HttpSurface::EsploraBackend) => {
+            HttpRoute::EsploraGet {
+                surface,
+                path,
+                query,
+            }
+        }
+        ("POST", HttpSurface::EsploraPublic | HttpSurface::EsploraBackend) => {
+            HttpRoute::EsploraPost { surface, path }
+        }
+        ("OPTIONS", HttpSurface::EsploraPublic) => HttpRoute::Preflight { surface },
+        ("POST", HttpSurface::JsonRpc) => HttpRoute::JsonRpc,
+        _ => HttpRoute::NotFound,
     }
 }
 
@@ -543,18 +654,67 @@ fn write_response(
     stream: &mut TcpStream,
     response: &crate::rest::Response,
     keep_alive: bool,
+    cors_policy: CorsPolicy,
 ) -> io::Result<()> {
-    let connection = if keep_alive { "keep-alive" } else { "close" };
-    write!(
-        stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
-        response.status,
-        response.reason,
-        response.content_type,
-        response.body.len()
-    )?;
+    let head = ResponseHead {
+        status: response.status,
+        reason: response.reason,
+        content_type: response.content_type,
+        content_length: response.body.len(),
+        keep_alive,
+        cors_policy,
+    };
+    write_headers(stream, &head)?;
     stream.write_all(&response.body)?;
     stream.flush()
+}
+
+struct ResponseHead<'a> {
+    status: u16,
+    reason: &'a str,
+    content_type: &'a str,
+    content_length: usize,
+    keep_alive: bool,
+    cors_policy: CorsPolicy,
+}
+
+fn write_headers(stream: &mut TcpStream, head: &ResponseHead<'_>) -> io::Result<()> {
+    let connection = if head.keep_alive {
+        "keep-alive"
+    } else {
+        "close"
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n",
+        head.status, head.reason, head.content_type
+    )?;
+    if let CorsPolicy::Public {
+        methods,
+        headers,
+        expose,
+    } = head.cors_policy
+    {
+        write!(stream, "Access-Control-Allow-Origin: *\r\n")?;
+        write_header_list(stream, "Access-Control-Allow-Methods", methods)?;
+        write_header_list(stream, "Access-Control-Allow-Headers", headers)?;
+        write_header_list(stream, "Access-Control-Expose-Headers", expose)?;
+    }
+    if head.status != 204 {
+        write!(stream, "Content-Length: {}\r\n", head.content_length)?;
+    }
+    write!(stream, "Connection: {connection}\r\n\r\n")
+}
+
+fn write_header_list(stream: &mut TcpStream, name: &str, values: &[&str]) -> io::Result<()> {
+    write!(stream, "{name}: ")?;
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            write!(stream, ", ")?;
+        }
+        write!(stream, "{value}")?;
+    }
+    write!(stream, "\r\n")
 }
 
 #[cfg(test)]
@@ -564,6 +724,19 @@ mod tests {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::context::Context;
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+
+    #[test]
+    fn configure_rpc_stream_disables_nagle() {
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        configure_rpc_stream(&client).expect("configure client");
+        configure_rpc_stream(&server).expect("configure server");
+        assert!(client.nodelay().expect("client nodelay"));
+        assert!(server.nodelay().expect("server nodelay"));
+    }
 
     #[test]
     #[allow(clippy::expect_used)]
@@ -610,6 +783,7 @@ mod tests {
         assert_eq!(
             classify("GET", "/api/blocks/tip/height"),
             HttpRoute::EsploraGet {
+                surface: HttpSurface::EsploraPublic,
                 path: "/api/blocks/tip/height",
                 query: ""
             }
@@ -617,29 +791,43 @@ mod tests {
         assert_eq!(
             classify("GET", "/esplora/internal/mempool/txs?max_txs=1"),
             HttpRoute::EsploraGet {
+                surface: HttpSurface::EsploraBackend,
                 path: "/esplora/internal/mempool/txs",
                 query: "max_txs=1"
             }
         );
         assert_eq!(
             classify("POST", "/api/tx"),
-            HttpRoute::EsploraPost { path: "/api/tx" }
+            HttpRoute::EsploraPost {
+                surface: HttpSurface::EsploraPublic,
+                path: "/api/tx"
+            }
         );
         assert_eq!(
             classify("POST", "/esplora/internal/txs"),
             HttpRoute::EsploraPost {
+                surface: HttpSurface::EsploraBackend,
                 path: "/esplora/internal/txs"
             }
         );
-        assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
-        assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
         assert_eq!(
-            classify("GET", "/blocks/tip/height"),
-            HttpRoute::EsploraGet {
-                path: "/blocks/tip/height",
-                query: ""
+            classify("OPTIONS", "/api/blocks/tip/height"),
+            HttpRoute::Preflight {
+                surface: HttpSurface::EsploraPublic
             }
         );
+        assert_eq!(
+            classify("OPTIONS", "/esplora/internal/txs"),
+            HttpRoute::NotFound
+        );
+        assert_eq!(
+            classify("OPTIONS", "/rest/chaininfo.json"),
+            HttpRoute::NotFound
+        );
+        assert_eq!(classify("OPTIONS", "/"), HttpRoute::NotFound);
+        assert_eq!(classify("POST", "/"), HttpRoute::JsonRpc);
+        assert_eq!(classify("POST", "/tx"), HttpRoute::JsonRpc);
+        assert_eq!(classify("GET", "/blocks/tip/height"), HttpRoute::NotFound);
     }
 
     #[test]
