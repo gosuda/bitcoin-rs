@@ -1,0 +1,43 @@
+name: Node offline validation inputs
+on:
+  push:
+    branches: [automation/node-splits-20260911]
+    paths: [.github/workflows/node-offline-validation.yml]
+permissions:
+  contents: read
+jobs:
+  public-build-inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: a1178cc884e42b953a041d0c139bc47814b7ccae
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt,clippy
+      - name: Fetch locked public crate sources
+        run: cargo fetch --locked
+      - name: Archive only public source and compiler inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/node-offline-inputs"
+          mkdir -p "$out"
+          git archive --format=tar.gz -o "$out/source.tar.gz" HEAD
+          git rev-parse HEAD > "$out/source-commit.txt"
+          compiler_root="$(dirname "$(dirname "$(rustup which --toolchain 1.95.0 rustc)")")"
+          tar --exclude='./share/doc' --exclude='./share/man' -C "$compiler_root" -czf "$out/rust-toolchain.tar.gz" .
+          cargo_root="${CARGO_HOME:-$HOME/.cargo}"
+          tar -C "$cargo_root" -czf "$out/cargo-registry.tar.gz" registry/cache registry/index
+          rustc --version --verbose > "$out/compiler-version.txt"
+          (cd "$out" && sha256sum source.tar.gz rust-toolchain.tar.gz cargo-registry.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: node-offline-inputs-a1178cc
+          path: ${{ runner.temp }}/node-offline-inputs/
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
