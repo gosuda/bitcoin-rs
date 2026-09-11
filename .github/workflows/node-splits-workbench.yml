@@ -5,30 +5,33 @@ on:
 permissions:
   contents: read
 jobs:
-  offline-tools:
+  refactor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: a1178cc884e42b953a041d0c139bc47814b7ccae
           persist-credentials: false
+          fetch-depth: 1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: '1.95.0'
           components: rustfmt,clippy
-      - name: Resolve locked dependency archive
-        run: cargo +1.95.0 fetch --locked
-      - name: Archive only public toolchain and registry inputs
-        run: |
-          mkdir -p /tmp/node-split-tools
-          python3 -m pip download --only-binary=:all: --python-version 313 --platform manylinux2014_x86_64 --implementation cp --abi cp313 --no-deps --dest /tmp/node-split-tools tree-sitter==0.25.2
-          tar -C "$HOME/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu" -cf - bin lib | gzip -1 > /tmp/node-split-tools/rust-1.95.0.tar.gz
-          tar -C "$CARGO_HOME" -cf - registry | gzip -1 > /tmp/node-split-tools/cargo-registry.tar.gz
-          sha256sum /tmp/node-split-tools/* > /tmp/node-split-tools/SHA256SUMS
+      - name: Install the pinned syntax parser
+        run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+      - name: Refactor and validate complete source groups
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/node-split-target
+        run: python3 .github/node-splits/refactor.py
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: node-split-offline-tools
-          path: /tmp/node-split-tools
+          name: node-split-validated-source
+          path: ${{ runner.temp }}/node-split-results
           retention-days: 1
-          compression-level: 0
