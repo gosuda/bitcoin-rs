@@ -18,15 +18,16 @@ crates that do not own storage are not combinations.
 - Adding a Cargo feature is not enough to support a combination. Add a
   row here in the same commit, or do not add the feature.
 
-### `FEAT-02`: No empty backend markers on non-storage crates
+### `FEAT-02`: Backend forwarding follows `ARCH-03`
 
-- **Owner**: `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`.
-- Layer 0 (`consensus`, `script`, `primitives`) and layer 3 (`rpc`)
-  define no `rocksdb` / `fjall` / `redb` / `mdbx` features, even empty.
-- `mempool` and `mining` likewise: they do not own storage, so they do
-  not carry backend feature names. Node forwards backends only into
-  crates that actually select an engine (`storage`, `chain`, `utxo`,
-  `p2p`, `index`).
+- **Owner**: `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`;
+  the validator it calls lives in `bin/bitcoin-rs/tests/support/dependency_graph.rs`.
+- Backend feature ownership and forwarding are governed by the normative
+  `ARCH-03` contract in [architecture.md](architecture.md). In particular,
+  layer 0 and RPC, as well as `mempool` and `mining`, must not define backend
+  feature names; forwarding is limited to storage and the approved service
+  adapters and operator-facing entry points. G17 enforces this constraint.
+- Empty backend markers are not combinations; the matrix lists none.
 
 ## Proven by
 

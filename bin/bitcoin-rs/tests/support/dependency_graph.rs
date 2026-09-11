@@ -29,6 +29,17 @@ pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 /// The node binary.
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
 
+/// Crates permitted to define and forward storage backend feature selection.
+pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 7] = [
+    STORAGE_CRATE,
+    "bitcoin-rs-chain",
+    "bitcoin-rs-utxo",
+    "bitcoin-rs-p2p",
+    "bitcoin-rs-index",
+    NODE_CRATE,
+    BIN_CRATE,
+];
+
 /// Approved layer for each workspace crate.
 ///
 /// Crates not listed here cause the validator to fail closed so the layer
@@ -203,6 +214,17 @@ impl WorkspaceGraph {
             .push(engine.to_owned());
     }
 
+    /// Adds or replaces a synthetic cargo feature for use in negative tests.
+    /// Replacing (rather than merging) keeps each negative test focused on
+    /// the rule it attacks; pass the full implies list the crate really has
+    /// when attacking something else.
+    pub(crate) fn set_feature(&mut self, on: &str, feature: &str, implies: &[&str]) {
+        self.features.entry(on.to_owned()).or_default().insert(
+            feature.to_owned(),
+            implies.iter().map(|s| s.to_string()).collect(),
+        );
+    }
+
     /// Validates the graph and returns either a summary or a list of violations.
     pub(crate) fn validate(&self) -> Result<Validation, Vec<String>> {
         let mut violations = Vec::new();
@@ -268,31 +290,55 @@ impl WorkspaceGraph {
             }
         }
 
-        // 4. Backend feature forwarding is confined to operator tiers and
-        //    services-tier adapters.
+        // 4. Backend feature names must carry a real backend choice, never
+        //    an empty marker. Only the allowed crates may define and forward
+        //    backend features; `mempool`, `mining`, consensus, RPC, etc. must
+        //    not. `bitcoin-rs` and `bitcoin-rs-node` forward into the adapter
+        //    set, adapters forward into `bitcoin-rs-storage`, and storage owns
+        //    the concrete engine dependencies.
         let mut checked_features = 0_usize;
         for (name, feature_map) in &self.features {
-            if name == STORAGE_CRATE || name == RPC_CRATE {
-                continue;
-            }
-            let carries_choice = approved_layer(name) >= 2;
             for (feature, implies) in feature_map {
                 checked_features += 1;
-                let forwards = BACKEND_FEATURES.contains(&feature.as_str())
-                    || implies.iter().any(|entry| {
-                        let entry = entry.trim_start_matches("dep:");
-                        BACKEND_FEATURES
-                            .iter()
-                            .any(|backend| entry.split('/').next() == Some(backend))
-                    });
-                if !forwards || carries_choice || implies.is_empty() {
+                if !BACKEND_FEATURES.contains(&feature.as_str()) {
                     continue;
                 }
-                violations.push(format!(
-                    "`{name}` forwards the backend feature `{feature}`; backend feature \
-                     forwarding above storage is allowed only on node, the binary, and \
-                     the services-tier adapters"
-                ));
+                if !BACKEND_FORWARDING_CRATES.contains(&name.as_str()) {
+                    violations.push(format!(
+                        "`{name}` must not define or forward the backend feature `{feature}`"
+                    ));
+                    continue;
+                }
+                if implies.is_empty() {
+                    violations.push(format!(
+                        "`{name}` defines empty backend marker `{feature}`; backend features \
+                         must forward into storage or an approved adapter that does"
+                    ));
+                    continue;
+                }
+                let forwards = if name == STORAGE_CRATE {
+                    implies.iter().all(|entry| {
+                        let entry = entry.trim_start_matches("dep:");
+                        ENGINE_CRATES.contains(&entry)
+                    })
+                } else {
+                    implies.iter().all(|entry| {
+                        let entry = entry.trim_start_matches("dep:");
+                        let mut parts = entry.split('/');
+                        let target = parts.next().unwrap_or_default();
+                        let forwarded_feature = parts.next().unwrap_or_default();
+                        !parts.next().is_some()
+                            && BACKEND_FORWARDING_CRATES.contains(&target)
+                            && forwarded_feature == feature.as_str()
+                    })
+                };
+                if !forwards {
+                    violations.push(format!(
+                        "`{name}` defines backend feature `{feature}` without matching \
+                         forwarding into an approved adapter or storage crate with the same \
+                         feature name"
+                    ));
+                }
             }
         }
 
