@@ -1,0 +1,26 @@
+name: Node boundaries workbench
+on:
+  push:
+    branches: [automation/node-boundaries-6903f9-20260911]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 6903f91c087aa8bf233d2e2ef64cc6b01d22402e
+          persist-credentials: false
+      - name: Export exact tracked source and its tree manifest
+        run: |
+          mkdir -p /tmp/node-boundaries-input
+          git archive --format=tar.gz --output=/tmp/node-boundaries-input/source.tar.gz HEAD
+          git ls-tree -r HEAD > /tmp/node-boundaries-input/tree.txt
+          git rev-parse HEAD > /tmp/node-boundaries-input/commit.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: node-boundaries-input-6903f9
+          path: /tmp/node-boundaries-input
+          retention-days: 1
