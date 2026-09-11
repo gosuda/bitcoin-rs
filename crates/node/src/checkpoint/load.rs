@@ -191,9 +191,8 @@ pub(super) fn load_payloads(
 ) -> Result<RestoredChainstate, CheckpointError> {
     let chain_tx_count = manifest.applied_tip.chain_tx_count;
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
-    // Header reconstruction initializes counts to zero. Restore the historical
-    // scripts-valid marker on every applied ancestor, not just the tip; the
-    // marker is used for duplicate classification after restart.
+    // Header reconstruction initializes counts to zero. Restore the exact
+    // cumulative count on the applied tip; ancestor counts remain unknown.
     let mut cursor = Some(headers.applied_tip_id);
     while let Some(node_id) = cursor {
         let parent = headers
@@ -206,7 +205,7 @@ pub(super) fn load_payloads(
             if node_id == headers.applied_tip_id {
                 chain_tx_count
             } else {
-                1
+                0
             },
         )?;
         cursor = parent;
