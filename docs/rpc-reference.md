@@ -74,8 +74,8 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `submitblock` | 0.4.0 | Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (scripts-valid), including after a later reorg, is duplicate. |
 | `submitheader` | 0.4.0 | See API-13 in docs/contracts/external-api.md for submitheader behavior. |
 | `prioritisetransaction` | 0.4.0 | Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. See API-23 in docs/contracts/external-api.md for dummy and fee_delta compatibility. |
-| `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. |
-| `generateblock` | 0.4.0 | See API-27 (docs/contracts/external-api.md) for transaction parsing and error semantics. |
+| `generatetoaddress` | 0.4.0 | Assembles, solves, and submits n blocks paying the given address through the mining coordinator. Invalid-output behavior is defined in docs/contracts/external-api.md#API-29. |
+| `generateblock` | 0.4.0 | See API-27 (docs/contracts/external-api.md) for transaction parsing and error semantics. Invalid-output behavior is defined in docs/contracts/external-api.md#API-29. |
 | `getnetworkhashps` | 0.4.0 | Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip. |
 | `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#API-28 for modified_fee units. |
 

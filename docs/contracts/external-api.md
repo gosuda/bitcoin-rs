@@ -19,7 +19,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 `getmininginfo` omitting unset optional fields. `API-26` is
 `estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-27` is
 `generateblock` txid and raw-tx parse errors. `API-28` is
-`getprioritisedtransactions` `modified_fee` in satoshis.
+`getprioritisedtransactions` `modified_fee` in satoshis. `API-29` is Core
+`generatetoaddress` / `generateblock` invalid-output text.
 
 ## Clauses
 
@@ -118,7 +119,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
   The transactions array is required (an explicit `[]` is coinbase-only).
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
-  mempool admission. Extra positional arguments are rejected.
+  mempool admission. Extra positional arguments are rejected. Output parse
+  errors are `API-29`.
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
@@ -443,6 +445,21 @@ owned by [wallet-facing.md](wallet-facing.md).
   present only when `in_mempool`) is the same unit: a JSON number in
   satoshis, matching Core `CAmount`.
 
+
+### `API-29`: generate invalid-output text
+
+- **Owner**: `generateblock_payout_script` in
+  `crates/rpc/src/handlers/util.rs`; `generatetoaddress` in
+  `crates/rpc/src/handlers/mining.rs`.
+- `generatetoaddress` refuses a non-address with `-5`
+  `Error: Invalid address`.
+- `generateblock` tries a descriptor first (`require_checksum = false`).
+  Ranged/multipath descriptors stay `-8`. If Parse fails, the text is
+  tried as an address; a miss is `-5`
+  `Error: Invalid address or descriptor`, matching Core
+  `src/rpc/mining.cpp`. A supplied checksum that fails Parse is refused
+  through that fallback, not CheckChecksum's wording.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -612,5 +629,11 @@ owned by [wallet-facing.md](wallet-facing.md).
 - `API-28`:
   - `crates/rpc/src/handlers/mining.rs` test
     `getprioritisedtransactions_projects_the_overlay`
+
+- `API-29`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `generatetoaddress_rejects_script_hex_and_descriptors`,
+    `generateblock_rejects_garbage_output_like_core`,
+    `generateblock_rejects_invalid_supplied_checksums`
 
 ## Vocabulary
