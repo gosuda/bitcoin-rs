@@ -12,10 +12,10 @@ BASE = '729f0e8691ec25401b8150ea9934c890a37e988a'
 INPUT = '80ab1f18f43ea1f32ef4c27169fcd98063ec482f'
 PLAN_SHA = 'f4cd3394c12e8c4a03be469f589ab333fa5a312814272359919bdd1c3c0170b3'
 STAGES = [
-    ('validation', 'refactor/node-validation-729f0e86', '891163a6f5f9e4c80c7c8e82736961e20ffc1864', 'Restore node cleanup validation and ownership gates'),
-    ('txindex', 'refactor/node-txindex-729f0e86', '52a17119ece5fd3b0a7e768adda9ab0865c027f1', 'Consolidate txindex runtime, query, and reconciliation owners'),
-    ('checkpoint', 'refactor/node-checkpoint-729f0e86', 'a0539b0dd6859b944de9a95fba23458c256154eb', 'Group checkpoint filesystem and periodic worker under one owner'),
-    ('mining', 'fix/node-mining-capabilities-729f0e86', '474d0bf1a9bb876e8d62c09fefaa6f9987736be0', 'Advertise only implemented mining template capabilities'),
+    ('validation', 'refactor/node-validation-729f0e86', 'c42b9dafde6d39db5c2cc5807c082996607471bd', 'Restore node cleanup validation and ownership gates'),
+    ('txindex', 'refactor/node-txindex-729f0e86', '9064e702c179609c728a97a81b66c35430e6e562', 'Consolidate txindex runtime, query, and reconciliation owners'),
+    ('checkpoint', 'refactor/node-checkpoint-729f0e86', '5d79a2cfbdcb9a557e173a1736d2c2316a2fbd81', 'Group checkpoint filesystem and periodic worker under one owner'),
+    ('mining', 'fix/node-mining-capabilities-729f0e86', '489db25553bee81189dfbf09d5b0a3255e0ef047', 'Advertise only implemented mining template capabilities'),
 ]
 ROOT = Path('crates/node/src')
 
@@ -72,6 +72,27 @@ def reconstruct(stage, path):
 def validation(plan):
     replace(ROOT / 'embed.rs', ', clippy::unused_async_trait_impl', '', 5)
     reconstruct(plan['stages'][0], 'bin/bitcoin-rs/tests/support/ownership_scan.rs')
+    # Keep each standalone commit Clippy-clean before the txindex extraction.
+    imports = {
+        'capability.rs': 'Arc, ArcSwap, TxIndexLifecycle, TxIndexRuntime, IndexCapabilities, CapabilityState, TxIndexQueryEngine, IndexProgress, TxQueryError, TxIndexCapabilitySource, CapabilityStatus, txindex_status',
+        'query.rs': 'QUERY_SCAN_ROW_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_BODY_READ_LIMIT, PrefixScanLimit, TxQueryError, TxIndexScan, TxIndexScanRow, Arc, Mutex, IndexCapabilities, TxIndexRuntime, IndexReader, RwLock, BlockTree, TipSnapshot, BlockBodySource, Ordering, TxIndexSnapshot, IndexCapability, Hash256, Block, MAX_SERIALIZED_BLOCK_BYTES, BlockHash, deserialize, TxPosition, TxPositionValue, Tx, Txid, OutPoint, ScriptHash, ScriptLiveScan, SpendingRecord, ScriptIndexSnapshot, ScriptHistoryRecord, ScriptIndexRecord, IndexWatermark, BlockLog, BlockSource, record_at_height, TxIndexQuery, TxIndexInfo, ScriptIndexQuery',
+    }
+    for name, names in imports.items():
+        replace(ROOT / 'txindex_worker' / name, 'use super::*;', 'use super::{' + names + '};', 1)
+    p = ROOT / 'state/tests.rs'
+    replace(p, 'use bitcoin_rs_rpc::context::{BlockLog, PruneService, PruneServiceError};', 'use bitcoin_rs_rpc::context::PruneServiceError;', 1)
+    replace(p, 'use bitcoin_rs_storage::FlatFileBlockStore;\n\n', '', 1)
+    replace(p, 'use parking_lot::RwLock;\n\n', '', 1)
+    replace(p, 'prune::load_pruneheight, ', '', 1)
+    replace(p, 'atomic::{AtomicBool, AtomicU32, Ordering}', 'atomic::Ordering', 1)
+    replace(ROOT / 'state/tests/prune.rs', 'fn prune_to_height_serializes_overlapping_calls() -> anyhow::Result<()> {\n', """fn prune_to_height_serializes_overlapping_calls() -> anyhow::Result<()> {
+    use super::super::prune::load_pruneheight;
+    use bitcoin_rs_rpc::context::{BlockLog, PruneService};
+    use bitcoin_rs_storage::FlatFileBlockStore;
+    use parking_lot::RwLock;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+""", 1)
+    replace('crates/node/benches/sync_pipeline.rs', 'fn populate_header_chain_from_blocks(tree:', '#[cfg(feature = "fjall")]\nfn populate_header_chain_from_blocks(tree:', 1)
     p = ROOT / 'state/tests/prune.rs'
     text = p.read_text()
     start = text.index('fn manual_prune_removes_pruned_block_transactions_from_cache()')
@@ -250,6 +271,7 @@ def main():
                 checks.append(check(gates, 'validation-owner-gates', output))
             if label == 'mining':
                 checks.append(check(['cargo', 'clippy', '--locked', '-p', 'bitcoin-rs-node', '--no-default-features', '--features', 'fjall,redb,zmq', '--all-targets', '--', '-D', 'warnings'], 'final-matrix-clippy', output))
+                checks.append(check(['cargo', 'clippy', '--locked', '-p', 'bitcoin-rs-node', '--no-default-features', '--features', 'redb,zmq', '--all-targets', '--', '-D', 'warnings'], 'final-redb-clippy', output))
                 checks.append(check(['cargo', 'test', *node, '--lib', '--', '--test-threads=1'], 'final-node-tests', output))
                 checks.append(check(gates, 'final-owner-gates', output))
                 checks.append(check(['cargo', 'test', *node, '--test', 'mining', '--test', 'embed', '--test', 'shutdown', '--', '--test-threads=1'], 'final-integration', output))
