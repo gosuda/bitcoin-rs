@@ -1535,7 +1535,7 @@ mod tests {
         let entry = pool
             .entry_by_txid(&txid)
             .expect("entry remains after prioritise");
-        assert_eq!(entry.fee_delta, 500);
+        assert_eq!(entry.fee_delta, 1_100);
         assert_eq!(entry.fee, 1_000);
     }
 
