@@ -197,7 +197,6 @@ impl<S: Read> Read for CountingStream<S> {
         Ok(read)
     }
 }
-
 impl<S: Write> Write for CountingStream<S> {
     fn write(&mut self, buffer: &[u8]) -> IoResult<usize> {
         let written = self.inner.write(buffer)?;
