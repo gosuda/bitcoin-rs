@@ -9,7 +9,7 @@ use std::sync::Arc;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree};
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
 use parking_lot::RwLock;
 
 use crate::dispatch::{ChainQuery, InventoryServing};
@@ -54,6 +54,9 @@ impl ActiveChainQuery {
         if header.compute_hash() != hash {
             return None;
         }
+        // Validate the complete stored body before serving its raw bytes. This
+        // preserves the wire-byte optimization without forwarding corruption.
+        Block::consensus_decode(&bytes).ok()?;
         let tree = self.block_tree.read();
         (tree.active_height_of(tree.tip()?.tip_id, hash.into()) == Some(current_height))
             .then(|| bytes::Bytes::from(bytes))
