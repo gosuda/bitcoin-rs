@@ -97,28 +97,45 @@ jobs:
               raise SystemExit('txindex module declaration block changed')
           source = source.replace(old_modules, new_modules, 1)
 
+          query_imports = 'use super::{QUERY_SCAN_ROW_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_BODY_READ_LIMIT, PrefixScanLimit, TxQueryError, TxIndexScan, TxIndexScanRow, IndexedParallelIterator, Arc, Mutex, IndexCapabilities, TxIndexRuntime, IndexReader, RwLock, BlockTree, TipSnapshot, BlockBodySource, BlockBodyStore, TxIndexSnapshot, ParallelIterator, IndexCapability, Hash256, Block, MAX_SERIALIZED_BLOCK_BYTES, BlockHash, deserialize, TxPosition, TxPositionValue, Tx, Txid, OutPoint, ScriptHash, ScriptLiveScan, SpendingRecord, ScriptIndexSnapshot, ScriptHistoryRecord, ScriptIndexRecord, IndexWatermark, BlockLog, BlockSource, record_at_height, TxIndexQuery, TxIndexInfo, ScriptIndexQuery};'
+          capability_imports = 'use super::{Arc, ArcSwap, TxIndexLifecycle, TxIndexRuntime, IndexCapabilities, CapabilityState, TxIndexQueryEngine, IndexProgress, TxQueryError, TxIndexCapabilitySource, CapabilityStatus, txindex_status};'
+          runtime_imports = 'use super::{AtomicU64, AtomicBool, Sender, RwLock, CompactString, ReconcilePhase, Arc, IndexCapabilities, ReconcileLeg, Ordering};'
+          lifecycle_imports = 'use super::{Arc, TxIndexQueryEngine, CompactString, ArcSwap, TxQueryError};'
+          open_imports = 'use super::{PathBuf, IndexCapabilities, Arc, Mutex, TxIndexWriter, PreparedBatchLimits, TxIndexRuntime, ArcSwap, TxIndexLifecycle, Generation, TipSnapshot, RwLock, BlockTree, BlockBodyStore, IndexBlockSource, BlockBodySource, AtomicBool, Receiver, NamespaceRegistry, NAMESPACE_REGISTRY, Heartbeat, IndexedParallelIterator, CompactString, TxIndexWorkerError, Duration, TXINDEX_OPEN_TIMEOUT, Ordering, TxIndexQueryEngine, QueryEngineLive, Worker, REVISION_QUIET_PERIOD, FORWARD_BATCH_DELAY, Path, thread, Instant, ROCKSDB_BATCH_LIMITS, DEFAULT_BATCH_LIMITS, REDB_BATCH_LIMITS, open_writer};'
+          supervisor_imports = 'use super::{Arc, TxIndexRuntime, JoinHandle, Generation, PathBuf, TxIndexOpenSpec, ArcSwap, TxIndexLifecycle, TipSnapshot, RwLock, BlockTree, BlockBodyStore, IndexBlockSource, BlockBodySource, AtomicBool, Receiver, NamespaceRegistry, thread, run_worker_with_open, ParallelIterator, IndexedParallelIterator, NAMESPACE_REGISTRY};'
+
           query = Path('crates/node/src/txindex_worker/query.rs')
           query_source = query.read_text()
           old_failed = 'if self.runtime.failed.load(Ordering::Acquire) {'
           old_shutdown = 'if self.runtime.shutdown.load(Ordering::Acquire) {'
           if query_source.count(old_failed) != 1 or query_source.count(old_shutdown) != 1:
               raise SystemExit('query health access changed')
+          if query_source.count('use super::*;') != 1:
+              raise SystemExit('query imports changed')
+          query_source = query_source.replace('use super::*;', query_imports, 1)
           query_source = query_source.replace(old_failed, 'if self.runtime.is_failed() {', 1)
           query_source = query_source.replace(old_shutdown, 'if self.runtime.shutdown_requested() {', 1)
 
+          capability = Path('crates/node/src/txindex_worker/capability.rs')
+          capability_source = capability.read_text()
+          if capability_source.count('use super::*;') != 1:
+              raise SystemExit('capability imports changed')
+          capability_source = capability_source.replace('use super::*;', capability_imports, 1)
+
           root.write_text(source)
           query.write_text(query_source)
+          capability.write_text(capability_source)
           Path('crates/node/src/txindex_worker/runtime.rs').write_text(
-              '//! Process-local txindex wake, revision, health, and generation state.\n\nuse super::*;\n\n' + runtime
+              '//! Process-local txindex wake, revision, health, and generation state.\n\n' + runtime_imports + '\n\n' + runtime
           )
           Path('crates/node/src/txindex_worker/lifecycle.rs').write_text(
-              '//! Atomic lifecycle publication and the stable query adapter handle.\n\nuse super::*;\n\n' + lifecycle
+              '//! Atomic lifecycle publication and the stable query adapter handle.\n\n' + lifecycle_imports + '\n\n' + lifecycle
           )
           Path('crates/node/src/txindex_worker/open.rs').write_text(
-              '//! Worker-owned txindex store open, composition, and lifecycle publication.\n\nuse super::*;\n\n' + open_spec + open_result
+              '//! Worker-owned txindex store open, composition, and lifecycle publication.\n\n' + open_imports + '\n\n' + open_spec + open_result
           )
           Path('crates/node/src/txindex_worker/supervisor.rs').write_text(
-              '//! Txindex worker thread supervision, joining, detaching, and namespace poisoning.\n\nuse super::*;\n\n' + supervisor
+              '//! Txindex worker thread supervision, joining, detaching, and namespace poisoning.\n\n' + supervisor_imports + '\n\n' + supervisor
           )
           PY
 
@@ -132,6 +149,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add crates/node/src/txindex_worker.rs \
+                  crates/node/src/txindex_worker/capability.rs \
                   crates/node/src/txindex_worker/query.rs \
                   crates/node/src/txindex_worker/runtime.rs \
                   crates/node/src/txindex_worker/lifecycle.rs \
