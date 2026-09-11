@@ -1,0 +1,84 @@
+name: one-shot txindex hardening cleanup
+
+on:
+  push:
+    branches:
+      - chatgpt/txindex-hardening-cleanup
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chatgpt-txindex-hardening-cleanup
+  cancel-in-progress: true
+
+jobs:
+  cleanup:
+    if: github.repository == 'gosuda/bitcoin-rs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/txindex-hardening-target
+          key: txindex-cleanup-${{ github.run_id }}
+          restore-keys: |
+            txindex-cleanup-
+            txindex-hardening-
+      - name: Harden, format, and validate
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/txindex-hardening-target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          imports = {
+              Path('crates/node/src/txindex_worker/query.rs'): 'use super::{QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, Arc, Block, BlockHash, BlockLog, BlockSource, BlockTree, Hash256, IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Mutex, OutPoint, PrefixScanLimit, RwLock, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexInfo, TxIndexQuery, TxIndexRuntime, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize, record_at_height};',
+              Path('crates/node/src/txindex_worker/capability.rs'): 'use super::{Arc, ArcSwap, CapabilityState, CapabilityStatus, IndexCapabilities, IndexProgress, TxIndexCapabilitySource, TxIndexLifecycle, TxIndexQueryEngine, TxIndexRuntime, TxQueryError, txindex_status};',
+          }
+          for path, replacement in imports.items():
+              source = path.read_text()
+              if source.count('use super::*;') != 1:
+                  raise SystemExit(f'unexpected wildcard import state in {path}')
+              path.write_text(source.replace('use super::*;', replacement, 1))
+          PY
+
+          cargo fmt -p bitcoin-rs-node
+          git diff --check
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib txindex_worker:: -- --test-threads=1
+      - name: Commit validated cleanup
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/chatgpt-txindex-hardening.yml
+          git rm .github/workflows/chatgpt-txindex-cleanup.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/node/src
+          git commit -m 'refactor(node): harden txindex module boundaries'
+          git push origin HEAD:chatgpt/txindex-hardening-cleanup
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/txindex-hardening-target
+          key: txindex-cleanup-${{ github.run_id }}
