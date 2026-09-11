@@ -16,7 +16,6 @@ default = []
 rocksdb = ["bitcoin-rs-storage/rocksdb"]
 fjall = ["bitcoin-rs-storage/fjall"]
 redb = ["bitcoin-rs-storage/redb"]
-mdbx = ["bitcoin-rs-storage/mdbx"]
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true
@@ -29,11 +28,11 @@ bytemuck.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
-parking_lot.workspace = true
 criterion.workspace = true
 tempfile = ">=3.20.0, <4"
 bitcoin.workspace = true
