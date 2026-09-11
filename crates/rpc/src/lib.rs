@@ -41,6 +41,8 @@ pub mod script_util;
 pub mod server;
 /// Transaction, block, and header rendering.
 pub mod tx_render;
+/// Bitcoin Core-compatible ZMQ notification protocol and transport.
+pub mod zmq;
 
 pub use auth::Auth;
 pub use compat_manifest::{MANIFEST_TOML, Status as CompatStatus};
