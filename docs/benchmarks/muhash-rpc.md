@@ -1,4 +1,54 @@
-# MuHash RPC comparator
+# MuHash RPC comparator cell
+
+This document owns the MuHash API cell: the production full-UTXO MuHash query (`gettxoutsetinfo` with `hash_type=muhash`) in bitcoin-rs compared with the same JSON-RPC call in Bitcoin Core `v31.1`, driven by the custody controller `tools/benchmark-campaign/muhash_rpc.py`. The controller is a comparator, not a benchmark result; a ratio exists only after every custody gate passes. In the target node the query runs over one coherent chain view (`ReadStamp`), is bounded and cancellable, and its result is an `api.query` cell of [`overhaul-product-cells.md`](overhaul-product-cells.md) and a manifest row of the T31 Core RPC contract.
+
+## Cell it owns
+
+Wall of exactly one JSON-RPC `gettxoutsetinfo` call per arm at the frozen tip, seven alternating pairs, under one declared cache policy, with receipts binding both binaries, the tip and the reply body.
+
+## Reference identity
+
+Bitcoin Core `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, `bitcoind` SHA-256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`. The bitcoin-rs arm is the final strict-Rust artifact with its SHA-256 recorded per run. Both nodes stand at the same pinned stop identity (`UNMEASURED` until the campaign).
+
+## End-state cells
+
+| Cell | Backend | Required outcome | Status |
+|---|---|---|---|
+| MuHash query, cold cache policy | fjall (default) | identical `muhash`, `txouts`, `total_amount`; p50/p95/p99/max with seven samples | `planned_not_executed` |
+| MuHash query, warm cache policy | fjall | same | `planned_not_executed` |
+| MuHash query, comparison backends | redb, rocksdb | same; comparison lane only, not the default | `planned_not_executed` |
+| Cancellation | fjall | an aborted scan releases retained snapshots and returns the declared client-visible result | `planned_not_executed` |
+
+The query is a bounded read under the existing read fence; it cannot consume the validation CPU or memory quota. Result rendering keeps integer satoshis internally and Core's exact external units.
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (controller contract before the rewrite)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
 
 `tools/benchmark-campaign/muhash_rpc.py` compares the production full-UTXO
 MuHash query in Bitcoin Core 31.1 with the same query in bitcoin-rs. It is a
@@ -7,7 +57,7 @@ that a live corpus run has been performed: the seven-pair campaign and any
 comparative number remain pending external execution against unmodified
 daemons (see "Status").
 
-## Measured contract
+### Measured contract
 
 Every measured observation is exactly one JSON-RPC call, and the client can
 send no other:
@@ -34,7 +84,7 @@ HTTP 200 and reports RPC errors in the body's `error` field, so the
 envelope check is authoritative. A non-positive or non-monotonic duration
 refuses the run.
 
-## Transport and custody limits
+### Transport and custody limits
 
 - The endpoint must be a literal-loopback HTTP URL (`127.0.0.1` or `::1`)
   with an explicit port and a path, and no userinfo, query, or fragment.
@@ -80,7 +130,7 @@ refuses the run.
   mode `0600`, and parsed in-process only; credentials are never emitted,
   logged, or written into any record or error message.
 
-## Receipts are controller declarations
+### Receipts are controller declarations
 
 The pre- and post-receipt files are operator declarations, not endpoint
 attestation. The operator is the trust root; the comparator explicitly
@@ -113,7 +163,7 @@ fixed request body hash, and base64-decodes the embedded raw response to
 re-hash it, strict-parse its envelope, and prove its parsed state equals
 the observation's state. A single mismatch anywhere refuses the campaign.
 
-## One policy, seven alternating pairs
+### One policy, seven alternating pairs
 
 A campaign declares exactly one cache policy; a second policy is a second
 campaign and a second result file. There is no fresh/warm dual phase.
@@ -144,7 +194,7 @@ start must be at or after the previous observation's monotonic end, so
 overlapping or reordered intervals are refused and the alternating
 labels cannot disguise concurrent or regrouped execution.
 
-## Correctness gate
+### Correctness gate
 
 No result file is created unless all of these hold:
 
@@ -167,7 +217,7 @@ untrusted response bodies, or attacker-controlled member names: wrong-key
 diagnostics carry counts only, and duplicate-member refusals are fixed
 strings.
 
-## Statistics and result identity
+### Statistics and result identity
 
 Each arm receives nearest-rank percentiles over its exactly seven samples:
 for sorted observations $x_1 \ldots x_n$, percentile $p$ is
@@ -177,7 +227,7 @@ names the arm with the lower nearest-rank p50, or records a tie; it is
 emitted only after every gate above has passed. `result_sha256` hashes the
 Decimal-safe canonical JSON record before the field is added.
 
-## Invocation
+### Invocation
 
 Run one timed observation:
 
@@ -249,7 +299,7 @@ removed. A refused run or caught post-link failure leaves no comparator-owned
 partial record. An uncatchable interruption after `linkat` can leave a complete
 record whose final durability check did not run.
 
-## Status
+### Status
 
 The protocol contract above is implemented and covered by local fixture
 tests, including a lifecycle-owned campaign against fixture RPC daemons for

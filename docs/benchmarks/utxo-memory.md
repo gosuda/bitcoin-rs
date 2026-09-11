@@ -1,4 +1,51 @@
-# UTXO set memory attribution
+# UTXO set memory and coin-record cells
+
+This document owns the UTXO set memory and coin-record cells of the target node. Coin records stay transaction-grouped (v5 directory layout) with full 256-bit txid identity and `u16` script-length bound (`UtxoError::ScriptTooLarge`); T10 persists only grouped changed records incrementally with exact before-images through the storage batch ladder, and T38 measures cache, allocation and I/O treatments one at a time. The prior attribution below (former checkpoint RSS hook, Apple Silicon fragmentation harness, height-412,732 chainstate load) is candidate evidence for the v5 layout and the arena rejection; it is not a full-node tip-RSS claim.
+
+## Cells it owns
+
+| Cell | Metric | Status |
+|---|---|---|
+| `utxo.record.bytes_per_output` | payload bytes per live output and RSS bytes per output on a real pinned chainstate, v5 layout, production allocator | `planned_not_executed` |
+| `utxo.commit.p95` | grouped-record commit p50/p95/p99/max on existing, uniform and concentrated fixtures through `write_durable_if` | `planned_not_executed` |
+| `utxo.cache.eviction_reload` | bounded-cache eviction reloads identical records; retained bytes stay at or below the resolved cache budget | `planned_not_executed` |
+| `utxo.fragmentation` | RSS growth after churn equal to twice the live set on the production allocator (mimalloc, x86-64 Linux) and on each additional measured configuration | `planned_not_executed` |
+| `node.tip_rss` | full-node RSS at the pinned stop identity including fjall, block record log and runtime; T02 baseline versus final | `planned_not_executed` |
+
+Accelerators (truncated prefixes) remain hints, never identity. No heap object per coin. No second database. An arena or pool proposal reopens only with attribution on its own production allocator and domain workload.
+
+```bash
+cargo test --locked -p bitcoin-rs-utxo --no-default-features --features fjall --test overhaul_persistent_coins -- --nocapture
+```
+
+## Required identities per sample
+
+Every sample in this cell records six identities. The T02 collector rejects a sample that lacks any of them; a rejected sample is not evidence.
+
+| Identity | Content |
+|---|---|
+| Artifact | SHA-256 of the exact binary, library or image measured; source commit |
+| Configuration | Resolved `NodeConfig`, feature set, allocator, validation mode |
+| Corpus | Corpus digest, height range, stop height and stop hash |
+| Durability | Backend, batch mode (`write`, `write_deferred`, `write_durable`), flush and sync posture |
+| Toolchain | `rustc 1.95.0`, edition 2024, profile, enabled features |
+| Hardware | CPU model, pinned core set, memory, storage device, OS kernel |
+
+## Acceptance rule
+
+- Promotion of a candidate over its control requires a median gain of at least 1.05x over at least three alternating candidate/control runs. Each arm stays within 5% of its own median. The improvement must exceed the observed host noise.
+- Non-target cells guard at no more than 3% median regression and no more than 5% p99 regression, measured with repeated runs and reported uncertainty. Average-only reporting never passes.
+- Report p50, p95, p99 and max with the sample count. Never sum nested intervals. Never sum concurrent intervals. Parallel worker walls and inclusive stage histograms are reported beside the process wall, not added to it.
+- Retain raw samples beside every summary. A Criterion adaptive elapsed total is not a median source.
+- A missing binary, corpus, hardware target or digest marks the cell `BLOCKED` with the missing identity named. `BLOCKED` is never a pass and never a skip.
+
+## Status
+
+`planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+## Prior candidate evidence (former checkpoint RSS hook, height-412,732 chainstate, 2026-08-16 correction)
+
+Retained verbatim from the pre-rewrite document. Headings are demoted one level. Nothing below is end-state proof.
 
 Step 2.1 of the memory campaign: measurement only, no encoding change. It exists
 to decide whether the encoding and allocation work planned after it is worth
@@ -16,7 +63,7 @@ The retired `utxo_memory_attribution` example used
 mix and 1.5 live outputs per record. The measurements below are retained as
 historical evidence; the one-off executable is no longer supported.
 
-## What a UTXO costs
+### What a UTXO costs
 
 Bytes per live output, constant across every size measured:
 
@@ -33,7 +80,7 @@ honest figure is the **marginal** cost between the 3M and 6M points, which
 removes the baseline entirely: **97.96 bytes of RSS per output against 87.5
 accounted, a 1.12x allocator overhead.**
 
-## Where the payload goes
+### Where the payload goes
 
 The 69.6 bytes of payload per output decompose as:
 
@@ -49,7 +96,7 @@ record averages only 1.5 live outputs to amortize it over. It is also the one
 item that cannot be compressed: the 8-byte key prefix is lossy and the full txid
 is what makes a lookup exact.
 
-## Fragmentation is not the answer
+### Fragmentation is not the answer
 
 The plan's leading hypothesis was allocator fragmentation from tens of millions
 of small allocations. Tested directly by spending the oldest tenth of the set and
@@ -67,7 +114,7 @@ handles well. **The hypothesis is refuted at this scale on this allocator** —
 with two caveats worth keeping: production links mimalloc rather than the system
 allocator, and 645,804 blocks is far more churn than twenty rounds.
 
-## Historical full-node measurement
+### Historical full-node measurement
 
 A pruned mainnet sync to **height 412,732** (38,145,360 outputs across
 10,519,335 records) settled the assumptions above. The figures below are
@@ -105,7 +152,7 @@ first pass assumed 1.5; the real trajectory is 2.296 at height 183k, 3.427 at
 302k, 4.056 at 390k (the 2015 UTXO-spam era) and 3.626 at 412k. It has not
 converged, and the tip value is still unknown.
 
-## Verdict
+### Verdict
 
 | | Tip projection, 180M outputs | Share of the 16 GiB budget |
 |---|---:|---:|
@@ -130,7 +177,7 @@ worth having, but it does not by itself settle the gate.
 **Step 2.2 is justified and done. Step 2.4 is not**: fragmentation measured 5%
 after churning twice the whole set.
 
-### When to revert v5
+#### When to revert v5
 
 Stated now, while the numbers are in front of us, so that whoever reads this
 later does not have to reconstruct the trade.
@@ -153,10 +200,7 @@ projection holds it at 3.626; it has not converged (2.296 at height 183k, 4.056
 at 390k), and it is the number the result is most sensitive to, because the
 32-byte txid amortizes over it directly.
 
-The projection holds outputs per record at 3.626, which has not converged and
-remains the number the result is most sensitive to.
-
-## Step 2.2: the v5 record codec
+### Step 2.2: the v5 record codec
 
 **Result: 11.75 bytes saved per output (21.7% of the payload), for a lookup cost
 of about 3 ns on a typical record and a lookup *win* on a fat one.**
@@ -168,13 +212,13 @@ of about 3 ns on a typical record and a lookup *win* on a fat one.**
 > where v5 is slower. The claim was true of the fixture and false of the
 > workload, which is the more useful thing to be right about.
 
-### Measured on the real chainstate, not the synthetic bench
+#### Measured on the real chainstate, not the synthetic bench
 
 Everything above about size came from a synthetic fixture. The same 2.03 GiB
 `utxo-v4.dat` a real pruned sync produced at height 412,732 — 10,519,335 records
 and **38,145,360 outputs** — was then loaded by a v4 build and a v5 build.
-Same file, same machine, only the codec differs
-using the now-retired `snapshot_memory` campaign helper.
+Same file, same machine, only the codec differs; both loads were measured
+with the now-retired `snapshot_memory` campaign helper.
 
 | Layer | v4 | v5 | Saved |
 |---|---:|---:|---:|
@@ -203,7 +247,7 @@ What this does **not** measure is full-node tip RSS: it loads the UTXO set alone
 with no fjall, CoinStats, block-record log or runtime alongside it. The G14 gate
 still needs a synced tip node with `txindex` and the remaining derived indexes.
 
-### Where the two layouts cross over
+#### Where the two layouts cross over
 
 `find_output`, by record size, `before_v4` against `after_v5`:
 
@@ -260,7 +304,7 @@ Hoisting `height` into the record header would save 3 bytes more and is **not
 done**: it needs "every output of a record shares one height" to hold, and
 BIP30's duplicate coinbase txids are exactly where it might not.
 
-### Rejected first draft: flat varints
+#### Rejected first draft: flat varints
 
 The first v5 was a flat frame per output —
 `varint(vout) || varint(amount) || varint(packed_height) || varint(script_len) || script`
@@ -298,7 +342,7 @@ The directories fix exactly that: a lookup scans one dense fixed-width array and
 sums a second, touching ~2 bytes per output instead of ~35. It is why `get_miss`
 ends up **2.3x faster than v4**, not merely level with it.
 
-### A corrupt record could panic the decoder
+#### A corrupt record could panic the decoder
 
 Found while looking at why `find_output` has a fixed cost, and worth more than
 the answer to that question.
@@ -323,7 +367,7 @@ every `u64`: whatever the decoder accepts must round-trip back to the same
 compressed value through the encoder. It does not merely check for absence of
 panics — it pins the accepted set to the encoder's image exactly.
 
-### What it costs
+#### What it costs
 
 Encoding is 1.6-2.4x slower, because the directory widths are a property of the
 whole record, so nothing can be written until every payload length is known.
@@ -338,7 +382,7 @@ per entry. It measured 505.7 ns against 428.5 ns on a 16-output record: setting
 up the scratch costs more than the bounds checks it saves at one or two bytes
 per entry.
 
-### How it is checked
+#### How it is checked
 
 The former `record_codec_equivalence` integration test and `record_codec`
 benchmark were retired with the A/B harness. Historical v4/v5 equivalence and
@@ -353,7 +397,7 @@ Reproduce the retained production-shaped benchmark:
 cargo bench -p bitcoin-rs-utxo --bench utxo_commit
 ```
 
-## Superseded: the pre-measurement sizing
+### Superseded: the pre-measurement sizing
 
 The section below was written from the synthetic harness alone, assuming 1.5
 outputs per record. It concluded encoding work was worth ~7% of process RSS and
@@ -388,7 +432,7 @@ wrong, both are small, and the half of the problem that has never been measured
 is larger than everything they can win together. Attribute the non-UTXO half
 first.
 
-## Caveats
+### Caveats
 
 - **1.5 live outputs per record is an assumption**, and it is the one the result
   is most sensitive to: the 32-byte txid amortizes over it directly. At 1.2
