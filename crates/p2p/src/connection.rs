@@ -489,12 +489,6 @@ impl PeerLifecycle {
     pub fn contains(&self, addr: SocketAddr) -> bool {
         self.table.is_connected(addr)
     }
-
-    /// Snapshots every live connection address, including handshaking peers.
-    #[must_use]
-    pub fn live_addresses(&self) -> Vec<SocketAddr> {
-        self.table.addrs()
-    }
 }
 
 /// Cloneable handle for one live peer connection.
