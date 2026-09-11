@@ -339,6 +339,7 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "compact_str",
+ "criterion",
  "proptest",
  "thiserror",
 ]

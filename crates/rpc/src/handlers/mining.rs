@@ -454,7 +454,7 @@ pub(crate) fn required_gbt_rules(network: Network) -> &'static [&'static str] {
     }
 }
 
-/// Enforces the GBT client-rule negotiation contract (API-10).
+/// Enforces the GBT client-rule negotiation contract (API-12).
 fn ensure_client_rules_for_template(
     network: Network,
     client_rules: &[MiningRule],
@@ -977,7 +977,7 @@ mod tests {
         // GetBlockTemplate contract and are no longer emitted.
     }
 
-    /// API-10: signet must be advertised alongside segwit on signet.
+    /// API-12: signet must be advertised alongside segwit on signet.
     #[test]
     fn getblocktemplate_requires_signet_rule_on_signet() {
         let mut template = sample_template();
@@ -1002,7 +1002,7 @@ mod tests {
         assert!(rules.iter().any(|rule| rule.as_str() == Some("!signet")));
     }
 
-    /// API-10: a template-listed mandatory rule requires explicit client support.
+    /// API-12: a template-listed mandatory rule requires explicit client support.
     #[test]
     fn getblocktemplate_rejects_template_mandatory_rule_without_client_support() {
         let mut template = sample_template();
@@ -1020,7 +1020,7 @@ mod tests {
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
 
-    /// API-10: segwit is the base client rule for template mode.
+    /// API-12: segwit is the base client rule for template mode.
     #[test]
     fn getblocktemplate_rejects_missing_segwit_rule() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1040,7 +1040,7 @@ mod tests {
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
     }
 
-    /// API-10: proposal mode skips client-rule negotiation.
+    /// API-12: proposal mode skips client-rule negotiation.
     #[test]
     fn getblocktemplate_proposal_skips_client_rule_negotiation() {
         let control = FakeMiningControl::with_template(sample_template());

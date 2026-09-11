@@ -52,7 +52,7 @@ mixed-tip page.
   descriptor helpers are key-free. The consumer signs.
 - Broadcast: `POST /tx` (hex body) reaches the shared `MempoolGateway`
   dispatched as the `Rpc` origin today; a distinct Esplora origin with its
-  own request fee limits is T18/API-11 work.
+  own request fee limits is T18/API-10 work.
 - Confirmation tracking, replacement observation, disconnect and reorg
   observation, and rescan all run over the same public reads.
 - Public `/api` responses, including errors, allow cross-origin reads with

@@ -193,22 +193,7 @@ Owners:
   capability returns the declared unavailable response, never an empty
   successful history.
 
-### `API-10`: GBT client-rule negotiation
-
-- **Owner**: `ensure_client_rules_for_template` and
-  `ensure_client_supports_mandatory_rules` in
-  `crates/rpc/src/handlers/mining.rs`.
-- Template mode requires the client to list `segwit`. On signet it also
-  requires `signet`. Failures are Core `-8` with Core's exact messages:
-  `getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})`
-  and
-  `getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})`.
-  Signet is checked first, matching Core v31.0 `src/rpc/mining.cpp`.
-- These checks run before template assembly. Proposal mode skips them.
-- After assembly, any remaining mandatory template rule the client omitted
-  is Core `-8`: `Support for 'NAME' rule requires explicit client support`.
-
-### `API-11`: Broadcast and preview through the admission gateway
+### `API-10`: Broadcast and preview through the admission gateway
 
 - `sendrawtransaction`, `testmempoolaccept`, Esplora `POST /tx`, package
   submissions, and P2P ingress all reach the single `MempoolGateway`
@@ -222,6 +207,21 @@ Owners:
   with frozen reject-reason strings.
 - Broadcast failures map to the Esplora error dialect: a rejected
   transaction is a 400 with the reject reason, not a retryable 503.
+
+### `API-12`: GBT client-rule negotiation
+
+- **Owner**: `ensure_client_rules_for_template` and
+  `ensure_client_supports_mandatory_rules` in
+  `crates/rpc/src/handlers/mining.rs`.
+- Template mode requires the client to list `segwit`. On signet it also
+  requires `signet`. Failures are Core `-8` with Core's exact messages:
+  `getblocktemplate must be called with the segwit rule set (call with {"rules": ["segwit"]})`
+  and
+  `getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})`.
+  Signet is checked first, matching Core v31.0 `src/rpc/mining.cpp`.
+- These checks run before template assembly. Proposal mode skips them.
+- After assembly, any remaining mandatory template rule the client omitted
+  is Core `-8`: `Support for 'NAME' rule requires explicit client support`.
 
 The wallet-facing subset of this surface is owned by
 [wallet-facing.md](wallet-facing.md).
