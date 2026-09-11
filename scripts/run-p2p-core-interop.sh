@@ -119,6 +119,9 @@ RS_LOG="${WORKDIR}/bitcoin-rs.log"
 CORE_LOG="${WORKDIR}/bitcoind.log"
 RS_RPC_USER="interop"
 RS_RPC_PASSWORD="interop"
+# Sole producer-side owner of the evidence schema identifier; the verifier
+# (crates/p2p/tests/core_interop_live.rs SCHEMA) consumes the value recorded
+# in the evidence. Do not add a second definition in this script.
 EVIDENCE_SCHEMA="bitcoin-rs-core-differential-v1"
 
 BITCOIN_RS_PID=""
@@ -131,7 +134,10 @@ core_rpc() {
   local cookie params=""
   cookie=$(cat "${CORE_COOKIE_FILE}")
   if (($# > 0)); then
-    params=,"\"params\":[$*]"
+    # $* must join as a JSON array (commas), not on the default IFS space;
+    # each argument is already a raw JSON literal.
+    local IFS=,
+    params=,"\"params\":[${*}]"
   fi
   curl -sS --max-time 10 --user "${cookie}" -H 'content-type: text/plain' \
     --data "{\"jsonrpc\":\"1.0\",\"id\":\"interop\",\"method\":\"${method}\"${params}}" \
@@ -148,7 +154,8 @@ rs_rpc() {
   shift
   local params=""
   if (($# > 0)); then
-    params=,"\"params\":[$*]"
+    local IFS=,
+    params=,"\"params\":[${*}]"
   fi
   curl -sS --max-time 10 --user "${RS_RPC_USER}:${RS_RPC_PASSWORD}" \
     -H 'content-type: text/plain' \
@@ -222,7 +229,7 @@ fi
 echo "==> creating wallet and mining ${BLOCKS} initial blocks"
 core_rpc createwallet '"interop"' >/dev/null
 MINING_ADDRESS=$(core_result getnewaddress)
-core_result generatetoaddress "${BLOCKS}" "\"${MINING_ADDRESS}\"" >/dev/null
+core_result generatetoaddress "${BLOCKS}" "${MINING_ADDRESS}" >/dev/null
 CORE_HEIGHT=$(core_result getblockcount | python3 -c 'import json, sys; print(json.load(sys.stdin))')
 echo "==> core height after initial mine: ${CORE_HEIGHT}"
 
@@ -248,7 +255,7 @@ echo "==> initial sync height: ${INITIAL_SYNC_HEIGHT}"
 
 echo "==> mining ${CATCHUP_BLOCKS} catch-up blocks on Core (post-handshake relay proof)"
 CATCHUP_FROM=${CORE_HEIGHT}
-core_result generatetoaddress "${CATCHUP_BLOCKS}" "\"${MINING_ADDRESS}\"" >/dev/null
+core_result generatetoaddress "${CATCHUP_BLOCKS}" "${MINING_ADDRESS}" >/dev/null
 CATCHUP_TO=$((CATCHUP_FROM + CATCHUP_BLOCKS))
 poll_until "catch-up sync" "${CATCHUP_TO}"
 RS_HEIGHT=$(rs_height)

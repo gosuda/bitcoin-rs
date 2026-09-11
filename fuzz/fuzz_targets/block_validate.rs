@@ -5,7 +5,8 @@ use libfuzzer_sys::fuzz_target;
 
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_consensus::{verify_block_rules, verify_transaction_non_script};
-use bitcoin_rs_primitives::{Block, OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, Block, OutPoint, Script, TxOut};
+use bitcoin_rs_script::VerifyFlags;
 
 /// Dummy coins for every requested outpoint so non-coinbase transactions
 /// run past `MissingPrevout` into value and sigop checks. Coinbase
@@ -33,12 +34,14 @@ fn validate_block(data: &[u8]) {
     let _ = verify_block_rules(&block);
     let view = AnyCoinView {
         coin: TxOut {
-            value: 50_000_000,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50_000_000),
+            script_pubkey: Script::from(vec![0x51]),
         },
     };
+    // No softfork is active at height 1; the mandatory-only flag set keeps
+    // sigop accounting active without any fork-dependent rules.
     for tx in &block.txs {
-        let _ = verify_transaction_non_script(tx, &view, 1, 0);
+        let _ = verify_transaction_non_script(tx, &view, 1, 0, VerifyFlags::MANDATORY);
     }
 }
 

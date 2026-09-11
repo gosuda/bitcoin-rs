@@ -13,6 +13,12 @@ Seeds under fuzz/corpus/ were imported from
 | Import tool | scripts/import-qa-assets.sh (clone pinned to the commit above, then cargo fuzz cmin per target) |
 | Size policy | source files >= 65536 bytes are skipped and counted in the import log (repo-size bound matching the targets' input caps) |
 
+Ownership: this document is the single owner of the target-to-corpus
+mapping below. `scripts/import-qa-assets.sh` does not restate it; on re-import
+it refreshes only the run-dependent fields in the table above and carries this
+Mapping section forward verbatim. Update the mapping here, in the same commit
+as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
+
 ## Mapping
 
 | Target | Upstream corpus | Transformation |

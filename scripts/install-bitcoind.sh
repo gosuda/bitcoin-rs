@@ -40,7 +40,19 @@ cached_matches_pin() {
   [[ "$(cat -- "${STAMP}")" == "${TARBALL_SHA256}" ]] || return 1
   local version
   version="$("${BITCOIND}" -version 2>/dev/null | head -n1 || true)"
-  [[ "${version}" == *"v${CORE_VERSION}"* ]]
+  # Component-exact match against the canonical pin, mirroring
+  # crates/p2p/tests/core_interop_live.rs version_is_pinned_line: the pinned
+  # "31.1" accepts 31.1(.N) but not 31.10(.N), 31.2(.N), or 30.1(.N).
+  [[ "${version}" =~ ([0-9]+(\.[0-9]+)*) ]] || return 1
+  local -a parsed=()
+  IFS='.' read -r -a parsed <<< "${BASH_REMATCH[1]}"
+  local -a pinned=()
+  IFS='.' read -r -a pinned <<< "${CORE_VERSION}"
+  ((${#parsed[@]} >= ${#pinned[@]})) || return 1
+  local i
+  for ((i = 0; i < ${#pinned[@]}; i++)); do
+    [[ "${parsed[i]}" == "${pinned[i]}" ]] || return 1
+  done
 }
 
 if cached_matches_pin; then
@@ -70,6 +82,6 @@ fi
 
 case "${MODE}" in
   print-path) printf '%s\n' "${BITCOIND}" ;;
-  export) printf 'BITCOIND_COMMAND=%q\n' "${BITCOIND}" ;;
+  export) printf 'export BITCOIND_COMMAND=%q\n' "${BITCOIND}" ;;
   install) printf '%s\n' "${BITCOIND}" ;;
 esac
