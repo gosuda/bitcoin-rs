@@ -485,31 +485,6 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getblocktemplate_rejects_missing_segwit_rule`,
     `getblocktemplate_proposal_skips_client_rule_negotiation`
 
-- `API-10`:
-  - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
-  - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
-  - `crates/rpc/src/handlers/mining.rs` test `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`
-- `API-11`:
-  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
-    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
-    `getblocktemplate_requires_signet_rule_on_signet`
-  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
-  - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
-    `signet_template_includes_challenge_and_signet_rule`
-- `API-12`:
-  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
-    `getblocktemplate_rejects_mainnet_during_ibd`,
-    `getblocktemplate_proposal_skips_mainnet_connection_gates`
-- `API-13`:
-  - `crates/rpc/src/handlers/mining.rs` tests `submitheader_rejects_undecodable_headers`,
-    `submitheader_returns_null_and_forwards_decoded_header`,
-    `submitheader_maps_rejected_to_verify_error`
-  - `crates/node/tests/mining.rs` tests `submit_header_admits_a_mined_child_and_is_idempotent`,
-    `submit_header_requires_the_previous_header`,
-    `submit_header_rejects_bad_diffbits`,
-    `submit_header_rejects_time_too_new`
-  - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
-    `nbits_mismatch_is_bad_diffbits`
 - `API-15`:
   - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
     `submitblock_ignores_bip22_dummy_and_trailing_bytes`
