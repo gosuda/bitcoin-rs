@@ -50,11 +50,13 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
 
 fn info(addr: SocketAddr) -> PeerInfo {
     PeerInfo {
+        wtxid_relay: false,
         addr,
         version: 70_016,
         services: 1,
         user_agent: String::from("/test/"),
         start_height: 0,
+        best_known_height: 0,
         conn_time: 0,
         addr_bind: addr,
         time_offset: 0,

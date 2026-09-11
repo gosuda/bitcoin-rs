@@ -351,6 +351,10 @@ impl KvStore for MemoryStore {
         let guard = self.cfs.read();
         Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
     }
+
+    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
+        // In-memory double: no persistence boundary exists to fault.
+    }
 }
 
 #[derive(Default)]
