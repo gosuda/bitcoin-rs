@@ -71,6 +71,21 @@ mixed-tip page.
   GET outside `/rest/`, `/api`, and `/esplora`, 404 at the listener demux
   and never become JSON-RPC.
 
+### Acceptance criteria and execution evidence
+
+- **WF-02 routing:** `HEAD /api/tx` and `PUT /` return 404, while
+  `POST /api/tx` remains the broadcast route; neither unsupported request
+  reaches JSON-RPC. Evidence: the running-node assertions in
+  `external_wallet_can_scan_estimate_and_broadcast` (the `HEAD /api/tx` and
+  `PUT /` exchanges) and the
+  corresponding CI test log.
+- **Closed namespaces:** `/api` and `/esplora` accept only their documented
+  GET/POST routes, and unprefixed explorer paths remain 404. Evidence: the
+  same integration test plus `listener_directory_table_is_closed_over_http`;
+  run with `cargo test -p bitcoin-rs --test wallet_facing`.
+- **Consumer boundary:** the proof uses only HTTP against a spawned node.
+  Evidence: `source_does_not_import_node_internals` in that test target.
+
 ### `WF-03`: Proof is a public-process consumer
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs` (existing) lives in the binary
