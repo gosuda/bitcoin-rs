@@ -145,11 +145,13 @@ pub(crate) fn required_i64(
     index: usize,
     name: &'static str,
 ) -> Result<i64, RpcError> {
-    params_array(params)?
-        .get(index)
+    params
+        .as_array()
+        .and_then(|arr| arr.get(index))
         .and_then(JsonValueTrait::as_i64)
         .ok_or(RpcError::InvalidParams(name))
 }
+
 
 /// Parses one 64-hex-character transaction id, rejecting anything else.
 pub(crate) fn parse_txid(value: &str) -> Result<Txid, RpcError> {
