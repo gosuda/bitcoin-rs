@@ -1,7 +1,7 @@
 use super::*;
 
 // -----------------------------------------------------------------------
-// A2.3: Warning snapshot tests
+// Contract: docs/contracts/recovery.md RCV-01 (derived positions remain distinct and visible)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -41,7 +41,7 @@ fn index_update_preserves_checkpoint_warning() {
 }
 
 // -----------------------------------------------------------------------
-// A2.3: Marker file tests
+// Contract: docs/contracts/recovery.md RCV-03 (durable evidence and prior-or-whole recovery)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -113,7 +113,7 @@ fn marker_last_event_wins_preserves_prev() {
 }
 
 // -----------------------------------------------------------------------
-// A2.3: Reporter tests
+// Contract: docs/contracts/recovery.md RCV-04 (recovery publication and index failure outcomes)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -167,7 +167,7 @@ fn reporter_report_index_ahead_writes_marker_and_warns() {
 }
 
 // -----------------------------------------------------------------------
-// A2 cycle 9: checkpoint fallback with index far ahead converges and warns
+// Contract: docs/contracts/recovery.md RCV-01 and RCV-04 (checkpoint/index reconciliation)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -223,7 +223,7 @@ fn checkpoint_fallback_with_index_far_ahead_converges_and_warns() {
 }
 
 // -----------------------------------------------------------------------
-// A2 cycle 10: marker write failure fails only the reporting index
+// Contract: docs/contracts/recovery.md RCV-04 (index watermark failure does not block chain progress)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -332,6 +332,4 @@ fn foreign_genesis_marker_current_cannot_displace_valid_prev() {
     assert_eq!(
         read_marker(dir.path(), genesis),
         Some(e1),
-        "valid marker .prev survives; foreign current never displaced it"
-    );
-}
+        "valid ma

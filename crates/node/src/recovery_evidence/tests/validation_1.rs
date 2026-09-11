@@ -1,7 +1,7 @@
 use super::*;
 
 // -----------------------------------------------------------------------
-// A2.1: Witness and marker file codec tests
+// Contract: docs/contracts/recovery.md RCV-03 (durable evidence identity and fallback)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -64,7 +64,7 @@ fn foreign_genesis_or_future_epoch_witness_is_ignored() {
 }
 
 // -----------------------------------------------------------------------
-// A2.1: Bounded file protocol tests
+// Contract: docs/contracts/recovery.md RCV-03 (orphan tails and prior-or-whole recovery)
 // -----------------------------------------------------------------------
 
 // `write_bounded` protocol step 8 and recovery contract RCV-03 require
@@ -146,7 +146,7 @@ fn witness_stage_failure_preserves_bounded_current_prev() {
 }
 
 // -----------------------------------------------------------------------
-// A2.3: Detection logic tests
+// Contract: docs/contracts/recovery.md RCV-01 (full identity and derived-position detection)
 // -----------------------------------------------------------------------
 
 #[test]

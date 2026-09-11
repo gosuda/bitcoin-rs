@@ -1,7 +1,7 @@
 use super::*;
 
 // -----------------------------------------------------------------------
-// A2.4: Oversized file is ignored
+// Contract: docs/contracts/recovery.md RCV-03 (bounded, non-authoritative tails)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -26,7 +26,7 @@ fn oversized_evidence_file_is_ignored() {
 }
 
 // -----------------------------------------------------------------------
-// A2.4: getblockchaininfo warnings from one immutable load
+// Contract: docs/contracts/recovery.md RCV-01 (derived recovery state is reported coherently)
 // -----------------------------------------------------------------------
 
 #[test]
@@ -52,7 +52,7 @@ fn getblockchaininfo_reports_atomic_rollback_warnings() {
 }
 
 // -----------------------------------------------------------------------
-// A2 repair (RecA12c4): semantic rotation — a parseable but foreign-genesis
+// Contract: docs/contracts/recovery.md RCV-03 (semantic validation preserves prior evidence)
 // or wrong-format current cannot displace a valid .prev
 // -----------------------------------------------------------------------
 
