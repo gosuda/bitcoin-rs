@@ -22,7 +22,7 @@ jobs:
       - name: Fetch locked public dependencies and archive offline tools
         run: |
           cargo fetch --locked --target x86_64-unknown-linux-gnu
-          mkdir -p /tmp/node-offline
+          mkdir -p /tmp/node-offline "$HOME/.cargo/git"
           tar --zstd -cf /tmp/node-offline/toolchain.tar.zst -C "$HOME/.rustup/toolchains/1.95.0-x86_64-unknown-linux-gnu" bin lib libexec
           tar --zstd -cf /tmp/node-offline/registry.tar.zst -C "$HOME/.cargo" registry/cache registry/index git
           sha256sum /tmp/node-offline/*
