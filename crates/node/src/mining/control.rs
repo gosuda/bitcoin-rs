@@ -129,7 +129,6 @@ impl MiningControl for MiningCoordinator {
                 let template = Self::template_from_candidate(
                     self.network,
                     candidate,
-                    &request,
                     submit_old,
                     version_bits_available,
                     version_bits_required,
