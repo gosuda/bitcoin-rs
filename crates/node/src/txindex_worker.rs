@@ -17,93 +17,75 @@
 //! A snapshot-gated query engine serves `bitcoin_rs_rpc::context::TxIndexQuery`
 //! and the generic [`ScriptIndexQuery`] without raw index mutex paths.
 
-#[cfg(test)]
-use bitcoin_rs_rpc::context::ScriptIndexQuery;
-mod lifecycle;
-
 use arc_swap::ArcSwap;
-use bitcoin_rs_chain::BlockBodySource;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_index::BlockSource;
-use bitcoin_rs_index::IndexCapabilities;
-#[cfg(test)]
-use bitcoin_rs_index::IndexCapability;
-use bitcoin_rs_index::IndexError;
-use bitcoin_rs_index::IndexReader;
-use bitcoin_rs_index::IndexWatermark;
-use bitcoin_rs_index::IndexWatermarks;
-use bitcoin_rs_index::IndexWriteFence;
-use bitcoin_rs_index::PreparedBatch;
-use bitcoin_rs_index::PreparedBatchLimits;
-#[cfg(test)]
-use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_index::TxIndexScan;
-use bitcoin_rs_index::TxIndexScanRow;
-use bitcoin_rs_index::reconcile::ReconcileLeg;
-use bitcoin_rs_index::reconcile::ReconcilePhase;
-use bitcoin_rs_index::writer::TxIndexWriter;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::BlockHash;
-use bitcoin_rs_primitives::Hash256;
-#[cfg(test)]
-use bitcoin_rs_primitives::Txid;
-use bitcoin_rs_primitives::deserialize;
-use bitcoin_rs_rpc::capabilities::CapabilityState;
-use bitcoin_rs_rpc::capabilities::CapabilityStatus;
-use bitcoin_rs_rpc::capabilities::TxIndexCapabilitySource;
-use bitcoin_rs_rpc::capabilities::txindex_status;
-use bitcoin_rs_rpc::context::BlockLog;
-#[cfg(test)]
-use bitcoin_rs_rpc::context::TxIndexQuery;
-use bitcoin_rs_rpc::context::TxQueryError;
-use bitcoin_rs_rpc::context::record_at_height;
-use bitcoin_rs_storage::PrefixScanLimit;
-use bitcoin_rs_storage::block_body::BlockBodyStore;
+
+use bitcoin_rs_chain::{BlockBodySource, BlockTree, TipSnapshot};
+
+use bitcoin_rs_index::{
+    BlockSource, IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark,
+    IndexWatermarks, IndexWriteFence, PreparedBatch, PreparedBatchLimits, ScriptHash,
+    ScriptLiveScan, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    reconcile::{ReconcileLeg, ReconcilePhase},
+    types::{TxPosition, TxPositionValue},
+    writer::TxIndexWriter,
+};
+
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
+
+use bitcoin_rs_rpc::{
+    capabilities::{CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status},
+    context::{
+        BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+        SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
+    },
+};
+
+use bitcoin_rs_storage::{PrefixScanLimit, block_body::BlockBodyStore};
+
 use compact_str::CompactString;
-use crossbeam_channel::Receiver;
-use crossbeam_channel::Sender;
+
+use crossbeam_channel::{Receiver, Sender};
+
 #[cfg(test)]
 use heartbeat::Heartbeat;
+
 #[cfg(test)]
-use namespace::NAMESPACE_REGISTRY;
+use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
+
+use parking_lot::{Mutex, RwLock};
+
 #[cfg(test)]
-use namespace::NamespaceRegistry;
-use parking_lot::Mutex;
-use parking_lot::RwLock;
-#[cfg(test)]
-use startup::fail_worker;
-#[cfg(test)]
-use startup::open_tx_index_on_worker;
+use startup::{fail_worker, open_tx_index_on_worker, open_tx_index_with_timeout};
 use startup::open_tx_index_store_on_worker;
-#[cfg(test)]
-use startup::open_tx_index_with_timeout;
+
 #[cfg(test)]
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::Instant;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 
+mod capability;
 mod catch_up;
 mod cursor;
+mod heartbeat;
+mod lifecycle;
+mod namespace;
+mod query;
+mod query_adapter;
 mod reconciliation;
 mod rollback;
+mod scheduling;
 mod startup;
 
-mod query_protocol;
-mod query_script;
-mod query_snapshot;
-mod query_transaction;
-
-mod heartbeat;
-mod namespace;
-mod query_adapter;
-mod scheduling;
+pub(crate) use capability::TxIndexCapability;
+use query::IndexProgress;
+pub(crate) use query::{IndexBlockSource, QueryEngineLive, TxIndexQueryEngine};
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -387,6 +369,7 @@ pub(crate) fn wait_txindex_open_gate() {
 
 #[cfg(not(test))]
 pub(crate) fn wait_txindex_open_gate() {}
+
 /// Handle used to spawn and join the supervised reconciliation worker.
 pub(crate) struct TxIndexWorker {
     runtime: Arc<TxIndexRuntime>,
@@ -544,8 +527,6 @@ enum ChunkAction {
     Progressed,
 }
 
-impl Worker {}
-
 enum CursorCommit {
     Settled,
     ResetRejected,
@@ -596,316 +577,6 @@ impl TxIndexWorkerError {
             self,
             Self::MissingBody { .. } | Self::Index(IndexError::MissingWatermarkIdentity { .. })
         )
-    }
-}
-
-/// Aggregate work budget shared by every operation in one public query.
-struct QueryBudget {
-    remaining_rows: usize,
-    remaining_bytes: usize,
-    remaining_scans: usize,
-    remaining_body_reads: usize,
-}
-
-impl QueryBudget {
-    const fn new() -> Self {
-        Self {
-            remaining_rows: QUERY_SCAN_ROW_LIMIT,
-            remaining_bytes: QUERY_SCAN_BYTE_LIMIT,
-            remaining_scans: QUERY_SCAN_COUNT_LIMIT,
-            remaining_body_reads: QUERY_BODY_READ_LIMIT,
-        }
-    }
-
-    fn next_scan_limit(&mut self) -> Result<PrefixScanLimit, TxQueryError> {
-        if self.remaining_scans == 0 || self.remaining_rows == 0 || self.remaining_bytes == 0 {
-            return Err(TxQueryError::Unavailable(
-                "txindex query work budget exhausted".into(),
-            ));
-        }
-        self.remaining_scans -= 1;
-        Ok(PrefixScanLimit {
-            max_rows: self.remaining_rows,
-            max_bytes: self.remaining_bytes,
-        })
-    }
-
-    fn accept_scan(&mut self, scan: TxIndexScan) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
-        if !scan.complete {
-            return Err(TxQueryError::Unavailable(
-                "txindex prefix scan truncated".into(),
-            ));
-        }
-        if scan.rows.len() > self.remaining_rows || scan.encoded_bytes > self.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query work budget exceeded".into(),
-            ));
-        }
-        self.remaining_rows -= scan.rows.len();
-        self.remaining_bytes -= scan.encoded_bytes;
-        Ok(scan.rows)
-    }
-
-    fn reserve_body_read(&mut self, max_bytes: usize) -> Result<(), TxQueryError> {
-        if self.remaining_body_reads == 0 || max_bytes > self.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query body budget exhausted".into(),
-            ));
-        }
-        self.remaining_body_reads -= 1;
-        Ok(())
-    }
-
-    fn charge_body_bytes(&mut self, bytes: usize) -> Result<(), TxQueryError> {
-        if bytes > self.remaining_bytes {
-            return Err(TxQueryError::Unavailable(
-                "txindex query body budget exceeded".into(),
-            ));
-        }
-        self.remaining_bytes -= bytes;
-        Ok(())
-    }
-}
-
-/// Authoritative Live query sources: capability selection, the UTXO set, and
-/// the chain-transition lock Live composition requires.
-pub(crate) struct QueryEngineLive {
-    pub(crate) utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
-    pub(crate) chain_transition: Option<Arc<Mutex<()>>>,
-    pub(crate) enabled: IndexCapabilities,
-}
-
-/// Node-owned, snapshot-gated transaction-index query engine.
-///
-/// Implements `bitcoin_rs_rpc::context::TxIndexQuery` and [`ScriptIndexQuery`] as the
-/// only public read paths for the transaction index. Every query runs against
-/// one typed point-in-time snapshot, captures
-/// health/shutdown/revision/tip before and after work, and returns typed
-/// `Retry`/`Unavailable` when the answer cannot be proven.
-#[derive(Clone)]
-pub(crate) struct TxIndexQueryEngine {
-    runtime: Arc<TxIndexRuntime>,
-    reader: Arc<dyn IndexReader>,
-    block_source: IndexBlockSource,
-    block_tree: Arc<RwLock<BlockTree>>,
-    applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
-    body_source: Option<Arc<dyn BlockBodySource>>,
-    utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
-    chain_transition: Option<Arc<Mutex<()>>>,
-    enabled: IndexCapabilities,
-}
-
-impl core::fmt::Debug for TxIndexQueryEngine {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("TxIndexQueryEngine").finish_non_exhaustive()
-    }
-}
-
-impl TxIndexQueryEngine {
-    /// Builds a query engine over the shared reader and authoritative block source.
-    #[must_use]
-    pub(crate) fn new(
-        runtime: Arc<TxIndexRuntime>,
-        reader: Arc<dyn IndexReader>,
-        block_source: IndexBlockSource,
-        block_tree: Arc<RwLock<BlockTree>>,
-        applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
-        body_source: Option<Arc<dyn BlockBodySource>>,
-        live: QueryEngineLive,
-    ) -> Self {
-        Self {
-            runtime,
-            reader,
-            block_source,
-            block_tree,
-            applied_tip,
-            body_source,
-            utxo: live.utxo,
-            chain_transition: live.chain_transition,
-            enabled: live.enabled,
-        }
-    }
-}
-
-/// One coherent read of index progress against a single applied tip.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IndexProgress {
-    pub synced: bool,
-    pub processed_height: u32,
-    pub target_height: u32,
-}
-
-/// Private index-side `BlockSource`: active-chain identity from the tree,
-/// bodies from the chain body store. Not a node-owned concept.
-#[derive(Clone)]
-pub(crate) struct IndexBlockSource {
-    blocks: Arc<RwLock<BlockLog>>,
-    block_body_source: Option<Arc<dyn BlockBodySource>>,
-    block_tree: Option<Arc<RwLock<BlockTree>>>,
-}
-
-impl IndexBlockSource {
-    #[must_use]
-    pub(crate) const fn new(blocks: Arc<RwLock<BlockLog>>) -> Self {
-        Self {
-            blocks,
-            block_body_source: None,
-            block_tree: None,
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
-        self.block_body_source = Some(source);
-        self
-    }
-
-    #[must_use]
-    pub(crate) fn with_block_tree(mut self, tree: Arc<RwLock<BlockTree>>) -> Self {
-        self.block_tree = Some(tree);
-        self
-    }
-
-    pub(crate) fn block_body_bytes_for(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-        self.block_body_source.as_ref()?.block_body(height, hash)
-    }
-
-    fn resolve_block_by_hash(&self, height: u32, active_hash: Hash256) -> Option<Block> {
-        let bytes = self.block_body_bytes_for(height, BlockHash::from(active_hash))?;
-        let block = deserialize::<Block>(&bytes).ok()?;
-        (block.block_hash() == BlockHash::from(active_hash)).then_some(block)
-    }
-}
-
-impl core::fmt::Debug for IndexBlockSource {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IndexBlockSource").finish_non_exhaustive()
-    }
-}
-
-impl BlockSource for IndexBlockSource {
-    fn block_at_height(&self, height: u32) -> Option<Block> {
-        let active_hash = if let Some(tree) = &self.block_tree {
-            tree.read().active_node_at_height(height)?.hash
-        } else {
-            let guard = self.blocks.read();
-            Hash256::from(record_at_height(&guard, height)?.hash)
-        };
-        self.resolve_block_by_hash(height, active_hash)
-    }
-
-    fn block_bytes_at_height(&self, height: u32, offset: u32, len: u32) -> Option<Vec<u8>> {
-        let source = self.block_body_source.as_ref()?;
-        let hash = if let Some(tree) = &self.block_tree {
-            BlockHash::from(tree.read().active_node_at_height(height)?.hash)
-        } else {
-            let guard = self.blocks.read();
-            record_at_height(&guard, height)?.hash
-        };
-        source.block_body_range(height, hash, offset, len)
-    }
-}
-
-/// Progress reads that raced a tip or revision move before the status
-/// report gives up on a coherent answer for this snapshot.
-const PROGRESS_READ_ATTEMPTS: usize = 4;
-
-/// Worker-owned txindex facts for the RPC capability projection.
-pub(crate) struct TxIndexCapability {
-    lifecycle: Option<Arc<ArcSwap<TxIndexLifecycle>>>,
-    runtime: Option<Arc<TxIndexRuntime>>,
-    enabled: IndexCapabilities,
-}
-
-impl TxIndexCapability {
-    pub(crate) fn new(
-        lifecycle: Option<Arc<ArcSwap<TxIndexLifecycle>>>,
-        runtime: Option<Arc<TxIndexRuntime>>,
-        enabled: IndexCapabilities,
-    ) -> Self {
-        Self {
-            lifecycle,
-            runtime,
-            enabled,
-        }
-    }
-
-    fn report(
-        lifecycle: &TxIndexLifecycle,
-        runtime: &TxIndexRuntime,
-        enabled: IndexCapabilities,
-    ) -> CapabilityState {
-        if let Some(message) = runtime.failure_message() {
-            return CapabilityState::Failed {
-                reason: message.to_string(),
-            };
-        }
-        let engine = match lifecycle {
-            TxIndexLifecycle::Opening => return CapabilityState::Opening,
-            TxIndexLifecycle::ShutdownAbandoned => return CapabilityState::ShutdownAbandoned,
-            TxIndexLifecycle::Failed(reason) => {
-                return CapabilityState::Failed {
-                    reason: reason.to_string(),
-                };
-            }
-            TxIndexLifecycle::Serving(engine) => engine,
-        };
-        let phase = runtime.phase();
-        if let Some((from_height, to_height)) = phase.rolling_back() {
-            return CapabilityState::RollingBack {
-                from_height,
-                to_height,
-            };
-        }
-        let rebuilding = phase.rebuilding();
-        if rebuilding != IndexCapabilities::NONE {
-            return match Self::progress(engine, rebuilding) {
-                Ok(progress) => CapabilityState::Rebuilding {
-                    processed_height: progress.processed_height,
-                    target_height: progress.target_height,
-                },
-                Err(error) => CapabilityState::Failed {
-                    reason: error.to_string(),
-                },
-            };
-        }
-        match Self::progress(engine, enabled) {
-            Ok(progress) if progress.synced => CapabilityState::Ready,
-            Ok(progress) => CapabilityState::CatchingUp {
-                processed_height: progress.processed_height,
-                target_height: progress.target_height,
-            },
-            Err(error) => CapabilityState::Failed {
-                reason: error.to_string(),
-            },
-        }
-    }
-
-    fn progress(
-        engine: &TxIndexQueryEngine,
-        required: IndexCapabilities,
-    ) -> Result<IndexProgress, TxQueryError> {
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            match engine.index_progress_for(required) {
-                Err(TxQueryError::Retry) if attempts < PROGRESS_READ_ATTEMPTS => {}
-                result => return result,
-            }
-        }
-    }
-}
-
-impl TxIndexCapabilitySource for TxIndexCapability {
-    fn capability(&self) -> CapabilityStatus {
-        let enabled = !self.enabled.is_empty();
-        let state = match (&self.lifecycle, &self.runtime) {
-            (Some(lifecycle), Some(runtime)) if enabled => {
-                Self::report(&lifecycle.load(), runtime, self.enabled)
-            }
-            _ => CapabilityState::Disabled,
-        };
-        txindex_status(enabled, state)
     }
 }
 

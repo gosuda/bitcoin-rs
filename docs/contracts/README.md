@@ -22,7 +22,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [chain-events.md](chain-events.md) | `EVT-01`–`EVT-05` | Applied-chain event seam and consumer cursors | state/apply/txindex recovery tests |
 | [mempool-mutations.md](mempool-mutations.md) | `MPL-01`–`MPL-04` | Mutation ordering, sequence events, chain-change fencing | mempool gateway, RPC ZMQ, and node apply tests |
 | [mempool-policy.md](mempool-policy.md) | `POL-01`–`POL-06` | Admission owner, policy pins, preview/finality, replacement and package rules | policy/RBF suites plus planned admission/finality/cluster suites |
-| [external-api.md](external-api.md) | `API-01`–`API-13` | RPC/REST/ZMQ manifest, errors, mining RPCs, reference provenance, and BIP22/BIP23 template extras, mainnet GBT operational gates, and `submitheader` | manifest coverage, Core parity, mining tests, GBT BIP23 extras, gate, and submitheader tests |
+| [external-api.md](external-api.md) | `API-01`–`API-14` | RPC/REST/ZMQ manifest, errors, mining RPCs, reference provenance, and BIP22/BIP23 template extras, mainnet GBT operational gates, `submitheader`, and GBT client-rule negotiation | manifest coverage, Core parity, mining tests, GBT BIP23 extras, gate, submitheader, and negotiation tests |
 | [wallet-facing.md](wallet-facing.md) | `WF-01`–`WF-03` | Public wallet-facing surface and isolation from node internals | wallet-facing and Esplora tests; `listener_directory_table_is_closed_over_http` |
 | [p2p-wire.md](p2p-wire.md) | `P2P-01`–`P2P-04` | Wire compatibility, peer leases, best-known-height credit, connected-socket posture | P2P compatibility/live interop, peer-table and sync tests |
 | [qa-corpus.md](qa-corpus.md) | `QAC-01` | Fuzz corpus provenance | corpus provenance and fuzz targets |

@@ -44,7 +44,7 @@ impl Worker {
         {
             return Ok(CursorCommit::NotAligned);
         }
-        let bytes = crate::reconcile::ConsumerCursor::from_snapshot(&snapshot).to_bytes();
+        let bytes = crate::reconcile::cursor_from_snapshot(&snapshot).to_bytes();
         if self
             .writer
             .consumer_cursor()
@@ -132,7 +132,7 @@ impl Worker {
         let aligned = (!self.enabled.tx_lookup || watermarks.tx_lookup == Some(result))
             && (!self.enabled.script_history || watermarks.script_history == Some(result))
             && (!self.enabled.script_live || watermarks.script_live == Some(result));
-        aligned.then(|| crate::reconcile::ConsumerCursor::from_snapshot(&snapshot).to_bytes())
+        aligned.then(|| crate::reconcile::cursor_from_snapshot(&snapshot).to_bytes())
     }
 
     pub(super) fn commit_pending(
