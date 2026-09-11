@@ -316,11 +316,6 @@ impl WorkspaceGraph {
         }
     }
 
-    /// Validates the ZMQ surface ownership boundary: the external ZMQ
-    /// dependency is owned by the RPC surface crate, and node forwards
-    /// the surface feature without naming the dependency directly.
-    /// Returns the number of feature assertions checked.
-
     /// Rule 4: backend features carry a real backend choice and only the
     /// forwarding allowlist may define them (see `BACKEND_FORWARDING_CRATES`).
     fn validate_backend_forwarding(&self, violations: &mut Vec<String>) -> usize {
@@ -373,6 +368,10 @@ impl WorkspaceGraph {
         checked_features
     }
 
+    /// Validates the ZMQ surface ownership boundary: the external ZMQ
+    /// dependency is owned by the RPC surface crate, and node forwards
+    /// the surface feature without naming the dependency directly.
+    /// Returns the number of feature assertions checked.
     fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {
         let mut checked = 0_usize;
         for (name, dependencies) in &self.zmq_deps {
