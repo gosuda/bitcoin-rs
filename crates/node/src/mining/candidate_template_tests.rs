@@ -105,6 +105,15 @@ fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) ->
     }
 }
 
+fn empty_request() -> bitcoin_rs_mining::BlockTemplateRequest {
+    bitcoin_rs_mining::BlockTemplateRequest {
+        mode: bitcoin_rs_mining::BlockTemplateMode::Template,
+        capabilities: Vec::new(),
+        rules: Vec::new(),
+        long_poll_id: None,
+    }
+}
+
 fn template_for(
     candidate: Candidate,
     submit_old: Option<bool>,
@@ -112,6 +121,7 @@ fn template_for(
     super::MiningCoordinator::template_from_candidate(
         Network::Regtest,
         Arc::new(candidate),
+        &empty_request(),
         submit_old,
         Vec::new(),
         0,
@@ -169,6 +179,7 @@ fn signet_template_carries_challenge_and_mandatory_rule() {
             true,
             true,
         )),
+        &empty_request(),
         None,
         Vec::new(),
         0,

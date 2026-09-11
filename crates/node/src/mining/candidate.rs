@@ -16,6 +16,7 @@ use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_mining::AvailableMiningRule;
 use bitcoin_rs_mining::BlockTemplate;
+use bitcoin_rs_mining::BlockTemplateRequest;
 use bitcoin_rs_mining::BlockValidationResult;
 use bitcoin_rs_mining::Candidate;
 use bitcoin_rs_mining::CandidateContext;
@@ -333,6 +334,7 @@ impl MiningCoordinator {
     pub(super) fn template_from_candidate(
         network: Network,
         candidate: Arc<Candidate>,
+        request: &BlockTemplateRequest,
         submit_old: Option<bool>,
         version_bits_available: Vec<AvailableMiningRule>,
         version_bits_required: u32,
@@ -351,15 +353,24 @@ impl MiningCoordinator {
         if signet.is_some() {
             rules.push(MiningRule::new("signet"));
         }
+        let mut capabilities = vec![
+            MiningCapability::new("proposal"),
+            MiningCapability::new("longpoll"),
+        ];
+        for capability in &request.capabilities {
+            if !capabilities
+                .iter()
+                .any(|known| known.as_str() == capability.as_str())
+            {
+                capabilities.push(capability.clone());
+            }
+        }
         BlockTemplate {
             candidate,
             rules,
             version_bits_available,
             version_bits_required,
-            capabilities: vec![
-                MiningCapability::new("proposal"),
-                MiningCapability::new("longpoll"),
-            ],
+            capabilities,
             mutable: vec![
                 TemplateMutation::Time,
                 TemplateMutation::Transactions,
@@ -367,6 +378,7 @@ impl MiningCoordinator {
             ],
             submit_old,
             signet,
+            work_id: None,
         }
     }
 
