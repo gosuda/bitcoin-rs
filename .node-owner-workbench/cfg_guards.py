@@ -1,4 +1,4 @@
-"""Keep a test-only item's imports gated when its owner is split."""
+"""Keep test-only dependencies gated across owner and import migrations."""
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
@@ -12,5 +12,11 @@ source = source.replace(old, new)
 path.write_text(source)
 path = root / 'phase1.py'
 source = path.read_text()
-source = source.replace("if 'use arc_swap::ArcSwap;' not in text:", "if 'ArcSwap::' in text and 'use arc_swap::ArcSwap;' not in text:")
+source += '\nfrom phase1_imports import after_fix\n'
 path.write_text(source)
+path = root / 'build_candidates.py'
+source = path.read_text()
+old = '        cleanup_imports(log)\n        command('
+new = "        cleanup_imports(log)\n        if hasattr(phase, 'after_fix'):\n            phase.after_fix()\n        command("
+assert old in source
+path.write_text(source.replace(old, new))
