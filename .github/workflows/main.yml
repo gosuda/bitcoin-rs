@@ -141,11 +141,12 @@ jobs:
           cargo bench --locked -p bitcoin-rs-node --no-run \
             --no-default-features --features fjall --bench chainstate_journal
       # Retained crate-level benchmarks without kernel (this job's previous
-      # whole content): merkle, utxo_commit under fjall, and sync_pipeline are
-      # not covered by the compiles above.
+      # whole content): merkle, utxo_commit under fjall, sync_pipeline, and
+      # the mining candidate are not covered by the compiles above.
       - run: |
           cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
           cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
+          cargo bench --locked -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate
           cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
 
       # Native script tests do not compile this feature-gated oracle. Exercise

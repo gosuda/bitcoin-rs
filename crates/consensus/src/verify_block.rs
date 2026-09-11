@@ -12,7 +12,7 @@ mod legacy {
 
 pub use legacy::{
     BlockRuleContext, block_has_witness, block_merkle_root_matches_txids,
-    block_witness_commitment_matches, verify_merkle_root_with_txids,
+    block_witness_commitment_matches, compute_merkle_root, verify_merkle_root_with_txids,
 };
 pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 

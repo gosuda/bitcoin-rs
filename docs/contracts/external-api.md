@@ -110,6 +110,9 @@ fixture replay gate. `API-11` is the BIP22/BIP23
 - The method takes the block-tree read lock, then loads one applied-tip
   snapshot. Height checks and the hash-rate walk use that snapshot and that
   locked tree, not a second tip load.
+- The hash-rate window is Core's parent walk: `lookup` parent pointers from
+  the resolved start node, min/max header time, `chainwork` delta. It does not
+  re-resolve each height through `node_at_height_from`.
 - `nblocks` (`lookup`) must be a positive count or `-1` (since the last
   difficulty retarget). Otherwise the RPC is Core `-8`
   (`RpcError::InvalidParameter`) with
@@ -321,3 +324,4 @@ The wallet-facing subset of this surface is owned by
 [MempoolGateway](../../CONCEPTS.md),
 [CapabilityState](../../CONCEPTS.md),
 [Esplora dialects](../../CONCEPTS.md).
+
