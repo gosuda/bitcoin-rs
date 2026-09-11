@@ -69,7 +69,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `clearbanned` | 0.4.0 |  |
 | `setnetworkactive` | 0.4.0 |  |
 | `getnodeaddresses` | 0.4.0 |  |
-| `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll. |
+| `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: client must advertise segwit (and signet on signet); submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll. |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts derived from the mining coordinator. |
 | `submitblock` | 0.4.0 |  |
 | `submitheader` | 0.4.0 | See API-13 in docs/contracts/external-api.md for submitheader behavior. |
@@ -119,6 +119,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `help` | n/a | No per-method help text renderer. |
 | `logging` | n/a | Log-category controls not exposed over RPC. |
 | `stop` | n/a | Lifecycle control not exposed over RPC. |
+| `submitheader` | n/a | Header-only submission not implemented. |
 | `getaddrmaninfo` | n/a | Addrman table stats not exposed. |
 | `abortprivatebroadcast` | n/a | Private-broadcast store not implemented. |
 | `analyzepsbt` | n/a | PSBT analysis not implemented (combine/finalize only). |
@@ -236,4 +237,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Implemented 71, Deviation 8, Extension 2, Unimplemented 93 - total 174.
+Row counts: Implemented 70, Deviation 8, Extension 2, Unimplemented 94 - total 174.

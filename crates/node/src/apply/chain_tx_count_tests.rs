@@ -1,3 +1,7 @@
+//! Counter recovery contract: [`docs/contracts/recovery.md#rcv-06-chain-transaction-count`].
+//! Zero means unknown (including legacy datadirs), rewinds that underflow remain
+//! unknown, and additions that overflow are unknown rather than wrapping.
+
 use super::*;
 
 fn handles() -> Chainstate {

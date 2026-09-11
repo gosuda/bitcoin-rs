@@ -322,6 +322,7 @@ impl MiningControl for CompatMiningControl {
             ],
             submit_old: None,
             signet: None,
+            work_id: None,
         }))
     }
 
@@ -369,14 +370,12 @@ impl MiningControl for CompatMiningControl {
 
 #[test]
 fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
-    let mut ctx = Context::new();
-    ctx.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(
-        ctx.with_mining_control(Arc::new(CompatMiningControl)),
+        Context::new().with_mining_control(Arc::new(CompatMiningControl)),
     ));
 
     let template: corepc_types::v31::GetBlockTemplate =
-        typed(&handler.dispatch("getblocktemplate", &json!([{}]))?)?;
+        typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
     assert_eq!(template.version, 0x2000_0000);
     assert_eq!(template.height, 0);
     assert_eq!(template.bits, "1d00ffff");

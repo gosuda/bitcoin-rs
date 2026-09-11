@@ -834,6 +834,8 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
         rules: Vec::new(),
         long_poll_id: None,
     })?);
+    // Bitcoin Core's getblocktemplate contract advertises server capabilities,
+    // and omits Signet metadata on networks that are not Signet.
     assert_eq!(
         template
             .capabilities
@@ -853,6 +855,8 @@ fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(template_request(None))?);
+    // Bitcoin Core's Signet getblocktemplate contract requires the signet rule
+    // and challenge metadata for Signet templates.
     assert!(template.rules.iter().any(|rule| rule.as_str() == "signet"));
     assert!(template.signet.is_some());
     Ok(())
