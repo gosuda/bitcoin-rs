@@ -3,24 +3,118 @@ on:
   push:
     branches: [automation/txindex-workbench-20260911]
 permissions:
-  contents: read
+  contents: write
+defaults:
+  run:
+    shell: bash
 jobs:
-  source:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Export updated main source and exact upstream changes
-        run: |
-          mkdir -p /tmp/txindex-current
-          git archive --format=tar.gz 7f5a460de67965ff36955bab1434c75f080ad384 > /tmp/txindex-current/source.tar.gz
-          git diff 8086e3b204a44c50a90d25e678015f690729aba9 7f5a460de67965ff36955bab1434c75f080ad384 > /tmp/txindex-current/upstream.patch
-          git log --oneline 8086e3b204a44c50a90d25e678015f690729aba9..7f5a460de67965ff36955bab1434c75f080ad384 > /tmp/txindex-current/upstream-commits.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          name: txindex-current-source
-          path: /tmp/txindex-current/
-          retention-days: 1
+          components: rustfmt,clippy
+      - name: Create current-main source worktree
+        run: |
+          git worktree add --detach /tmp/txindex-candidate 7f5a460de67965ff36955bab1434c75f080ad384
+          mkdir -p /tmp/txindex-evidence
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: /tmp/txindex-candidate -> target
+          cache-on-failure: true
+      - name: Refine current query and publication owners
+        run: |
+          python .txindex-workbench/refine_current.py /tmp/txindex-candidate
+          cd /tmp/txindex-candidate
+          git add -A
+          git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --edition 2024 --config skip_children=true
+          git add -A
+          git diff --cached --check
+          cargo fmt --all -- --check
+          git diff --cached --stat | tee /tmp/txindex-evidence/query-diff-stat.txt
+          git diff --cached --binary > /tmp/txindex-evidence/query.patch
+          rustc --version | tee /tmp/txindex-evidence/rust-version.txt
+      - name: Query refactor - strict all-target Clippy
+        working-directory: /tmp/txindex-candidate
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/txindex-evidence/query-clippy.log
+      - name: Query refactor - worker regressions
+        working-directory: /tmp/txindex-candidate
+        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib txindex_worker -- --nocapture 2>&1 | tee /tmp/txindex-evidence/query-tests.log
+      - name: Index regression suite
+        working-directory: /tmp/txindex-candidate
+        run: cargo test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast 2>&1 | tee /tmp/txindex-evidence/index-tests.log
+      - name: CL-08 and CL-13 ownership gate
+        working-directory: /tmp/txindex-candidate
+        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture 2>&1 | tee /tmp/txindex-evidence/ownership.log
+      - name: Publish validated source-only query refactor
+        working-directory: /tmp/txindex-candidate
+        run: |
+          git config user.name 'metaphorics'
+          git config user.email '152830360+metaphorics@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if git diff --cached --name-only | grep -E '^\.github/|^\.txindex-workbench/'; then exit 1; fi
+          git commit -m 'refactor(node): isolate txindex query work and unify accounting'
+          git rev-parse HEAD | tee /tmp/txindex-evidence/query-commit.txt
+          git push origin HEAD:refs/heads/refactor/txindex-query-boundaries-20260911
+      - name: Apply independently reviewable store-open shutdown fix
+        run: |
+          python .txindex-workbench/refine_open.py /tmp/txindex-candidate
+          cd /tmp/txindex-candidate
+          git add -A
+          git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --edition 2024 --config skip_children=true
+          git add -A
+          git diff --cached --check
+          cargo fmt --all -- --check
+          git diff --cached --stat | tee /tmp/txindex-evidence/open-diff-stat.txt
+          git diff --cached --binary > /tmp/txindex-evidence/open.patch
+      - name: Shutdown fix - strict all-target Clippy
+        working-directory: /tmp/txindex-candidate
+        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/txindex-evidence/open-clippy.log
+      - name: Shutdown fix - complete txindex worker regressions
+        working-directory: /tmp/txindex-candidate
+        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib txindex_worker -- --nocapture 2>&1 | tee /tmp/txindex-evidence/open-tests.log
+      - name: Prove the cancellation regression detects the original uncapped wait
+        working-directory: /tmp/txindex-candidate
+        run: |
+          file=crates/node/src/txindex_worker/startup/open_wait.rs
+          cp "$file" /tmp/open_wait.original.rs
+          trap 'cp /tmp/open_wait.original.rs "$file"' EXIT
+          sed -i 's/remaining.min(OPEN_POLL_INTERVAL)/remaining/' "$file"
+          status=0
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib pending_open_rechecks_shutdown_before_the_open_deadline -- --nocapture > /tmp/txindex-evidence/open-negative-control.log 2>&1 || status=$?
+          cp /tmp/open_wait.original.rs "$file"
+          test "$status" -ne 0
+          grep 'test result: FAILED' /tmp/txindex-evidence/open-negative-control.log
+          grep 'pending_open_rechecks_shutdown_before_the_open_deadline.*FAILED' /tmp/txindex-evidence/open-negative-control.log
+          git diff --exit-code -- "$file"
+      - name: Publish validated source-only shutdown fix
+        working-directory: /tmp/txindex-candidate
+        run: |
+          cargo fmt --all -- --check
+          git add -A
+          git diff --cached --check
+          if git diff --cached --name-only | grep -E '^\.github/|^\.txindex-workbench/'; then exit 1; fi
+          git commit -m 'fix(node): bound txindex open cancellation and retain namespace exclusion'
+          git rev-parse HEAD | tee /tmp/txindex-evidence/open-commit.txt
+          git push origin HEAD:refs/heads/fix/txindex-open-shutdown-20260911
+      - name: Preserve exact source and validation evidence
+        if: always()
+        run: |
+          if test -d /tmp/txindex-candidate; then
+            tar --exclude=target --exclude=.git -czf /tmp/txindex-evidence/candidate.tar.gz -C /tmp/txindex-candidate .
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: txindex-final-evidence
+          path: /tmp/txindex-evidence/
+          retention-days: 14
