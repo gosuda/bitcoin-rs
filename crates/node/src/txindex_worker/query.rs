@@ -1,6 +1,15 @@
 //! Snapshot-gated txindex queries and the index-side block source.
 
-use super::*;
+use super::{
+    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, Hash256,
+    IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES,
+    Mutex, Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT,
+    QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, RwLock, ScriptHash, ScriptHistoryRecord,
+    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
+    TipSnapshot, Tx, TxIndexInfo, TxIndexQuery, TxIndexRuntime, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
+    record_at_height,
+};
 
 /// Aggregate work budget shared by every operation in one public query.
 struct QueryBudget {
