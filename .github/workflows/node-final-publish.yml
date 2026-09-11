@@ -1,0 +1,161 @@
+name: node-final-publish
+
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths:
+      - .github/workflows/node-final-publish.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-final-publish
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt,clippy
+      - name: Install native transport build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev pkg-config
+      - name: Verify transport and stage immutable reconstruction inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/node-final-evidence
+          python3 - <<'PY'
+          import base64, hashlib, json, shutil, zlib
+          from pathlib import Path
+          root = Path('.github/node-final')
+          manifest = json.loads((root / 'manifest.json').read_text())
+          if manifest['base'] != '5db428fbbb47688c55e22cd6d490b5406a32e6be':
+              raise ValueError('Unexpected source base')
+          encoded = []
+          for part in manifest['parts']:
+              p = Path(part['path'])
+              if p.parent != root or p.is_symlink():
+                  raise ValueError('Unexpected payload path')
+              raw = p.read_bytes()
+              sha = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+              if sha != part['sha']:
+                  raise ValueError('Payload blob mismatch: ' + str(p))
+              encoded.append(raw.strip())
+          raw = zlib.decompress(base64.b64decode(b''.join(encoded), validate=True))
+          if hashlib.sha256(raw).hexdigest() != manifest['plan_sha256']:
+              raise ValueError('Reconstruction plan checksum mismatch')
+          plan = json.loads(raw)
+          if plan['base'] != manifest['base']:
+              raise ValueError('Plan base mismatch')
+          identities = [{k: s[k] for k in ('label', 'tree', 'branch')} for s in plan['stages']]
+          if identities != manifest['stages']:
+              raise ValueError('Plan tree identities mismatch')
+          Path('/tmp/node-final-plan.json').write_bytes(raw)
+          shutil.copyfile(root / 'finalize.py', '/tmp/node-finalize.py')
+          shutil.copyfile(root / 'manifest.json', '/tmp/node-final-evidence/manifest.json')
+          PY
+          rustc --version --verbose > /tmp/node-final-evidence/compiler.txt
+          git rev-parse HEAD > /tmp/node-final-evidence/workbench.txt
+      - name: Reconstruct, lint, and test every exact stage
+        run: python3 /tmp/node-finalize.py --plan /tmp/node-final-plan.json --output /tmp/node-final-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-final-verified
+          path: /tmp/node-final-evidence/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5db428fbbb47688c55e22cd6d490b5406a32e6be
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-final-verified
+          path: /tmp/node-final-evidence
+      - name: Verify validated bundle and atomically publish five new refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, subprocess as sp
+          from pathlib import Path
+          root = Path('/tmp/node-final-evidence')
+          record = json.loads((root / 'publication.json').read_text())
+          expected = [
+              ('apply', 'b381d75858748f8f59cfe2c7c7e8a8a833a1cfbd'),
+              ('sync', '91e4e17c3a354e3c64cbaed36c9f03ef4fdf2d7f'),
+              ('mining', '8929974b9c8503bab5d510c405d807e2362e3ebf'),
+              ('checkpoint', 'a174d4d6fa94bb7c178777d3b8a1c630d7b64976'),
+              ('txindex', 'e65f0d7033129f950767068b787ac5681437783a'),
+          ]
+          base = '5db428fbbb47688c55e22cd6d490b5406a32e6be'
+          if record['base'] != base or record['validated'] is not True:
+              raise ValueError('Unvalidated publication record')
+          stages = record['stages']
+          if [(s['label'], s['tree']) for s in stages] != expected:
+              raise ValueError('Unexpected published tree identities')
+          for check in record['final_checks'] + [c for s in stages for c in s['checks']]:
+              if check['returncode'] != 0:
+                  raise ValueError('Failed validation')
+              log = root / (check['name'] + '.log')
+              if hashlib.sha256(log.read_bytes()).hexdigest() != check['sha256']:
+                  raise ValueError('Validation log checksum mismatch')
+          bundle = root / 'node-refactors.bundle'
+          if hashlib.sha256(bundle.read_bytes()).hexdigest() != record['bundle_sha256']:
+              raise ValueError('Git bundle checksum mismatch')
+          sp.run(['git', 'bundle', 'verify', str(bundle)], check=True)
+          refs = []
+          parent = base
+          for stage in stages:
+              branch = 'agent/node-' + stage['label'] + '-final-5db428fb'
+              if stage['branch'] != branch or stage['parent'] != parent:
+                  raise ValueError('Unexpected stack or branch')
+              ref = 'refs/heads/' + branch
+              sp.run(['git', 'fetch', '--no-tags', str(bundle), ref], check=True)
+              commit = sp.check_output(['git', 'rev-parse', 'FETCH_HEAD']).decode().strip()
+              tree = sp.check_output(['git', 'rev-parse', commit + '^{tree}']).decode().strip()
+              actual_parent = sp.check_output(['git', 'show', '-s', '--format=%P', commit]).decode().strip()
+              if commit != stage['commit'] or tree != stage['tree'] or actual_parent != parent:
+                  raise ValueError('Git object identity mismatch')
+              remote = sp.check_output(['git', 'ls-remote', '--heads', 'origin', ref]).decode().split()
+              if remote and remote[0] != commit:
+                  raise ValueError('Destination already exists; refusing overwrite: ' + branch)
+              sp.run(['git', 'update-ref', ref, commit, '0' * 40], check=True)
+              refs.append(ref)
+              parent = commit
+          sp.run(['git', 'push', '--atomic', 'origin', *[r + ':' + r for r in refs]], check=True)
+          for stage, ref in zip(stages, refs):
+              remote = sp.check_output(['git', 'ls-remote', '--heads', 'origin', ref]).decode().split()
+              if not remote or remote[0] != stage['commit']:
+                  raise ValueError('Published ref verification failed')
+              print(stage['label'], stage['branch'], stage['commit'], stage['tree'])
+          (root / 'published.json').write_text(json.dumps(record, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-final-published
+          path: /tmp/node-final-evidence/published.json
+          retention-days: 7
+          if-no-files-found: error
