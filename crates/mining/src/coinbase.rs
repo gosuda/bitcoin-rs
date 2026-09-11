@@ -1,4 +1,6 @@
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
 
@@ -33,12 +35,6 @@ pub enum MiningError {
         /// Invalid ancestor position.
         ancestor: u32,
     },
-    /// The immutable snapshot's dependency graph contains a cycle.
-    #[error("snapshot dependency graph contains a cycle at entry {entry}")]
-    DependencyCycle {
-        /// Snapshot position at which the cycle was detected.
-        entry: usize,
-    },
     /// A selected fee sum exceeded the satoshi range.
     #[error("selected transaction fees overflow the satoshi range")]
     FeeOverflow,
@@ -67,24 +63,24 @@ pub(crate) fn build_coinbase(
     height: u32,
     subsidy_halving_interval: u32,
     fees: u64,
-    payout: Vec<u8>,
+    payout: &[u8],
     witness_commitment: Option<&Hash256>,
 ) -> Result<Tx, MiningError> {
     let value = bitcoin_rs_consensus::block_subsidy(height, subsidy_halving_interval)
         .checked_add(fees)
         .ok_or(MiningError::CoinbaseValueOverflow)?;
 
-    let mut witness = Vec::new();
+    let mut witness = Witness::new();
     let mut outputs = vec![TxOut {
-        value,
-        script_pubkey: payout,
+        value: Amount::from_sat(value),
+        script_pubkey: payout.to_vec().into(),
     }];
 
     if let Some(commitment) = witness_commitment {
         witness.push(WITNESS_RESERVED_VALUE.to_vec());
         outputs.push(TxOut {
-            value: 0,
-            script_pubkey: witness_commitment_script(commitment),
+            value: Amount::ZERO,
+            script_pubkey: witness_commitment_script(commitment).into(),
         });
     }
 
@@ -92,12 +88,12 @@ pub(crate) fn build_coinbase(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0xffff_ffff),
-            script_sig: coinbase_script_sig(height)?,
-            sequence: 0xffff_ffff,
+            script_sig: coinbase_script_sig(height)?.into(),
+            sequence: Sequence::MAX,
             witness,
         }],
         outputs,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     })
 }
 
@@ -167,18 +163,20 @@ mod uncommitted_witness_tests {
         WITNESS_RESERVED_VALUE, update_uncommitted_block_structures, witness_commitment_script,
     };
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
 
     fn commitment_block(witness: Vec<Vec<u8>>, with_commitment: bool) -> Block {
         let mut outputs = vec![TxOut {
-            value: 50,
-            script_pubkey: vec![0x51],
+            value: Amount::from_sat(50),
+            script_pubkey: Script::from_bytes(vec![0x51]),
         }];
         if with_commitment {
             outputs.push(TxOut {
-                value: 0,
-                script_pubkey: witness_commitment_script(&Hash256::from_le_bytes(&[0xab; 32])),
+                value: Amount::ZERO,
+                script_pubkey: witness_commitment_script(&Hash256::from_le_bytes(&[0xab; 32]))
+                    .into(),
             });
         }
         Block {
@@ -187,19 +185,19 @@ mod uncommitted_witness_tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 1,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 0,
             },
             txs: vec![Tx {
                 version: 2,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                    script_sig: vec![0x51, 0x00],
-                    sequence: u32::MAX,
-                    witness,
+                    script_sig: Script::from_bytes(vec![0x51, 0x00]),
+                    sequence: Sequence::MAX,
+                    witness: witness.into(),
                 }],
                 outputs,
-                lock_time: 0,
+                lock_time: LockTime::ZERO,
             }],
         }
     }
@@ -210,7 +208,7 @@ mod uncommitted_witness_tests {
         update_uncommitted_block_structures(&mut block, true);
         assert_eq!(
             block.txs[0].inputs[0].witness,
-            vec![WITNESS_RESERVED_VALUE.to_vec()]
+            Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
         );
     }
 
@@ -219,7 +217,7 @@ mod uncommitted_witness_tests {
         let custom = vec![vec![0x11; 32]];
         let mut block = commitment_block(custom.clone(), true);
         update_uncommitted_block_structures(&mut block, true);
-        assert_eq!(block.txs[0].inputs[0].witness, custom);
+        assert_eq!(block.txs[0].inputs[0].witness, Witness::from_stack(custom));
     }
 
     #[test]

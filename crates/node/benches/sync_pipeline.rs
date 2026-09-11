@@ -38,9 +38,14 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::path::Path;
+
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
@@ -48,21 +53,24 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::secp256k1::{All, Message as SecpMessage, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
-    Amount, OutPoint as OracleOutPoint, ScriptBuf as OracleScriptBuf, Sequence as OracleSequence,
-    Transaction as OracleTx, TxIn as OracleTxIn, TxOut as OracleTxOut, Txid as OracleTxid, Witness,
-    absolute, opcodes, script::Builder as OracleBuilder, transaction,
+    Amount as OracleAmount, OutPoint as OracleOutPoint, ScriptBuf as OracleScriptBuf,
+    Sequence as OracleSequence, Transaction as OracleTx, TxIn as OracleTxIn, TxOut as OracleTxOut,
+    Txid as OracleTxid, Witness as OracleWitness, absolute, opcodes,
+    script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
+use bitcoin_rs_node::metrics::{
+    Cell, CorpusIdentity, EvidenceIdentity, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample,
+    Sha256Hex,
+};
 use bitcoin_rs_node::{
-    BlockSync, Network, NodeConfig, TxIndexRuntime,
-    apply::Chainstate,
-    state::NodeState,
-    sync::{SyncBudget, default_sync_budget},
+    BlockSync, Network, NodeConfig, TxIndexRuntime, apply::Chainstate, state::NodeState,
+    sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
-use bitcoin_rs_primitives::deserialize;
+use bitcoin_rs_primitives::{consensus_bytes, deserialize};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
@@ -178,7 +186,8 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     print_signed_spend_proxy_summary(&blocks);
 
     const SIGNED_SPEND_SAMPLES: usize = 30;
-    let samples: ParkingMutex<Vec<Duration>> =
+    let origin = Instant::now();
+    let samples: ParkingMutex<Vec<(Duration, Duration)>> =
         ParkingMutex::new(Vec::with_capacity(SIGNED_SPEND_SAMPLES.saturating_mul(4)));
 
     c.bench_function("sync_pipeline_apply_signed_spend_proxy", |b| {
@@ -192,7 +201,9 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
                         .apply_block(black_box(block))
                         .unwrap_or_else(|error| panic!("signed-spend apply failed: {error}"));
                 }
-                samples.lock().push(sweep_start.elapsed());
+                samples
+                    .lock()
+                    .push((sweep_start.duration_since(origin), sweep_start.elapsed()));
                 black_box(
                     state
                         .applied_tip()
@@ -205,7 +216,75 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
         })
     });
 
-    print_percentiles("signed_spend_proxy", &samples.lock());
+    let sweeps = samples.lock();
+    print_percentiles(
+        "signed_spend_proxy",
+        &sweeps
+            .iter()
+            .map(|(_, elapsed)| *elapsed)
+            .collect::<Vec<_>>(),
+    );
+    record_evidence("sync_pipeline.signed_spend_proxy", &blocks, &sweeps);
+}
+
+/// Appends one identity-bearing sample per sweep to the bench evidence
+/// ledger under `target/benchmarks/`.
+///
+/// Every number carries the binary, configuration, corpus, backend and
+/// durability it was taken under, so a later comparison can match or reject
+/// it; the ledger is append-only across runs.
+fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]) {
+    let config = production_state_config();
+    let mut identity = EvidenceIdentity::of_process(&config)
+        .unwrap_or_else(|error| panic!("evidence identity: {error}"));
+    let corpus_bytes: Vec<u8> = blocks.iter().flat_map(consensus_bytes).collect();
+    identity.corpus = Some(CorpusIdentity {
+        id: cell.to_owned(),
+        manifest_sha256: Sha256Hex::digest(&corpus_bytes),
+    });
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/benchmarks/sync_pipeline.toml");
+    let mut ledger = match std::fs::read_to_string(&path) {
+        Ok(text) => Ledger::parse(&text).unwrap_or_else(|error| panic!("bench ledger: {error}")),
+        Err(_) => Ledger {
+            schema: LEDGER_SCHEMA.into(),
+            cells: Vec::new(),
+            contract: std::collections::BTreeMap::new(),
+        },
+    };
+    if !ledger.cells.iter().any(|candidate| candidate.id == cell) {
+        ledger.cells.push(Cell {
+            id: cell.to_owned(),
+            samples: Vec::new(),
+        });
+    }
+    let nanos = |duration: Duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    for (start, elapsed) in sweeps {
+        let sample = Sample {
+            path: "apply.prove_window".into(),
+            owner: "node".into(),
+            identity: identity.clone(),
+            interval: Interval {
+                kind: IntervalKind::Inside,
+                start_ns: nanos(*start),
+                end_ns: nanos(start.saturating_add(*elapsed)),
+            },
+            cpu_ns: None,
+            elapsed_ns: nanos(*elapsed),
+            rss_peak_bytes: None,
+            io_bytes: None,
+            storage_bytes: None,
+        };
+        ledger
+            .record(cell, sample)
+            .unwrap_or_else(|error| panic!("record bench sample: {error}"));
+    }
+    std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
+        .unwrap_or_else(|error| panic!("bench evidence dir: {error}"));
+    let rendered = ledger
+        .render()
+        .unwrap_or_else(|error| panic!("render bench ledger: {error}"));
+    std::fs::write(&path, rendered).unwrap_or_else(|error| panic!("write bench ledger: {error}"));
 }
 
 fn deterministic_initial_sync_proxy(c: &mut Criterion) {
@@ -618,13 +697,14 @@ impl SyncFixture {
     fn new_reverse_scan_overflow(tx_index_mode: TxIndexMode) -> Self {
         let mut fixture =
             Self::new_with_block_count(tx_index_mode, 0, SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS);
-        // The bench stages 128 received blocks and still needs to request the
-        // full 128-block pending window, so the received-block budget must
-        // cover both the staged blocks and the new requests.
-        fixture.sync.install_budget(SyncBudget {
-            max_received_blocks: 256,
-            ..default_sync_budget()
-        });
+        // The bench stages 128 received blocks and still needs to request a
+        // full pending window, so the received-block budget must cover both
+        // the staged blocks and the new requests.
+        let mut budget = default_sync_budget();
+        budget.max_received_blocks = budget
+            .max_pending_blocks
+            .saturating_add(SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS);
+        fixture.sync.install_budget(budget);
         let first_index = SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_START_HEIGHT.saturating_sub(1);
         let last_index = first_index.saturating_add(SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS);
         for block in fixture
@@ -1077,6 +1157,7 @@ fn populate_sync_header_chain(
     (blocks, received_scan_expected)
 }
 
+#[cfg(feature = "fjall")]
 fn populate_header_chain_from_blocks(tree: &mut BlockTree, blocks: &[Block]) {
     let genesis = Network::Regtest.genesis_block();
     let genesis_id = tree
@@ -1194,7 +1275,7 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase_transaction(height)],
@@ -1211,7 +1292,7 @@ fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![fanout_coinbase_transaction(height)],
@@ -1241,7 +1322,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs,
@@ -1257,7 +1338,7 @@ fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::default(),
         time,
-        bits: 0x207f_ffff,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
         nonce: 0,
     }
 }
@@ -1265,16 +1346,16 @@ fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
 fn coinbase_transaction(height: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: coinbase_script_sig(height),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: 50_0000_0000,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(50_0000_0000),
+            script_pubkey: Script::new(),
         }],
     }
 }
@@ -1282,18 +1363,18 @@ fn coinbase_transaction(height: u32) -> Tx {
 fn fanout_coinbase_transaction(height: u32) -> Tx {
     let outputs = (0..SPEND_PROXY_FANOUT)
         .map(|_| TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: push_int(1),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: push_int(1).into(),
         })
         .collect();
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: coinbase_script_sig(height),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs,
     }
@@ -1302,16 +1383,16 @@ fn fanout_coinbase_transaction(height: u32) -> Tx {
 fn spend_proxy_transaction(prev_txid: Txid, vout: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(prev_txid, vout),
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }],
         outputs: vec![TxOut {
-            value: SPEND_PROXY_SPEND_OUTPUT_VALUE,
-            script_pubkey: push_int(1),
+            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            script_pubkey: push_int(1).into(),
         }],
     }
 }
@@ -1355,7 +1436,8 @@ fn block_merkle_root(block: &Block) -> Hash256 {
 
 /// Decodes a 256-bit compact target into little-endian bytes. Negative,
 /// overflowed, and zero-mantissa encodings decode to an unreachable zero.
-fn compact_to_target(bits: u32) -> [u8; 32] {
+fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
+    let bits = bits.to_consensus();
     let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
     let mantissa = u64::from(bits & 0x007f_ffff);
     let mut target = [0_u8; 32];
@@ -1379,7 +1461,7 @@ fn compact_to_target(bits: u32) -> [u8; 32] {
 
 /// Returns true when `hash` is at or below the compact target, comparing the
 /// little-endian byte arrays from the most significant end.
-fn pow_met(bits: u32, hash: &BlockHash) -> bool {
+fn pow_met(bits: CompactTarget, hash: &BlockHash) -> bool {
     let target = compact_to_target(bits);
     let hash_le = hash.as_bytes();
     for index in (0..32).rev() {
@@ -1490,7 +1572,7 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs: vec![coinbase],
@@ -1507,8 +1589,8 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
         let pkh = keys.p2pkh[usize::try_from(i).unwrap()].pubkey_hash();
         let script = OracleScriptBuf::new_p2pkh(&pkh);
         outputs.push(TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: script.as_bytes().to_vec(),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
     // P2WPKH outputs (indices 22..44).
@@ -1518,8 +1600,8 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
             .unwrap();
         let script = OracleScriptBuf::new_p2wpkh(&pkh);
         outputs.push(TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: script.as_bytes().to_vec(),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
     // P2WSH 2-of-3 outputs (indices 44..64).
@@ -1528,25 +1610,25 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
         let script_hash = redeem.wscript_hash();
         let script = OracleScriptBuf::new_p2wsh(&script_hash);
         outputs.push(TxOut {
-            value: SPEND_PROXY_COINBASE_OUTPUT_VALUE,
-            script_pubkey: script.as_bytes().to_vec(),
+            value: Amount::from_sat(SPEND_PROXY_COINBASE_OUTPUT_VALUE),
+            script_pubkey: script.as_bytes().to_vec().into(),
         });
     }
     // BIP141 witness commitment output.
     let commitment = witness_commitment_for_coinbase(&outputs);
     outputs.push(TxOut {
-        value: 0,
-        script_pubkey: witness_commitment_script_pubkey(&commitment),
+        value: Amount::from_sat(0),
+        script_pubkey: witness_commitment_script_pubkey(&commitment).into(),
     });
 
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: coinbase_script_sig(height),
-            sequence: u32::MAX,
-            witness: vec![WITNESS_RESERVED_VALUE.to_vec()],
+            script_sig: coinbase_script_sig(height).into(),
+            sequence: Sequence::MAX,
+            witness: vec![WITNESS_RESERVED_VALUE.to_vec()].into(),
         }],
         outputs,
     }
@@ -1616,7 +1698,7 @@ fn child_signed_spend_fanout_block(
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         },
         txs,
@@ -1630,7 +1712,7 @@ fn child_signed_spend_fanout_block(
         .outputs
         .last_mut()
         .unwrap_or_else(|| panic!("coinbase missing commitment output"));
-    last.script_pubkey = witness_commitment_script_pubkey(&commitment);
+    last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
     // Recompute merkle root after updating the commitment.
     block.header.merkle_root = block_merkle_root(&block);
     mine_block_to_declared_target(&mut block);
@@ -1731,10 +1813,10 @@ fn build_signed_p2pkh_spend(
             },
             script_sig: OracleScriptBuf::new(),
             sequence: OracleSequence::MAX,
-            witness: Witness::new(),
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
             script_pubkey: OracleBuilder::new().push_int(1).into_script(),
         }],
     };
@@ -1779,10 +1861,10 @@ fn build_signed_p2wpkh_spend(
             },
             script_sig: OracleScriptBuf::new(),
             sequence: OracleSequence::MAX,
-            witness: Witness::new(),
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
             script_pubkey: OracleBuilder::new().push_int(1).into_script(),
         }],
     };
@@ -1791,7 +1873,7 @@ fn build_signed_p2wpkh_spend(
         .p2wpkh_signature_hash(
             0,
             &script_pubkey,
-            Amount::from_sat(prevout_value),
+            OracleAmount::from_sat(prevout_value),
             EcdsaSighashType::All,
         )
         .unwrap_or_else(|e| panic!("p2wpkh sighash: {e}"));
@@ -1801,7 +1883,8 @@ fn build_signed_p2wpkh_spend(
     sig.normalize_s();
     let mut sig_bytes = sig.serialize_der().as_ref().to_vec();
     sig_bytes.push(EcdsaSighashType::All as u8);
-    tx.input[0].witness = Witness::from_slice(&[sig_bytes, pubkey.inner.serialize().to_vec()]);
+    tx.input[0].witness =
+        OracleWitness::from_slice(&[sig_bytes, pubkey.inner.serialize().to_vec()]);
     to_native_tx(&tx)
 }
 
@@ -1826,10 +1909,10 @@ fn build_signed_p2wsh_spend(
             },
             script_sig: OracleScriptBuf::new(),
             sequence: OracleSequence::MAX,
-            witness: Witness::new(),
+            witness: OracleWitness::new(),
         }],
         output: vec![OracleTxOut {
-            value: Amount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
+            value: OracleAmount::from_sat(SPEND_PROXY_SPEND_OUTPUT_VALUE),
             script_pubkey: OracleBuilder::new().push_int(1).into_script(),
         }],
     };
@@ -1838,7 +1921,7 @@ fn build_signed_p2wsh_spend(
         .p2wsh_signature_hash(
             0,
             &redeem,
-            Amount::from_sat(prevout_value),
+            OracleAmount::from_sat(prevout_value),
             EcdsaSighashType::All,
         )
         .unwrap_or_else(|e| panic!("p2wsh sighash: {e}"));
@@ -1860,7 +1943,7 @@ fn build_signed_p2wsh_spend(
         sigs[1].clone(),
         redeem.as_bytes().to_vec(),
     ];
-    tx.input[0].witness = Witness::from_slice(&witness_items);
+    tx.input[0].witness = OracleWitness::from_slice(&witness_items);
     to_native_tx(&tx)
 }
 

@@ -8,9 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use bitcoin_rs_node::metrics::{
+    CorpusIdentity, EvidenceIdentity, Interval, IntervalKind, Ledger as RuntimeLedger, Sample,
+    Sha256Hex,
+};
 use serde::Deserialize;
 
-const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v1";
+const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";
 const CONTRACT: &str = "docs/contracts/hot-path-attribution.md";
 const LEDGER: &str = "docs/benchmarks/hot-path-ledger.toml";
 const CELL_COUNT: usize = 36;
@@ -73,6 +77,7 @@ fn workspace_file(relative: &str) -> PathBuf {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Ledger {
     schema: String,
     contract: String,
@@ -82,6 +87,7 @@ struct Ledger {
     candidates: Vec<Candidate>,
     levers: Vec<Lever>,
     forbidden_probes: Vec<ForbiddenProbe>,
+    cells: Vec<Cell>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,6 +105,20 @@ impl Matrix {
             .saturating_mul(self.corpora.len())
             .saturating_mul(self.archs.len())
             .saturating_mul(self.backends.len())
+    }
+
+    fn cell_ids(&self) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        for domain in &self.domains {
+            for corpus in &self.corpora {
+                for arch in &self.archs {
+                    for backend in &self.backends {
+                        ids.insert(format!("{domain}.{corpus}.{arch}.{backend}"));
+                    }
+                }
+            }
+        }
+        ids
     }
 }
 
@@ -162,10 +182,20 @@ struct ForbiddenProbe {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Cell {
+    id: String,
+    samples: Vec<Sample>,
+}
+
 fn load_ledger() -> Ledger {
     let path = workspace_file(LEDGER);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!("read {}: {error}", path.display());
+    });
+    RuntimeLedger::parse(&text).unwrap_or_else(|error| {
+        panic!("runtime ledger validation for {LEDGER}: {error}");
     });
     toml::from_str(&text).unwrap_or_else(|error| {
         panic!("parse {LEDGER}: {error}");
@@ -200,6 +230,133 @@ fn matrix_is_the_frozen_36_cell_denominator() {
     assert_eq!(ledger.matrix.corpora, ["c150", "cmodern"]);
     assert_eq!(ledger.matrix.archs, ["x86_64", "arm64"]);
     assert_eq!(ledger.matrix.backends, ["fjall", "rocksdb", "redb"]);
+}
+
+/// HPA-05: use the actual inventory, not just its required minimum.
+/// Returns the offending cell and path without changing sample histories.
+fn check_sample_paths(ledger: &Ledger) -> Result<(), (&str, &str)> {
+    let ids: BTreeSet<&str> = ledger.paths.iter().map(|row| row.id.as_str()).collect();
+    for cell in &ledger.cells {
+        for sample in &cell.samples {
+            if sample.path.is_empty() || !ids.contains(sample.path.as_str()) {
+                return Err((cell.id.as_str(), sample.path.as_str()));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cell_histories_match_the_matrix_and_runtime_schema() {
+    let ledger = load_ledger();
+    check_sample_paths(&ledger).unwrap_or_else(|(cell, path)| {
+        panic!("cell `{cell}` contains undeclared sample path `{path}`");
+    });
+    let mut actual = BTreeSet::new();
+    for cell in &ledger.cells {
+        assert!(!cell.id.is_empty(), "empty cell id");
+        assert!(
+            actual.insert(cell.id.clone()),
+            "duplicate cell id `{}`",
+            cell.id
+        );
+    }
+    assert_eq!(
+        ledger.cells.len(),
+        CELL_COUNT,
+        "ledger must declare one history per cell"
+    );
+    assert_eq!(
+        actual,
+        ledger.matrix.cell_ids(),
+        "cell histories must equal the matrix cross-product"
+    );
+}
+
+/// Synthetic HPA-05/HPA-12 schema fixtures, never recorded as measurements.
+/// Both fixture cells use Cmodern, redb, and arm64; only the path varies.
+fn ledger_with_sample_paths(cell_id: &str, paths: &[&str]) -> Ledger {
+    let mut ledger = load_ledger();
+    let cell = ledger
+        .cells
+        .iter_mut()
+        .find(|cell| cell.id == cell_id)
+        .expect("fixture cell is declared");
+    for path in paths {
+        cell.samples.push(Sample {
+            path: (*path).to_owned(),
+            owner: "node".into(),
+            identity: EvidenceIdentity {
+                binary_sha256: Sha256Hex([1; 32]),
+                version: "test".into(),
+                config_sha256: Sha256Hex([2; 32]),
+                corpus: Some(CorpusIdentity {
+                    id: "Cmodern".into(),
+                    manifest_sha256: Sha256Hex([3; 32]),
+                }),
+                backend: "redb".into(),
+                durability: "test-only".into(),
+                hardware: "test arm64".into(),
+            },
+            interval: Interval {
+                kind: IntervalKind::Inside,
+                start_ns: 0,
+                end_ns: 1,
+            },
+            cpu_ns: None,
+            elapsed_ns: 1,
+            rss_peak_bytes: None,
+            io_bytes: None,
+            storage_bytes: None,
+        });
+    }
+    ledger
+}
+
+/// HPA-05/HPA-12: declared paths, repeated samples, and empty cells survive.
+#[test]
+fn declared_sample_paths_preserve_repetitions_and_empty_cells() {
+    let cell_id = "muhash.cmodern.arm64.redb";
+    let paths = ["cell.wall", "muhash.response", "cell.wall"];
+    let ledger = ledger_with_sample_paths(cell_id, &paths);
+    assert_eq!(check_sample_paths(&ledger), Ok(()));
+    assert_eq!(ledger.cells.len(), CELL_COUNT);
+    for cell in &ledger.cells {
+        if cell.id == cell_id {
+            let recorded: Vec<&str> = cell
+                .samples
+                .iter()
+                .map(|sample| sample.path.as_str())
+                .collect();
+            assert_eq!(recorded, paths);
+        } else {
+            assert!(cell.samples.is_empty());
+        }
+    }
+}
+
+/// HPA-05: the declared inventory may extend `REQUIRED_PATHS`.
+#[test]
+fn additional_declared_sample_paths_are_allowed() {
+    let ledger = ledger_with_sample_paths("p2p.cmodern.arm64.redb", &["p2p.apply_idle"]);
+    assert_eq!(check_sample_paths(&ledger), Ok(()));
+}
+
+/// HPA-05: a valid earlier sample must not hide a bad later sample or cell.
+#[test]
+fn undeclared_sample_paths_are_rejected_in_later_histories() {
+    let cell_id = "muhash.cmodern.arm64.redb";
+    for path in [
+        "not.declared",
+        "",
+        " ",
+        "CELL.WALL",
+        "cell.wall.extra",
+        "probe.assume_valid",
+    ] {
+        let ledger = ledger_with_sample_paths(cell_id, &["cell.wall", path]);
+        assert_eq!(check_sample_paths(&ledger), Err((cell_id, path)));
+    }
 }
 
 #[test]

@@ -3,12 +3,12 @@
 use std::str::FromStr as _;
 
 use anyhow::Result;
-use bitcoin_rs_node::zmq_publisher::ZmqTopic;
 use bitcoin_rs_node::{
     NetworkSelection, NodeConfig, NotificationConfig, P2pOverrides, ScriptIndexMode, UserConfig,
     ValidationOverrides, ZmqEndpointConfig, resolve,
 };
 use bitcoin_rs_primitives::Network;
+use bitcoin_rs_rpc::zmq::ZmqTopic;
 
 #[test]
 fn standard_network_uses_builtin_defaults() -> Result<()> {

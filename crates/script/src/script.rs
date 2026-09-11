@@ -21,6 +21,10 @@ pub mod opcode {
     pub const OP_PUSHNUM_1: u8 = 0x51;
     /// `OP_16`: pushes the number 16 (`OP_PUSHNUM_16`).
     pub const OP_PUSHNUM_16: u8 = 0x60;
+    /// `OP_IF`: begins a conditional branch (evaluator-owned semantics).
+    pub const OP_IF: u8 = 0x63;
+    /// `OP_ENDIF`: closes a conditional branch.
+    pub const OP_ENDIF: u8 = 0x68;
     /// `OP_RETURN`: marks an unspendable provably-prunable output.
     pub const OP_RETURN: u8 = 0x6a;
     /// `OP_DUP`: duplicates the top stack item.
@@ -335,10 +339,6 @@ pub fn is_multisig(script: &[u8]) -> bool {
 /// division by 1000 at the end only).
 #[must_use]
 pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
-    // Scripts over the consensus execution limit are unspendable, as in Core.
-    if script.len() > 10_000 {
-        return 0;
-    }
     let script_size = varint_size(script.len()).saturating_add(script.len());
     let size = if is_op_return(script) {
         0
@@ -347,9 +347,8 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     } else {
         32 + 4 + 1 + 107 + 4 + 8 + script_size
     };
-    let product =
-        dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
-    product.saturating_add(999) / 1000
+    let fee = dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
+    fee.saturating_add(999) / 1000
 }
 
 /// Encodes `data` as a minimal canonical push (direct push for 1..=75 bytes,
