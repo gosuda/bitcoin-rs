@@ -7,6 +7,7 @@ projects the same coherent node state and maps typed owner results to its
 own wire format. `API-07` is the recorded Core reference used by the RPC
 fixture replay gate. `API-11` is the BIP22/BIP23
 `getblocktemplate` extras the pinned corepc type does not model.
+`API-12` is mainnet template operational gates.
 
 Owners:
 
@@ -56,8 +57,9 @@ Owners:
   contract.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): standard
   JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-3`
-  (invalid type), `-5` (not found), `-8` (invalid parameter), and `-25`
-  plus `-26` (submission).
+  (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
+  (not connected), `-10` (initial download), and `-25` plus `-26`
+  (submission).
 - Amounts are integer satoshis internally. Adapters render the exact
   external BTC or sat-per-vB units and precision.
 - The node ships no wallet and holds no private key material. Methods
@@ -154,6 +156,16 @@ Owners:
   not retrieve or authenticate the referenced evidence. Reviewing evidence
   from the selected Core build is a maintainer responsibility outside this
   automated gate.
+
+### `API-12`: Mainnet template operational gates
+
+- **Owner**: `ensure_template_ready` in `crates/rpc/src/handlers/mining.rs`.
+- Template mode on mainnet requires at least one live peer (`PeerTable`) and
+  that the node has left IBD (`Context::is_initial_block_download`). Failures
+  are Core `-9` (`bitcoin-rs is not connected!`) and `-10`
+  (`bitcoin-rs is in initial sync and waiting for blocks...`).
+- Proposal mode does not apply these gates. Networks other than mainnet skip
+  them, matching Core `IsTestChain()`.
 
 ## Live gaps
 
@@ -283,6 +295,11 @@ The wallet-facing subset of this surface is owned by
   - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
   - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
     `signet_template_includes_challenge_and_signet_rule`
+
+- `API-12`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
+    `getblocktemplate_rejects_mainnet_during_ibd`,
+    `getblocktemplate_proposal_skips_mainnet_connection_gates`
 
 ## Vocabulary
 
