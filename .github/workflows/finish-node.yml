@@ -7,6 +7,10 @@ on:
       - .github/finish-node.py
       - .github/workflows/finish-node.yml
 
+concurrency:
+  group: node-finish-publication
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -80,10 +84,10 @@ jobs:
           record = json.loads((root / 'publication.json').read_text())
           base = '729f0e8691ec25401b8150ea9934c890a37e988a'
           expected = [
-              ('validation', 'refactor/node-validation-729f0e86', '891163a6f5f9e4c80c7c8e82736961e20ffc1864'),
-              ('txindex', 'refactor/node-txindex-729f0e86', '52a17119ece5fd3b0a7e768adda9ab0865c027f1'),
-              ('checkpoint', 'refactor/node-checkpoint-729f0e86', 'a0539b0dd6859b944de9a95fba23458c256154eb'),
-              ('mining', 'fix/node-mining-capabilities-729f0e86', '474d0bf1a9bb876e8d62c09fefaa6f9987736be0'),
+              ('validation', 'refactor/node-validation-729f0e86', 'c42b9dafde6d39db5c2cc5807c082996607471bd'),
+              ('txindex', 'refactor/node-txindex-729f0e86', '9064e702c179609c728a97a81b66c35430e6e562'),
+              ('checkpoint', 'refactor/node-checkpoint-729f0e86', '5d79a2cfbdcb9a557e173a1736d2c2316a2fbd81'),
+              ('mining', 'fix/node-mining-capabilities-729f0e86', '489db25553bee81189dfbf09d5b0a3255e0ef047'),
           ]
           if record['base'] != base or record['validated'] is not True or len(record['stages']) != 4:
               raise ValueError('Unexpected publication identity')
@@ -102,7 +106,7 @@ jobs:
               if label == 'validation':
                   required.add('validation-owner-gates')
               if label == 'mining':
-                  required |= {'final-matrix-clippy', 'final-node-tests', 'final-owner-gates', 'final-integration'}
+                  required |= {'final-matrix-clippy', 'final-redb-clippy', 'final-node-tests', 'final-owner-gates', 'final-integration'}
               if {c['name'] for c in stage['checks']} != required:
                   raise ValueError('Missing validation gates')
               for check in stage['checks']:
