@@ -321,6 +321,7 @@ impl MiningControl for CompatMiningControl {
                 TemplateMutation::PreviousBlock,
             ],
             submit_old: None,
+            signet: None,
             work_id: None,
         }))
     }
@@ -344,6 +345,13 @@ impl MiningControl for CompatMiningControl {
 
     fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Accepted)
+    }
+
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
     }
 
     fn publish_generation(&self) {}

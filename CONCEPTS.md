@@ -116,8 +116,9 @@ A peer holding up the apply frontier by failing to deliver a frontier block it w
 `PeerTable`; `PeerLifecycle` wraps that table for service send and disconnect
 helpers. Ready snapshots carry `PeerSource`, and identity-checked table
 methods are what authorize a mutation. Address equality alone never does.
-`BlockSync` owns the production download window and may call those table
-methods directly. `P2pService` does not hold a second window. See
+`BlockSync` drives the P2P-owned [`DownloadWindow`] and [`BlockStager`] and may
+call identity-checked [`PeerTable`] methods directly. `P2pService` does not
+hold a second window. See
 `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
 
 ### assumevalid

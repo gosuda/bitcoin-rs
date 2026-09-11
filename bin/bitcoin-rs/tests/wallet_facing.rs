@@ -664,6 +664,32 @@ fn assert_esplora_namespace(
         "GET /api/internal/* is not wallet-facing: {}",
         backend.text()
     );
+    let head_tx = client.exchange("HEAD", "/api/tx", None, b"")?;
+    assert_eq!(
+        head_tx.status,
+        404,
+        "HEAD /api/tx must not run POST /tx: {}",
+        head_tx.text()
+    );
+    let put_root = client.exchange("PUT", "/", None, b"")?;
+    assert_eq!(
+        put_root.status,
+        404,
+        "PUT / is not JSON-RPC: {}",
+        put_root.text()
+    );
+    assert_eq!(
+        client.esplora_text("/esplora/blocks/tip/height")?.trim(),
+        height.trim(),
+        "/esplora is a superset of public electrs"
+    );
+    let backend_internal = client.esplora_get("/esplora/internal/mempool/txs")?;
+    assert_eq!(
+        backend_internal.status,
+        200,
+        "GET /esplora/internal/* is the mempool-backend path: {}",
+        backend_internal.text()
+    );
     Ok(())
 }
 

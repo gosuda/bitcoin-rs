@@ -145,7 +145,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
     use bitcoin_rs_consensus::{ConsensusError, kernel::verify_tx_scripts};
 
     let mut signed = tx.clone();
-    signed.inputs[INPUT].witness = witness.to_vec();
+    signed.inputs[INPUT].witness = witness.to_vec().into();
     // The other input has a synthetic OP_TRUE prevout. This is script-verdict
     // parity, not contextual block validation or a claim about historical UTXOs.
     let mut spent: Vec<_> = signed
@@ -157,8 +157,8 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
                 prevout.clone()
             } else {
                 TxOut {
-                    value: VALUE,
-                    script_pubkey: vec![0x51],
+                    value: VALUE.into(),
+                    script_pubkey: vec![0x51].into(),
                 }
             };
             (input.previous_output, output)
@@ -168,7 +168,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
         .expect("kernel accepts independently signed BIP143 input");
     // Every BIP143 mode commits to this amount. Ensure the oracle is not
     // vacuously accepting, and require a script rejection, not an engine error.
-    spent[INPUT].1.value += 1;
+    spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(1_u64.into());
     assert!(matches!(
         verify_tx_scripts(&signed, &spent, VerifyFlags::MANDATORY),
         Err(ConsensusError::Script {

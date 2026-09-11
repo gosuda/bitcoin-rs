@@ -661,7 +661,7 @@ fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let genesis = Network::Regtest.genesis_block();
     let mut child = mined_child(genesis.block_hash())?;
-    child.header.bits = 0x207f_fffe;
+    child.header.bits = CompactTarget::from_consensus(0x207f_fffe);
     mine_block_to_regtest_target(&mut child)?;
     match mining.submit_header(child.header) {
         Err(MiningControlError::Rejected(reason)) => {

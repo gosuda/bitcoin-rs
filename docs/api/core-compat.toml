@@ -426,6 +426,11 @@ group = "mining"
 status = "implemented_unverified"
 
 [[rpc]]
+method = "submitheader"
+group = "mining"
+status = "implemented_unverified"
+
+[[rpc]]
 method = "prioritisetransaction"
 group = "mining"
 status = "implemented_unverified"
