@@ -56,7 +56,7 @@ impl BlockSync {
             return;
         }
         let block_count = hashes.len();
-        let window = self.download_window.lock();
+        let mut window = self.download_window.lock();
         window.confirm_prefix_probe(owner, hashes, &successful, now);
         metrics::counter!("node.sync.prefix_probe_peers")
             .increment(u64::try_from(successful.len()).unwrap_or(u64::MAX));
@@ -84,7 +84,7 @@ impl BlockSync {
             return GetdataRequestOutcome::default();
         };
 
-        let window = self.download_window.lock();
+        let mut window = self.download_window.lock();
         let request = window.next_peer_request(
             sync_peer_addr,
             allow_expired_retry_from_peer,

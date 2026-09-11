@@ -1478,10 +1478,10 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(1),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 

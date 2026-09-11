@@ -1200,7 +1200,9 @@ fn propose_block(
         long_poll_id: None,
     })? {
         BlockTemplateResult::Proposal(result) => Ok(result),
-        other => panic!("expected a proposal result, got {other:?}"),
+        other @ BlockTemplateResult::Template(_) => {
+            panic!("expected a proposal result, got {other:?}")
+        }
     }
 }
 

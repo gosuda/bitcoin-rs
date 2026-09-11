@@ -402,6 +402,166 @@ owned by [wallet-facing.md](wallet-facing.md).
 
 ## Proven by
 
+- `API-07`: `crates/rpc/tests/core_parity.rs` test
+  `corpus_bounds_and_provenance_hold` and `support::fixture::tests`:
+  - `copied_fixture_preserves_core_reference`
+  - `corpus_rejects_missing_core_reference_fields`
+  - `corpus_rejects_non_pinned_core_version`
+  - `corpus_rejects_mismatched_or_empty_core_digest`
+- `bin/bitcoin-rs/tests/overhaul_core_api.rs` (planned): every required
+  manifest row driven statefully against the pinned reference, including
+  auth negatives, batches, notifications, fee units, ZMQ sequence bytes
+  and order, unsupported methods, unavailable-capability errors, and
+  cancellation.
+- `bin/bitcoin-rs/tests/overhaul_esplora.rs` (planned): pinned-schema
+  equality per public and backend route, unavailable states for lag,
+  reorg, and disabled capability, broadcast reaching the gateway with the
+  Esplora origin, and reorg mid-query.
+- Existing: `crates/rpc/tests/manifest_coverage.rs` tests
+  `rpc_rows_and_the_live_registry_agree_both_ways`,
+  `rest_rows_and_router_registrations_agree_both_ways`,
+  `zmq_rows_are_valid_core_topics`,
+  `every_unimplemented_rpc_row_answers_method_not_found`,
+  `generated_reference_matches_checked_in`;
+  `crates/rpc/tests/handler_smoke.rs`;
+  `crates/rpc/src/esplora.rs` tests
+  `esplora_lives_only_under_the_api_prefix`,
+  `api_is_the_public_electrs_directory`,
+  `esplora_is_the_mempool_backend_superset`.
+- `API-05` and `API-06`, existing:
+  `crates/rpc/src/handlers/mining.rs` tests
+  `generatetoaddress_projects_solved_hashes`,
+  `generatetoaddress_rejects_script_hex_and_descriptors`,
+  `generateblock_projects_hash_object`,
+  `generateblock_accepts_addr_descriptor`,
+  `generateblock_without_submit_includes_hex`,
+  `generateblock_requires_transactions_array`,
+  `generateblock_keeps_raw_transactions`,
+  `generateblock_rejects_trailing_parameters`,
+  `generateblock_rejects_invalid_supplied_checksums`,
+  `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`;
+  `crates/node/tests/mining.rs` tests
+  `generate_mines_coinbase_only_blocks_to_the_tip`,
+  `generateblock_rejects_unknown_mempool_txid`,
+  `generateblock_raw_tx_does_not_require_mempool_admission`,
+  `generate_without_submit_does_not_advance_the_tip`,
+  `network_hash_ps_rejects_core_invalid_windows`;
+  `crates/node/src/mining.rs` test
+  `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`;
+  `crates/mining/tests/template_shape.rs` tests
+  `candidate_solves_an_unsolved_regtest_header`,
+  `ordered_assembly_keeps_snapshot_order`.
+
+- `API-11`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
+    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
+    `getblocktemplate_requires_signet_rule_on_signet`
+  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
+  - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
+    `signet_template_includes_challenge_and_signet_rule`
+
+- `API-12`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
+    `getblocktemplate_rejects_mainnet_during_ibd`,
+    `getblocktemplate_proposal_skips_mainnet_connection_gates`
+- `API-13`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitheader_rejects_undecodable_headers`,
+    `submitheader_returns_null_and_forwards_decoded_header`,
+    `submitheader_maps_rejected_to_verify_error`
+  - `crates/node/tests/mining.rs` tests `submit_header_admits_a_mined_child_and_is_idempotent`,
+    `submit_header_requires_the_previous_header`,
+    `submit_header_rejects_bad_diffbits`,
+    `submit_header_rejects_time_too_new`
+  - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
+    `nbits_mismatch_is_bad_diffbits`
+    - Execution evidence: `cargo test -p bitcoin-rs-node header_reject_tests` and
+      `cargo test -p bitcoin-rs-rpc submitheader` (CI job `test`, commit `adc8e37`).
+    - Core reference: Bitcoin Core v30.0 `src/rpc/mining.cpp` (`submitheader`)
+      and `src/validation.cpp` header reject reasons (tag `v30.0`).
+
+- `API-14`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_requires_signet_rule_on_signet`,
+    `getblocktemplate_rejects_template_mandatory_rule_without_client_support`,
+    `getblocktemplate_rejects_missing_segwit_rule`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`
+
+- `API-10`:
+  - `crates/node/src/mining.rs` test `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`
+  - `crates/node/tests/mining.rs` test `network_hash_ps_rejects_core_invalid_windows`
+  - `crates/rpc/src/handlers/mining.rs` test `getnetworkhashps_projects_control_invalid_request_as_invalid_parameter`
+- `API-11`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
+    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
+    `getblocktemplate_requires_signet_rule_on_signet`
+  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
+  - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
+    `signet_template_includes_challenge_and_signet_rule`
+- `API-12`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_mainnet_without_peers`,
+    `getblocktemplate_rejects_mainnet_during_ibd`,
+    `getblocktemplate_proposal_skips_mainnet_connection_gates`
+- `API-13`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitheader_rejects_undecodable_headers`,
+    `submitheader_returns_null_and_forwards_decoded_header`,
+    `submitheader_maps_rejected_to_verify_error`
+  - `crates/node/tests/mining.rs` tests `submit_header_admits_a_mined_child_and_is_idempotent`,
+    `submit_header_requires_the_previous_header`,
+    `submit_header_rejects_bad_diffbits`,
+    `submit_header_rejects_time_too_new`
+  - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
+    `nbits_mismatch_is_bad_diffbits`
+- `API-15`:
+  - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
+    `submitblock_ignores_bip22_dummy_and_trailing_bytes`
+- `API-16`:
+  - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_invalid_mode`,
+    `getblocktemplate_proposal_decode_matches_core`,
+    `getblocktemplate_proposal_skips_client_rule_negotiation`
+- `API-17`:
+  - `crates/mining/src/coinbase.rs` tests `fills_reserved_nonce_when_commitment_present_and_witness_empty`,
+    `leaves_an_existing_coinbase_witness_alone`,
+    `skips_without_commitment_or_when_segwit_is_inactive`
+  - `crates/node/tests/mining.rs` test `submit_block_fills_omitted_coinbase_witness`
+- `API-18`:
+  - `crates/node/tests/mining.rs` tests `submit_block_applies_a_header_already_in_the_tree`,
+    `proposal_of_an_applied_block_is_duplicate`,
+    `proposal_of_an_invalid_header_is_duplicate_invalid`,
+    `proposal_of_a_header_only_block_is_duplicate_inconclusive`,
+    `duplicate_submit_returns_duplicate`
+- `API-19`:
+  - `crates/node/src/mining.rs` tests `consensus_failures_use_core_bip22_reasons`,
+    `header_failures_use_core_bip22_reasons`
+  - `crates/node/tests/mining.rs` tests `proposal_without_coinbase_is_bad_cb_missing`,
+    `proposal_merkle_mismatch_is_bad_txnmrklroot`,
+    `proposal_rejects_excess_coinbase_without_side_effects`
+- `API-20`:
+  - `crates/node/tests/mining.rs` test `template_does_not_echo_client_capabilities`
+- `API-21`:
+  - `crates/consensus/src/verify_block.rs` tests
+    `contextual_rules_reject_witness_before_segwit_activation`,
+    `contextual_rules_enforce_bip141_commitment_after_segwit_activation`,
+    `bip141_coinbase_witness_must_have_exactly_one_32_byte_element`,
+    `bip141_witness_commitment_last_output_wins`
+  - `crates/node/src/mining.rs` test `consensus_failures_use_core_bip22_reasons`
+  - `crates/node/tests/mining.rs` tests
+    `proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size`,
+    `proposal_witness_without_commitment_is_unexpected_witness`,
+    `proposal_wrong_witness_commitment_is_bad_witness_merkle_match`
+- `API-22`:
+  - `crates/rpc/src/handlers/mining.rs` test
+    `getblocktemplate_renders_candidate_and_reuses_control_result`
+  - `crates/rpc/tests/core_compat.rs` test `mining_responses_deserialize_into_pinned_types`
+- `API-23`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `prioritisetransaction_calls_mempool_prioritise_directly`,
+    `prioritisetransaction_rejects_nonzero_dummy_like_core`,
+    `prioritisetransaction_requires_fee_delta_as_third_parameter`
+- `API-24`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `prioritisetransaction_rejects_dust_outputs_like_core`,
+    `prioritisetransaction_allows_dust_overlay_on_regtest`,
+    `prioritisetransaction_allows_absent_txid_overlay`
+  - `crates/mempool/src/standardness.rs` test `dust_relay_fee_changes_the_boundary`
 
 ## Vocabulary
 
