@@ -39,6 +39,31 @@ fn head_frame_preserves_magic_version_and_every_field() -> Result<(), JournalWri
 }
 
 #[test]
+fn head_frame_rejects_unknown_fields() -> Result<(), JournalWriterError> {
+    let bytes = marker().serialize()?;
+    let mut payload: serde_json::Value = serde_json::from_slice(&bytes[9..])
+        .map_err(|error| JournalWriterError::HeadUnreadable(error.to_string()))?;
+    payload
+        .as_object_mut()
+        .expect("serialized head marker is an object")
+        .insert("future_field".to_owned(), serde_json::Value::Null);
+    let payload = serde_json::to_vec(&payload)
+        .map_err(|error| JournalWriterError::HeadUnreadable(error.to_string()))?;
+    let checksum = HeadMarker::crc32c(&payload);
+    let mut frame = Vec::with_capacity(payload.len() + 9);
+    frame.extend_from_slice(b"JRNH");
+    frame.push(1);
+    frame.extend_from_slice(&checksum.to_le_bytes());
+    frame.extend_from_slice(&payload);
+
+    assert!(matches!(
+        HeadMarker::deserialize(&frame),
+        Err(JournalWriterError::HeadUnreadable(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn head_frame_rejects_short_magic_version_and_checksum_corruption() -> Result<(), JournalWriterError>
 {
     let bytes = marker().serialize()?;

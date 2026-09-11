@@ -17,6 +17,7 @@ const MAX_HEAD_BYTES: u64 = 4 * 1024;
 /// where payload is a JSON object. The checksum covers the payload so a torn
 /// rename or a bit flip fails closed at load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HeadMarker {
     /// Checkpoint generation this journal extends.
     pub(crate) base_generation: u64,
