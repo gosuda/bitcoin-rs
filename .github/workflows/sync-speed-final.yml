@@ -1,0 +1,130 @@
+name: sync-speed-final
+on:
+  push:
+    branches: [automation/sync-speed-final-20260911]
+permissions:
+  contents: write
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 2
+  RUST_BACKTRACE: 1
+  BASE: e6c5eae02738260b5b7240738323098afd6d7c5b
+jobs:
+  verify:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 3
+      - name: Isolate source and reproducible tooling
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/final-evidence" "$RUNNER_TEMP/final-tools"
+          cp tools/automation/sync-speed/*.py "$RUNNER_TEMP/final-tools/"
+          git checkout --detach "$BASE"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          key: sync-speed-native-195
+      - name: Original code regression and release probe
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/final-evidence"
+          T="$RUNNER_TEMP/final-tools"
+          { git rev-parse HEAD; rustc +1.95.0 -Vv; cargo +1.95.0 -V; sha256sum Cargo.lock; uname -a; lscpu; } > "$E/identity.txt"
+          python3 "$T/prepare.py" --control
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib indexed_sync_frontiers_match_parent_plans -- --nocapture --test-threads=1 2>&1 | tee "$E/control-regression.log"
+          python3 "$T/probe_v2.py"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --release --lib --no-run --message-format=json > "$E/control-build.jsonl"
+          python3 - <<'PY'
+          import json,os,pathlib,shutil
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'final-evidence'
+          a=[json.loads(x) for x in (p/'control-build.jsonl').read_text().splitlines() if x.startswith('{')]
+          e=[x['executable'] for x in a if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='bitcoin_rs_node']
+          assert len(e)==1,e
+          shutil.copy2(e[0],p/'control-probe')
+          PY
+          git restore --source="$BASE" -- crates/node/src/sync.rs
+      - name: Freeze and test refined source candidate
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/final-evidence"
+          T="$RUNNER_TEMP/final-tools"
+          python3 "$T/prepare.py"
+          python3 "$T/refine.py"
+          rustfmt +1.95.0 --edition 2024 --config skip_children=true crates/node/src/sync.rs
+          test "$(git diff --name-only)" = 'crates/node/src/sync.rs'
+          git diff --check
+          git diff > "$E/candidate.patch"
+          git add crates/node/src/sync.rs
+          git commit -m 'perf(sync): resolve linear request frontiers without full reorg plans'
+          { git rev-parse HEAD; git rev-parse HEAD^{tree}; git ls-tree HEAD crates/node/src/sync.rs; sha256sum Cargo.lock; } > "$E/candidate-identity.txt"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib -- --test-threads=1 2>&1 | tee "$E/candidate-tests.log"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --test sync_smoke -- --test-threads=1 2>&1 | tee "$E/candidate-sync-smoke.log"
+          cargo +1.95.0 test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_evidence -- --nocapture 2>&1 | tee "$E/overhaul_evidence.log"
+          git diff --exit-code
+      - name: Refined candidate release probe and paired measurements
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/final-evidence"
+          T="$RUNNER_TEMP/final-tools"
+          python3 "$T/probe_v2.py"
+          cargo +1.95.0 test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --release --lib --no-run --message-format=json > "$E/candidate-build.jsonl"
+          python3 - <<'PY'
+          import json,os,pathlib,shutil
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'final-evidence'
+          a=[json.loads(x) for x in (p/'candidate-build.jsonl').read_text().splitlines() if x.startswith('{')]
+          e=[x['executable'] for x in a if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='bitcoin_rs_node']
+          assert len(e)==1,e
+          shutil.copy2(e[0],p/'candidate-probe')
+          PY
+          git restore --source=HEAD -- crates/node/src/sync.rs
+          python3 "$T/probe_v2.py" compare "$E" | tee "$E/paired-summary.log"
+      - name: Record strict Clippy on the repository development toolchain
+        run: |
+          set -euo pipefail
+          E="$RUNNER_TEMP/final-evidence"
+          rustup toolchain install stable --profile minimal --component clippy
+          rustc +stable -Vv > "$E/clippy-toolchain.txt"
+          code=0
+          cargo +stable clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings > "$E/candidate-clippy.log" 2>&1 || code=$?
+          cat "$E/candidate-clippy.log"
+          printf 'strict-development-clippy exit=%s\n' "$code" | tee "$E/clippy-exit.txt"
+          # Keep unrelated baseline failures visible, but never publish a new
+          # candidate that still carries a diagnostic in its changed source.
+          if test "$code" -ne 0 && grep -q 'crates/node/src/sync.rs:' "$E/candidate-clippy.log"; then exit "$code"; fi
+      - name: Push source-only candidate to a new review branch
+        run: |
+          set -euo pipefail
+          branch=perf/sync-linear-frontier-v2-20260911
+          code=0
+          git ls-remote --exit-code --heads origin "refs/heads/$branch" || code=$?
+          test "$code" = 2
+          test "$(git diff --name-only "$BASE" HEAD)" = 'crates/node/src/sync.rs'
+          test "$(git rev-list --count "$BASE"..HEAD)" = 1
+          git diff --exit-code
+          git push origin "HEAD:refs/heads/$branch"
+          printf 'PUBLISHED_SOURCE %s %s\n' "$branch" "$(git rev-parse HEAD)" | tee "$RUNNER_TEMP/final-evidence/published.txt"
+      - name: Preserve raw evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: sync-speed-final-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/final-evidence/*.txt
+            ${{ runner.temp }}/final-evidence/*.log
+            ${{ runner.temp }}/final-evidence/*.json
+            ${{ runner.temp }}/final-evidence/*.patch
+            ${{ runner.temp }}/final-tools/*.py
+          if-no-files-found: error
+          retention-days: 7
