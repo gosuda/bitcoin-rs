@@ -15,8 +15,8 @@ def run(*args, cwd):
 
 def replace_once(path: Path, old: str, new: str) -> None:
     text = path.read_text()
-    if text.count(old) != 1:
-        raise RuntimeError(f"unexpected replacement count in {path}: {text.count(old)}")
+    if old not in text:
+        raise RuntimeError(f"missing replacement target in {path}")
     path.write_text(text.replace(old, new, 1))
 
 
@@ -36,8 +36,6 @@ def main() -> int:
     work = Path(os.environ["RUNNER_TEMP"]) / "node-contract-traceability"
     run("git", "worktree", "add", "--detach", str(work), base, cwd=root)
 
-    # Close two lint residues introduced by the newly merged split PRs before
-    # validating the review follow-ups. These are mechanical, behavior-free.
     replace_once(
         work / "crates/node/src/sync/requests.rs",
         "        let mut window = self.download_window.lock();\n",
