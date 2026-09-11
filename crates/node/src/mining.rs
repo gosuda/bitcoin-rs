@@ -751,13 +751,9 @@ impl MiningCoordinator {
             return;
         };
         let height = prev.height.saturating_add(1);
-        let segwit_active = bitcoin_rs_chain::softfork_state(
-          &tree,
-          self.network,
-          Some(prev_id),
-          height,
-      )
-      .segwit_active;
+        let segwit_active =
+            bitcoin_rs_chain::softfork_state(&tree, self.network, Some(prev_id), height)
+                .segwit_active;
         drop(tree);
         update_uncommitted_block_structures(block, segwit_active);
     }
