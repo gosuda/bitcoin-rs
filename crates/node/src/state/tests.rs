@@ -11,23 +11,16 @@ use bitcoin_rs_chain::TipSnapshot;
 
 use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
-use bitcoin_rs_rpc::context::{BlockLog, PruneService, PruneServiceError};
-
-use bitcoin_rs_storage::FlatFileBlockStore;
+use bitcoin_rs_rpc::context::PruneServiceError;
 
 use core::mem::size_of;
 
 use hashbrown::HashMap;
 
-use parking_lot::RwLock;
-
-use super::{events::*, index::*, prune::load_pruneheight, restore::*};
+use super::{events::*, index::*, restore::*};
 
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU32, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
