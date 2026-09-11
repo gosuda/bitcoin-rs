@@ -1,0 +1,128 @@
+name: update-node-async-lints
+
+on:
+  push:
+    branches: [agent/node-finish-publication-20260911]
+    paths:
+      - .github/update-node-async-lints.py
+      - .github/workflows/update-node-async-lints.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_OPT_LEVEL: 0
+      CARGO_PROFILE_TEST_OPT_LEVEL: 0
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt,clippy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: node-async-compat-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            node-finish-${{ runner.os }}-rust195-${{ hashFiles('Cargo.lock') }}
+      - name: Check annotations, both Clippy versions, and final native tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .github/update-node-async-lints.py /tmp/update-node-async-lints.py
+          python /tmp/update-node-async-lints.py prepare /tmp/node-async-checked
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-async-checked
+          path: /tmp/node-async-checked/
+          retention-days: 7
+          if-no-files-found: error
+  stage:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-async-checked
+          path: /tmp/node-async-checked
+      - name: Expose validated commit objects without updating PR branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import importlib.util, json, subprocess as sp
+          from pathlib import Path
+          spec = importlib.util.spec_from_file_location('checked', '.github/update-node-async-lints.py')
+          m = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          root = Path('/tmp/node-async-checked')
+          record = json.loads((root / 'publication.json').read_text())
+          if record['validated'] is not True or len(record['stages']) != len(m.STAGES):
+              raise ValueError('Incomplete source record')
+          required = {label + '-' + suffix for label, *_ in m.STAGES for suffix in ('format', 'whitespace', 'clippy-1.95.0', 'clippy-stable')}
+          required |= {'final-workspace-format', 'final-standard-clippy', 'final-redb-clippy', 'final-stable-unit', 'final-stable-integration', 'final-stable-owner-gates'}
+          if {c['name'] for c in record['checks']} != required:
+              raise ValueError('Missing native checks')
+          for c in record['checks']:
+              if c['rc'] != 0 or m.sha(root / (c['name'] + '.log')) != c['sha256']:
+                  raise ValueError('Invalid check evidence')
+          bundle = root / 'sources.bundle'
+          if m.sha(bundle) != record['bundle_sha256']:
+              raise ValueError('Source bundle differs')
+          previous = None
+          for s, (label, branch, old, tree) in zip(record['stages'], m.STAGES):
+              if (s['label'], s['branch'], s['old'], s['tree']) != (label, branch, old, tree):
+                  raise ValueError('Unexpected destination')
+              ref = 'refs/heads/' + branch
+              if m.git('ls-remote', '--heads', 'origin', ref).decode().split() != [old, ref]:
+                  raise ValueError('Concurrent branch update')
+              local = 'refs/heads/checked-async-' + label
+              sp.run(['git', 'fetch', str(bundle), local + ':' + local], check=True)
+              commit = m.git('rev-parse', local).decode().strip()
+              parents = [old] if previous is None else [old, previous]
+              if commit != s['commit'] or s['parents'] != parents or m.git('rev-list', '--parents', '-1', commit).decode().split() != [commit, *parents]:
+                  raise ValueError('Invalid parent graph')
+              if m.git('rev-parse', commit + '^{tree}').decode().strip() != tree:
+                  raise ValueError('Unexpected source tree')
+              if m.git('diff', '--name-only', old, commit).decode().splitlines() != [m.PATH]:
+                  raise ValueError('Unexpected source scope')
+              before = m.git('show', old + ':' + m.PATH).decode()
+              after = m.git('show', commit + ':' + m.PATH).decode()
+              if before.count(m.OLD) != 5 or before.replace(m.OLD, m.NEW) != after:
+                  raise ValueError('Runtime source changed')
+              sp.run(['git', 'merge-base', '--is-ancestor', old, commit], check=True)
+              previous = commit
+          staging = 'refs/heads/agent/node-async-validated-20260911'
+          if m.git('ls-remote', '--heads', 'origin', staging).strip():
+              raise ValueError('Validation staging ref already exists')
+          sp.run(['git', 'push', '--atomic', 'origin', previous + ':' + staging], check=True)
+          for s in record['stages']:
+              print('VALIDATED FOR FAST-FORWARD', s['branch'], s['old'], s['commit'], s['tree'])
+          PY
