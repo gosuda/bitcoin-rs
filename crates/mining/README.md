@@ -26,8 +26,6 @@ coordinator that implements `MiningControl`.
   crate.
 - `redb`: forwarding marker for the redb storage backend; gates no code in this
   crate.
-- `mdbx`: forwarding marker for the mdbx storage backend; gates no code in this
-  crate.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

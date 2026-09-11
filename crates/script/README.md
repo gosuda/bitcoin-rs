@@ -15,6 +15,15 @@ vectors pin zero native mismatches in `tests/core_vectors.rs`. The `kernel`
 feature on `bitcoin-rs-consensus` remains the library production default;
 see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
 
+## Stack transfer contract
+
+`Stack::move_to` and `Stack::move_from` transfer exactly one top `ScriptItem`
+by ownership between bounded stacks. Source underflow is checked before
+destination capacity; `Stack::MAX_DEPTH` is that capacity bound. Either error
+leaves both stacks unchanged. A successful transfer preserves item identity
+and stack order without duplicating the item. This is an ownership and
+correctness contract, not a product performance claim.
+
 ## Features
 
 - `rocksdb`, `fjall`, `redb`: no-op in this crate — this crate has no backend code; the names exist so the shared storage-backend features can be enabled uniformly across the workspace.

@@ -16,6 +16,7 @@
 //!   which exploits how many amounts are round numbers of satoshis.
 
 use crate::UtxoError;
+use bitcoin_rs_primitives::Amount;
 
 /// Largest number of bytes a `u64` varint can occupy.
 pub(crate) const VARINT_MAX_LEN: usize = 10;
@@ -119,7 +120,7 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
 /// ceiling sits two orders of magnitude below that, and making the domain
 /// explicit is better than a debug-only panic on a value that should be
 /// impossible.
-pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = 21_000_000 * 100_000_000;
+pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = Amount::MAX_MONEY.to_sat();
 
 /// Bitcoin Core's `CTxOutCompressor` amount compression.
 ///

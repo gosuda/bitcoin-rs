@@ -22,7 +22,9 @@ and BIP155 addrv2 and BIP339 wtxid-relay state live in `addrv2` and `wtxid`.
 
 `PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`),
 connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`).
-It enforces key invariants across the node:
+A connected TCP stream enters that world only through `CountingStream::from_connected`,
+which owns `TCP_NODELAY` and forwards vectored writes so `wire::write_message` stays
+one `writev` on the socket. It enforces key invariants across the node:
 - **Single connection per address**: Exactly one live session per remote `SocketAddr`.
 - **Atomic predecessor cancellation**: Registering a new lease at an existing address
   atomically cancels and replaces the predecessor.
@@ -36,6 +38,12 @@ All consumers — the inbound TCP `listener`, outbound connection threads, the b
 download scheduler, outbound transaction relay, and RPC methods (`getpeerinfo`,
 `getnetworkinfo`, `disconnectnode`) — observe and mutate live connections exclusively
 through `PeerTable`.
+
+Transaction inventory, parent requests, and outbound relay are P2P consumers of the
+shared transaction lifecycle. The authoritative cross-crate ownership split is
+[ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary);
+peer-visible inventory and relay behavior are defined in
+[P2P compatibility](../../docs/policies/p2p-compatibility.md).
 
 `PeerManager` owns DNS resolver and seed configuration and bootstraps outbound
 addresses. Live session registration, replacement, metadata publication, and
@@ -54,6 +62,17 @@ active chain through the `ChainQuery` trait; `inbound` hands over `InboundBlock`
 are tracked via the file-persisted `BanList` of the `banlist` module, whole subnets are
 excluded as a `BannedSubnet` built from an `IpSubnet`, and BIP155 addrv2 and BIP339
 wtxid-relay state live in `addrv2` and `wtxid`.
+
+## Ban-list persistence contract
+
+`BanList::load` and `BanList::save` own the score-list file. Each non-empty row is
+`<ip>\t<score>\t<until-seconds>\t<reason>`; `until-seconds = 0` means no expiry,
+and non-zero values are seconds since `UNIX_EPOCH`. A missing file loads as an
+empty list. Other open or read failures are unavailable and propagate as
+`PeerError::Io`, consistent with `CONSTRAINTS.md` `CL-23` (unavailable is not
+empty). Malformed fields and expiry values that cannot be represented by
+`SystemTime` fail as `PeerError::InvalidBanEntry`. Loading does not rewrite the
+source file. This contract does not make `save` crash-atomic.
 
 ## Features
 - `default` (enables `fjall`): build with the fjall storage backend selected.
