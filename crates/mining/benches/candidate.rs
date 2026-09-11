@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot};
 use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
-use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxIn, TxOut, Txid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness,
+};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 const POOL_SIZES: [usize; 4] = [0, 64, 512, 2_048];
@@ -23,7 +26,7 @@ fn context() -> CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 250,
         version: 0x2000_0001,
-        bits: 0x1d00_ffff,
+        bits: CompactTarget::from_consensus(0x1d00_ffff),
         min_time: 10,
         current_time: 20,
         locktime_cutoff: 10,
@@ -41,19 +44,19 @@ fn distinct_tx(seed: u64, parent: Option<Txid>) -> Tx {
     previous[..8].copy_from_slice(&seed.to_le_bytes());
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(
                 parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&previous))),
                 0,
             ),
-            script_sig: Vec::new(),
-            sequence: 0xFFFF_FFFF,
-            witness: Vec::new(),
+            script_sig: Script::from(Vec::new()),
+            sequence: Sequence::from_consensus(0xFFFF_FFFF),
+            witness: Witness::from_stack(Vec::new()),
         }],
         outputs: vec![TxOut {
-            value: 10_000,
-            script_pubkey: seed.to_le_bytes().to_vec(),
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from(seed.to_le_bytes().to_vec()),
         }],
     }
 }
