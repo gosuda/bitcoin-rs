@@ -1,4 +1,4 @@
-//! CONTRACT v1: docs/contracts/recovery.md, JRN-SEGMENT-01.
+//! CONTRACT: docs/contracts/recovery.md, JRN-01 (version 1.0).
 use super::*;
 
 #[test]
