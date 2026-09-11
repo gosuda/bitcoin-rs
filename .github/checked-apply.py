@@ -2,7 +2,6 @@
 import base64
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess as sp
 import sys
@@ -12,6 +11,9 @@ BASE = 'b59ce9160bb031d623b37cf798e53b963d18ef00'
 BRANCH = 'refactor/node-apply-owners-20260911'
 PAYLOAD_SHA256 = 'f4cd3394c12e8c4a03be469f589ab333fa5a312814272359919bdd1c3c0170b3'
 ADMISSION_SHA = '1e14fc2ab82d6a4be299f5067f140a2b8c030d11'
+DOC_PATH = 'crates/node/src/checkpoint/tests/behavior_2.rs'
+DOC_BEFORE = '66252f5766f7ee9b750562d664f71370816bae82'
+DOC_AFTER = '23210eaa3d8e1899ff8bf7f321bd937d759076da'
 
 
 def git(*args):
@@ -28,6 +30,7 @@ def allowed(path):
         'crates/node/src/apply.rs',
         'bin/bitcoin-rs/tests/support/ownership_scan.rs',
         'docs/contracts/architecture.md',
+        DOC_PATH,
     }
     if not valid or p.is_absolute() or '..' in p.parts or p.is_symlink():
         raise ValueError('Unexpected destination: ' + path)
@@ -107,9 +110,19 @@ def main():
     if blob(text.encode()) != ADMISSION_SHA:
         raise ValueError('Admission visibility correction differs')
     admission.write_text(text)
+    # Main's checkpoint test documentation independently fails strict Clippy.
+    # Repair only the checked documentation token; do not suppress the lint.
+    documentation = allowed(DOC_PATH)
+    raw = documentation.read_bytes()
+    if blob(raw) != DOC_BEFORE:
+        raise ValueError('Baseline checkpoint documentation changed')
+    raw = raw.replace(b': MuHash numerator/denominator,', b': `MuHash` numerator/denominator,')
+    if blob(raw) != DOC_AFTER:
+        raise ValueError('Documentation correction differs')
+    documentation.write_bytes(raw)
     sp.run(['git', 'add', '--all'], check=True)
     paths = git('diff', '--cached', '--name-only').decode().splitlines()
-    if paths != sorted(stage['files']):
+    if paths != sorted(set(stage['files']) | {DOC_PATH}):
         raise ValueError('Unexpected changed paths')
     tree = git('write-tree').decode().strip()
     node = ['--locked', '-p', 'bitcoin-rs-node', '--no-default-features', '--features', 'fjall,zmq']
