@@ -1,6 +1,7 @@
 use super::*;
 use std::io::Write;
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-BOOT-1.
 #[test]
 fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     let writer = open_fresh("config-defaults", Arc::new(CountingStore::new()))?;
@@ -21,6 +22,7 @@ fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-REC-1.
 #[test]
 fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -43,6 +45,7 @@ fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-REC-1.
 #[test]
 fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -65,6 +68,7 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -86,6 +90,7 @@ fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> Test
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -169,6 +174,7 @@ fn failed_rewind_truncation_blocks_appends_until_restart() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-ROT-1.
 #[test]
 fn rotation_keeps_cursor_invariants() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -191,6 +197,7 @@ fn rotation_keeps_cursor_invariants() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-FAIL-1.
 #[test]
 fn failpoints_fire_documented_errors() -> TestResult {
     for boundary in [
@@ -225,6 +232,7 @@ fn failpoints_fire_documented_errors() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-LIFE-1.
 #[test]
 fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     let store = Arc::new(CountingStore::new());

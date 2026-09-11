@@ -1,6 +1,10 @@
 use super::*;
 
+// Contract references: docs/contracts/chainstate-journal-v1.md, JW-MARK-1,
+// JW-DUR-1, JW-RET-1, and JW-LIFE-1. Each test below is tagged at its
+// boundary so persistence expectations remain traceable when semantics evolve.
 #[test]
+// JW-MARK-1.
 fn clear_full_revalidation_marker_unlinks_then_treats_absence_as_success() -> TestResult {
     let dir = tempfile::tempdir()?;
     let journal_dir = dir.path().join(JOURNAL_DIR_NAME);
@@ -40,6 +44,7 @@ fn marker_clear_retry_syncs_directory_after_prior_sync_failure() -> TestResult {
 }
 
 #[test]
+// JW-DUR-1.
 fn head_never_advances_without_counted_storage_flush() -> TestResult {
     let store = Arc::new(CountingStore::new());
     let mut writer = open_fresh("flush-order", Arc::clone(&store))?;
@@ -59,6 +64,7 @@ fn head_never_advances_without_counted_storage_flush() -> TestResult {
 }
 
 #[test]
+// JW-DUR-1.
 fn configured_lag_limits_retry_persistent_flush_failures() -> TestResult {
     let store = Arc::new(CountingStore::new());
     let mut writer = open_fresh("lag-backpressure", Arc::clone(&store))?;
@@ -109,6 +115,7 @@ fn configured_lag_time_forces_pre_apply_durability() -> TestResult {
 }
 
 #[test]
+// JW-RET-1.
 fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     let store = Arc::new(CountingStore::new());
     let mut writer = open_fresh("retention", store)?;
@@ -139,6 +146,7 @@ fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
 }
 
 #[test]
+// JW-LIFE-1.
 fn freeze_failures_restore_open_state_for_retry() -> TestResult {
     for boundary in [
         JournalWriterFailpoint::StorageFlush,
