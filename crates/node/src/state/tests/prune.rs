@@ -417,7 +417,7 @@ fn manual_prune_removes_pruned_block_transactions_from_cache() -> anyhow::Result
         anyhow::bail!("prune service should exist when prune_target_mb > 0");
     };
     // Pruning cannot evict cached transactions while their block still lies
-    // above the durable checkpoint's reorg-retention floor (ARCH-07).
+    // above the durable checkpoint's reorg-retention floor (ARCH-08).
     service
         .prune_to_height(11)
         .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
