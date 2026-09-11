@@ -1,0 +1,31 @@
+name: node-complete-snapshot
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths: [.github/workflows/node-complete-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export current main and saved refactor history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/node-complete
+          mapfile -t refs < <(git for-each-ref --format='%(refname)' 'refs/remotes/origin/agent/node-*' refs/remotes/origin/main)
+          git bundle create /tmp/node-complete/repository.bundle HEAD "${refs[@]}"
+          git rev-parse refs/remotes/origin/main > /tmp/node-complete/main.txt
+          sha256sum /tmp/node-complete/repository.bundle > /tmp/node-complete/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-complete-source
+          path: /tmp/node-complete/
+          retention-days: 7
+          if-no-files-found: error
