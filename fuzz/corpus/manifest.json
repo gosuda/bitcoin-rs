@@ -1,6 +1,6 @@
 {
   "_contract": "QAC-05 (docs/contracts/qa-corpus.md): expected decoder verdict per seed; regenerate with CORPUS_MANIFEST_WRITE=1 cargo test -p bitcoin-rs-primitives",
-  "block_decode": {
+  "block_validate": {
     "0393b8acae2686b81b0e5260bb769a12c48bdef4": "accepted",
     "03fc882d1829411c9fc1c5658a06759a42326ef0": "rejected:end_of_data",
     "079055e574e44fefe9ffde24631594f417e75fd9": "rejected:end_of_data",
@@ -37,7 +37,7 @@
     "3130e0fe106c7b84c9c84c71a77977e206d4b071": "rejected:varint",
     "3193e88e1002c18ce98d896c53a12e1da185a6d5": "rejected:end_of_data",
     "31b33c58251c3cdc870bb7bccea9616b63f9a9d8": "rejected:end_of_data",
-    "31bc812ce932a04d6f7c3d872000bc3b77399398": "rejected:invalid_segwit_flag",
+    "31bc812ce932a04d6f7c3d872000bc3b77399398": "rejected:end_of_data",
     "328376b5da8da6055beaedc92ce539ec3e7d7708": "rejected:end_of_data",
     "340bdfa378d5a69eff1175b419db1d2a50833ce4": "rejected:end_of_data",
     "347d245213d3716c58dd97ca5707896e6b84f634": "rejected:end_of_data",
@@ -70,7 +70,7 @@
     "5ef20a0b7f3149b2d8e9f113d2d763faaeb5e70a": "rejected:end_of_data",
     "5f7a3969284ea503d96e4a9fc315b754d4a655e2": "rejected:end_of_data",
     "60aef7a1c37ac9ae7c8bee44d86b514a46a96a82": "rejected:end_of_data",
-    "60b106139cc6bcb8e90c3c43d02561a4d66f7294": "rejected:invalid_segwit_flag",
+    "60b106139cc6bcb8e90c3c43d02561a4d66f7294": "rejected:trailing_bytes",
     "62016ee44a23dde858e39140822926be5d914209": "rejected:end_of_data",
     "6213f1b4c8b8d866bd09d7cce1255cc029a3ca3a": "rejected:superfluous_witness",
     "644576e7b9cf8d64ced2cc312ae88761e878263a": "rejected:end_of_data",
@@ -180,7 +180,7 @@
     "ff30265ba5d81628196b88b1954f5e53a163fd84": "rejected:end_of_data",
     "ffac4e9bc9bbd5ee37cf3381e50ad62f53f8acae": "rejected:end_of_data"
   },
-  "tx_decode": {
+  "tx_validate": {
     "0164873c245983f0c0fcc5b943ced4e3efba3cb1": "rejected:trailing_bytes",
     "030620d1a12726c6abbd1144d1bd0daeab5ca556": "rejected:end_of_data",
     "035b1593968f0d8dd894025383773df588083bcd": "rejected:end_of_data",

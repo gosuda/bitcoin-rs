@@ -132,6 +132,8 @@ name = "bitcoin-rs-fuzz"
 version = "0.0.0"
 dependencies = [
  "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",

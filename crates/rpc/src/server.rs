@@ -105,7 +105,11 @@ impl RpcServer {
     }
 
     fn handle_accept(&self, active: &Arc<Mutex<usize>>, mut stream: TcpStream) -> io::Result<()> {
-        configure_rpc_stream(&stream)?;
+        // Connection-local: a nodelay failure must not stop the accept loop.
+        if let Err(error) = configure_rpc_stream(&stream) {
+            debug!(%error, "rpc connection dropped: nodelay");
+            return Ok(());
+        }
         let should_accept = {
             let mut count = active.lock();
             if *count >= self.max_connections {
@@ -584,8 +588,7 @@ fn split_path_query(path: &str) -> (&str, &str) {
         .map_or((path, ""), |(path, query)| (path, query))
 }
 
-/// Listener directories. JSON-RPC owns `/`; Esplora owns `/api` and `/esplora`;
-/// Core REST owns `/rest/`.
+/// Listener directories; see `docs/contracts/wallet-facing.md` WF-02.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
     Rest {
@@ -989,6 +992,35 @@ mod tests {
 
         shutdown.store(true, Ordering::Release);
         handle.join().expect("join serve thread")?;
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_method_is_404_at_listener() -> std::io::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            serve_connection(
+                stream,
+                &auth,
+                &handler,
+                false,
+                core::time::Duration::from_secs(1),
+            )
+        });
+
+        let mut client = TcpStream::connect(address)?;
+        client.write_all(b"HEAD /api/tx HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        thread
+            .join()
+            .expect("listener thread")
+            .expect("serve request");
         Ok(())
     }
 

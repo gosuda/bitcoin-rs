@@ -2,7 +2,7 @@
 //!
 //! The index owner decides how durable derived state reaches consistency with a
 //! supplied active chain. The caller owns the authoritative chain representation
-//! and implements [`ActiveChainView`]; agreement between index watermarks alone
+//! and implements [`crate::reconcile::ActiveChainView`]; agreement between index watermarks alone
 //! never prove query readiness.
 
 use bitcoin_rs_primitives::Hash256;
@@ -309,13 +309,13 @@ pub fn selected_watermark(
     capabilities: IndexCapabilities,
 ) -> SelectedWatermark {
     let selected = [
-        capabilities.tx_lookup.then_some(watermarks.tx_lookup),
-        capabilities
-            .script_history
-            .then_some(watermarks.script_history),
-        capabilities.script_live.then_some(watermarks.script_live),
+        (capabilities.tx_lookup, watermarks.tx_lookup),
+        (capabilities.script_history, watermarks.script_history),
+        (capabilities.script_live, watermarks.script_live),
     ];
-    let mut selected = selected.into_iter().flatten();
+    let mut selected = selected
+        .into_iter()
+        .filter_map(|(enabled, watermark)| enabled.then_some(watermark));
     let Some(first) = selected.next() else {
         return SelectedWatermark::Invalid;
     };

@@ -403,18 +403,22 @@ impl<'a> ParsedTransaction<'a> {
 
         let version_span = cur.take(4)?;
         let (mut input_count_value, mut input_count_span) = cur.read_compact()?;
+        let mut output_count_override: Option<(u64, ByteSpan)> = None;
         let mut segwit = false;
         if input_count_value == 0 {
-            // BIP144: a zero input count is the segwit marker; the flag byte
-            // must be exactly 0x01.
-            let (flag, _flag_span) = cur.read_u8()?;
-            if flag != 0x01 {
+            // Core treats a zero flag as the legacy empty-input/empty-output form,
+            // while 0x01 is the BIP144 segwit marker; any other value is rejected.
+            let (flag, flag_span) = cur.read_u8()?;
+            if flag == 0 {
+                output_count_override = Some((0, flag_span));
+            } else if flag == 0x01 {
+                segwit = true;
+                let (count, span) = cur.read_compact()?;
+                input_count_value = count;
+                input_count_span = span;
+            } else {
                 return Err(DecodeError::InvalidSegwitFlag { got: flag });
             }
-            segwit = true;
-            let (count, span) = cur.read_compact()?;
-            input_count_value = count;
-            input_count_span = span;
         }
         cur.require_count(input_count_value, MIN_INPUT_LEN)?;
 
@@ -432,7 +436,10 @@ impl<'a> ParsedTransaction<'a> {
             });
         }
 
-        let (output_count_value, output_count_span) = cur.read_compact()?;
+        let (output_count_value, output_count_span) = match output_count_override {
+            Some(pair) => pair,
+            None => cur.read_compact()?,
+        };
         cur.require_count(output_count_value, MIN_OUTPUT_LEN)?;
         let mut outputs = Vec::new();
         for _ in 0..output_count_value {

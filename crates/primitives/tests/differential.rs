@@ -158,8 +158,8 @@ fn enforce_corpus_verdicts(target: &str) {
     for (path, bytes) in &seeds {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
         let verdict = match target {
-            "tx_decode" => decode_verdict::<NativeTx>(bytes),
-            "block_decode" => decode_verdict::<NativeBlock>(bytes),
+            "tx_validate" => decode_verdict::<NativeTx>(bytes),
+            "block_validate" => decode_verdict::<NativeBlock>(bytes),
             other => panic!("unknown corpus target {other}"),
         };
         observed.insert(name, verdict);
@@ -274,12 +274,12 @@ fn error_kind(error: &DecodeError) -> String {
 // (docs/contracts/qa-corpus.md) through the pinned verdict manifest.
 #[test]
 fn tx_corpus_seeds_match_expected_verdicts() {
-    enforce_corpus_verdicts("tx_decode");
+    enforce_corpus_verdicts("tx_validate");
 }
 
 #[test]
 fn block_corpus_seeds_match_expected_verdicts() {
-    enforce_corpus_verdicts("block_decode");
+    enforce_corpus_verdicts("block_validate");
 }
 
 #[test]
