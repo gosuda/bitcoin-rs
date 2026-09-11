@@ -2,7 +2,7 @@
 
 The synchronous, Bitcoin Core-compatible JSON-RPC and REST surface of the node: method dispatch, HTTP Basic and cookie authentication, and a wallet-free method surface — every RPC that would require private key material is simply absent.
 
-`RpcServer::bind` binds a TCP listener and `serve` (or `serve_with_shutdown` for controlled shutdown) runs the blocking accept loop, handing each connection to a bounded worker thread under a per-connection idle timeout. Each request is authenticated by `Auth`, then matched to a Core-compatible handler by `Handler::dispatch`, which reads shared node state through the dependency-injected `Context` — the boundary carrying `ChainControl` consensus-affecting operations, `PruneService`, `TxIndexQuery`, `NetworkState`, and `ZmqNotification`. Failures map to JSON-RPC error codes through `RpcError`, and Bitcoin Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are not implemented and answer `method not found`, while PSBT combination and finalization remain available because they are driven by external signers without this process holding private key material.
+`RpcServer::bind` binds a TCP listener and `serve` (or `serve_with_shutdown` for controlled shutdown) runs the blocking accept loop, handing each connection to a bounded worker thread under a per-connection idle timeout. Each request is authenticated by `Auth`, then matched to a Core-compatible handler by `Handler::dispatch`, which reads shared node state through the dependency-injected `Context` — the boundary carrying `ChainControl` consensus-affecting operations, `PruneService`, `TxIndexQuery`, `NetworkState`, and the live `ZmqPublisher`. Failures map to JSON-RPC error codes through `RpcError`, and Bitcoin Core-compatible REST endpoints (`rest`) are served on the same listener when enabled. RPCs that would reveal, import, create, or use private keys are not implemented and answer `method not found`, while PSBT combination and finalization remain available because they are driven by external signers without this process holding private key material.
 
 ## Capability boundary
 
@@ -16,7 +16,11 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 ## Interface architecture and implementation guidance
 
 ### 1. Protocol demuxing and authentication
-- **Transport Demuxing**: Private free function `classify` (`crates/rpc/src/server.rs`) is the listener directory table, and `serve_connection` dispatches it before authentication. The wallet-facing Esplora routing contract is maintained in [`WF-02`](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues).
+- **Transport Demuxing**: Private free function `classify` (`crates/rpc/src/server.rs`) is the listener directory table. `serve_connection` dispatches that table before authentication. The wallet-facing Esplora routing contract is maintained in [`WF-02`](../../docs/contracts/wallet-facing.md#wf-02-operations-a-wallet-actually-issues):
+  - `GET /rest/*` → Core REST (`rest::route`).
+  - `GET` or `POST` under `/api` or `/esplora` → Esplora. `classify` strips the directory prefix and passes `Surface` plus the rest; `esplora::route` / `route_post` only dispatch inside that directory. Unknown paths 404 and never become JSON-RPC. `/api` is public electrs; `/esplora` is the mempool-backend superset. Wallet broadcast is `POST /api/tx`.
+  - Other `POST` → JSON-RPC. `Auth::validate_header` (`crates/rpc/src/auth.rs`) guards this path only.
+  - Any other method or GET outside `/rest/`, `/api`, and `/esplora` → 404 at the demux. Unprefixed electrs paths and `HEAD`/`PUT`/`DELETE` do not enter Esplora or JSON-RPC. The request parser accepts those methods so `classify` can 404 them instead of answering JSON-RPC 400.
 - **JSON-RPC Framing & Protocol Versioning**: `JsonRpcVersion` (`crates/rpc/src/server.rs`) governs wire framing:
   - Requests with `"jsonrpc": "2.0"` use JSON-RPC 2.0 (`JsonRpcVersion::V2`): success responses emit `{"jsonrpc":"2.0","result":...,"id":...}` (HTTP 200), error responses emit `{"jsonrpc":"2.0","error":...,"id":...}` (HTTP 200), and requests omitting `id` are treated as notifications returning HTTP 204 No Content.
   - Other requests use JSON-RPC 1.1 / legacy (`JsonRpcVersion::Legacy`): success responses emit `{"result":...,"error":null,"id":...}` (HTTP 200), error responses emit `{"result":null,"error":...,"id":...}` with HTTP 500 status, and missing `id` values default to `null`.
@@ -40,7 +44,7 @@ no backend cargo feature (`g17_dependency_direction` proves both from
 - **Cursor Pagination**: Use immutable hash cursors (`last_seen_txid`, block hashes) rather than integer offsets for volatile datasets.
 
 ### 4. Non-blocking event notifications
-- **ZMQ Framing**: ZeroMQ notifications (`ZmqPublisher` in `crates/node/src/zmq_publisher.rs`) emit 3-part multipart frames `[topic, body, 4-byte LE sequence]`.
+- **ZMQ Framing**: ZeroMQ notifications (`ZmqPublisher` in `crates/rpc/src/zmq.rs`) emit 3-part multipart frames `[topic, body, 4-byte LE sequence]`.
 - **Non-Blocking Delivery**: Socket writes must use non-blocking sends (`zmq::DONTWAIT`). Notification buffer saturation must drop messages at the high-water mark rather than stalling block validation or consensus execution.
 - **Reorg Sequencing & Notification Order**: Chain-transition rollback and admission orchestration in `crates/node/src/apply.rs` guarantees block disconnect events (`D`, published during rollback) are emitted before block connect events (`C`, published in `apply_block_admitted`).
 

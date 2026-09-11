@@ -97,9 +97,9 @@ impl ScriptActivity {
                     continue;
                 }
                 stats.funded_txo_count = stats.funded_txo_count.saturating_add(1);
-                stats.funded_txo_sum = stats.funded_txo_sum.saturating_add(output.value);
+                stats.funded_txo_sum = stats.funded_txo_sum.saturating_add(output.value.to_sat());
                 if let Ok(vout) = u32::try_from(vout) {
-                    target_outputs.insert((txid, vout), output.value);
+                    target_outputs.insert((txid, vout), output.value.to_sat());
                 }
             }
         }
@@ -240,7 +240,7 @@ impl<'a> Projection<'a> {
                 let output = self
                     .prevout(&previous_output)?
                     .ok_or_else(|| unavailable("previous transaction unavailable"))?;
-                input_value = input_value.saturating_add(output.value);
+                input_value = input_value.saturating_add(output.value.to_sat());
                 Some(output)
             };
             let (redeem, witness_script) = inner_scripts(input, previous.as_ref());
@@ -261,7 +261,7 @@ impl<'a> Projection<'a> {
                         .collect()
                 }),
                 is_coinbase: coinbase,
-                sequence: input.sequence,
+                sequence: input.sequence.to_consensus(),
                 inner_redeemscript_asm: redeem.as_deref().map(script_asm),
                 inner_witnessscript_asm: witness_script.as_deref().map(script_asm),
             });
@@ -271,14 +271,13 @@ impl<'a> Projection<'a> {
             .iter()
             .map(|output| self.transaction_output(output))
             .collect();
-        let output_value = transaction
-            .outputs
-            .iter()
-            .fold(0_u64, |sum, output| sum.saturating_add(output.value));
+        let output_value = transaction.outputs.iter().fold(0_u64, |sum, output| {
+            sum.saturating_add(output.value.to_sat())
+        });
         Ok(TransactionValue {
             txid: transaction.txid().to_string(),
             version: transaction.version.cast_unsigned(),
-            locktime: transaction.lock_time,
+            locktime: transaction.lock_time.to_consensus(),
             vin: inputs,
             vout: outputs,
             size: u32::try_from(transaction.total_size()).unwrap_or(u32::MAX),
@@ -300,7 +299,7 @@ impl<'a> Projection<'a> {
             )
             .ok()
             .map(|address| address.to_string()),
-            value: output.value,
+            value: output.value.to_sat(),
         }
     }
 
@@ -361,7 +360,7 @@ impl<'a> Projection<'a> {
                 .median_time_past_for_hash(Hash256::from(record.hash))
                 .unwrap_or(header.time),
             nonce: header.nonce,
-            bits: header.bits,
+            bits: header.bits.to_consensus(),
             difficulty: self.ctx.difficulty_for_bits(header.bits),
         })
     }
@@ -469,7 +468,7 @@ impl<'a> Projection<'a> {
                         txid: entry.txid.to_string(),
                         vout,
                         status: TransactionStatus::unconfirmed(),
-                        value: output.value,
+                        value: output.value.to_sat(),
                     });
                 }
             }

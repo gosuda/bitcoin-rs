@@ -15,9 +15,10 @@ The crate owns the domain `Candidate`, [`Candidate::solve`](crate::Candidate::so
 and the node-facing mining contract ([`MiningControl`](crate::MiningControl),
 [`BlockTemplate`](crate::BlockTemplate), [`MiningInfo`](crate::MiningInfo),
 [`MiningControl::generate`](crate::MiningControl::generate)).
-BIP22/BIP23 JSON projection lives in RPC. Long-poll waiting, generate
-assemble-solve-submit, and block submission live in the node-owned
-coordinator that implements `MiningControl`.
+BIP22/BIP23 JSON projection lives in RPC: `submitold` after a long-poll wait,
+`signet_challenge` on signet, and capabilities `proposal` plus `longpoll`.
+Long-poll waiting, generate assemble-solve-submit, and block submission live
+in the node-owned coordinator that implements `MiningControl`.
 
 ## Features
 - `rocksdb`: forwarding marker for the rocksdb storage backend; gates no code in
@@ -25,8 +26,6 @@ coordinator that implements `MiningControl`.
 - `fjall`: forwarding marker for the fjall storage backend; gates no code in this
   crate.
 - `redb`: forwarding marker for the redb storage backend; gates no code in this
-  crate.
-- `mdbx`: forwarding marker for the mdbx storage backend; gates no code in this
   crate.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
