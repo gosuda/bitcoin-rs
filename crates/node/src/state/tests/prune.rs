@@ -401,7 +401,7 @@ fn manual_prune_removes_pruned_block_transactions_from_cache() -> anyhow::Result
     let pruned_txid = pruned_tx.txid();
     let unrelated_tx = Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: LockTime::from_consensus(0),
         inputs: Vec::new(),
         outputs: Vec::new(),
     };
