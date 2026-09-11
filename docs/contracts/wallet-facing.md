@@ -105,7 +105,7 @@ mixed-tip page.
 ## Proven by
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
-- `crates/rpc/src/server.rs` tests `classify_splits_rest_esplora_and_json_rpc` (existing), `listener_directory_table_is_closed_over_http`
+- `crates/rpc/src/server.rs` tests `wf_02_classify_splits_rest_esplora_and_json_rpc` (existing)
 - `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset` (existing)
 - `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
   (existing)
