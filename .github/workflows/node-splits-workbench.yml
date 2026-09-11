@@ -4,11 +4,8 @@ on:
     branches: [automation/node-splits-a1178cc-20260911]
 permissions:
   contents: read
-concurrency:
-  group: node-splits-a1178cc-20260911
-  cancel-in-progress: true
 jobs:
-  inventory:
+  source:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -16,39 +13,14 @@ jobs:
         with:
           ref: a1178cc884e42b953a041d0c139bc47814b7ccae
           persist-credentials: false
-      - name: Report implementation boundaries
+      - name: Archive tracked source and offline parser wheels
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          for name in ['apply', 'sync', 'state', 'txindex_worker', 'checkpoint', 'run', 'mining', 'recovery_evidence', 'import', 'storage_footprint']:
-              p = Path('crates/node/src') / (name + '.rs')
-              text = p.read_text()
-              print('\nFILE', str(p), 'LINES', len(text.splitlines()), flush=True)
-              for n, line in enumerate(text.splitlines(), 1):
-                  if re.match(r'^(?:pub(?:\([^)]*\))? )?(?:async |const )?(?:fn |struct |enum |trait |type |impl(?:<| )|mod )', line):
-                      print(n, line, flush=True)
-                  elif re.match(r'^    (?:pub(?:\([^)]*\))? )?(?:async |const )?fn ', line):
-                      print(n, line, flush=True)
-          PY
-  baseline:
-    needs: inventory
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      CARGO_BUILD_JOBS: 2
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      CARGO_TERM_COLOR: never
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+          mkdir -p /tmp/node-split-input
+          git archive --format=tar.gz --output=/tmp/node-split-input/source.tar.gz HEAD
+          git ls-tree -r HEAD > /tmp/node-split-input/source-tree.txt
+          python3 -m pip download --only-binary=:all: --python-version 311 --platform manylinux2014_x86_64 --implementation cp --abi cp311 --no-deps --dest /tmp/node-split-input tree-sitter==0.25.2 tree-sitter-rust==0.24.0
+      - uses: actions/upload-artifact@v4
         with:
-          ref: a1178cc884e42b953a041d0c139bc47814b7ccae
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          toolchain: '1.95.0'
-          components: rustfmt,clippy
-      - name: Baseline node Clippy
-        run: cargo +1.95.0 clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall -- -D warnings
+          name: node-split-input-a1178cc
+          path: /tmp/node-split-input
+          retention-days: 1
