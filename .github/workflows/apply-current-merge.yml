@@ -1,0 +1,68 @@
+name: Integrate validated apply split with current main
+on:
+  push:
+    branches: [automation/apply-current-merge-20260911]
+permissions:
+  contents: write
+concurrency:
+  group: apply-current-merge-20260911
+  cancel-in-progress: true
+jobs:
+  validate-and-update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/apply-current-target
+          key: apply-current-stable-${{ github.run_id }}
+          restore-keys: apply-current-stable-
+      - name: Merge current main, validate exact integration, and fast-forward PR branch
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/apply-current-target
+        shell: bash
+        run: |
+          set -euo pipefail
+          product=refactor/node-split-c4dd58-apply
+          git fetch origin main "$product"
+          work="$RUNNER_TEMP/apply-current-product"
+          git worktree add --detach "$work" "origin/$product"
+          cd "$work"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-ff --no-edit origin/main
+          cargo fmt -p bitcoin-rs-node
+          if ! git diff --quiet; then
+            git add crates/node/src
+            git commit --amend --no-edit
+          fi
+          cargo fmt -p bitcoin-rs-node -- --check
+          git diff --check origin/main HEAD
+          cargo clippy --locked -p bitcoin-rs-node --all-targets --no-default-features --features fjall,zmq -- -D warnings
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --lib apply:: -- --test-threads=1
+          old="$(git rev-parse origin/$product)"
+          git merge-base --is-ancestor "$old" HEAD
+          git push origin "HEAD:refs/heads/$product"
+          echo "UPDATED $product $(git rev-parse HEAD) FROM $old MAIN $(git rev-parse origin/main)"
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ runner.temp }}/apply-current-target
+          key: apply-current-stable-${{ github.run_id }}
