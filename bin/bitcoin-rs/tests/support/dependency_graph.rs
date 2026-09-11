@@ -221,7 +221,7 @@ impl WorkspaceGraph {
     pub(crate) fn set_feature(&mut self, on: &str, feature: &str, implies: &[&str]) {
         self.features.entry(on.to_owned()).or_default().insert(
             feature.to_owned(),
-            implies.iter().map(|s| s.to_string()).collect(),
+            implies.iter().map(ToString::to_string).collect(),
         );
     }
 
@@ -290,12 +290,40 @@ impl WorkspaceGraph {
             }
         }
 
-        // 4. Backend feature names must carry a real backend choice, never
-        //    an empty marker. Only the allowed crates may define and forward
-        //    backend features; `mempool`, `mining`, consensus, RPC, etc. must
-        //    not. `bitcoin-rs` and `bitcoin-rs-node` forward into the adapter
-        //    set, adapters forward into `bitcoin-rs-storage`, and storage owns
-        //    the concrete engine dependencies.
+        let mut checked_features = 0_usize;
+        checked_features += self.validate_backend_forwarding(&mut violations);
+
+        // 5. The external ZMQ dependency is owned by the RPC surface crate.
+        //    Node may forward the surface feature but must not name the
+        //    external dependency directly.
+        checked_features += self.validate_zmq_surface(&mut violations);
+
+        if violations.is_empty() {
+            Ok(Validation {
+                checked_edges,
+                checked_engine_edges,
+                checked_features,
+                classified: self.classified,
+                summary: format!(
+                    "dependency direction: {checked_edges} edges; \
+                     engine edges: {checked_engine_edges}; features: {checked_features}; \
+                     classified crates: {}",
+                    self.classified
+                ),
+            })
+        } else {
+            Err(violations)
+        }
+    }
+
+    /// Validates the ZMQ surface ownership boundary: the external ZMQ
+    /// dependency is owned by the RPC surface crate, and node forwards
+    /// the surface feature without naming the dependency directly.
+    /// Returns the number of feature assertions checked.
+
+    /// Rule 4: backend features carry a real backend choice and only the
+    /// forwarding allowlist may define them (see `BACKEND_FORWARDING_CRATES`).
+    fn validate_backend_forwarding(&self, violations: &mut Vec<String>) -> usize {
         let mut checked_features = 0_usize;
         for (name, feature_map) in &self.features {
             for (feature, implies) in feature_map {
@@ -327,7 +355,7 @@ impl WorkspaceGraph {
                         let mut parts = entry.split('/');
                         let target = parts.next().unwrap_or_default();
                         let forwarded_feature = parts.next().unwrap_or_default();
-                        !parts.next().is_some()
+                        parts.next().is_none()
                             && BACKEND_FORWARDING_CRATES.contains(&target)
                             && forwarded_feature == feature.as_str()
                     })
@@ -342,33 +370,9 @@ impl WorkspaceGraph {
             }
         }
 
-        // 5. The external ZMQ dependency is owned by the RPC surface crate.
-        //    Node may forward the surface feature but must not name the
-        //    external dependency directly.
-        checked_features += self.validate_zmq_surface(&mut violations);
-
-        if violations.is_empty() {
-            Ok(Validation {
-                checked_edges,
-                checked_engine_edges,
-                checked_features,
-                classified: self.classified,
-                summary: format!(
-                    "dependency direction: {checked_edges} edges; \
-                     engine edges: {checked_engine_edges}; features: {checked_features}; \
-                     classified crates: {}",
-                    self.classified
-                ),
-            })
-        } else {
-            Err(violations)
-        }
+        checked_features
     }
 
-    /// Validates the ZMQ surface ownership boundary: the external ZMQ
-    /// dependency is owned by the RPC surface crate, and node forwards
-    /// the surface feature without naming the dependency directly.
-    /// Returns the number of feature assertions checked.
     fn validate_zmq_surface(&self, violations: &mut Vec<String>) -> usize {
         let mut checked = 0_usize;
         for (name, dependencies) in &self.zmq_deps {
