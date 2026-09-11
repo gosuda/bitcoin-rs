@@ -53,9 +53,9 @@ impl NodeState {
         config.validate()?;
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
-        let checkpoint_data_dir = crate::checkpoint_fs::open_data_dir(&config.data_dir)
+        let checkpoint_data_dir = crate::checkpoint::fs::open_data_dir(&config.data_dir)
             .with_context(|| format!("open data_dir {}", config.data_dir.display()))?;
-        crate::checkpoint_fs::ensure_current_schema(&checkpoint_data_dir).with_context(|| {
+        crate::checkpoint::fs::ensure_current_schema(&checkpoint_data_dir).with_context(|| {
             format!(
                 "validate CURRENT_SCHEMA for datadir {}",
                 config.data_dir.display()
@@ -415,12 +415,12 @@ impl NodeState {
             applied_tip.load().as_ref().map_or(0, |tip| tip.height),
         ));
         apply_handles.checkpoint_publisher =
-            Some(Arc::new(crate::checkpoint_worker::CheckpointPublisher {
+            Some(Arc::new(crate::checkpoint::worker::CheckpointPublisher {
                 admission: Arc::clone(&apply_handles.admission),
                 undo_store: Arc::clone(&apply_handles.undo_store),
                 block_body_store: Arc::clone(&block_body_store),
                 applied_tip: Arc::clone(&applied_tip),
-                checkpoint_data_dir: crate::checkpoint_fs::open_data_dir(&config.data_dir)
+                checkpoint_data_dir: crate::checkpoint::fs::open_data_dir(&config.data_dir)
                     .with_context(|| format!("open data_dir {}", config.data_dir.display()))?,
                 network: config.network,
                 genesis_hash: config.network.genesis_block_hash(),

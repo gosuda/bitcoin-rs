@@ -42,7 +42,7 @@ impl<S: KvStore> JournalWriter<S> {
         self.fail_head_rename()?;
         self.dir.rename("head.json.tmp", &self.dir, "head.json")?;
         self.fail_head_dir_sync()?;
-        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
         self.record_size_metric();
         Ok(())
     }

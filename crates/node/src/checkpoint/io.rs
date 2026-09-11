@@ -3,8 +3,8 @@
 use super::CURRENT_FILE;
 use super::CheckpointError;
 use super::CheckpointFailpoint;
-use crate::checkpoint_fs::CheckpointRoot;
-use crate::checkpoint_fs::sync_dir;
+use crate::checkpoint::fs::CheckpointRoot;
+use crate::checkpoint::fs::sync_dir;
 use cap_std::fs::Dir;
 use cap_std::fs::File;
 use std::io::Write;

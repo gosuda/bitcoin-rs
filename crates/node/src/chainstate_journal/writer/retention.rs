@@ -219,7 +219,7 @@ impl<S: KvStore> JournalWriter<S> {
             self.dir.remove_file(name)?;
         }
         clear_full_revalidation_marker(&self.dir)?;
-        crate::checkpoint_fs::sync_dir(&self.dir)?;
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
         Ok(())
     }
 

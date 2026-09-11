@@ -17,9 +17,6 @@ pub mod apply;
 pub mod chain_effects;
 mod chainstate_journal;
 mod checkpoint;
-mod checkpoint_fs;
-/// Periodic chainstate checkpoint publication during sync.
-mod checkpoint_worker;
 /// Layered node configuration.
 pub mod config;
 /// Typed in-process node lifecycle: the embedding surface over the same
