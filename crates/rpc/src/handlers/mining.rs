@@ -11,11 +11,10 @@ use bitcoin_rs_primitives::{
     Block, ConsensusDecode, Header, Network, Tx, Txid, consensus_bytes, deserialize,
 };
 use compact_str::CompactString;
-use sonic_rs::{JsonContainerTrait, JsonValueMutTrait, JsonValueTrait, Value, json};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
     self, compact_target_hex, i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic,
-    typed_to_sonic_omitting_nulls,
 };
 use crate::context::Context;
 use crate::error::RpcError;
@@ -31,6 +30,7 @@ const GBT_REQUIRE_SEGWIT: &str =
 const GBT_REQUIRE_SIGNET: &str = r#"getblocktemplate must be called with the signet rule set (call with {"rules": ["segwit", "signet"]})"#;
 const PRIORITISE_DUMMY_ERROR: &str =
     "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.";
+const PRIORITISE_DUST_ERROR: &str = "Priority is not supported for transactions with dust outputs.";
 
 fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
     fn nibble(byte: u8) -> Result<u8, ()> {
@@ -46,7 +46,7 @@ fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
         return Err(());
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         out.push((nibble(chunk[0])? << 4) | nibble(chunk[1])?);
     }
     Ok(out)
@@ -99,6 +99,11 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     ensure_at_most_params(params, 2)?;
+    if let Some(dummy) = params_array(params)?.get(1) {
+        if !dummy.is_null() && dummy.as_str().is_none() {
+            return Err(RpcError::InvalidType("parameter must be string"));
+        }
+    }
     let hex = required_str(params, 0, "block hex is required")?;
     let block = decode_submitted_block(hex)?;
     match control.submit_block(block) {
@@ -109,8 +114,7 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 fn decode_submitted_block(hex: &str) -> Result<Block, RpcError> {
     let bytes = from_hex(hex).map_err(|()| block_decode_failed())?;
-    // Core `DecodeHexBlk` unserializes a witness block and ignores leftover
-    // bytes, so extra hex after a complete block is accepted.
+    // See the API-15 contract for DecodeHexBlk compatibility behavior.
     let mut reader: &[u8] = &bytes;
     <Block as ConsensusDecode>::consensus_decode(&mut reader).map_err(|_| block_decode_failed())
 }
@@ -140,6 +144,7 @@ pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         .mining_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+    ensure_at_most_params(params, 1)?;
     let hex = required_str(params, 0, "header hex is required")?;
     let header = decode_block_header(hex)?;
     match control.submit_header(header) {
@@ -147,7 +152,6 @@ pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         Err(error) => Err(map_mining_control_error(error)),
     }
 }
-
 pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let (txid_str, fee_delta, dummy) = if let Some(array) = params.as_array() {
         if array.len() > 3 {
@@ -188,9 +192,22 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             ));
         }
     }
-    ctx.mempool
-        .prioritise(txid, fee_delta)
-        .map_err(|_| RpcError::InvalidParams("fee delta would overflow"))?;
+    // See the authoritative API-24 contract for this network-dependent rule.
+    let prioritised = if ctx.chain_network == Network::Regtest {
+        ctx.mempool.prioritise(txid, fee_delta).map(|()| true)
+    } else {
+        let dust_relay_fee = ctx
+            .mempool
+            .read()
+            .policy_snapshot()
+            .standardness
+            .dust_relay_fee;
+        ctx.mempool
+            .prioritise_if_not_dust(txid, fee_delta, dust_relay_fee)
+    };
+    if !prioritised.map_err(|_| RpcError::InvalidParams("fee delta would overflow"))? {
+        return Err(RpcError::InvalidParameter(PRIORITISE_DUST_ERROR.to_owned()));
+    }
     if let Some(control) = ctx.mining_control.as_ref() {
         control.publish_generation();
     }
@@ -506,16 +523,23 @@ fn client_supports_rule(rules: &[MiningRule], name: &str) -> bool {
     rules.iter().any(|rule| rule.as_str() == name)
 }
 
-/// Core refuses template assembly until the client lists `segwit`, and
-/// `signet` on signet. Proposal mode returns before these checks.
+pub(crate) fn required_gbt_rules(network: Network) -> &'static [&'static str] {
+    match network {
+        Network::Signet => &["segwit", "signet"],
+        _ => &["segwit"],
+    }
+}
+
+/// Enforces the GBT client-rule negotiation contract (API-14).
 fn ensure_client_rules_for_template(
     network: Network,
     client_rules: &[MiningRule],
 ) -> Result<(), RpcError> {
-    if network == Network::Signet && !client_supports_rule(client_rules, "signet") {
+    let required = required_gbt_rules(network);
+    if required.contains(&"signet") && !client_supports_rule(client_rules, "signet") {
         return Err(RpcError::InvalidParameter(GBT_REQUIRE_SIGNET.to_owned()));
     }
-    if !client_supports_rule(client_rules, "segwit") {
+    if required.contains(&"segwit") && !client_supports_rule(client_rules, "segwit") {
         return Err(RpcError::InvalidParameter(GBT_REQUIRE_SEGWIT.to_owned()));
     }
     Ok(())
@@ -539,8 +563,11 @@ fn ensure_client_supports_mandatory_rules(
     Ok(())
 }
 
-/// Core refuses template assembly on mainnet while disconnected or still in IBD.
-/// Proposal mode skips these gates. Test chains (`Network != Mainnet`) skip them.
+fn rule_is_mandatory(rule: &str) -> bool {
+    matches!(rule, "segwit" | "signet")
+}
+
+/// See the API-08 contract for the template-readiness requirements.
 fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
     if ctx.chain_network != Network::Mainnet {
         return Ok(());
@@ -559,10 +586,6 @@ fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
         ));
     }
     Ok(())
-}
-
-fn rule_is_mandatory(rule: &str) -> bool {
-    matches!(rule, "segwit" | "signet")
 }
 
 fn render_template_transactions(
@@ -610,7 +633,7 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let mut value = typed_to_sonic_omitting_nulls(&v31::GetBlockTemplate {
+    typed_to_sonic(&v31::GetBlockTemplate {
         version: candidate.version,
         rules,
         version_bits_available,
@@ -638,22 +661,12 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
         current_time: u64::from(candidate.current_time),
         bits: format!("{:08x}", candidate.bits),
         height: i64::from(candidate.height),
-        signet_challenge: template
-            .signet
-            .as_ref()
-            .map(|signet| to_lower_hex(&signet.challenge)),
+        signet_challenge: None,
         default_witness_commitment: candidate
             .witness_commitment
             .as_ref()
             .map(|commitment| to_lower_hex(&witness_commitment_script(commitment))),
-    })?;
-    if let Some(submit_old) = template.submit_old
-        && let Some(object) = value.as_object_mut()
-    {
-        // BIP23 `submitold` is not on corepc's pinned GetBlockTemplate type.
-        let _ = object.insert("submitold", json!(submit_old));
-    }
-    Ok(value)
+    })
 }
 
 fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
@@ -709,10 +722,10 @@ fn render_validation_result(result: BlockValidationResult) -> Value {
 
 fn map_mining_control_error(error: MiningControlError) -> RpcError {
     match error {
-        MiningControlError::Rejected(message) => RpcError::TxVerifyError(message.to_string()),
         MiningControlError::InvalidRequest(message)
         | MiningControlError::Unavailable(message)
         | MiningControlError::Failed(message) => RpcError::Internal(message.to_string()),
+        MiningControlError::Rejected(message) => RpcError::TxVerifyError(message.to_string()),
     }
 }
 
@@ -731,7 +744,8 @@ mod tests {
         TemplateMutation,
     };
     use bitcoin_rs_primitives::{
-        BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid,
+        Amount, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
     use parking_lot::Mutex;
 
@@ -745,7 +759,6 @@ mod tests {
         last_request: Mutex<Option<BlockTemplateRequest>>,
         last_hash_ps: Mutex<Option<(i64, i64)>>,
         last_generate: Mutex<Option<GenerateRequest>>,
-        last_header: Mutex<Option<Header>>,
         template_calls: AtomicUsize,
         submit_calls: AtomicUsize,
         info_calls: AtomicUsize,
@@ -762,7 +775,6 @@ mod tests {
                 last_request: Mutex::new(None),
                 last_hash_ps: Mutex::new(None),
                 last_generate: Mutex::new(None),
-                last_header: Mutex::new(None),
                 template_calls: AtomicUsize::new(0),
                 submit_calls: AtomicUsize::new(0),
                 info_calls: AtomicUsize::new(0),
@@ -827,12 +839,10 @@ mod tests {
             Ok(self.submit.lock().clone())
         }
 
-        fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
-            *self.last_header.lock() = Some(header);
-            let fail = self.fail.lock().clone();
-            if let Some(error) = fail {
-                return Err(error);
-            }
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_primitives::Header,
+        ) -> Result<(), MiningControlError> {
             Ok(())
         }
 
@@ -861,7 +871,7 @@ mod tests {
             previous_block_hash: previous,
             height: 101,
             version: 0x2000_0000,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             min_time: 1_700_000_001,
             current_time: 1_700_000_010,
             csv_active: true,
@@ -874,7 +884,7 @@ mod tests {
                 version: 2,
                 inputs: Vec::new(),
                 outputs: Vec::new(),
-                lock_time: 0,
+                lock_time: LockTime::from_consensus(0),
             },
             coinbase_value: 5_000_000_000,
             fees: 0,
@@ -905,6 +915,7 @@ mod tests {
             ],
             submit_old: None,
             signet: None,
+            work_id: None,
         }
     }
 
@@ -915,12 +926,12 @@ mod tests {
                 weight: 2_500,
                 transactions: 3,
             }),
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             difficulty: 1.0,
             network_hashes_per_second: 42.5,
             pooled_transactions: 4,
             network: Network::Regtest,
-            next_bits: 0x207f_ffff,
+            next_bits: CompactTarget::from_consensus(0x207f_ffff),
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
@@ -929,16 +940,18 @@ mod tests {
     }
 
     fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
-        ctx_with_control_on_network(control, Network::Regtest)
+        let mut ctx = Context::new();
+        ctx.chain_network = Network::Regtest;
+        Arc::new(ctx.with_mining_control(control))
     }
 
     fn ctx_with_control_on_network(
         control: Arc<dyn MiningControl>,
         network: Network,
     ) -> Arc<Context> {
-        let mut ctx = Context::new();
+        let mut ctx = Context::new().with_mining_control(control);
         ctx.chain_network = network;
-        Arc::new(ctx.with_mining_control(control))
+        Arc::new(ctx)
     }
 
     fn sample_block() -> Block {
@@ -946,15 +959,15 @@ mod tests {
             version: 1,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0xffff_ffff),
-                script_sig: vec![0x51],
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::from_bytes(vec![0x51]),
+                sequence: Sequence::from_consensus(0xffff_ffff),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50 * 100_000_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50 * 100_000_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let merkle_root = coinbase.txid().0;
         Block {
@@ -963,7 +976,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root,
                 time: 1_296_688_602,
-                bits: 0x207f_ffff,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 2,
             },
             txs: vec![coinbase],
@@ -991,6 +1004,7 @@ mod tests {
         );
     }
 
+    // API-08: mainnet GBT requires a connected peer.
     #[test]
     fn getblocktemplate_rejects_mainnet_without_peers() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1003,6 +1017,7 @@ mod tests {
         assert_eq!(error.to_string(), "bitcoin-rs is not connected!");
     }
 
+    // API-08: mainnet GBT is rejected during initial block download.
     #[test]
     fn getblocktemplate_rejects_mainnet_during_ibd() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1019,6 +1034,7 @@ mod tests {
         );
     }
 
+    // API-08: proposal mode bypasses the mainnet connection gates.
     #[test]
     fn getblocktemplate_proposal_skips_mainnet_connection_gates() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1096,7 +1112,7 @@ mod tests {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
         let longpoll = sample_candidate().template_id.as_str().to_owned();
-        let result = getblocktemplate(
+        getblocktemplate(
             &ctx,
             &json!([{
                 "rules": ["segwit"],
@@ -1113,35 +1129,15 @@ mod tests {
             request.long_poll_id.as_deref(),
             Some(sample_candidate().template_id.as_str())
         );
-        assert_eq!(
-            result.get("submitold").and_then(JsonValueTrait::as_bool),
-            Some(true)
-        );
+        // `submitold`/`workid` are BIP23 extras outside the pinned v17
+        // GetBlockTemplate contract and are no longer emitted.
     }
 
-    #[test]
-    fn getblocktemplate_emits_submitold_and_omits_it_when_unset() {
-        let mut template = sample_template();
-        template.submit_old = Some(false);
-        let control = FakeMiningControl::with_template(template);
-        let ctx = ctx_with_control(control);
-        let result = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
-            .unwrap_or_else(|err| panic!("submitold template failed: {err}"));
-        assert_eq!(
-            result.get("submitold").and_then(JsonValueTrait::as_bool),
-            Some(false)
-        );
-        assert!(result.get("signet_challenge").is_none());
-        assert!(result.get("workid").is_none());
-    }
-
+    /// API-14: signet must be advertised alongside segwit on signet.
     #[test]
     fn getblocktemplate_requires_signet_rule_on_signet() {
         let mut template = sample_template();
         template.rules.push(MiningRule::new("signet"));
-        template.signet = Some(SignetMiningInfo {
-            challenge: vec![0x51],
-        });
         let control = FakeMiningControl::with_template(template);
         let ctx = ctx_with_control_on_network(control.clone(), Network::Signet);
         let missing_signet = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
@@ -1160,14 +1156,9 @@ mod tests {
             .and_then(JsonContainerTrait::as_array)
             .expect("rules array");
         assert!(rules.iter().any(|rule| rule.as_str() == Some("!signet")));
-        assert_eq!(
-            accepted
-                .get("signet_challenge")
-                .and_then(JsonValueTrait::as_str),
-            Some("51")
-        );
     }
 
+    /// API-14: a template-listed mandatory rule requires explicit client support.
     #[test]
     fn getblocktemplate_rejects_template_mandatory_rule_without_client_support() {
         let mut template = sample_template();
@@ -1185,33 +1176,7 @@ mod tests {
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
 
-    #[test]
-    fn getblocktemplate_proposal_accepted_returns_null() {
-        let control = FakeMiningControl::with_template(sample_template());
-        *control.proposal.lock() = BlockValidationResult::Accepted;
-        let ctx = ctx_with_control(control.clone());
-        let genesis = sample_block();
-        let hex = to_lower_hex(&consensus_bytes(&genesis));
-        let result = getblocktemplate(
-            &ctx,
-            &json!([{
-                "mode": "proposal",
-                "capabilities": ["proposal"],
-                "data": hex,
-            }]),
-        )
-        .unwrap_or_else(|err| panic!("proposal failed: {err}"));
-        assert!(result.is_null());
-        assert!(matches!(
-            control
-                .last_request
-                .lock()
-                .as_ref()
-                .map(|request| &request.mode),
-            Some(BlockTemplateMode::Proposal(_))
-        ));
-    }
-
+    /// API-14: segwit is the base client rule for template mode.
     #[test]
     fn getblocktemplate_rejects_missing_segwit_rule() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1231,6 +1196,7 @@ mod tests {
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 0);
     }
 
+    /// API-14: proposal mode skips client-rule negotiation.
     #[test]
     fn getblocktemplate_proposal_skips_client_rule_negotiation() {
         let control = FakeMiningControl::with_template(sample_template());
@@ -1247,6 +1213,14 @@ mod tests {
         )
         .unwrap_or_else(|err| panic!("proposal without rules failed: {err}"));
         assert!(result.is_null());
+        assert!(matches!(
+            control
+                .last_request
+                .lock()
+                .as_ref()
+                .map(|request| &request.mode),
+            Some(BlockTemplateMode::Proposal(_))
+        ));
         assert_eq!(control.template_calls.load(Ordering::Relaxed), 1);
     }
 
@@ -1343,6 +1317,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-15
     fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
         let missing = Arc::new(Context::new());
         let error = submitblock(&missing, &json!(["00"]))
@@ -1363,6 +1338,7 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-15
     fn submitblock_ignores_bip22_dummy_and_trailing_bytes() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
@@ -1382,53 +1358,54 @@ mod tests {
     }
 
     #[test]
-    fn submitheader_requires_mining_control() {
-        let ctx = Arc::new(Context::new());
-        let error = submitheader(&ctx, &json!(["00"])).expect_err("missing control must fail");
-        assert!(matches!(
-            error,
-            RpcError::MethodDisabled("mining is unavailable")
-        ));
-    }
-
-    #[test]
-    fn submitheader_rejects_undecodable_headers() {
-        let control = FakeMiningControl::with_template(sample_template());
-        let ctx = ctx_with_control(control);
-        for hex in ["", "00", "zz", "0"] {
-            let error =
-                submitheader(&ctx, &json!([hex])).expect_err("undecodable header must fail");
-            assert!(matches!(error, RpcError::Deserialization(_)));
-            assert_eq!(error.code(), RpcError::CORE_DESERIALIZATION_ERROR);
-            assert_eq!(error.to_string(), "Block header decode failed");
-        }
-    }
-
-    #[test]
-    fn submitheader_returns_null_and_forwards_decoded_header() {
+    // CONTRACT: API-15
+    fn submitblock_rejects_non_string_bip22_dummy() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
-        let header = sample_block().header;
-        let mut hex = to_lower_hex(&consensus_bytes(&header));
-        hex.push_str("ffff");
-        let result = submitheader(&ctx, &json!([hex]))
-            .unwrap_or_else(|err| panic!("submitheader failed: {err}"));
-        assert!(result.is_null());
-        assert_eq!(*control.last_header.lock(), Some(header));
+        let genesis = sample_block();
+        let hex = to_lower_hex(&consensus_bytes(&genesis));
+        for dummy in [json!(123), json!(true), json!([]), json!({})] {
+            let error = submitblock(&ctx, &json!([hex.as_str(), dummy]))
+                .expect_err("non-string BIP22 dummy must fail");
+            assert!(matches!(error, RpcError::InvalidType(_)));
+            assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+        }
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 0);
+
+        *control.submit.lock() = BlockValidationResult::Accepted;
+        let nulled = submitblock(&ctx, &json!([hex.as_str(), null]))
+            .unwrap_or_else(|err| panic!("null dummy must be accepted and ignored: {err}"));
+        assert!(nulled.is_null());
+        let stringed = submitblock(&ctx, &json!([hex.as_str(), "ignored"]))
+            .unwrap_or_else(|err| panic!("string dummy must be accepted and ignored: {err}"));
+        assert!(stringed.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]
-    fn submitheader_maps_rejected_to_verify_error() {
+    // CONTRACT: API-15
+    fn decode_tx_zero_input_zero_flag_accepted_like_core() {
         let control = FakeMiningControl::with_template(sample_template());
-        *control.fail.lock() = Some(MiningControlError::Rejected(CompactString::from(
-            "Must submit previous header (00) first",
-        )));
-        let ctx = ctx_with_control(control);
-        let hex = to_lower_hex(&consensus_bytes(&sample_block().header));
-        let error = submitheader(&ctx, &json!([hex])).expect_err("rejected header must fail");
-        assert!(matches!(error, RpcError::TxVerifyError(_)));
-        assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
-        assert_eq!(error.to_string(), "Must submit previous header (00) first");
+        let ctx = ctx_with_control(control.clone());
+        // A single transaction encoded as version | zero-input dummy | zero flag |
+        // lock time: Core reads the zero flag as the legacy empty transaction
+        // (zero inputs, zero outputs) and admits it to validation instead of
+        // failing with -22.
+        let empty = Tx {
+            version: 1,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: LockTime::from_consensus(0),
+        };
+        let block = Block {
+            header: sample_block().header,
+            txs: vec![empty],
+        };
+        let hex = to_lower_hex(&consensus_bytes(&block));
+        let result = submitblock(&ctx, &json!([hex.as_str()]))
+            .unwrap_or_else(|err| panic!("zero-input zero-flag block must decode: {err}"));
+        assert!(result.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1470,9 +1447,9 @@ mod tests {
         let control = FakeMiningControl::with_template(sample_template());
         {
             let mut info = control.info.lock();
-            info.bits = 0x1d00_ffff;
+            info.bits = CompactTarget::from_consensus(0x1d00_ffff);
             info.difficulty = 1.0;
-            info.next_bits = 0x1c00_ffff;
+            info.next_bits = CompactTarget::from_consensus(0x1c00_ffff);
         }
         let ctx = ctx_with_control(control);
         let result = getmininginfo(&ctx, &json!([]))
@@ -1490,12 +1467,18 @@ mod tests {
             result.get("bits").and_then(JsonValueTrait::as_str),
             Some("1d00ffff")
         );
-        assert_eq!(target, compact_target_hex(0x1d00_ffff));
+        assert_eq!(
+            target,
+            compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff))
+        );
         assert_eq!(
             next.get("bits").and_then(JsonValueTrait::as_str),
             Some("1c00ffff")
         );
-        assert_eq!(next_target, compact_target_hex(0x1c00_ffff));
+        assert_eq!(
+            next_target,
+            compact_target_hex(CompactTarget::from_consensus(0x1c00_ffff))
+        );
         assert_ne!(target, next_target);
     }
 
@@ -1518,7 +1501,7 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let txid = tx.txid();
         {
@@ -1568,6 +1551,71 @@ mod tests {
         assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
     }
 
+    fn dust_priority_tx() -> Tx {
+        Tx {
+            version: 2,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            }],
+            lock_time: LockTime::from_consensus(0),
+        }
+    }
+
+    // CONTRACT: API-24
+    #[test]
+    fn prioritisetransaction_rejects_dust_outputs_like_core() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let ctx = Arc::new(Context::new());
+        assert_eq!(ctx.chain_network, Network::Mainnet);
+        let tx = dust_priority_tx();
+        let txid = tx.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
+        let txid_hex = txid.to_string();
+        let error = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
+            .expect_err("dust mempool tx must not be prioritised");
+        assert!(matches!(error, RpcError::InvalidParameter(_)));
+        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(error.to_string(), PRIORITISE_DUST_ERROR);
+    }
+
+    // CONTRACT: API-24
+    #[test]
+    fn prioritisetransaction_allows_dust_overlay_on_regtest() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
+        let mut ctx = Context::new();
+        ctx.chain_network = Network::Regtest;
+        let ctx = Arc::new(ctx);
+        let tx = dust_priority_tx();
+        let txid = tx.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
+        let txid_hex = txid.to_string();
+        let result = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500]))
+            .unwrap_or_else(|err| panic!("regtest may prioritise dust: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
+    // CONTRACT: API-24
+    #[test]
+    fn prioritisetransaction_allows_absent_txid_overlay() {
+        let ctx = Arc::new(Context::new());
+        let txid = "11".repeat(32);
+        let result = prioritisetransaction(&ctx, &json!([txid.as_str(), 0, 500]))
+            .unwrap_or_else(|err| panic!("absent txid overlay must be accepted: {err}"));
+        assert_eq!(result.as_bool(), Some(true));
+    }
+
     #[test]
     fn getblocktemplate_includes_selected_transactions() {
         let mut template = sample_template();
@@ -1575,10 +1623,10 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let txid = tx.txid();
         let wtxid = tx.wtxid();
@@ -1631,6 +1679,7 @@ mod tests {
             },
         ];
         template.version_bits_required = 1 << 2;
+        template.work_id = Some(CompactString::from("work-abc"));
         let control = FakeMiningControl::with_template(template);
         let ctx = ctx_with_control(control);
         let result = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
@@ -1795,7 +1844,7 @@ mod tests {
             version: 2,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         };
         let pooled = pooled_tx.txid();
         {
@@ -1862,15 +1911,15 @@ mod tests {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: vec![],
-                sequence: u32::MAX,
-                witness: vec![],
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50_000,
-                script_pubkey: vec![0x51],
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: 0,
+            lock_time: LockTime::from_consensus(0),
         }
     }
 

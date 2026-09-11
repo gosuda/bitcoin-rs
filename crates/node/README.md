@@ -10,15 +10,19 @@ drives `event_loop`, the central synchronous loop.
 `NodeState` holds the shared state and the `Chainstate` facade for
 authoritative apply; `ChainFollowers` dispatch post-commit RPC/ZMQ/index,
 mining, and admission work while the `ChainTransition` is still held;
-`BlockSync` orchestrates block download; `reorg` switches the applied chain
-from one branch to another. The chainstate facade serializes connect,
+`BlockSync` executes block download against the P2P-owned `SyncPlanner`;
+`reorg` switches the applied chain from one branch to another. The chainstate facade serializes connect,
 disconnect, and window apply behind `ChainTransition`. Owning crates expose
 the domain surfaces `node` wires:
 chain BIP9/softfork lookups, P2P `ActiveChainQuery`, mining candidate context,
-and the txindex worker's private block-source bridge. Notifications leave
-through the `ZmqPublisher` trait and its `SocketZmqPublisher` / `TracingZmqPublisher`
-/ `NoOpZmqPublisher` implementations and the `TxIndexRuntime` worker; `signal` and
-`shutdown` bridge process signals into graceful shutdown.
+and the txindex worker's private block-source bridge. The RPC surface crate owns
+the ZMQ protocol and transport; node constructs its `ZmqPublisher`, attaches the
+mempool observer, and orders publication with committed chain effects. `signal`
+and `shutdown` bridge process signals into graceful shutdown.
+
+For transactions, node supplies the chain view and wires the runtime workers and
+committed-result handoffs. The authoritative cross-crate ownership split is
+[ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
 
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
 See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
@@ -40,7 +44,6 @@ runtime crate.
   #213 is the measurement gate for dropping `kernel` from this crate's defaults.
 - `rocksdb`, `fjall`, `redb`: forward the named storage backend to every subsystem
   crate.
-- `mdbx`: forward the mdbx backend to the crates that provide one.
 - `kernel`: route consensus verification through bitcoinkernel
   (`bitcoin-rs-consensus/kernel`).
 - `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;

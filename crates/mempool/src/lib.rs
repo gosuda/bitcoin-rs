@@ -3,8 +3,12 @@
 
 extern crate alloc;
 
-/// Transaction acceptance into the mempool.
+/// Mempool outputs layered over confirmed coin lookup.
 pub mod accept;
+/// Shared resolved-input accounting.
+pub mod accounting;
+/// Shared transaction preparation, retries, and gateway lifecycle queries.
+pub mod admission;
 /// Mempool entry metadata.
 pub mod entry;
 /// Package eviction policy.
@@ -16,7 +20,7 @@ pub mod gateway;
 /// Mutation records returned by every mutating pool method.
 pub mod mutation;
 /// Orphan transaction pool for transactions with missing parents.
-pub mod orphan;
+mod orphan;
 /// Pareto-front transaction priority ordering.
 pub mod pareto;
 /// Mempool policy limits.
@@ -25,12 +29,14 @@ pub mod policy;
 pub mod pool;
 /// BIP125 replacement-by-fee checks.
 pub mod rbf;
+/// Preparation of disconnected transactions for the existing reorg batch.
+pub mod reconsider;
 /// Transaction relay standardness policy.
 pub mod standardness;
 
-pub use accept::{
-    AcceptChecks, AcceptContext, AcceptError, AcceptResult, MempoolUtxoView, accept_to_mempool,
-    check_acceptance,
+pub use accept::MempoolUtxoView;
+pub use admission::{
+    AdmissionChain, ChainAdmissionSnapshot, OrphanRetry, SubmitError, SubmitOutcome,
 };
 pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;
@@ -52,4 +58,6 @@ pub use pool::{
     PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
-pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
+pub use standardness::{
+    StandardnessError, StandardnessPolicy, is_standard_tx, tx_has_dust_outputs,
+};
