@@ -3,111 +3,23 @@ on:
   push:
     branches: [automation/txindex-cleanup-workbench-20260911]
 permissions:
-  contents: write
+  contents: read
 concurrency:
-  group: txindex-cleanup-index-finish-${{ github.sha }}
+  group: txindex-current-source-${{ github.sha }}
   cancel-in-progress: false
-env:
-  CARGO_TERM_COLOR: never
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: 1
 jobs:
-  validate:
-    strategy:
-      fail-fast: false
-      matrix:
-        scope: [index]
+  current-source:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      SCOPE: ${{ matrix.scope }}
-    defaults:
-      run:
-        working-directory: candidate
-        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          path: workbench
+          ref: 7f5a460de67965ff36955bab1434c75f080ad384
           persist-credentials: false
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: d4392c35858bce7626cec35fea905ebe97b554c0
-          path: candidate
-          persist-credentials: true
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          toolchain: '1.95.0'
-          components: rustfmt,clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-        with:
-          workspaces: candidate
-          shared-key: txindex-cleanup-native-${{ matrix.scope }}
-          cache-on-failure: true
-      - name: Generate and audit the source-only refactor
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          python -m pip install 'Pygments==2.19.2'
-          python ../workbench/.workbench/refactor_txindex.py
-          python ../workbench/.workbench/finalize_txindex.py "$SCOPE"
-          python ../workbench/.workbench/adjustments.py "$SCOPE"
-          python -c 'from pathlib import Path; p=Path("crates/index/src/reconcile.rs"); s=p.read_text(); assert s.count("[`ActiveChainView`]")==1; p.write_text(s.replace("[`ActiveChainView`]", "[`crate::reconcile::ActiveChainView`]"))'
-          cargo +1.95.0 fmt -p bitcoin-rs-index
-      - name: Compiler-assisted unused import cleanup
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          for pass in 1 2; do
-            cargo +1.95.0 fix --locked -p bitcoin-rs-index --features fjall,redb --all-targets --allow-dirty --allow-staged
-          done
-      - name: Formatting and strict Clippy
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          cargo +1.95.0 fmt -p bitcoin-rs-index
-          cargo +1.95.0 fmt -p bitcoin-rs-index -- --check
-          cargo +1.95.0 clippy --locked -p bitcoin-rs-index --features fjall,redb --all-targets -- -D warnings
-      - name: Contract and integration tests
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          cargo +1.95.0 test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast
-      - name: Public documentation links
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p bitcoin-rs-index --features fjall,redb --no-deps
-      - name: Verify exact diff scope and export candidate
-        if: ${{ always() }}
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          git add crates/index/src/index.rs crates/index/src/index crates/index/src/reconcile.rs crates/index/README.md
-          git diff --cached --check
-          git diff --cached --stat
-          git diff --exit-code
-          git diff --cached --name-only | python -c 'import sys; paths=sys.stdin.read().splitlines(); assert paths; assert all(p in {"crates/index/src/index.rs","crates/index/src/reconcile.rs","crates/index/README.md"} or p.startswith("crates/index/src/index/") for p in paths), paths'
-          git diff --cached --binary > /tmp/txindex-${SCOPE}.patch
-          git diff --cached --name-only -z | tar -czf /tmp/txindex-${SCOPE}-source.tar.gz --null -T -
-      - name: Publish validated source without workbench history
-        run: |
-          exec > >(tee -a /tmp/txindex-${SCOPE}.log) 2>&1
-          branch="refactor/txindex-${SCOPE}-modules-20260911"
-          if [[ -n "$(git ls-remote --heads origin "refs/heads/$branch")" ]]; then
-            git fetch --depth=1 origin "$branch"
-            test "$(git write-tree)" = "$(git rev-parse FETCH_HEAD^{tree})"
-            git rev-parse FETCH_HEAD > /tmp/txindex-${SCOPE}-commit.txt
-          else
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m 'refactor(index): modularize txindex storage and simplify canonical row mutations'
-            git push origin "HEAD:refs/heads/$branch"
-            git rev-parse HEAD > /tmp/txindex-${SCOPE}-commit.txt
-          fi
-          cat /tmp/txindex-${SCOPE}-commit.txt
+      - name: Export exact current source
+        run: git archive --format=tar HEAD > /tmp/txindex-current-source.tar
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: ${{ always() }}
         with:
-          name: txindex-${{ matrix.scope }}-candidate
-          path: |
-            /tmp/txindex-${{ matrix.scope }}.patch
-            /tmp/txindex-${{ matrix.scope }}-source.tar.gz
-            /tmp/txindex-${{ matrix.scope }}.log
-            /tmp/txindex-${{ matrix.scope }}-commit.txt
+          name: txindex-current-source
+          path: /tmp/txindex-current-source.tar
           retention-days: 1
           if-no-files-found: error
