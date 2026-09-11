@@ -11,25 +11,69 @@ concurrency:
   group: txindex-cleanup-workbench
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
 jobs:
-  inspect:
+  index:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: candidate
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: d4392c35858bce7626cec35fea905ebe97b554c0
+          path: workbench
           persist-credentials: false
-      - name: Export pinned source and source inventory
-        run: |
-          git archive --format=tar HEAD > /tmp/txindex-source.tar
-          find . -name AGENTS.md -print
-          grep -nE '^(pub(\([^)]*\))? )?(const|struct|enum|trait|fn|impl|mod) ' crates/index/src/index.rs
-          find crates/node -iname '*index*' -print
-          cat crates/index/Cargo.toml rust-toolchain.toml
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          name: txindex-source
-          path: /tmp/txindex-source.tar
+          ref: d4392c35858bce7626cec35fea905ebe97b554c0
+          path: candidate
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: '1.95.0'
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+        with:
+          workspaces: candidate
+          shared-key: txindex-cleanup-native
+          cache-on-failure: true
+      - name: Generate source modules and prove original function-body preservation
+        run: |
+          python -m pip install 'Pygments==2.19.2'
+          python ../workbench/.workbench/refactor_txindex.py
+          cargo +1.95.0 fmt --all
+      - name: Compiler-assisted import cleanup
+        run: cargo +1.95.0 fix --locked -p bitcoin-rs-index --features fjall,redb --all-targets --allow-dirty --allow-staged
+      - name: Format and strict Clippy
+        run: |
+          cargo +1.95.0 fmt --all
+          cargo +1.95.0 fmt --all -- --check
+          cargo +1.95.0 clippy --locked -p bitcoin-rs-index --features fjall,redb --all-targets -- -D warnings
+      - name: Index contract and integration tests
+        run: cargo +1.95.0 test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast
+      - name: Public documentation links
+        run: RUSTDOCFLAGS='-D warnings' cargo +1.95.0 doc --locked -p bitcoin-rs-index --features fjall,redb --no-deps
+      - name: Verify diff scope and export candidate
+        if: ${{ always() }}
+        run: |
+          git add crates/index/src/index.rs crates/index/src/index
+          git diff --cached --check
+          git diff --cached --stat
+          git diff --cached --name-only | python -c 'import sys; paths=sys.stdin.read().splitlines(); assert paths; assert all(p == "crates/index/src/index.rs" or p.startswith("crates/index/src/index/") for p in paths), paths'
+          git diff --cached --binary > /tmp/txindex-index.patch
+          tar -czf /tmp/txindex-index-source.tar.gz crates/index/src/index.rs crates/index/src/index
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: ${{ always() }}
+        with:
+          name: txindex-index-candidate
+          path: |
+            /tmp/txindex-index.patch
+            /tmp/txindex-index-source.tar.gz
           retention-days: 1
           if-no-files-found: error
