@@ -95,12 +95,7 @@ pub fn plan_from_snapshot(
         tree,
         active_tip: target_tip.tip_id,
     };
-    index_reconcile::plan_from_identity(
-        cursor,
-        &identity(snapshot),
-        target(target_tip),
-        &chain,
-    )
+    index_reconcile::plan_from_identity(cursor, &identity(snapshot), target(target_tip), &chain)
 }
 
 /// Height of the newest block shared by `position` and `active_tip`.

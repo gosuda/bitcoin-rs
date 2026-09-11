@@ -80,6 +80,11 @@ pub struct Node {
     pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
 }
 
+// Keep the newer per-method Clippy lint names compatible with the MSRV.
+#[allow(
+    unknown_lints,
+    reason = "older supported Clippy versions do not know unused_async_trait_impl"
+)]
 impl Node {
     /// Starts an owned node after configuration validation and crash recovery.
     ///
