@@ -26,15 +26,15 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
-          toolchain: '1.95.0'
+          toolchain: stable
           components: rustfmt,clippy
       - uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
             ${{ runner.temp }}/node-contract-target
-          key: node-contract-rust195-${{ github.run_id }}
-          restore-keys: node-contract-rust195-
+          key: node-contract-stable-${{ github.run_id }}
+          restore-keys: node-contract-stable-
       - name: Validate exact follow-up tree and publish source branch
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/node-contract-target
@@ -45,4 +45,4 @@ jobs:
           path: |
             ~/.cargo/registry
             ${{ runner.temp }}/node-contract-target
-          key: node-contract-rust195-${{ github.run_id }}
+          key: node-contract-stable-${{ github.run_id }}
