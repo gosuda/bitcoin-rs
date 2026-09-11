@@ -1,0 +1,26 @@
+name: Index owner workbench
+on:
+  push:
+    branches: [workbench/index-owner-742-20260912]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: af5d034d1a74973666b8ef37adc4de3f9ea11d23
+          persist-credentials: false
+      - name: Export pinned tracked source without repository credentials
+        run: |
+          mkdir -p /tmp/index-owner-source
+          git archive --format=tar.gz HEAD > /tmp/index-owner-source/source.tar.gz
+          git rev-parse HEAD > /tmp/index-owner-source/source-commit.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: index-owner-source-${{ github.run_id }}
+          path: /tmp/index-owner-source
+          retention-days: 1
+          if-no-files-found: error
