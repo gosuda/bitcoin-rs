@@ -24,7 +24,7 @@ impl BlockSync {
     /// Every alternate receives the same earliest hashes, so the probe cannot
     /// create a unique out-of-order height hole. It runs once per deep owner.
     pub(super) fn send_prefix_probes(&self, probe_peers: &[SyncPeer], now: Instant) {
-        let mut window = self.download_window.lock();
+        let window = self.download_window.lock();
         let Some((owner, hashes, required_height)) = window.prefix_probe_plan() else {
             return;
         };
