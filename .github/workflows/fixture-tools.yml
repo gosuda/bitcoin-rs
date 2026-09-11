@@ -1,0 +1,24 @@
+name: fixture-tools
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fixture-tools-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  golden-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check downloader syntax
+        run: bash -n scripts/fetch-golden.sh
+      - name: Run offline downloader regressions
+        run: python3 -m unittest discover -s scripts/tests -v

@@ -2,19 +2,17 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Txid};
 
 use crate::block_view::BlockView;
+use crate::sigops::transaction_sigop_cost;
 #[cfg(not(feature = "kernel"))]
 use bitcoin_rs_script::Interpreter;
-use bitcoin_rs_script::script::instructions;
-use bitcoin_rs_script::{
-    Instruction, VerifyFlags, count_segwit, count_tx_legacy, is_p2sh, is_witness_program, opcode,
-};
+use bitcoin_rs_script::VerifyFlags;
 use rayon::prelude::*;
 
 use crate::rust_path::UtxoView;
-use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, MAX_MONEY};
+use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST};
 
 const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 const SEQUENCE_FINAL: u32 = 0xffff_ffff;
@@ -113,7 +111,7 @@ fn is_null_outpoint(outpoint: &OutPoint) -> bool {
 /// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
 #[must_use]
 fn is_final_tx_with_locktime_cutoff(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    let lock_time = tx.lock_time;
+    let lock_time = tx.lock_time.to_consensus();
     if lock_time == 0 {
         return true;
     }
@@ -129,7 +127,7 @@ fn is_final_tx_with_locktime_cutoff(tx: &Tx, block_height: u32, locktime_cutoff:
 
     tx.inputs
         .iter()
-        .all(|input| input.sequence == SEQUENCE_FINAL)
+        .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
 /// Verifies non-contextual and input-script transaction rules for a transaction.
@@ -152,21 +150,17 @@ pub fn verify_transaction(
 ///
 /// Checks finality, empty inputs/outputs, coinbase scriptSig size, duplicate inputs, null
 /// prevouts, missing prevouts, input/output value balance, and sigop limits. Skips
-/// kernel/script script execution. This is the assume-valid entry.
+/// kernel/script script execution. This is the assume-valid entry: callers
+/// still supply active flags because skipping execution must not disable
+/// activated witness sigop accounting.
 pub fn verify_transaction_non_script(
     tx: &Tx,
     prevouts: &impl UtxoView,
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    verify_transaction_with_locktime_cutoff(
-        tx,
-        prevouts,
-        height,
-        locktime_cutoff,
-        VerifyFlags::NONE,
-        true,
-    )
+    verify_transaction_with_locktime_cutoff(tx, prevouts, height, locktime_cutoff, flags, true)
 }
 
 fn verify_transaction_with_locktime_cutoff(
@@ -206,7 +200,7 @@ fn verify_transaction_with_locktime_cutoff(
         }
     }
 
-    finalize_tx_value_and_sigops(tx, &prep)
+    finalize_tx_value_and_sigops(tx, &prep, flags)
 }
 
 /// Resolved per-transaction state carried from the pre-phase into the script and
@@ -215,6 +209,35 @@ struct TxPrep {
     prevouts: Vec<(OutPoint, TxOut)>,
     input_value: u64,
     output_value: u64,
+}
+
+/// Checks non-coinbase input outpoints for null or repeated references.
+///
+/// This context-free subset of Core's `CheckTransaction` is shared with
+/// mempool admission before missing-input policy can retain an orphan.
+/// It does not resolve coins, execute scripts, or validate the other transaction
+/// fields. The one-null-input coinbase shape is left to the caller's coinbase rules.
+///
+/// # Errors
+///
+/// Returns the first null or duplicate input in transaction order, preserving
+/// the ordinary verifier's existing error precedence.
+///
+/// Reference: <https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_check.cpp>.
+pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError> {
+    if is_coinbase(tx) {
+        return Ok(());
+    }
+    let mut seen = HashSet::new();
+    for (input_index, input) in tx.inputs.iter().enumerate() {
+        if is_null_outpoint(&input.previous_output) {
+            return Err(ConsensusError::NullPrevout { input_index });
+        }
+        if !seen.insert(input.previous_output) {
+            return Err(ConsensusError::DuplicateInput { input_index });
+        }
+    }
+    Ok(())
 }
 
 /// Runs a transaction's non-script pre-checks: finality, empty in/out, total
@@ -252,15 +275,7 @@ fn prepare_tx_checks(
         return Ok(None);
     }
 
-    let mut seen = HashSet::new();
-    for (input_index, input) in tx.inputs.iter().enumerate() {
-        if is_null_outpoint(&input.previous_output) {
-            return Err(ConsensusError::NullPrevout { input_index });
-        }
-        if !seen.insert(input.previous_output) {
-            return Err(ConsensusError::DuplicateInput { input_index });
-        }
-    }
+    verify_transaction_input_outpoints(tx)?;
 
     let mut input_value = 0u64;
     let mut prevouts = Vec::with_capacity(tx.inputs.len());
@@ -268,7 +283,7 @@ fn prepare_tx_checks(
         let prevout = lookup(input_index, &input.previous_output)
             .ok_or(ConsensusError::MissingPrevout { input_index })?;
         input_value = input_value
-            .checked_add(prevout.value)
+            .checked_add(prevout.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
         prevouts.push((input.previous_output, prevout));
     }
@@ -282,7 +297,11 @@ fn prepare_tx_checks(
 
 /// Runs a transaction's deferred post-checks: input/output value balance and the
 /// sigop-cost limit, reusing the resolved prevouts.
-fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusError> {
+fn finalize_tx_value_and_sigops(
+    tx: &Tx,
+    prep: &TxPrep,
+    flags: VerifyFlags,
+) -> Result<(), ConsensusError> {
     if prep.input_value < prep.output_value {
         return Err(ConsensusError::InputsLessThanOutputs {
             input_value: prep.input_value,
@@ -291,7 +310,7 @@ fn finalize_tx_value_and_sigops(tx: &Tx, prep: &TxPrep) -> Result<(), ConsensusE
     }
 
     let _ = 0usize;
-    let sigop_cost = total_sigop_cost(tx, &prep.prevouts);
+    let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts, flags);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
             cost: sigop_cost,
@@ -397,7 +416,7 @@ pub fn verify_block_input_scripts(
     kernel_block: &crate::kernel::KernelBlock,
 ) -> Result<(), ConsensusError> {
     let prepare_started = Instant::now();
-    let unit = prepare_block_script_checks(view, height, locktime_cutoff, kernel_block)?;
+    let unit = prepare_block_script_checks(view, height, locktime_cutoff, flags, kernel_block)?;
     timings.prepare_seconds = prepare_started.elapsed().as_secs_f64();
 
     let parallel_started = Instant::now();
@@ -407,7 +426,6 @@ pub fn verify_block_input_scripts(
     let mut before_serial_scan = || {};
     let verdict = verify_prepared_units_with_hooks(
         core::slice::from_ref(&unit),
-        &[flags],
         &mut set_parallel_seconds,
         &mut before_serial_scan,
     );
@@ -418,9 +436,12 @@ pub fn verify_block_input_scripts(
 ///
 /// Holds borrows into the caller's parse-once [`BlockView`] transactions and
 /// parsed kernel block, so both must outlive every unit built from them.
+/// The unit owns the active flags shared by preparation and script execution;
+/// no later parallel flag list can give its two phases different contexts.
 pub struct BlockScriptChecks<'b> {
     prepared: Vec<PreparedTx<'b>>,
     checks: Vec<InputCheck>,
+    flags: VerifyFlags,
 }
 
 /// Which unit failed, and how.
@@ -450,6 +471,7 @@ pub fn prepare_block_script_checks<'tx, 'checks>(
     view: &mut BlockView<'tx>,
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
     kernel_block: &'checks crate::kernel::KernelBlock,
 ) -> Result<BlockScriptChecks<'checks>, ConsensusError>
 where
@@ -463,13 +485,16 @@ where
         });
     }
     let (prepared, checks) =
-        prepare_block_input_checks(txs, resolved, height, locktime_cutoff, kernel_block);
-    Ok(BlockScriptChecks { prepared, checks })
+        prepare_block_input_checks(txs, resolved, height, locktime_cutoff, flags, kernel_block);
+    Ok(BlockScriptChecks {
+        prepared,
+        checks,
+        flags,
+    })
 }
 
 fn verify_prepared_units_with_hooks<AfterParallel, BeforeSerialScan>(
     units: &[BlockScriptChecks<'_>],
-    flags_per_unit: &[VerifyFlags],
     after_parallel: &mut AfterParallel,
     before_serial_scan: &mut BeforeSerialScan,
 ) -> Result<(), BatchScriptFailure>
@@ -477,17 +502,6 @@ where
     AfterParallel: FnMut(),
     BeforeSerialScan: FnMut(),
 {
-    if units.len() != flags_per_unit.len() {
-        return Err(BatchScriptFailure {
-            unit: 0,
-            error: ConsensusError::Kernel(format!(
-                "batch verify needs one flag set per unit: {} units, {} flag sets",
-                units.len(),
-                flags_per_unit.len()
-            )),
-        });
-    }
-
     // Offsets are precomputed rather than accumulated during the scan. With a
     // running counter, reversing the scan order misaligns every slice instead
     // of simply reporting a different unit, which hides an ordering bug behind
@@ -504,7 +518,7 @@ where
 
     let run = |(unit_index, check): &(usize, &InputCheck)| {
         let unit = &units[*unit_index];
-        check_input(&unit.prepared, check, flags_per_unit[*unit_index])
+        check_input(&unit.prepared, check, unit.flags)
     };
     let flat: Vec<(usize, &InputCheck)> = units
         .iter()
@@ -549,14 +563,11 @@ where
 /// # Errors
 ///
 /// Returns the first [`BatchScriptFailure`] in the supplied unit order, or an
-/// internal layout failure when the unit and flag slices do not correspond.
-pub fn verify_prepared_units(
-    units: &[BlockScriptChecks<'_>],
-    flags_per_unit: &[VerifyFlags],
-) -> Result<(), BatchScriptFailure> {
+/// internal layout failure when retained checks and their results do not correspond.
+pub fn verify_prepared_units(units: &[BlockScriptChecks<'_>]) -> Result<(), BatchScriptFailure> {
     let mut after = || {};
     let mut before = || {};
-    verify_prepared_units_with_hooks(units, flags_per_unit, &mut after, &mut before)
+    verify_prepared_units_with_hooks(units, &mut after, &mut before)
 }
 
 /// Reports an internal prepared-check layout mismatch.
@@ -614,6 +625,7 @@ fn prepare_block_input_checks<'b>(
     resolved: &mut [Vec<Option<TxOut>>],
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
     // Unused by the portable backend, which verifies the view's transactions
     // directly; kept in the signature so both backends share one call shape.
     #[cfg_attr(
@@ -708,7 +720,7 @@ fn prepare_block_input_checks<'b>(
         }
         let checks_len = tx.inputs.len();
 
-        let post_error = finalize_tx_value_and_sigops(tx, &prep).err();
+        let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let stop_after_tx = post_error.is_some();
         prepared.push(PreparedTx {
             #[cfg(not(feature = "kernel"))]
@@ -756,103 +768,17 @@ fn check_input(
     }
 }
 
-fn cached_prevout_lookup(
-    prevouts: &[(OutPoint, TxOut)],
-    cursor: &mut usize,
-    outpoint: &OutPoint,
-) -> Option<TxOut> {
-    if prevouts.is_empty() {
-        return None;
-    }
-    if *cursor >= prevouts.len() {
-        *cursor = 0;
-    }
-    if let Some((cached_outpoint, txout)) = prevouts.get(*cursor)
-        && cached_outpoint == outpoint
-    {
-        *cursor = (*cursor).saturating_add(1);
-        return Some(txout.clone());
-    }
-    let (index, txout) =
-        prevouts
-            .iter()
-            .enumerate()
-            .find_map(|(index, (cached_outpoint, txout))| {
-                (cached_outpoint == outpoint).then_some((index, txout))
-            })?;
-    *cursor = index.saturating_add(1);
-    Some(txout.clone())
-}
-
 fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
     tx.outputs.iter().try_fold(0u64, |sum, output| {
         let next = sum
-            .checked_add(output.value)
+            .checked_add(output.value.to_sat())
             .ok_or(ConsensusError::OutputValueOverflow)?;
-        if next > MAX_MONEY {
+        if Amount::from_sat(next) > Amount::MAX_MONEY {
             Err(ConsensusError::OutputValueOverflow)
         } else {
             Ok(next)
         }
     })
-}
-
-fn total_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> u32 {
-    let mut cost = count_tx_legacy(tx).saturating_mul(4);
-    let mut cursor = 0_usize;
-    for input in &tx.inputs {
-        let Some(prevout) = cached_prevout_lookup(prevouts, &mut cursor, &input.previous_output)
-        else {
-            continue;
-        };
-        let redeem_script = last_push(&input.script_sig);
-        if is_p2sh(&prevout.script_pubkey) {
-            if let Some(redeem) = redeem_script {
-                cost = cost.saturating_add(count_accurate(redeem).saturating_mul(4));
-            }
-        }
-        let witness_program = if is_witness_program(&prevout.script_pubkey) {
-            Some(prevout.script_pubkey.as_slice())
-        } else {
-            redeem_script.filter(|script| is_witness_program(script))
-        };
-        if let Some(program) = witness_program {
-            cost = cost.saturating_add(count_segwit(program, &input.witness));
-        }
-    }
-    cost
-}
-
-fn last_push(script: &[u8]) -> Option<&[u8]> {
-    let mut last = None;
-    for instruction in instructions(script) {
-        match instruction.ok()? {
-            Instruction::PushBytes(bytes) => last = Some(bytes),
-            Instruction::Op(_) => last = None,
-        }
-    }
-    last
-}
-
-fn count_accurate(script: &[u8]) -> u32 {
-    let mut count = 0_u32;
-    let mut pushed_number = None;
-    for instruction in instructions(script) {
-        match instruction {
-            Ok(Instruction::Op(opcode::OP_CHECKSIG | opcode::OP_CHECKSIGVERIFY)) => {
-                count = count.saturating_add(1);
-                pushed_number = None;
-            }
-            Ok(Instruction::Op(opcode::OP_CHECKMULTISIG | opcode::OP_CHECKMULTISIGVERIFY)) => {
-                count = count.saturating_add(u32::from(pushed_number.unwrap_or(20)));
-                pushed_number = None;
-            }
-            Ok(Instruction::Op(op)) => pushed_number = opcode::decode_pushnum(op),
-            Ok(Instruction::PushBytes(_)) => pushed_number = None,
-            Err(_) => break,
-        }
-    }
-    count
 }
 
 #[cfg(test)]
@@ -862,8 +788,8 @@ mod tests {
     #[cfg(feature = "kernel")]
     use bitcoin::hashes::Hash as _;
     use bitcoin_rs_primitives::{
-        Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-        deserialize,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
     };
     #[cfg(not(feature = "kernel"))]
     use bitcoin_rs_primitives::{Sighash, SighashCache};
@@ -887,7 +813,7 @@ mod tests {
                 prev_blockhash: BlockHash::default(),
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0x2000_ffff,
+                bits: CompactTarget::from_consensus(0x2000_ffff),
                 nonce: 0,
             },
             txs: txs.to_vec(),
@@ -915,20 +841,93 @@ mod tests {
         }
     }
 
+    // Activation contract: BIP141, "Sigops" (https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops),
+    // as implemented by Bitcoin Core v31.1 in src/validation.cpp:
+    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/validation.cpp
+    #[test]
+    fn assume_valid_and_prepared_sigop_checks_follow_witness_activation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cost = crate::MAX_BLOCK_SIGOPS_COST + 1;
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[9; 32])), 0);
+        let tx = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(u32::MAX),
+                witness: Witness::from_stack(vec![vec![0xac; usize::try_from(cost)?]]),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(9_000),
+                script_pubkey: Script::new(),
+            }],
+            lock_time: LockTime::from_consensus(0),
+        };
+        let prevouts = hashbrown::HashMap::from([(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![1; 32]].concat()),
+            },
+        )]);
+        // The assume-valid path skips script execution, not sigop accounting.
+        // Active flags remain explicit even though script execution is skipped.
+        assert_eq!(
+            super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::P2SH),
+            Ok(()),
+        );
+        assert_eq!(
+            super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::MANDATORY),
+            Err(ConsensusError::SigopsLimit {
+                cost,
+                max: crate::MAX_BLOCK_SIGOPS_COST
+            }),
+        );
+        // Batched preparation binds the same flags used by execution, so its
+        // cached post-error cannot come from a different activation context.
+        let txs = vec![tx];
+        let block = kernel_block_for(&txs);
+        let resolved = vec![vec![prevouts.get(&outpoint).cloned()]];
+        let inactive = super::prepare_block_script_checks(
+            &mut block_view_for(&txs, resolved.clone()),
+            0,
+            0,
+            VerifyFlags::P2SH,
+            &block,
+        )?;
+        assert!(inactive.prepared[0].post_error.is_none());
+        assert!(super::verify_prepared_units(core::slice::from_ref(&inactive)).is_ok());
+        let active = super::prepare_block_script_checks(
+            &mut block_view_for(&txs, resolved),
+            0,
+            0,
+            VerifyFlags::MANDATORY,
+            &block,
+        )?;
+        assert_eq!(
+            active.prepared[0].post_error,
+            Some(ConsensusError::SigopsLimit {
+                cost,
+                max: crate::MAX_BLOCK_SIGOPS_COST,
+            })
+        );
+        Ok(())
+    }
+
     #[test]
     fn coinbase_transaction_skips_prevout_lookup() {
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![1, 1],
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: vec![1, 1].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let utxos = hashbrown::HashMap::new();
@@ -975,19 +974,19 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![spending_input(outpoint), spending_input(outpoint)],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             outpoint,
             TxOut {
-                value: 100,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(100),
+                script_pubkey: push_int(1).into(),
             },
         );
         assert_eq!(
@@ -1008,26 +1007,26 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![true_spending_input(first), true_spending_input(second)],
             outputs: vec![TxOut {
-                value: 75,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(75),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             first,
             TxOut {
-                value: 50,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(50),
+                script_pubkey: push_int(1).into(),
             },
         );
         utxos.insert(
             second,
             TxOut {
-                value: 50,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(50),
+                script_pubkey: push_int(1).into(),
             },
         );
 
@@ -1049,26 +1048,26 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![true_spending_input(first), true_spending_input(second)],
             outputs: vec![TxOut {
-                value: 75,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(75),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             first,
             TxOut {
-                value: 50,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(50),
+                script_pubkey: push_int(1).into(),
             },
         );
         utxos.insert(
             second,
             TxOut {
-                value: 50,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(50),
+                script_pubkey: push_int(1).into(),
             },
         );
         let view = CountingUtxoView::new(utxos);
@@ -1093,26 +1092,26 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![true_spending_input(first), true_spending_input(second)],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             first,
             TxOut {
-                value: 50,
-                script_pubkey: p2tr_script_pubkey(),
+                value: Amount::from_sat(50),
+                script_pubkey: p2tr_script_pubkey().into(),
             },
         );
         utxos.insert(
             second,
             TxOut {
-                value: 50,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(50),
+                script_pubkey: push_int(1).into(),
             },
         );
 
@@ -1170,28 +1169,28 @@ mod tests {
             script_pubkey.push(0x20); // push 32 bytes
             script_pubkey.extend_from_slice(&output_key.serialize());
             prevouts.push(TxOut {
-                value: 50_000,
-                script_pubkey,
+                value: Amount::from_sat(50_000),
+                script_pubkey: script_pubkey.into(),
             });
             keypairs.push(tweaked_keypair);
         }
 
         let mut tx = Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: outpoints
                 .iter()
                 .copied()
                 .map(|previous_output| TxIn {
                     previous_output,
-                    script_sig: Vec::new(),
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 })
                 .collect(),
             outputs: vec![TxOut {
-                value: 99_000,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(99_000),
+                script_pubkey: push_int(1).into(),
             }],
         };
 
@@ -1202,7 +1201,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("taproot sighash"));
             let message = Message::from_digest(sighash.to_le_bytes());
             let signature = secp.sign_schnorr(&message, keypair);
-            tx.inputs[input_idx].witness = vec![signature.serialize().to_vec()];
+            tx.inputs[input_idx].witness = vec![signature.serialize().to_vec()].into();
         }
 
         let mut utxos = hashbrown::HashMap::new();
@@ -1225,24 +1224,24 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: [push_int(7), push_int(7)].concat(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: [push_int(7), push_int(7)].concat().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             outpoint,
             TxOut {
-                value: 100,
-                script_pubkey: vec![OP_EQUAL],
+                value: Amount::from_sat(100),
+                script_pubkey: vec![OP_EQUAL].into(),
             },
         );
 
@@ -1264,24 +1263,24 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: [push_int(7), push_int(8)].concat(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: [push_int(7), push_int(8)].concat().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             outpoint,
             TxOut {
-                value: 100,
-                script_pubkey: vec![OP_EQUAL],
+                value: Amount::from_sat(100),
+                script_pubkey: vec![OP_EQUAL].into(),
             },
         );
 
@@ -1308,29 +1307,29 @@ mod tests {
         };
         let tx = Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
-                script_sig: [push_int(7), push_int(8)].concat(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: [push_int(7), push_int(8)].concat().into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         };
         let mut utxos = hashbrown::HashMap::new();
         utxos.insert(
             outpoint,
             TxOut {
-                value: 100,
-                script_pubkey: vec![OP_EQUAL],
+                value: Amount::from_sat(100),
+                script_pubkey: vec![OP_EQUAL].into(),
             },
         );
 
         assert_eq!(
-            super::verify_transaction_non_script(&tx, &utxos, 0, 0),
+            super::verify_transaction_non_script(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY),
             Ok(())
         );
         assert!(matches!(
@@ -1343,16 +1342,16 @@ mod tests {
     fn verify_transaction_rejects_non_final_height_lock() {
         let tx = Tx {
             version: 1,
-            lock_time: 200,
+            lock_time: LockTime::from_consensus(200),
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: Vec::new(),
-                sequence: 0,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             }],
         };
         let utxos = hashbrown::HashMap::new();
@@ -1369,16 +1368,16 @@ mod tests {
     fn timestamp_locktime_uses_caller_supplied_cutoff() {
         let tx = Tx {
             version: 1,
-            lock_time: 500_000_100,
+            lock_time: LockTime::from_consensus(500_000_100),
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: Vec::new(),
-                sequence: 0,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             }],
         };
 
@@ -1398,16 +1397,16 @@ mod tests {
 
         let non_final = Tx {
             version: 1,
-            lock_time: 500_000_100,
+            lock_time: LockTime::from_consensus(500_000_100),
             inputs: vec![TxIn {
                 previous_output: OutPoint::default(),
-                script_sig: Vec::new(),
-                sequence: 0,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0),
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
             }],
         };
 
@@ -1420,9 +1419,9 @@ mod tests {
     fn spending_input(outpoint: OutPoint) -> TxIn {
         TxIn {
             previous_output: outpoint,
-            script_sig: push_int(1),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: push_int(1).into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }
     }
 
@@ -1458,17 +1457,23 @@ mod tests {
                     vec![Some(op_equal_txout(50))],
                 ],
                 &first_block,
+                VerifyFlags::MANDATORY,
             ),
-            prepared_unit(&good_txs, vec![Vec::new()], &good_block),
+            prepared_unit(
+                &good_txs,
+                vec![Vec::new()],
+                &good_block,
+                VerifyFlags::MANDATORY,
+            ),
             prepared_unit(
                 &last_txs,
                 vec![Vec::new(), vec![Some(op_equal_txout(50))]],
                 &last_block,
+                VerifyFlags::MANDATORY,
             ),
         ];
-        let flags = [VerifyFlags::MANDATORY; 3];
 
-        match super::verify_prepared_units(&units, &flags) {
+        match super::verify_prepared_units(&units) {
             Err(failure) => assert_eq!(
                 failure.unit, 0,
                 "the earliest failing unit must win, got unit {}",
@@ -1502,17 +1507,27 @@ mod tests {
         let bad_block = kernel_block_for(&bad_txs);
 
         let units = [
-            prepared_unit(&clean_txs, clean_resolved.clone(), &clean_block),
-            prepared_unit(&clean_txs, clean_resolved, &clean_block),
+            prepared_unit(
+                &clean_txs,
+                clean_resolved.clone(),
+                &clean_block,
+                VerifyFlags::MANDATORY,
+            ),
+            prepared_unit(
+                &clean_txs,
+                clean_resolved,
+                &clean_block,
+                VerifyFlags::MANDATORY,
+            ),
             prepared_unit(
                 &bad_txs,
                 vec![Vec::new(), vec![Some(op_equal_txout(50))]],
                 &bad_block,
+                VerifyFlags::MANDATORY,
             ),
         ];
-        let flags = [VerifyFlags::MANDATORY; 3];
 
-        match super::verify_prepared_units(&units, &flags) {
+        match super::verify_prepared_units(&units) {
             Err(failure) => assert_eq!(
                 failure.unit, 2,
                 "only the last unit fails, so misaligned offsets would blame another"
@@ -1542,8 +1557,13 @@ mod tests {
             &mut timings,
             &block,
         );
-        let units = [prepared_unit(&txs, resolved, &block)];
-        let batched = super::verify_prepared_units(&units, &[VerifyFlags::MANDATORY]);
+        let units = [prepared_unit(
+            &txs,
+            resolved,
+            &block,
+            VerifyFlags::MANDATORY,
+        )];
+        let batched = super::verify_prepared_units(&units);
 
         match (single, batched) {
             (Err(single_error), Err(failure)) => assert_eq!(
@@ -1574,22 +1594,24 @@ mod tests {
         let redeem_script = [0_u8];
         let redeem_hash = bitcoin::hashes::hash160::Hash::hash(&redeem_script);
         let p2sh_output = TxOut {
-            value: 50,
-            script_pubkey: [
-                vec![OP_HASH160],
-                push_data(&redeem_hash.to_byte_array()),
-                vec![OP_EQUAL],
-            ]
-            .concat(),
+            value: Amount::from_sat(50),
+            script_pubkey: Script::from_bytes(
+                [
+                    vec![OP_HASH160],
+                    push_data(&redeem_hash.to_byte_array()),
+                    vec![OP_EQUAL],
+                ]
+                .concat(),
+            ),
         };
         let second_txs = vec![
             coinbase_transaction_with_script_sig_len(2),
             spend_tx(
                 vec![TxIn {
                     previous_output: outpoint(10),
-                    script_sig: push_data(&redeem_script),
-                    sequence: 0xffff_ffff,
-                    witness: Vec::new(),
+                    script_sig: push_data(&redeem_script).into(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
                 }],
                 50,
             ),
@@ -1597,18 +1619,33 @@ mod tests {
         let second_block = kernel_block_for(&second_txs);
         let second_resolved = vec![Vec::new(), vec![Some(p2sh_output)]];
 
-        let units = [
-            prepared_unit(&first_txs, first_resolved, &first_block),
-            prepared_unit(&second_txs, second_resolved, &second_block),
-        ];
-        assert!(
-            super::verify_prepared_units(&units[1..], &[VerifyFlags::MANDATORY],).is_err(),
-            "the second fixture must require its permissive flag set"
+        let strict = prepared_unit(
+            &second_txs,
+            second_resolved.clone(),
+            &second_block,
+            VerifyFlags::MANDATORY,
         );
         assert!(
-            super::verify_prepared_units(&units, &[VerifyFlags::MANDATORY, VerifyFlags::NONE],)
-                .is_ok(),
-            "each unit must use the flag set at its own index"
+            super::verify_prepared_units(core::slice::from_ref(&strict)).is_err(),
+            "the second fixture must require its permissive flag set"
+        );
+        let units = [
+            prepared_unit(
+                &first_txs,
+                first_resolved,
+                &first_block,
+                VerifyFlags::MANDATORY,
+            ),
+            prepared_unit(
+                &second_txs,
+                second_resolved,
+                &second_block,
+                VerifyFlags::NONE,
+            ),
+        ];
+        assert!(
+            super::verify_prepared_units(&units).is_ok(),
+            "each unit must use its own bound flag set"
         );
     }
 
@@ -1617,9 +1654,10 @@ mod tests {
         txs: &'b [Tx],
         resolved: Vec<Vec<Option<TxOut>>>,
         block: &'b crate::kernel::KernelBlock,
+        flags: VerifyFlags,
     ) -> super::BlockScriptChecks<'b> {
         let mut view = block_view_for(txs, resolved);
-        match super::prepare_block_script_checks(&mut view, 0, 0, block) {
+        match super::prepare_block_script_checks(&mut view, 0, 0, flags, block) {
             Ok(unit) => unit,
             Err(error) => panic!("test fixture prevout matrix is malformed: {error}"),
         }
@@ -1628,9 +1666,9 @@ mod tests {
     fn true_spending_input(outpoint: OutPoint) -> TxIn {
         TxIn {
             previous_output: outpoint,
-            script_sig: Vec::new(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: Script::new(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }
     }
 
@@ -1671,16 +1709,16 @@ mod tests {
     fn coinbase_transaction_with_script_sig_len(len: usize) -> Tx {
         Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                script_sig: vec![1; len],
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: vec![1; len].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 50,
-                script_pubkey: Vec::new(),
+                value: Amount::from_sat(50),
+                script_pubkey: Script::new(),
             }],
         }
     }
@@ -1688,16 +1726,16 @@ mod tests {
     #[cfg(feature = "kernel")]
     fn op1_txout(value: u64) -> TxOut {
         TxOut {
-            value,
-            script_pubkey: push_int(1),
+            value: Amount::from_sat(value),
+            script_pubkey: push_int(1).into(),
         }
     }
 
     #[cfg(feature = "kernel")]
     fn op_equal_txout(value: u64) -> TxOut {
         TxOut {
-            value,
-            script_pubkey: vec![OP_EQUAL],
+            value: Amount::from_sat(value),
+            script_pubkey: vec![OP_EQUAL].into(),
         }
     }
 
@@ -1707,9 +1745,9 @@ mod tests {
     fn mismatch_input(outpoint: OutPoint) -> TxIn {
         TxIn {
             previous_output: outpoint,
-            script_sig: [push_int(7), push_int(8)].concat(),
-            sequence: 0xffff_ffff,
-            witness: Vec::new(),
+            script_sig: [push_int(7), push_int(8)].concat().into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
         }
     }
 
@@ -1717,11 +1755,11 @@ mod tests {
     fn spend_tx(inputs: Vec<TxIn>, output_value: u64) -> Tx {
         Tx {
             version: 1,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs,
             outputs: vec![TxOut {
-                value: output_value,
-                script_pubkey: push_int(1),
+                value: Amount::from_sat(output_value),
+                script_pubkey: push_int(1).into(),
             }],
         }
     }
@@ -1965,7 +2003,9 @@ mod tests {
     fn decode_hex(hex: &str) -> Vec<u8> {
         assert!(hex.len().is_multiple_of(2), "hex string has odd length");
         hex.as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let digits = std::str::from_utf8(pair).unwrap_or_else(|_| panic!("hex ascii"));
                 u8::from_str_radix(digits, 16).unwrap_or_else(|_| panic!("hex digit"))
@@ -1989,8 +2029,8 @@ mod tests {
             .prevouts
             .iter()
             .map(|prevout| TxOut {
-                value: prevout.amount_sat,
-                script_pubkey: decode_hex(&prevout.script_hex),
+                value: Amount::from_sat(prevout.amount_sat),
+                script_pubkey: decode_hex(&prevout.script_hex).into(),
             })
             .collect::<Vec<_>>();
         let flags = VerifyFlags::from_core_names(&file.flags)
@@ -2056,6 +2096,7 @@ mod tests {
         let unit = super::BlockScriptChecks {
             prepared,
             checks: Vec::new(),
+            flags: VerifyFlags::MANDATORY,
         };
         let scan_started = Cell::new(false);
         let mut before_serial_scan = || scan_started.set(true);
@@ -2067,7 +2108,6 @@ mod tests {
         };
         let result = super::verify_prepared_units_with_hooks(
             core::slice::from_ref(&unit),
-            &[VerifyFlags::MANDATORY],
             &mut after_parallel,
             &mut before_serial_scan,
         );
