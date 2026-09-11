@@ -17,7 +17,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 `prioritisetransaction` dummy/`fee_delta` arity. `API-24` is
 `prioritisetransaction` dust-output refusal. `API-25` is
 `getmininginfo` omitting unset optional fields. `API-26` is
-`estimatesmartfee` Core `conf_target` and `estimate_mode` gates.
+`estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-27` is
+`generateblock` txid and raw-tx parse errors.
 
 ## Clauses
 
@@ -418,6 +419,19 @@ owned by [wallet-facing.md](wallet-facing.md).
   this node's estimator has one horizon.
 - Trailing parameters are refused.
 
+
+### `API-27`: `generateblock` txid and raw-tx parse errors
+
+- **Owner**: `parse_generateblock_transactions` in
+  `crates/rpc/src/handlers/mining.rs`.
+- 64-character hex is Core `Txid::FromHex`. A txid missing from the
+  mempool is `-5` `Transaction {str} not in mempool.` using the caller's
+  string.
+- Anything else is Core `DecodeHexTx`. Invalid hex or a payload that is
+  not a complete transaction is `-22`
+  `Transaction decode failed for {str}. Make sure the tx has at least one
+  input.`
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -577,5 +591,11 @@ owned by [wallet-facing.md](wallet-facing.md).
     `estimatesmartfee_rejects_conf_target_outside_core_range`,
     `estimatesmartfee_rejects_unknown_estimate_mode`,
     `estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing`
+
+- `API-27`:
+  - `crates/rpc/src/handlers/mining.rs` tests
+    `generateblock_rejects_unknown_mempool_txid_like_core`,
+    `generateblock_rejects_undecodable_raw_tx_like_core`,
+    `generateblock_keeps_raw_transactions`
 
 ## Vocabulary

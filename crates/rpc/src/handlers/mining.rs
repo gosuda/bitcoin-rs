@@ -262,7 +262,7 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let output = required_str(params, 0, "output is required")?;
     let payout = generateblock_payout_script(output, convert::bitcoin_network(ctx.chain_network))?;
-    let transactions = parse_generateblock_transactions(params)?;
+    let transactions = parse_generateblock_transactions(ctx, params)?;
     let submit = optional_bool(params, 2, true)?;
     let generated = control
         .generate(GenerateRequest {
@@ -379,7 +379,10 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
         .ok_or(RpcError::InvalidType("parameter must be an integer"))
 }
 
-fn parse_generateblock_transactions(params: &Value) -> Result<Vec<GenerateTx>, RpcError> {
+fn parse_generateblock_transactions(
+    ctx: &Context,
+    params: &Value,
+) -> Result<Vec<GenerateTx>, RpcError> {
     let array = params_array(params)?;
     let Some(value) = array.get(1) else {
         return Err(RpcError::InvalidParams("transactions is required"));
@@ -397,17 +400,34 @@ fn parse_generateblock_transactions(params: &Value) -> Result<Vec<GenerateTx>, R
                 "transactions must be an array of hex strings",
             ));
         };
+        // CONTRACT: docs/contracts/external-api.md#API-27
         if let Ok(txid) = Txid::from_str(text) {
-            transactions.push(GenerateTx::Mempool(txid));
+            let snapshot = ctx.mempool.read().mining_snapshot();
+            let Some(entry) = snapshot
+                .entries
+                .into_iter()
+                .find(|entry| entry.txid == txid)
+            else {
+                return Err(generateblock_unknown_txid(text));
+            };
+            transactions.push(GenerateTx::ResolvedMempool(entry));
             continue;
         }
-        let bytes = from_hex(text)
-            .map_err(|()| RpcError::InvalidParams("transaction hex is not valid hexadecimal"))?;
-        let tx: Tx = deserialize(&bytes)
-            .map_err(|_| RpcError::InvalidParams("transaction hex could not be decoded"))?;
+        let bytes = from_hex(text).map_err(|()| generateblock_tx_decode_failed(text))?;
+        let tx: Tx = deserialize(&bytes).map_err(|_| generateblock_tx_decode_failed(text))?;
         transactions.push(GenerateTx::Raw(tx));
     }
     Ok(transactions)
+}
+
+fn generateblock_unknown_txid(text: &str) -> RpcError {
+    RpcError::InvalidAddressOrKey(format!("Transaction {text} not in mempool."))
+}
+
+fn generateblock_tx_decode_failed(text: &str) -> RpcError {
+    RpcError::Deserialization(format!(
+        "Transaction decode failed for {text}. Make sure the tx has at least one input."
+    ))
 }
 
 fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, RpcError> {
@@ -2074,11 +2094,20 @@ mod tests {
     /// API-05: 64-character hex is a mempool txid; longer hex is a raw transaction.
     #[test]
     fn generateblock_keeps_raw_transactions() {
+        use bitcoin_rs_mempool::MempoolEntry;
+
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = ctx_with_control(control.clone());
-        let tx = sample_raw_tx();
-        let raw_hex = to_lower_hex(&consensus_bytes(&tx));
-        let txid = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
+        let pooled = sample_raw_tx();
+        let txid = pooled.txid();
+        {
+            let mut pool = ctx.mempool.pool().write();
+            pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7))
+                .unwrap_or_else(|err| panic!("insert failed: {err}"));
+        }
+        let mut raw = sample_raw_tx();
+        raw.lock_time = LockTime::from_consensus(1);
+        let raw_hex = to_lower_hex(&consensus_bytes(&raw));
         generateblock(&ctx, &json!([REGTEST_ADDRESS, [txid.to_string(), raw_hex]]))
             .unwrap_or_else(|err| panic!("generateblock failed: {err}"));
         let request = control
@@ -2086,10 +2115,61 @@ mod tests {
             .lock()
             .clone()
             .unwrap_or_else(|| panic!("generateblock must call generate"));
+        let pooled_entry = ctx
+            .mempool
+            .read()
+            .mining_snapshot()
+            .entries
+            .into_iter()
+            .find(|entry| entry.txid == txid)
+            .unwrap_or_else(|| panic!("pooled txid must resolve from mining snapshot"));
         assert_eq!(
             request.selection,
-            GenerateSelection::Ordered(vec![GenerateTx::Mempool(txid), GenerateTx::Raw(tx)])
+            GenerateSelection::Ordered(vec![
+                GenerateTx::ResolvedMempool(pooled_entry),
+                GenerateTx::Raw(raw)
+            ])
         );
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-27
+    #[test]
+    fn generateblock_rejects_unknown_mempool_txid_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        let missing = "CD".repeat(32);
+        let error = generateblock(&ctx, &json!([REGTEST_ADDRESS, [missing.as_str()]]))
+            .err()
+            .unwrap_or_else(|| panic!("unknown mempool txid must fail at parse"));
+        assert_eq!(error.code(), RpcError::CORE_NOT_FOUND);
+        assert_eq!(
+            error.to_string(),
+            format!("Transaction {missing} not in mempool.")
+        );
+    }
+
+    // CONTRACT: docs/contracts/external-api.md#API-27
+    #[test]
+    fn generateblock_rejects_undecodable_raw_tx_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control);
+        for payload in ["00", "zz", "abcd"] {
+            let error = generateblock(&ctx, &json!([REGTEST_ADDRESS, [payload]]))
+                .err()
+                .unwrap_or_else(|| panic!("`{payload}` must fail decode"));
+            assert_eq!(
+                error.code(),
+                RpcError::CORE_DESERIALIZATION_ERROR,
+                "for `{payload}`"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "Transaction decode failed for {payload}. Make sure the tx has at least one input."
+                ),
+                "for `{payload}`"
+            );
+        }
     }
 
     /// API-05: extra generateblock positionals are rejected, matching Core arity.

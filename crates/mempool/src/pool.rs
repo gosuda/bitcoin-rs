@@ -203,7 +203,7 @@ pub struct MempoolStats {
 /// ancestors — its in-pool parents, their parents, and so on — so package
 /// walks stay inside the snapshot; an entry with no in-pool parent chain
 /// carries an empty vector.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotEntry {
     /// Tx payload, shared with the pool entry by `Arc`.
     pub tx: Arc<Tx>,

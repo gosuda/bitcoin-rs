@@ -141,7 +141,7 @@ declare_rows! {
     "submitheader", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "See API-13 in docs/contracts/external-api.md for submitheader behavior.", "0.4.0", Some(mining::submitheader);
     "prioritisetransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. See API-23 in docs/contracts/external-api.md for dummy and fee_delta compatibility.", "0.4.0", Some(mining::prioritisetransaction);
     "generatetoaddress", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles, solves, and submits n blocks paying the given address through the mining coordinator.", "0.4.0", Some(mining::generatetoaddress);
-    "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order; third param is Core's submit flag.", "0.4.0", Some(mining::generateblock);
+    "generateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "See API-27 (docs/contracts/external-api.md) for transaction parsing and error semantics.", "0.4.0", Some(mining::generateblock);
     "getnetworkhashps", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip.", "0.4.0", Some(mining::getnetworkhashps);
     "getprioritisedtransactions", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled.", "0.4.0", Some(mining::getprioritisedtransactions);
 

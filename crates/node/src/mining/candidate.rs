@@ -428,6 +428,11 @@ pub(super) fn snapshot_for_selection(
                         let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
                         selected.push(full.entries[old_usize].clone());
                     }
+                    GenerateTx::ResolvedMempool(entry) => {
+                        let mut entry = entry.clone();
+                        entry.ancestors.clear();
+                        selected.push(entry);
+                    }
                     GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
                 }
             }
