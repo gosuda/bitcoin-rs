@@ -65,6 +65,9 @@ fn positioned_rows() -> Vec<PositionedRow> {
     ]
 }
 
+// Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical bytes
+// (rows 163-181), together with `crates/index/src/index/rows.rs`'s
+// `for_each_row_group` contract: one stored key retains all numeric positions.
 #[test]
 fn groups_preserve_distinct_keys_and_numeric_positions() {
     let mut rows = positioned_rows();
@@ -94,6 +97,11 @@ fn groups_preserve_distinct_keys_and_numeric_positions() {
     assert_eq!(empty_groups, 0);
 }
 
+// Contract: `docs/benchmarks/scriptindex-format.md`, § Logical vs physical
+// bytes (rows 163-181), and `crates/index/src/index/rows.rs`'s
+// `PendingRows::encoded_bytes`/`delete_rows` contracts: emitted logical bytes
+// match row accounting, and shared block-header identity is retained unless
+// explicitly requested for deletion.
 #[test]
 fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(), IndexError> {
     let mut rows = PendingRows {
@@ -143,6 +151,11 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
     Ok(())
 }
 
+// Contract: `crates/index/src/index/rows.rs`, `LiveOp` and
+// `apply_live_ops` documentation (lines 8-18 and 153-160): forward application
+// is last-operation-wins, while rollback is the exact inverse using the
+// first forward operation. This is the small-sequence regression for that
+// forward/rollback coalescing requirement.
 #[test]
 fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
     let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0);
