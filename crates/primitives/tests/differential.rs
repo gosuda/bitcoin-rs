@@ -86,7 +86,7 @@ fn assert_tx_roundtrip(serialized: &[u8], expected_wtxid: &str, context: &str) {
     // Golden wtxid derived independently of this codec (BIP141: double
     // SHA-256 of the full serialization; equal to the txid without witness
     // data). See tests/testdata/<height>.wtxids.txt provenance in
-    // scripts/fetch-golden.sh.
+    // scripts/derive-wtxids.py (the fetcher keeps its two-file cache contract).
     let expected = Wtxid::from_str(expected_wtxid)
         .unwrap_or_else(|error| panic!("{context}: golden wtxid hex: {error}"));
     assert_eq!(native.wtxid(), expected, "{context}: golden wtxid");
