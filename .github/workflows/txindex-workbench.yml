@@ -3,86 +3,24 @@ on:
   push:
     branches: [automation/txindex-workbench-20260911]
 permissions:
-  contents: write
-defaults:
-  run:
-    shell: bash
+  contents: read
 jobs:
-  validate:
+  source:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      CARGO_TERM_COLOR: never
-      CARGO_INCREMENTAL: 0
-      RUST_BACKTRACE: 1
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          components: rustfmt,clippy
-      - name: Create isolated source worktree
+          persist-credentials: false
+      - name: Export updated main source and exact upstream changes
         run: |
-          git worktree add --detach /tmp/txindex-candidate 8086e3b204a44c50a90d25e678015f690729aba9
-          mkdir -p /tmp/txindex-evidence
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-        with:
-          workspaces: /tmp/txindex-candidate -> target
-          cache-on-failure: true
-      - name: Materialize and format only the source changes
-        run: |
-          python .txindex-workbench/refactor.py /tmp/txindex-candidate
-          python .txindex-workbench/finalize.py /tmp/txindex-candidate
-          cd /tmp/txindex-candidate
-          git add -A
-          git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --edition 2024 --config skip_children=true
-          git add -A
-          git diff --cached --check
-          git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' | xargs -0 rustfmt --check --edition 2024 --config skip_children=true
-          if cargo fmt --all -- --check > /tmp/txindex-evidence/workspace-format.log 2>&1; then
-            echo 'Workspace formatting passes' | tee /tmp/txindex-evidence/format-status.txt
-          else
-            python "$GITHUB_WORKSPACE/.txindex-workbench/check_format_scope.py"
-          fi
-          git diff --cached --stat | tee /tmp/txindex-evidence/diff-stat.txt
-          git diff --cached --binary > /tmp/txindex-evidence/refactor.patch
-          rustc --version | tee /tmp/txindex-evidence/rust-version.txt
-      - name: Strict node clippy (fjall, redb, zmq; all targets)
-        working-directory: /tmp/txindex-candidate
-        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --all-targets -- -D warnings 2>&1 | tee /tmp/txindex-evidence/clippy.log
-      - name: Txindex worker and moved tests
-        working-directory: /tmp/txindex-candidate
-        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,redb,zmq --lib txindex_worker -- --nocapture 2>&1 | tee /tmp/txindex-evidence/txindex-tests.log
-      - name: Index crate regression suite
-        working-directory: /tmp/txindex-candidate
-        run: cargo test --locked -p bitcoin-rs-index --features fjall,redb --no-fail-fast 2>&1 | tee /tmp/txindex-evidence/index-tests.log
-      - name: CL-08 and CL-13 ownership gate
-        working-directory: /tmp/txindex-candidate
-        run: cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_ownership -- --nocapture 2>&1 | tee /tmp/txindex-evidence/ownership.log
-      - name: Publish only the validated source commit
-        working-directory: /tmp/txindex-candidate
-        run: |
-          git config user.name 'metaphorics'
-          git config user.email '152830360+metaphorics@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          if git diff --cached --name-only | grep -E '^\.github/|^\.txindex-workbench/'; then
-            echo 'Workbench helper leaked into candidate' >&2
-            exit 1
-          fi
-          git commit -m 'refactor(node): split txindex owners and consolidate work accounting'
-          git rev-parse HEAD | tee /tmp/txindex-evidence/candidate-commit.txt
-          git push origin HEAD:refs/heads/refactor/txindex-owners-20260911
-      - name: Preserve exact source and validation evidence
-        if: always()
-        run: |
-          if test -d /tmp/txindex-candidate; then
-            tar --exclude=target --exclude=.git -czf /tmp/txindex-evidence/candidate.tar.gz -C /tmp/txindex-candidate .
-          fi
+          mkdir -p /tmp/txindex-current
+          git archive --format=tar.gz 7f5a460de67965ff36955bab1434c75f080ad384 > /tmp/txindex-current/source.tar.gz
+          git diff 8086e3b204a44c50a90d25e678015f690729aba9 7f5a460de67965ff36955bab1434c75f080ad384 > /tmp/txindex-current/upstream.patch
+          git log --oneline 8086e3b204a44c50a90d25e678015f690729aba9..7f5a460de67965ff36955bab1434c75f080ad384 > /tmp/txindex-current/upstream-commits.txt
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
         with:
-          name: txindex-refactor-evidence
-          path: /tmp/txindex-evidence/
-          retention-days: 7
+          name: txindex-current-source
+          path: /tmp/txindex-current/
+          retention-days: 1
