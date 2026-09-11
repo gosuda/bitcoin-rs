@@ -13,6 +13,8 @@ Rule checks live in small per-subject modules (`bip9`, `bip30`, `bip34`, `bip65`
 `bip66`, `bip68`, `bip112`, `bip113`, `bip141`, `bip143`, `bip341`, `bip342`), surfaced
 through the `verify_transaction` family (with median-time-past and borrowed variants),
 `is_final_tx`, and the `verify_block_rules` family including Merkle-root verification.
+`compute_merkle_root` is the sole pairwise SHA-256d fold (AVX2 or spine) used by
+block rules, witness-commitment checks, and mining candidate assembly.
 `kernel::KernelBlock` parses a serialized block exactly once with
 `bitcoinkernel::Block::new`, yielding the txids and borrowed transaction objects that
 script preparation reuses, and `kernel::KernelContext::verify_tx` verifies a

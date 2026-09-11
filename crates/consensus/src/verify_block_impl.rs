@@ -366,7 +366,7 @@ pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool
             *wtxid.as_bytes()
         });
     }
-    let Some(root) = merkle_root_bytes(&mut leaves) else {
+    let Some(root) = compute_merkle_root(&mut leaves) else {
         return false;
     };
 
@@ -380,7 +380,13 @@ fn sha256d(data: &[u8]) -> [u8; 32] {
     double_sha256(data).to_le_bytes()
 }
 
-fn merkle_root_bytes(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
+/// Bitcoin merkle root over raw 32-byte leaves.
+///
+/// Duplicates the last leaf on odd levels. Empty input returns `None`.
+/// The vector is reduced in place through the same AVX2/spine walker the
+/// block-rule path uses; mining does not keep a second fold.
+#[must_use]
+pub fn compute_merkle_root(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
     if leaves.is_empty() {
         return None;
     }
@@ -433,7 +439,7 @@ mod tests {
     use super::{
         BlockRuleContext, WITNESS_COMMITMENT_PREFIX, block_has_witness,
         block_merkle_root_matches_txids, is_coinbase, merkle_root_and_mutation,
-        merkle_root_and_mutation_borrowed, merkle_root_and_mutation_scalar, merkle_root_bytes,
+        merkle_root_and_mutation_borrowed, merkle_root_and_mutation_scalar, compute_merkle_root,
         merkle_root_spine, sha256d, verify_block_rules, verify_block_rules_precomputed,
         verify_merkle_root_with_txids,
     };
@@ -742,7 +748,7 @@ mod tests {
         for leaf_count in 1..=33 {
             let leaves = txids(leaf_count);
             let mut bytes: Vec<[u8; 32]> = leaves.iter().map(|txid| *txid.as_bytes()).collect();
-            let bytes_root = merkle_root_bytes(&mut bytes);
+            let bytes_root = compute_merkle_root(&mut bytes);
             let mut hashes = leaves;
             let txid_root = merkle_root_and_mutation(&mut hashes).map(|(root, _)| *root.as_bytes());
             assert_eq!(bytes_root, txid_root, "leaf count {leaf_count}");
@@ -1125,7 +1131,7 @@ mod tests {
                 }
             })
             .collect();
-        let root = merkle_root_bytes(&mut leaves).unwrap_or([0u8; 32]);
+        let root = compute_merkle_root(&mut leaves).unwrap_or([0u8; 32]);
         let mut buffer = [0u8; 64];
         buffer[..32].copy_from_slice(&root);
         buffer[32..].copy_from_slice(reserved);
