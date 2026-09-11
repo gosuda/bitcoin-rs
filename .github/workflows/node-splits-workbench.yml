@@ -37,19 +37,19 @@ jobs:
           restore-keys: node-splits-a1178cc-rust195-
       - name: Install pinned Rust syntax parser
         run: python3 -m pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-      - name: Refactor and validate the unpublished source groups
+      - name: Refactor and validate apply plus dependent reorg
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/node-split-target
-        run: python3 .github/node-splits/final_pass.py
+        run: python3 .github/node-splits/apply_finish.py
       - name: Publish only native-validated commits without force-pushes
         if: always()
         env:
           NODE_SPLIT_PUBLISH_TOKEN: ${{ github.token }}
-        run: python3 .github/node-splits/final_pass.py publish
+        run: python3 .github/node-splits/apply_finish.py publish
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: node-final-validation
+          name: node-apply-reorg-validation
           path: ${{ runner.temp }}/node-remaining-results
           retention-days: 1
       - uses: actions/cache/save@v4
