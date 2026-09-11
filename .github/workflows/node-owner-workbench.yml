@@ -4,39 +4,21 @@ on:
     branches: [automation/node-owner-workbench-20260911]
 permissions:
   contents: read
-concurrency:
-  group: node-owner-workbench
-  cancel-in-progress: true
 jobs:
-  validate:
+  tooling:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    env:
-      CARGO_TERM_COLOR: never
-      CARGO_INCREMENTAL: 0
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Prepare pinned checkout
+      - name: Export compatible syntax parser and transformation source
         run: |
-          cp -r .node-owner-workbench "$RUNNER_TEMP/owner-tools"
-          git fetch --depth=1 origin e6c5eae02738260b5b7240738323098afd6d7c5b
-          git checkout --detach e6c5eae02738260b5b7240738323098afd6d7c5b
-          mkdir -p "$RUNNER_TEMP/evidence"
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
-      - name: Inspect owner boundaries
-        run: |
-          pip install tree-sitter==0.25.2 tree-sitter-rust==0.24.0
-          python "$RUNNER_TEMP/owner-tools/inspect.py" | tee "$RUNNER_TEMP/evidence/owners.txt"
-      - name: Baseline compiler checks
-        run: cargo clippy --locked -p bitcoin-rs-node --no-default-features --features fjall,zmq --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/evidence/baseline-clippy.txt"
+          mkdir -p "$RUNNER_TEMP/owner-tools/wheels"
+          cp .node-owner-workbench/*.py "$RUNNER_TEMP/owner-tools/"
+          pip download --only-binary=:all: --python-version 313 --implementation cp --abi cp313 --platform manylinux2014_x86_64 --dest "$RUNNER_TEMP/owner-tools/wheels" tree-sitter==0.25.2 tree-sitter-rust==0.24.0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
         with:
-          name: node-owner-evidence
-          path: ${{ runner.temp }}/evidence
+          name: node-owner-tools
+          path: ${{ runner.temp }}/owner-tools
           retention-days: 1
