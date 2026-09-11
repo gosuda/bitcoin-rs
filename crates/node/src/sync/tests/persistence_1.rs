@@ -1,5 +1,9 @@
 use super::*;
 
+// Contract anchors: retry settlement and generation fencing are owned by
+// docs/contracts/mempool-mutations.md#MPL-04. Boundary values below are
+// derived from the restore_split local chunk invariant.
+
 #[test]
 fn batch_drain_restores_unapplied_tail_after_mid_batch_failure()
 -> Result<(), Box<dyn std::error::Error>> {

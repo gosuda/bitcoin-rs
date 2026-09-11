@@ -1,5 +1,9 @@
 use super::*;
 
+// Contract anchors: request eligibility and ordering are owned by
+// docs/contracts/p2p-wire.md#P2P-03; batch sizing is the local sync budget
+// invariant exercised by the fixtures below.
+
 #[test]
 fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
 -> Result<(), Box<dyn std::error::Error>> {
