@@ -3,7 +3,7 @@
 //! The index owner decides how durable derived state reaches consistency with a
 //! supplied active chain. The caller owns the authoritative chain representation
 //! and implements [`ActiveChainView`]; agreement between index watermarks alone
-//! never proves query readiness.
+//! never prove query readiness.
 
 use bitcoin_rs_primitives::Hash256;
 
@@ -166,11 +166,19 @@ pub fn plan_from_identity(
     target: ChainTip,
     chain: &impl ActiveChainView,
 ) -> ReconcilePlan {
-    let identity_matches_cursor = cursor.epoch == identity.epoch
-        && cursor.sequence == identity.sequence
-        && cursor.hash == identity.tip_hash
-        && cursor.height == identity.tip_height;
-    let identity_matches_target = identity.tip_hash == target.hash && identity.tip_height == target.height;
+    let identity_matches_cursor = (
+        cursor.epoch,
+        cursor.sequence,
+        cursor.hash,
+        cursor.height,
+    ) == (
+        identity.epoch,
+        identity.sequence,
+        identity.tip_hash,
+        identity.tip_height,
+    );
+    let identity_matches_target =
+        identity.tip_hash == target.hash && identity.tip_height == target.height;
     if identity_matches_cursor && identity_matches_target {
         return ReconcilePlan::CaughtUp;
     }
