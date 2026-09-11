@@ -84,8 +84,9 @@ This page assigns ownership and cites proof under the
     inventory against the policy table, rust-bitcoin v1 envelopes, handshake
     fields, per-network framing, relay round-trips, the reject-or-ignore
     matrix, and peer-visible reorg/restart behavior.
-- `crates/p2p/tests/core_interop_live.rs`: live interop lane running via
-  `scripts/run-p2p-core-interop.sh` when an external `bitcoind` is provided.
+- `crates/p2p/tests/core_interop_live.rs`: live differential lane running via
+  `scripts/run-p2p-core-interop.sh` against the pinned Core 31.1 `bitcoind`
+  (`docs/contracts/core-differential.md`).
 - `crates/p2p/src/counters.rs` tests
   `a_vectored_write_counts_every_slice_the_socket_took`,
   `a_short_vectored_write_counts_what_the_socket_took`, and
@@ -109,3 +110,14 @@ This page assigns ownership and cites proof under the
   `from_connected_disables_nagle`: the counting wrapper forwards one
   `write_vectored` for header plus payload, and the connected-socket
   constructor owns `TCP_NODELAY` (P2P-04).
+- `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
+  and outbound session sockets set `TCP_NODELAY` (`P2P-04`).
+- `crates/p2p/src/handshake.rs` test
+  `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
+  handshake writes framed version, feature, and verack bytes once and reaches
+  Ready (`P2P-01`).
+- `crates/p2p/src/counters.rs` tests `leftover_bytes_do_not_revisit_the_socket`,
+  `two_wire_messages_decode_from_one_socket_read`, and
+  `a_timed_out_refill_does_not_replay_consumed_bytes`: one kernel delivery of
+  two v1 frames decodes both without a second socket read, and a timed-out
+  refill does not replay consumed bytes (`P2P-01`).

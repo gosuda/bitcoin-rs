@@ -50,7 +50,8 @@ class ImportFlowTests(unittest.TestCase):
         harness.parent.mkdir(parents=True)
         harness.write_bytes(OWNER_HARNESS.read_bytes())
         self.provenance = self.root / "fuzz/CORPUS_PROVENANCE.md"
-        self.provenance.write_text("previous provenance\n")
+        self.provenance.write_text((REPO_ROOT / "fuzz" / "CORPUS_PROVENANCE.md").read_text())
+        self.previous_provenance = self.provenance.read_text()
         self.source = self.root / "upstream"
         self.corpora = self.source / "fuzz_corpora"
         for name in ("p2p_deserialize_raw_net_msg", "bitcoin_deserialize_script",
@@ -121,11 +122,11 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         result = self.run_import()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(),
-                         ["p2p_message", "block_decode", "tx_decode", "script_eval"])
+                         ["p2p_message", "block_validate", "tx_validate", "script_eval"])
         self.assertIn(self.pin, self.provenance.read_text())
         self.assertIn("2000-01-01T00:00:00Z", self.provenance.read_text())
         self.assertEqual(stat.S_IMODE(self.provenance.stat().st_mode), 0o644)
-        for target in ("block_decode", "tx_decode"):
+        for target in ("block_validate", "tx_validate"):
             self.assertEqual((self.root / "fuzz/corpus" / target / "seed").read_bytes(), b"Q")
 
     def test_missing_source_stops_before_minimization_or_provenance(self):
@@ -134,55 +135,55 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertFalse((self.root / "fuzz/corpus").exists())
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_minimization_preserves_provenance(self):
         result = self.run_import("cmin")
         self.assertEqual(result.returncode, CMIN_STATUS, result.stderr)
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
         self.assertEqual((self.root / "cmin.log").read_text().splitlines(), ["p2p_message"])
 
     def test_failed_commit_probe_is_not_hidden_by_valid_output(self):
         result = self.run_import("git_head")
         self.assertEqual(result.returncode, GIT_HEAD_STATUS, result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_size_probe_stops_before_mapping(self):
         result = self.run_import("du")
         self.assertEqual(result.returncode, SIZE_STATUS, result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertFalse((self.root / "fuzz/corpus").exists())
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_timestamp_preserves_provenance(self):
         result = self.run_import("date")
         self.assertEqual(result.returncode, DATE_STATUS, result.stderr)
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_provenance_write_preserves_previous_file(self):
         result = self.run_import("provenance_write")
         self.assertEqual(result.returncode, PROVENANCE_WRITE_STATUS, result.stderr)
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_provenance_chmod_preserves_previous_file(self):
         result = self.run_import("provenance_chmod")
         self.assertEqual(result.returncode, PROVENANCE_CHMOD_STATUS, result.stderr)
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_provenance_publish_preserves_previous_file(self):
         result = self.run_import("provenance_publish")
         self.assertEqual(result.returncode, PROVENANCE_PUBLISH_STATUS, result.stderr)
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_provenance_symlink_is_replaced_without_following_it(self):
         outside = self.root / "outside.md"
-        outside.write_text("unrelated data\n")
+        outside.write_text(self.previous_provenance)
         self.provenance.unlink()
         self.provenance.symlink_to(outside)
         result = self.run_import()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(outside.read_text(), "unrelated data\n")
+        self.assertEqual(outside.read_text(), self.previous_provenance)
         self.assertFalse(self.provenance.is_symlink())
         self.assertIn(self.pin, self.provenance.read_text())
         self.assertEqual(stat.S_IMODE(self.provenance.stat().st_mode), 0o644)
@@ -197,7 +198,7 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
     def test_termination_cleans_staging_and_preserves_provenance(self):
         result = self.run_import("term")
         self.assertEqual(result.returncode, TERM_STATUS, result.stderr)
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_nonnumeric_disk_probe_cannot_authorize_an_import(self):
         probe = self.bin / "df"
@@ -207,7 +208,7 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse((self.root / "fuzz/corpus").exists())
         self.assertFalse((self.root / "cmin.log").exists())
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_overflowing_disk_probe_cannot_authorize_an_import(self):
         probe = self.bin / "df"
@@ -217,7 +218,7 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertFalse((self.root / "fuzz/corpus").exists())
         self.assertFalse((self.root / "cmin.log").exists())
-        self.assertEqual(self.provenance.read_text(), "previous provenance\n")
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_provenance_does_not_claim_fixed_selectors_after_owner_reordering(self):
         harness = self.root / "fuzz/fuzz_targets/script_eval.rs"

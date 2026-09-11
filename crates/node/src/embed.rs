@@ -91,7 +91,7 @@ impl Node {
     ///
     /// The method drives synchronous node workers on the caller's task. It
     /// neither installs process signal handlers nor creates an executor.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn start(
         config: crate::NodeConfig,
         runtime: crate::RuntimeInputs,
@@ -112,7 +112,7 @@ impl Node {
     }
 
     /// Returns a decoded block, distinguishing unknown from unavailable data.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn block_by_hash(&self, hash: BlockHash) -> Result<Option<Block>, NodeError> {
         let hash = Hash256::from(hash);
         let Some(record) = self.context.block_by_hash(hash) else {
@@ -139,7 +139,7 @@ impl Node {
     /// A disabled or unhealthy confirmed index is unavailable, not an answer
     /// that the transaction does not exist. A complete negative lookup is
     /// `NodeError::NotFound`.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
         let pooled = self.state.mempool().read().transaction_by_txid(&txid);
         if let Some(tx) = pooled {
@@ -180,7 +180,7 @@ impl Node {
     ///
     /// Policy checks and ordered publication belong to the shared gateway;
     /// embedding does not insert directly into the pool or own another gateway.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
         let max_feerate = Some(bitcoin_rs_rpc::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB);
         self.context
@@ -189,7 +189,7 @@ impl Node {
     }
 
     /// Stops owned services, then publishes the clean-shutdown checkpoint.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn shutdown(self) -> Result<(), NodeError> {
         self.shutdown_blocking()
     }

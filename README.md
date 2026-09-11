@@ -189,8 +189,6 @@ verification commands, CI workflows, and crate architecture conventions.
 - [docs/contracts/](docs/contracts/) — Normative architecture and protocol contracts
 - [CONCEPTS.md](CONCEPTS.md) — Domain terminology and concepts
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — Development workflow and CI guidelines
-
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE). See
