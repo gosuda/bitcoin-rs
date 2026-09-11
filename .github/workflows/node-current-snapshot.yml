@@ -1,0 +1,44 @@
+name: node-current-snapshot
+
+on:
+  push:
+    branches: [agent/node-mod-workbench]
+    paths: [.github/workflows/node-current-snapshot.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt,clippy
+      - name: Export source and compiler inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/node-inputs
+          git bundle create /tmp/node-inputs/source.bundle HEAD refs/remotes/origin/main refs/remotes/origin/refactor/node-split-sync-20260911 refs/remotes/origin/agent/node-apply-workbench refs/remotes/origin/agent/node-sync-workbench refs/remotes/origin/agent/node-checkpoint-workbench refs/remotes/origin/agent/node-mining-workbench refs/remotes/origin/agent/node-txindex-workbench
+          git log -35 --first-parent --format='%h %s' origin/main > /tmp/node-inputs/recent-main.txt
+          git rev-parse origin/main > /tmp/node-inputs/main-sha.txt
+          git checkout --detach 2402c28a3b5f62ac8dc5eaa8d304ed6bc595c37b
+          cargo +1.95.0 vendor --locked /tmp/node-vendor > /tmp/node-inputs/vendor-config.toml
+          tar -czf /tmp/node-inputs/vendor.tgz -C /tmp node-vendor
+          tc=$(rustup run 1.95.0 rustc --print sysroot)
+          tar -czf /tmp/node-inputs/toolchain.tgz -C "$tc" .
+          sha256sum /tmp/node-inputs/*.bundle /tmp/node-inputs/*.tgz > /tmp/node-inputs/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: node-current-inputs
+          path: /tmp/node-inputs/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
