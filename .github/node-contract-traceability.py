@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate comment/contract follow-ups for merged node refactors."""
+"""Validate post-split review and lint follow-ups on the latest main."""
 from pathlib import Path
 import os
 import subprocess
@@ -35,6 +35,19 @@ def main() -> int:
     print("VALIDATION_BASE", base, flush=True)
     work = Path(os.environ["RUNNER_TEMP"]) / "node-contract-traceability"
     run("git", "worktree", "add", "--detach", str(work), base, cwd=root)
+
+    # Close two lint residues introduced by the newly merged split PRs before
+    # validating the review follow-ups. These are mechanical, behavior-free.
+    replace_once(
+        work / "crates/node/src/sync/requests.rs",
+        "        let mut window = self.download_window.lock();\n",
+        "        let window = self.download_window.lock();\n",
+    )
+    replace_once(
+        work / "crates/node/src/checkpoint/tests/behavior_2.rs",
+        "/// `crates/utxo/src/stats/coin_stats.rs`: MuHash numerator/denominator, then\n",
+        "/// `crates/utxo/src/stats/coin_stats.rs`: `MuHash` numerator/denominator, then\n",
+    )
 
     reporter = work / "crates/node/src/recovery_evidence/reporter.rs"
     replace_once(
@@ -85,7 +98,7 @@ def main() -> int:
         "--all-targets", "--no-default-features", "--features", "fjall,zmq",
         "--", "-D", "warnings", cwd=work,
     )
-    for test_filter in ("recovery_evidence::", "tx_ingress::"):
+    for test_filter in ("recovery_evidence::", "tx_ingress::", "checkpoint::", "sync::"):
         run(
             "cargo", "test", "--locked", "-p", "bitcoin-rs-node",
             "--no-default-features", "--features", "fjall,zmq", "--lib", test_filter,
@@ -94,7 +107,13 @@ def main() -> int:
     run("cargo", "fmt", "-p", "bitcoin-rs-node", "--", "--check", cwd=work)
     run("git", "diff", "--check", cwd=work)
 
-    paths = ["docs/contracts/recovery.md", "crates/node/src/recovery_evidence/reporter.rs", *refs]
+    paths = [
+        "docs/contracts/recovery.md",
+        "crates/node/src/recovery_evidence/reporter.rs",
+        "crates/node/src/sync/requests.rs",
+        "crates/node/src/checkpoint/tests/behavior_2.rs",
+        *refs,
+    ]
     run("git", "add", "--", *paths, cwd=work)
     changed = set(subprocess.check_output(["git", "diff", "--cached", "--name-only"], cwd=work, text=True).splitlines())
     if changed != set(paths):
@@ -102,8 +121,8 @@ def main() -> int:
     run("git", "config", "user.name", "github-actions[bot]", cwd=work)
     run("git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com", cwd=work)
     run(
-        "git", "commit", "-m", "docs(node): pin recovery and ingress test contracts",
-        "-m", "Follow up merged #914/#915 review: document warning-before-marker recovery evidence ordering as RCV-12 and tie extracted recovery/ingress tests to RCV-12/RCV-04/MPL-04.", cwd=work,
+        "git", "commit", "-m", "chore(node): close post-split review and lint residue",
+        "-m", "Follow up merged #914/#915 review with RCV-12/MPL-04 traceability and clean the two strict-Clippy residues left by merged checkpoint/sync splits.", cwd=work,
     )
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()
     remote = subprocess.check_output(["git", "ls-remote", "--heads", "origin", f"refs/heads/{PRODUCT}"], cwd=work, text=True).strip()
