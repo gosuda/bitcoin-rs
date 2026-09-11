@@ -109,12 +109,19 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
         let pruner_tip = updated_pruneheight
             .checked_add(policy.retention_depth())
             .ok_or_else(|| PruneServiceError::failed("prune height overflow"))?;
+        // Storage clamps pruning to the durable tip so crash-recovery bodies
+        // remain available. Keep the transaction cache aligned with that same
+        // effective boundary.
+        let durable_tip_height = self.durable_tip_height.load(Ordering::Acquire);
+        let effective_prune_below = pruner_tip
+            .min(durable_tip_height)
+            .saturating_sub(policy.retention_depth());
 
         let prune_candidates: Vec<(u32, bitcoin_rs_primitives::BlockHash, usize)> = {
             let blocks = self.blocks.read();
             blocks
                 .iter()
-                .filter(|record| record.height < updated_pruneheight && record.tx_count > 0)
+                .filter(|record| record.height < effective_prune_below && record.tx_count > 0)
                 .map(|record| (record.height, record.hash, record.tx_count))
                 .collect()
         };
@@ -145,7 +152,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             &mut batch,
             &self.block_files,
             pruner_tip,
-            self.durable_tip_height.load(Ordering::Acquire),
+            durable_tip_height,
             policy,
         )
         .map_err(|err| PruneServiceError::failed(err.to_string()))?;
