@@ -1,3 +1,5 @@
+// CONTRACT: `docs/contracts/mempool-mutations.md#MPL-04` owns peer admission,
+// orphan/reject lifecycle, connection attribution, generation fencing, and retries.
 use super::*;
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
