@@ -199,13 +199,24 @@ impl PeerSource {
     }
 }
 
+impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {
+    fn from(source: PeerSource) -> Self {
+        Self {
+            addr: source.addr,
+            connection_id: source.connection_id.get(),
+        }
+    }
+}
+
 /// Maximum queued messages for one peer connection.
 pub const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
+
 /// Maximum queued full wire bytes for one peer connection.
 ///
 /// Admission tests usage before adding, so sixteen worst-case block messages
 /// fit: after fifteen, 60,000,360 bytes remain below this 64 MiB high-water.
 pub const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 /// `usize` form of the consensus maximum serialized block size. The
 /// authoritative `u64` original and this `usize` form are both owned by
 /// `peer` ([`crate::MAX_BLOCK_SERIALIZED_SIZE`] and
@@ -655,9 +666,11 @@ mod tests {
         crate::PeerInfo {
             addr,
             version: 70_016,
+            wtxid_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,
+            best_known_height: 0,
             conn_time,
             inbound: false,
             addr_bind: addr,

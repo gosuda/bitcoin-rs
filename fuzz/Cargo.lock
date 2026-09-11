@@ -117,6 +117,7 @@ version = "0.5.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
+ "hashbrown",
  "rayon",
  "secp256k1",
  "serde",
@@ -131,11 +132,32 @@ name = "bitcoin-rs-fuzz"
 version = "0.0.0"
 dependencies = [
  "bitcoin",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bitcoin-rs-utxo",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "bitcoin-rs-mempool"
+version = "0.5.0"
+dependencies = [
+ "arc-swap",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-script",
+ "bytemuck",
+ "hashbrown",
+ "metrics",
+ "parking_lot",
+ "sha2",
+ "slab",
+ "smallvec",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -145,6 +167,7 @@ dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
+ "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bytemuck",

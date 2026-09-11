@@ -18,7 +18,10 @@ use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Candidate,
     MiningCapability, MiningControl, MiningControlError, MiningInfo, TemplateId, TemplateMutation,
 };
-use bitcoin_rs_primitives::{Block, Hash256, Network, OutPoint, Tx, TxIn, Txid, client_version};
+use bitcoin_rs_primitives::{
+    Block, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Txid,
+    Witness, client_version,
+};
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -278,7 +281,7 @@ impl MiningControl for CompatMiningControl {
                 previous_block_hash,
                 height: 0,
                 version: 0x2000_0000,
-                bits: 0x1d00_ffff,
+                bits: CompactTarget::from_consensus(0x1d00_ffff),
                 min_time: 0,
                 current_time: 0,
                 csv_active: false,
@@ -289,12 +292,12 @@ impl MiningControl for CompatMiningControl {
                 mempool_sequence: 0,
                 coinbase: Tx {
                     version: 1,
-                    lock_time: 0,
+                    lock_time: LockTime::ZERO,
                     inputs: vec![TxIn {
                         previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                        script_sig: Vec::new(),
-                        sequence: u32::MAX,
-                        witness: Vec::new(),
+                        script_sig: Script::new(),
+                        sequence: Sequence::MAX,
+                        witness: Witness::new(),
                     }],
                     outputs: Vec::new(),
                 },
@@ -318,6 +321,7 @@ impl MiningControl for CompatMiningControl {
                 TemplateMutation::PreviousBlock,
             ],
             submit_old: None,
+            signet: None,
             work_id: None,
         }))
     }
@@ -326,12 +330,12 @@ impl MiningControl for CompatMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
-            bits: 0x207f_ffff,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,
             network: Network::Regtest,
-            next_bits: 0x207f_ffff,
+            next_bits: CompactTarget::from_consensus(0x207f_ffff),
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,
@@ -341,6 +345,13 @@ impl MiningControl for CompatMiningControl {
 
     fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
         Ok(BlockValidationResult::Accepted)
+    }
+
+    fn submit_header(
+        &self,
+        _header: bitcoin_rs_primitives::Header,
+    ) -> Result<(), MiningControlError> {
+        Ok(())
     }
 
     fn publish_generation(&self) {}
@@ -359,12 +370,16 @@ impl MiningControl for CompatMiningControl {
 
 #[test]
 fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
+    // API-12 mainnet gates (peers + IBD) live in the handler unit tests.
+    // This rendering proof runs off-mainnet so it reaches the template.
+    let mut ctx = Context::new();
+    ctx.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(
-        Context::new().with_mining_control(Arc::new(CompatMiningControl)),
+        ctx.with_mining_control(Arc::new(CompatMiningControl)),
     ));
 
     let template: corepc_types::v31::GetBlockTemplate =
-        typed(&handler.dispatch("getblocktemplate", &json!([{}]))?)?;
+        typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
     assert_eq!(template.version, 0x2000_0000);
     assert_eq!(template.height, 0);
     assert_eq!(template.bits, "1d00ffff");
@@ -382,6 +397,10 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     assert_eq!(template.size_limit, 4_000_000);
     assert_eq!(template.weight_limit, 4_000_000);
     assert_eq!(template.coinbase_value, 0);
+    assert_eq!(
+        template.coinbase_aux.get("flags").map(String::as_str),
+        Some("")
+    );
     assert!(template.transactions.is_empty());
     assert!(template.rules.is_empty());
     assert!(template.version_bits_available.is_empty());

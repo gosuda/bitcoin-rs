@@ -22,12 +22,19 @@ use crate::connection::{PeerLifecycle, PeerSource};
 use crate::listener::ListenerError;
 
 const DEFAULT_OUTBOUND_TARGET: usize = 8;
+
 const DEFAULT_OUTBOUND_ACTIVE_LIMIT: usize = 8;
+
 const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = 8;
+
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
+
 const FAILED_ADDR_BACKOFF: Duration = Duration::from_mins(1);
+
 const DNS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+
 const DNS_BOOTSTRAP_REFILL_INTERVAL: Duration = Duration::from_secs(1);
+
 const DNS_BOOTSTRAP_FAST_REFILL_LIMIT: u8 = 2;
 
 /// Configuration needed by the P2P runtime, after node configuration has
@@ -195,7 +202,7 @@ impl P2pService {
     ) -> Result<(), P2pServiceError> {
         let chain_query = chain_query.cloned();
         let sync_wake_tx = sync_wake_tx.cloned();
-        let peer_ready = Arc::clone(peer_ready);
+        let peer_ready = peer_ready.clone();
         let mut slot = self.workers.lock();
         if slot.is_some() {
             return Err(P2pServiceError::AlreadyStarted);

@@ -78,7 +78,7 @@ secp256k1 = { version = ">=0.29.1, <0.30", default-features = false, features = 
 
 # sha2 0.11: default features are alloc+oid; no std/asm feature is exposed.
 sha2 = { version = ">=0.11, <0.12", default-features = false }
-bitcoin_hashes = { version = "0.14", default-features = false, features = [
+bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features = [
     "alloc", "std",
 ] }
 cap-std = "=4.0.2"
@@ -172,8 +172,6 @@ rust-rocksdb = { version = ">=0.50, <0.51", default-features = false, features =
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
-# MDBX via init4tech fork — no features exposed.
-signet-libmdbx = { version = ">=0.8.3, <0.9", default-features = false }
 
 # fjall 3.x line.
 fjall = { version = ">=3.1.4, <4", default-features = false, features = ["lz4"] }
