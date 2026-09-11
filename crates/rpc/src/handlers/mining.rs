@@ -162,11 +162,16 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             .get(2)
             .and_then(JsonValueTrait::as_i64)
             .ok_or(RpcError::InvalidType("parameter must be an integer"))?;
-        (array.get(0).and_then(JsonValueTrait::as_str), fee_delta, array.get(1))
+        (
+            array.get(0).and_then(JsonValueTrait::as_str),
+            fee_delta,
+            array.get(1),
+        )
     } else if params.is_object() {
         (
             params.get("txid").and_then(JsonValueTrait::as_str),
-            params.get("fee_delta")
+            params
+                .get("fee_delta")
                 .and_then(JsonValueTrait::as_i64)
                 .ok_or(RpcError::InvalidType("parameter must be an integer"))?,
             params.get("dummy"),
@@ -1515,7 +1520,10 @@ mod tests {
         assert_eq!(result.as_bool(), Some(true));
         let error = prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0, 500, "unexpected"]))
             .expect_err("extra parameters must fail");
-        assert!(matches!(error, RpcError::InvalidParams("too many parameters")));
+        assert!(matches!(
+            error,
+            RpcError::InvalidParams("too many parameters")
+        ));
         prioritisetransaction(&ctx, &json!({"txid": txid_hex, "fee_delta": 600}))
             .unwrap_or_else(|err| panic!("named fee_delta must be accepted: {err}"));
         prioritisetransaction(&ctx, &json!([txid_hex.as_str(), 0.0, 0]))
