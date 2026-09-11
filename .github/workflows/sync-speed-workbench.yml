@@ -6,7 +6,7 @@ permissions:
   contents: write
 concurrency:
   group: sync-speed-workbench-20260911
-  cancel-in-progress: false
+  cancel-in-progress: true
 defaults:
   run:
     shell: bash
@@ -60,26 +60,12 @@ jobs:
           };
 
           '''.replace('\n          ', '\n        ') + s[end:]
-          helper = '''    /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.
-              /// Keep fallible ancestry navigation separate from request publication.
-              fn first_connect_height(
-                  tree: &bitcoin_rs_chain::BlockTree,
-                  applied_hash: Hash256,
-                  target: bitcoin_rs_chain::NodeId,
-              ) -> Option<u32> {
-                  let applied_id = tree.lookup(applied_hash)?;
-                  let height = tree.node(applied_id).ok()?.height;
-                  let first = if tree.node_at_height_from(target, height) == Some(applied_id) {
-                      tree.node_at_height_from(target, height.checked_add(1)?)?
-                  } else {
-                      *plan_reorg(tree, applied_id, target).ok()?.connect.first()?
-                  };
-                  Some(tree.node(first).ok()?.height)
-              }
-
-          '''
-          helper = '\n'.join(line[10:] if line.startswith('          ') else line for line in helper.splitlines()) + '\n'
+          helper = "    /// Projects SYNC-FRONTIER-01 into the scheduler's first pending height.\n    /// Keep fallible ancestry navigation separate from request publication.\n    fn first_connect_height(\n        tree: &bitcoin_rs_chain::BlockTree,\n        applied_hash: Hash256,\n        target: bitcoin_rs_chain::NodeId,\n    ) -> Option<u32> {\n        let applied_id = tree.lookup(applied_hash)?;\n        let height = tree.node(applied_id).ok()?.height;\n        let successor = if tree.node_at_height_from(target, height) == Some(applied_id) {\n            height\n                .checked_add(1)\n                .and_then(|height| tree.node_at_height_from(target, height))\n        } else {\n            None\n        };\n        let first = successor.or_else(|| {\n            plan_reorg(tree, applied_id, target)\n                .ok()?\n                .connect\n                .first()\n                .copied()\n        })?;\n        Some(tree.node(first).ok()?.height)\n    }\n\n"
           s = s.replace(needle, helper + needle, 1)
+          test = '    // SYNC-FRONTIER-01: an invalidated height index must preserve the\n    // unchanged parent-plan result even when public node_mut leaves a gap.\n    #[test]\n    fn request_frontier_retains_parent_plan_on_height_gaps(\n    ) -> Result<(), Box<dyn std::error::Error>> {\n        let mut tree = BlockTree::new();\n        let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;\n        let root_hash = tree.node(root)?.hash;\n        let header = test_header(BlockHash::from(root_hash), 1);\n        let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;\n        tree.node_mut(child)?.height = 2;\n        let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;\n        let [first] = plan.connect.as_slice() else {\n            return Err("expected one connect node".into());\n        };\n        assert_eq!(\n            BlockSync::first_connect_height(&tree, root_hash, child),\n            Some(tree.node(*first)?.height),\n        );\n        Ok(())\n    }\n\n'
+          test_needle = "    #[test]\n    fn tick_sends_getdata_for_headers_above_applied_tip()"
+          assert s.count(test_needle) == 1
+          s = s.replace(test_needle, test + test_needle, 1)
           p.write_text(s)
           PY
           rustfmt +stable --edition 2024 --config skip_children=true crates/node/src/sync.rs
