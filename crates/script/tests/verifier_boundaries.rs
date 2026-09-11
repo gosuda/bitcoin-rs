@@ -101,7 +101,8 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     }
 
     let mut altered_prevouts = prevouts.clone();
-    altered_prevouts[1].value = bitcoin_rs_primitives::Amount::from_sat(altered_prevouts[1].value.to_sat() + 1);
+    altered_prevouts[1].value =
+        bitcoin_rs_primitives::Amount::from_sat(altered_prevouts[1].value.to_sat() + 1);
     assert!(verify(&tx, &altered_prevouts, 0).is_err());
 
     let mut reordered_prevouts = prevouts.clone();
@@ -123,7 +124,8 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     );
 
     let mut altered_tx = tx;
-    altered_tx.outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(altered_tx.outputs[0].value.to_sat() - 1);
+    altered_tx.outputs[0].value =
+        bitcoin_rs_primitives::Amount::from_sat(altered_tx.outputs[0].value.to_sat() - 1);
     assert!(verify(&altered_tx, &prevouts, 0).is_err());
 }
 

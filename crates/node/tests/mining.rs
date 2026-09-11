@@ -11,7 +11,10 @@ use bitcoin_rs_node::{
     state::NodeState,
 };
 
-use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
+};
 
 use compact_str::CompactString;
 

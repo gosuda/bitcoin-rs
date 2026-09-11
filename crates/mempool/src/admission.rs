@@ -5,7 +5,9 @@
 //! commit or a peer orphan/reject transition.
 
 use alloc::{sync::Arc, vec::Vec};
-use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness, Wtxid};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness, Wtxid,
+};
 use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
@@ -811,7 +813,8 @@ mod tests {
             }
             1 => {
                 let mut conflict = (*valid).clone();
-                conflict.outputs[0].value = Amount::from_sat(conflict.outputs[0].value.to_sat() - 1);
+                conflict.outputs[0].value =
+                    Amount::from_sat(conflict.outputs[0].value.to_sat() - 1);
                 gateway.insert_entry(
                     AdmissionOrigin::Rpc,
                     MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 1),
@@ -1345,7 +1348,8 @@ mod tests {
                 if refresh {
                     replacement.inputs[0].witness = Witness::from_stack(vec![vec![1]])
                 } else {
-                    replacement.outputs[0].value = Amount::from_sat(replacement.outputs[0].value.to_sat() - 1);
+                    replacement.outputs[0].value =
+                        Amount::from_sat(replacement.outputs[0].value.to_sat() - 1);
                 }
                 let replacement = Arc::new(replacement);
                 let available = match mode {
@@ -1549,9 +1553,9 @@ mod tests {
             let expected_outpoint = oracle.input[0].previous_output;
             let oracle_output = bitcoin::TxOut {
                 value: bitcoin::Amount::from_sat(parent.outputs[1].value.to_sat()),
-                script_pubkey: bitcoin::ScriptBuf::from_bytes(
-                    Vec::from(parent.outputs[1].script_pubkey.clone()),
-                ),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(Vec::from(
+                    parent.outputs[1].script_pubkey.clone(),
+                )),
             };
             assert_eq!(
                 u32::try_from(oracle.total_sigop_cost(|outpoint| {
@@ -1793,7 +1797,11 @@ mod tests {
             let gateway = gateway();
             let (valid, chain) = witness_spend();
             let mut invalid = (*valid).clone();
-            invalid.inputs[0].witness = if stripped { Witness::new()} else { Witness::from_stack(vec![vec![0x00]])};
+            invalid.inputs[0].witness = if stripped {
+                Witness::new()
+            } else {
+                Witness::from_stack(vec![vec![0x00]])
+            };
             let invalid = Arc::new(invalid);
             assert_eq!(valid.txid(), invalid.txid());
             assert_ne!(valid.wtxid(), invalid.wtxid());

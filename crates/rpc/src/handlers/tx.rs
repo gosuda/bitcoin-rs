@@ -9,7 +9,10 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{AdmissionOrigin, MutationResult, SubmitError, SubmitOutcome};
-use bitcoin_rs_primitives::{Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize};
+use bitcoin_rs_primitives::{
+    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
@@ -1375,7 +1378,7 @@ mod tests {
     /// coinbase script makes the txid differ, and the merkle root is recomputed
     /// so `verifytxoutproof` can still extract matches from a proof over it.
     fn distinct_block(marker: u8) -> Block {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let mut block = fixture_genesis();
         if let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) {
             input.script_sig = Script::from_bytes(vec![marker; 4]);
@@ -2118,7 +2121,10 @@ mod acceptance_tests {
 
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
-    use bitcoin_rs_primitives::{Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes};
+    use bitcoin_rs_primitives::{
+        Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+        TxOut, Txid, Witness, consensus_bytes,
+    };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
 

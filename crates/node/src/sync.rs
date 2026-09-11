@@ -17,7 +17,9 @@ use bitcoin_rs_chain::{BlockTree, ChainError, NodeId, TipSnapshot, plan_reorg};
 
 use bitcoin_rs_p2p::{InboundBlock, InboundHeaders, Message, PeerInfo, PeerSource, PeerTable};
 
-use bitcoin_rs_primitives::{Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, Hash256, LockTime, Script, Sequence, Witness,
+};
 
 use crate::apply::error::ApplyError;
 
@@ -2423,7 +2425,7 @@ mod tests {
     #[test]
     fn outweighed_branch_target_accepts_shorter_higher_work_branch()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{CompactTarget};
+        use bitcoin_rs_primitives::CompactTarget;
         let genesis = genesis_header();
         let mut tree = BlockTree::new();
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -2444,7 +2446,10 @@ mod tests {
         let mut high_work = test_header(genesis.compute_hash(), 101);
         high_work.bits = CompactTarget::from_consensus(0x2000_ffff);
         high_work.nonce = 0;
-        while !pow_met(high_work.bits.to_consensus(), Hash256::from(high_work.compute_hash())) {
+        while !pow_met(
+            high_work.bits.to_consensus(),
+            Hash256::from(high_work.compute_hash()),
+        ) {
             high_work.nonce = high_work.nonce.wrapping_add(1);
         }
         let high_work_id =
@@ -2480,7 +2485,7 @@ mod tests {
     #[test]
     fn branch_switch_uses_staged_bodies_without_durable_store()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(2)?;
         sync.ensure_genesis_tip();
         install_budget(
@@ -2636,7 +2641,7 @@ mod tests {
     #[test]
     fn branch_switch_replans_after_a_competing_connect_before_transition()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(2)?;
         sync.ensure_genesis_tip();
         for block in &main {
@@ -2885,7 +2890,7 @@ mod tests {
     #[test]
     fn operational_reorg_failure_preserves_branch_and_retries_without_restart()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let (mut sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -2992,7 +2997,7 @@ mod tests {
     #[test]
     fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -3064,7 +3069,7 @@ mod tests {
     #[test]
     fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -7373,7 +7378,7 @@ mod tests {
     const GENESIS_TIME: u32 = 1_296_688_602;
 
     fn test_header(prev_blockhash: BlockHash, height: u32) -> Header {
-        use bitcoin_rs_primitives::{CompactTarget};
+        use bitcoin_rs_primitives::CompactTarget;
         let mut merkle = [0_u8; 32];
         merkle[..4].copy_from_slice(&height.to_le_bytes());
         let mut header = Header {
@@ -7387,19 +7392,25 @@ mod tests {
         // Mine rather than hope: the fixture previously relied on nonce=height
         // happening to satisfy regtest's easy target, so any change to another
         // header field silently broke proof-of-work validation.
-        while !pow_met(header.bits.to_consensus(), Hash256::from(header.compute_hash())) {
+        while !pow_met(
+            header.bits.to_consensus(),
+            Hash256::from(header.compute_hash()),
+        ) {
             header.nonce = header.nonce.wrapping_add(1);
         }
         header
     }
 
     fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
-        use bitcoin_rs_primitives::{CompactTarget};
+        use bitcoin_rs_primitives::CompactTarget;
         let mut header = test_header(prev_blockhash, height);
         header.bits = CompactTarget::from_consensus(0x207f_fffe);
         for nonce in 0..=u32::MAX {
             header.nonce = nonce;
-            if pow_met(header.bits.to_consensus(), Hash256::from(header.compute_hash())) {
+            if pow_met(
+                header.bits.to_consensus(),
+                Hash256::from(header.compute_hash()),
+            ) {
                 return header;
             }
         }
@@ -7414,7 +7425,10 @@ mod tests {
         header.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
         for nonce in 0..=u32::MAX {
             header.nonce = nonce;
-            if pow_met(header.bits.to_consensus(), Hash256::from(header.compute_hash())) {
+            if pow_met(
+                header.bits.to_consensus(),
+                Hash256::from(header.compute_hash()),
+            ) {
                 return Ok(header);
             }
         }
@@ -7575,7 +7589,7 @@ mod tests {
         height: u32,
         txdata: Vec<Tx>,
     ) -> Block {
-        use bitcoin_rs_primitives::{CompactTarget};
+        use bitcoin_rs_primitives::CompactTarget;
         let mut block = Block {
             header: Header {
                 version: 1,
@@ -7588,7 +7602,10 @@ mod tests {
             txs: txdata,
         };
         block.header.merkle_root = merkle_root(&block.txs);
-        while !pow_met(block.header.bits.to_consensus(), Hash256::from(block.block_hash())) {
+        while !pow_met(
+            block.header.bits.to_consensus(),
+            Hash256::from(block.block_hash()),
+        ) {
             block.header.nonce = block.header.nonce.saturating_add(1);
         }
         block
@@ -8224,7 +8241,7 @@ mod tests {
     #[test]
     fn permanent_forward_failure_purges_invalid_blocks_without_retry()
     -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Amount};
+        use bitcoin_rs_primitives::Amount;
         let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
         sync.ensure_genesis_tip();
         stage_body(&sync, &main[0]);
@@ -8376,7 +8393,7 @@ mod tests {
 
     #[test]
     fn fatal_disconnect_readmits_nothing() -> Result<(), Box<dyn std::error::Error>> {
-        use bitcoin_rs_primitives::{Script};
+        use bitcoin_rs_primitives::Script;
         let (mut handles, main, mut bodies) = matured_chain(101)?;
         let tip = main
             .last()

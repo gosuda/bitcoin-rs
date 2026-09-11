@@ -137,9 +137,7 @@ fn read_fixture(height: u32, extension: &str) -> Result<Vec<u8>, Box<dyn std::er
     }
 }
 
-fn parse_wtxids(
-    wtxid_text: &str,
-) -> Result<Vec<Wtxid>, Box<dyn std::error::Error>> {
+fn parse_wtxids(wtxid_text: &str) -> Result<Vec<Wtxid>, Box<dyn std::error::Error>> {
     wtxid_text
         .lines()
         .filter(|line| !line.trim().is_empty())

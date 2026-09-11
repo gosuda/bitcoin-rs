@@ -20,7 +20,9 @@ use bitcoin_rs_mempool::{
     AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, Mempool, MempoolEntry,
     MempoolGateway, MempoolLimits, arm_admission_park, reset_admission_park,
 };
-use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+};
 use bitcoin_rs_script::opcode;
 
 const P2PKH_SCRIPT: &[u8] = &[

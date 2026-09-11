@@ -164,7 +164,9 @@ mod tests {
         Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
     };
     use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
-    use bitcoin_rs_primitives::{Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
+    use bitcoin_rs_primitives::{
+        Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    };
     use parking_lot::{Mutex, RwLock};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::atomic::AtomicUsize;

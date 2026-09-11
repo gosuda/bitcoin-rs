@@ -4,7 +4,10 @@ use anyhow::{Context as _, Result, bail};
 
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 
 use sha2::{Digest, Sha256};
 

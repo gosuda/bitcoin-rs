@@ -2,7 +2,10 @@
 //! These are parse/identity workloads, not signed consensus-valid blocks.
 
 use bitcoin_rs_consensus::block_view::BlockFacts;
-use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 
 /// A zero witness modulus selects legacy transactions; otherwise the last
 /// transaction in each modulus-sized group carries one witness stack.

@@ -22,13 +22,12 @@ pub fn prepared_context(
     prevouts: &[(OutPoint, TxOut)],
     missing_inputs: bool,
 ) -> PackageTxContext {
-    let input_value = prevouts
-        .iter()
-        .fold(0_u64, |sum, (_, output)| sum.saturating_add(output.value.to_sat()));
-    let output_value = tx
-        .outputs
-        .iter()
-        .fold(0_u64, |sum, output| sum.saturating_add(output.value.to_sat()));
+    let input_value = prevouts.iter().fold(0_u64, |sum, (_, output)| {
+        sum.saturating_add(output.value.to_sat())
+    });
+    let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
+        sum.saturating_add(output.value.to_sat())
+    });
     PackageTxContext {
         fee: input_value.saturating_sub(output_value),
         vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
@@ -41,7 +40,9 @@ pub fn prepared_context(
 mod tests {
     use bitcoin::consensus::deserialize;
     use bitcoin::hashes::Hash as _;
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Txid, Witness, consensus_bytes};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, Script, Sequence, TxIn, Txid, Witness, consensus_bytes,
+    };
     use bitcoin_rs_script::script::{opcode, push_data};
 
     use super::*;

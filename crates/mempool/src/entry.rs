@@ -288,7 +288,10 @@ mod mining_metadata_tests {
 mod wire_metadata_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Wtxid,
+    };
 
     use super::MempoolEntry;
 

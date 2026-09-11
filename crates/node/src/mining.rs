@@ -25,7 +25,9 @@ use bitcoin_rs_mining::{
     difficulty_for_bits,
 };
 
-use bitcoin_rs_primitives::{Amount, Block, CompactTarget, Hash256, LockTime, Network, Script, Tx, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, Hash256, LockTime, Network, Script, Tx, consensus_bytes,
+};
 
 use compact_str::CompactString;
 
@@ -1302,7 +1304,7 @@ mod network_hashps_oracle_tests {
     const BITS: u32 = 0x207f_ffff;
 
     fn header(prev: BlockHash, time: u32) -> Header {
-        use bitcoin_rs_primitives::{CompactTarget};
+        use bitcoin_rs_primitives::CompactTarget;
         Header {
             version: 1,
             prev_blockhash: prev,
@@ -1480,9 +1482,9 @@ mod candidate_template_tests {
 
     #[test]
     fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
-        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
         use alloc::sync::Arc;
         use bitcoin_rs_mining::Candidate;
+        use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
 
         let mut state = super::CoordinatorState::new();
         let coinbase = Tx {

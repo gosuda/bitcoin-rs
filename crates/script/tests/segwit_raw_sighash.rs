@@ -10,7 +10,9 @@
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
 use bitcoin::consensus::{deserialize as oracle_decode, encode::VarInt, serialize};
-use bitcoin_rs_primitives::{Amount, Script, Sighash, SighashCache, SighashError, Tx, TxOut, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, Script, Sighash, SighashCache, SighashError, Tx, TxOut, deserialize,
+};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{Message, PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -288,7 +290,12 @@ fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
             );
         }
         assert_eq!(
-            cache.segwit_v0_signature_hash_raw(tx.inputs.len(), &script, Amount::from_sat(VALUE), 0),
+            cache.segwit_v0_signature_hash_raw(
+                tx.inputs.len(),
+                &script,
+                Amount::from_sat(VALUE),
+                0
+            ),
             Err(SighashError::InputOutOfRange {
                 index: tx.inputs.len(),
                 total: tx.inputs.len(),
@@ -322,7 +329,12 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
         }
         for input in [INPUT, tx.inputs.len()] {
             assert_eq!(
-                cache.segwit_v0_signature_hash(input, &script, Amount::from_sat(VALUE), Sighash::Default),
+                cache.segwit_v0_signature_hash(
+                    input,
+                    &script,
+                    Amount::from_sat(VALUE),
+                    Sighash::Default
+                ),
                 Err(SighashError::DefaultOnlyTaproot),
             );
         }

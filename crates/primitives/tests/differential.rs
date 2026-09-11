@@ -15,7 +15,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr as _;
 
-use bitcoin_rs_primitives::{Amount, Block as NativeBlock, ConsensusDecode, ConsensusEncode, DecodeError, LockTime, Script, Sequence, Sighash, SighashCache, Tx as NativeTx, TxOut, Witness, Wtxid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, Block as NativeBlock, ConsensusDecode, ConsensusEncode, DecodeError, LockTime, Script,
+    Sequence, Sighash, SighashCache, Tx as NativeTx, TxOut, Witness, Wtxid, consensus_bytes,
+    deserialize,
+};
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
 
@@ -99,7 +103,9 @@ fn fixture_blocks_roundtrip_byte_identically() {
             .join("tests/testdata")
             .join(format!("{name}.wtxids.txt"));
         let expected_wtxids: Vec<String> = std::fs::read_to_string(&wtxid_path)
-            .unwrap_or_else(|error| panic!("fixture {name}: reading {}: {error}", wtxid_path.display()))
+            .unwrap_or_else(|error| {
+                panic!("fixture {name}: reading {}: {error}", wtxid_path.display())
+            })
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(str::to_owned)
@@ -150,11 +156,7 @@ fn enforce_corpus_verdicts(target: &str) {
 
     let mut observed: BTreeMap<String, String> = BTreeMap::new();
     for (path, bytes) in &seeds {
-        let name = path
-            .rsplit('/')
-            .next()
-            .unwrap_or(path)
-            .to_owned();
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
         let verdict = match target {
             "tx_decode" => decode_verdict::<NativeTx>(bytes),
             "block_decode" => decode_verdict::<NativeBlock>(bytes),
@@ -179,17 +181,23 @@ fn enforce_corpus_verdicts(target: &str) {
                     .to_owned(),
             ),
         );
-        root.insert(target.to_owned(), serde_json::Value::Object(
-            observed
-                .into_iter()
-                .map(|(name, verdict)| (name, serde_json::Value::String(verdict)))
-                .collect(),
-        ));
+        root.insert(
+            target.to_owned(),
+            serde_json::Value::Object(
+                observed
+                    .into_iter()
+                    .map(|(name, verdict)| (name, serde_json::Value::String(verdict)))
+                    .collect(),
+            ),
+        );
         let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(root))
             .expect("manifest renders");
         std::fs::write(&manifest_path, rendered + "\n")
             .unwrap_or_else(|error| panic!("writing {}: {error}", manifest_path.display()));
-        eprintln!("wrote {}; re-run without CORPUS_MANIFEST_WRITE to enforce", manifest_path.display());
+        eprintln!(
+            "wrote {}; re-run without CORPUS_MANIFEST_WRITE to enforce",
+            manifest_path.display()
+        );
         return;
     }
 
@@ -201,9 +209,9 @@ fn enforce_corpus_verdicts(target: &str) {
     });
     let manifest = serde_json::from_str::<serde_json::Value>(&manifest_text)
         .unwrap_or_else(|error| panic!("manifest.json: {error}"));
-    let expected = manifest.get(target).unwrap_or_else(|| {
-        panic!("fuzz/corpus/manifest.json has no \"{target}\" section")
-    });
+    let expected = manifest
+        .get(target)
+        .unwrap_or_else(|| panic!("fuzz/corpus/manifest.json has no \"{target}\" section"));
     let expected = expected.as_object().expect("manifest section is an object");
 
     for (name, observed_verdict) in &observed {

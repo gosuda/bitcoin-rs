@@ -14,7 +14,10 @@ use bitcoin::hashes::Hash as _;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::total_sigop_cost;
 use bitcoin_rs_primitives::tx::{Tx, TxIn, TxOut};
-use bitcoin_rs_primitives::{Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Txid, Witness, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Txid, Witness,
+    consensus_bytes,
+};
 
 /// A counting view proving resolve-once: every lookup increments a counter.
 struct CountingView {

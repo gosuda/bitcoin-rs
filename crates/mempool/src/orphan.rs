@@ -275,7 +275,9 @@ impl AdmissionLifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
+    };
     fn source(id: u64) -> PeerToken {
         PeerToken {
             addr: core::net::SocketAddr::from(([127, 0, 0, 1], 8333)),

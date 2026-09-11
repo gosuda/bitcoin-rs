@@ -928,7 +928,8 @@ mod tests {
                 let original = relay_identity_tx();
                 let next = if alternate_witness {
                     let mut variant = (*original).clone();
-                    variant.inputs[0].witness = bitcoin_rs_primitives::Witness::from_stack(vec![vec![2]]);
+                    variant.inputs[0].witness =
+                        bitcoin_rs_primitives::Witness::from_stack(vec![vec![2]]);
                     Arc::new(variant)
                 } else {
                     // Same allocation, not merely equal bytes: Arc identity is

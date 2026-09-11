@@ -192,7 +192,10 @@ mod tests {
                     previous_output: OutPoint::new(Txid::default(), vout),
                     script_sig: Script::new(),
                     sequence: Sequence::from_consensus(u32::MAX),
-                    witness: Witness::from_stack(vec![vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG]]),
+                    witness: Witness::from_stack(vec![vec![
+                        opcode::OP_PUSHNUM_1 + 1,
+                        opcode::OP_CHECKMULTISIG,
+                    ]]),
                 })
                 .collect(),
             outputs: Vec::new(),

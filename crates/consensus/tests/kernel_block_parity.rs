@@ -80,9 +80,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{
-    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxOut, Witness, consensus_bytes, deserialize,
-};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, consensus_bytes, deserialize};
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use serde::Deserialize;
 

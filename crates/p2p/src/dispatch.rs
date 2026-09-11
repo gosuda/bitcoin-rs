@@ -1086,7 +1086,7 @@ mod tests {
 
     #[test]
     fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
-            use bitcoin_rs_primitives::Script;
+        use bitcoin_rs_primitives::Script;
         use std::sync::Arc;
 
         use bitcoin_rs_mempool::{

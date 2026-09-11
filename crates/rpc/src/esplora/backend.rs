@@ -235,7 +235,9 @@ mod pagination_tests {
     use alloc::sync::Arc;
 
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use serde_json::Value;
 
     use super::{internal_mempool_txs, select_mempool_page};
@@ -254,7 +256,9 @@ mod pagination_tests {
                     value: Amount::from_sat(1_000),
                     script_pubkey: Script::from_bytes(vec![0x51]),
                 }],
-                lock_time: LockTime::from_consensus(u32::try_from(index).expect("small fixture index")),
+                lock_time: LockTime::from_consensus(
+                    u32::try_from(index).expect("small fixture index"),
+                ),
             };
             let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, time, 0);
             expected.push((time, entry.txid));

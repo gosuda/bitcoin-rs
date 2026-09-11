@@ -12,7 +12,10 @@ use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_mining::{
     CandidateContext, MiningError, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
 };
-use bitcoin_rs_primitives::{Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, Wtxid};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, Wtxid,
+};
 
 #[test]
 fn empty_candidate_encodes_bip34_and_exact_subsidy() -> Result<(), Box<dyn Error>> {

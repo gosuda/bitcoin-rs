@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use bitcoin_rs_mempool::MempoolEntry;
-use bitcoin_rs_primitives::{Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
+use bitcoin_rs_primitives::{
+    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+};
 use bitcoin_rs_script::count_tx_legacy;
 
 fn fixture(inputs: usize, script_len: usize, witness_len: Option<usize>) -> Tx {

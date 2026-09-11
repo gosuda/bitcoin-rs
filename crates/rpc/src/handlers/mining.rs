@@ -609,7 +609,10 @@ mod tests {
         MiningControl, MiningControlError, MiningInfo, MiningRule, SignetMiningInfo, TemplateId,
         TemplateMutation,
     };
-    use bitcoin_rs_primitives::{Amount, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+    use bitcoin_rs_primitives::{
+        Amount, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use parking_lot::Mutex;
 
     use crate::handlers::util::descriptor_checksum;
@@ -1066,12 +1069,18 @@ mod tests {
             result.get("bits").and_then(JsonValueTrait::as_str),
             Some("1d00ffff")
         );
-        assert_eq!(target, compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff)));
+        assert_eq!(
+            target,
+            compact_target_hex(CompactTarget::from_consensus(0x1d00_ffff))
+        );
         assert_eq!(
             next.get("bits").and_then(JsonValueTrait::as_str),
             Some("1c00ffff")
         );
-        assert_eq!(next_target, compact_target_hex(CompactTarget::from_consensus(0x1c00_ffff)));
+        assert_eq!(
+            next_target,
+            compact_target_hex(CompactTarget::from_consensus(0x1c00_ffff))
+        );
         assert_ne!(target, next_target);
     }
 

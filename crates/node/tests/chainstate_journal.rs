@@ -4,7 +4,10 @@ use anyhow::Result;
 
 use bitcoin_rs_node::{Network, NodeConfig, apply::error::ApplyError, state::NodeState};
 
-use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness,
+};
 
 use sha2::{Digest, Sha256};
 
@@ -101,7 +104,10 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let mut replacement = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     replacement.header.time = replacement.header.time.saturating_add(1);
     replacement.header.nonce = 0;
-    while !pow_met(replacement.header.bits.to_consensus(), replacement.block_hash().0) {
+    while !pow_met(
+        replacement.header.bits.to_consensus(),
+        replacement.block_hash().0,
+    ) {
         replacement.header.nonce = replacement
             .header
             .nonce

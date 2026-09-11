@@ -157,7 +157,8 @@ mod tests {
     #[test]
     fn restored_coin_takes_precedence_over_an_offered_output() {
         let mut parent = spend(funded(), 9_000);
-        parent.outputs[0].script_pubkey = Script::from_bytes([vec![0x00, 0x14], vec![2; 20]].concat());
+        parent.outputs[0].script_pubkey =
+            Script::from_bytes([vec![0x00, 0x14], vec![2; 20]].concat());
         let child = spend(OutPoint::new(parent.txid(), 0), 8_000);
         let mut batch = DisconnectedCandidates::new(0, 0);
         assert!(batch.offer(&parent, |_| Some(TxOut {

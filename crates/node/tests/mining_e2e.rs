@@ -12,7 +12,10 @@ use bitcoin_rs_mining::MiningControl;
 
 use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize, encode::double_sha256};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize, encode::double_sha256,
+};
 
 use bitcoin_rs_rpc::{
     Handler,
@@ -167,7 +170,9 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
                 previous_output: null_prevout(),
                 // BIP34 height push plus one pad byte: consensus requires a
                 // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-                script_sig: Script::from_bytes([script_push_int(i64::from(height)), script_push_int(0)].concat()),
+                script_sig: Script::from_bytes(
+                    [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+                ),
                 sequence: Sequence::from_consensus(0xffff_ffff),
                 witness: Witness::new(),
             }],
@@ -208,7 +213,10 @@ fn current_tip(state: &NodeState) -> Result<bitcoin_rs_chain::TipSnapshot> {
 
 fn grind_pow(block: &mut Block) -> Result<()> {
     loop {
-        if pow_is_met(block.header.bits.to_consensus(), &block.header.compute_hash().into()) {
+        if pow_is_met(
+            block.header.bits.to_consensus(),
+            &block.header.compute_hash().into(),
+        ) {
             return Ok(());
         }
         let Some(next) = block.header.nonce.checked_add(1) else {
@@ -346,7 +354,9 @@ fn mine_regtest_block(
             previous_output: null_prevout(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: Script::from_bytes([script_push_int(i64::from(height)), script_push_int(0)].concat()),
+            script_sig: Script::from_bytes(
+                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+            ),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],

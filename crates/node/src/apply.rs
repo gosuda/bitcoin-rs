@@ -17,7 +17,10 @@ use bitcoin_rs_consensus::{MAX_SCRIPT_SIZE, MEDIAN_TIME_PAST_WINDOW, rust_path::
 
 use bitcoin_rs_mempool::{AdmissionOrigin, ChainChangeGuard, Mempool, MempoolGateway};
 
-use bitcoin_rs_primitives::{Amount, Block, CompactTarget, ConsensusEncode as _, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxOut, Txid, Witness, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, Block, CompactTarget, ConsensusEncode as _, Hash256, LockTime, Network, OutPoint,
+    Script, Sequence, Tx, TxOut, Txid, Witness, consensus_bytes,
+};
 
 use bitcoin_rs_storage::{InMemoryUndoStore, block_body::BlockBodyStore};
 
@@ -10687,9 +10690,9 @@ mod chain_generation_tests {
 
     #[test]
     fn invalidate_block_reconsiders_under_held_transition() {
-        use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxOut, Witness};
         use bitcoin_rs_primitives::TxIn;
         use bitcoin_rs_primitives::consensus_bytes;
+        use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxOut, Witness};
         use bitcoin_rs_script::push_int;
 
         use super::consensus_rule_tests::MapBodyStore;

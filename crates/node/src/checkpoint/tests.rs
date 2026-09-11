@@ -27,7 +27,10 @@ use std::io::Cursor;
 use std::path::Path;
 
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot, accept_headers, compact_is_met_by};
-use bitcoin_rs_primitives::{Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, TxOut, Txid, deserialize};
+use bitcoin_rs_primitives::{
+    Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, TxOut, Txid,
+    deserialize,
+};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener, scan_coin_stats};
 use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
 use parking_lot::RwLock;

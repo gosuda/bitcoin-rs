@@ -15,8 +15,8 @@
 //! * [`compress_amount`] — Bitcoin Core's `CTxOutCompressor` amount transform,
 //!   which exploits how many amounts are round numbers of satoshis.
 
-use bitcoin_rs_primitives::Amount;
 use crate::UtxoError;
+use bitcoin_rs_primitives::Amount;
 
 /// Largest number of bytes a `u64` varint can occupy.
 pub(crate) const VARINT_MAX_LEN: usize = 10;

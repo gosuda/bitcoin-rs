@@ -16,7 +16,10 @@ use bitcoin_rs_consensus::{
     BlockView, ConsensusError, MAX_BLOCK_SIGOPS_COST, UtxoView, transaction_sigop_cost,
     verify_transaction, verify_transaction_non_script,
 };
-use bitcoin_rs_primitives::{Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+};
 use bitcoin_rs_script::{VerifyFlags, opcode};
 
 const BIP141_SIGOP_LIMIT: u32 = 80_000;

@@ -304,7 +304,9 @@ mod tests {
         AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
         MutationOutcome, PeerToken, SubmitError, SubmitOutcome,
     };
-    use bitcoin_rs_primitives::{Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    };
     use parking_lot::Mutex;
 
     #[derive(Debug, Default)]
