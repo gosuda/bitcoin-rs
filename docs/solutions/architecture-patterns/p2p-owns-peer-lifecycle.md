@@ -29,6 +29,14 @@ messages through an identity-checked lease rather than resolving a
 `SocketAddr` again. The source carries the connection identity, so a stale
 operation cannot publish, send to, or cancel a replacement.
 
+Accepted-header evidence belongs to `BlockSync`'s unfinished body work. It
+retains the exact source and hash across ticks while download capacity is
+limited. Selection checks the final active chain after all inbound header
+batches and retires evidence when its source is no longer ready/current,
+its hash leaves the active chain, or apply reaches its height. Only the
+highest active announcement per source survives selection; discarded fork
+evidence is not recovered later and handshake metadata is never rewritten.
+
 ## Guardrails
 
 - Address equality does not establish connection identity.
@@ -40,6 +48,7 @@ operation cannot publish, send to, or cancel a replacement.
 - The node starts one `P2pService`. RPC applies the same network-activity
   transition (`apply_network_active`) on the shared flag and `PeerTable`.
   Production block-download scheduling stays on `BlockSync`'s download window.
+  `P2pService` does not keep a shadow window or call `forget_peer` on ready.
 - Ready-peer selection carries `PeerSource` through the final send.
 - Disconnect requests caused by received data use the data's `PeerSource`.
 - Same-address replacement tests must cover stale publication and stale

@@ -3,7 +3,7 @@ use bitcoin_rs_chain::header_sync::{next_work_required, validate_header_nbits};
 use bitcoin_rs_chain::{
     BlockHeader, BlockTree, ChainError, Network, NodeStatus, accept_headers, current_unix_seconds,
 };
-use bitcoin_rs_primitives::{BlockHash, Hash256};
+use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
 
 #[test]
 fn accepts_valid_headers_across_batches_and_rejects_bad_bits()
@@ -34,7 +34,7 @@ fn accepts_valid_headers_across_batches_and_rejects_bad_bits()
     );
 
     let mut tampered = headers[0];
-    tampered.bits = 0x2200_ffff;
+    tampered.bits = CompactTarget::from_consensus(0x2200_ffff);
     let err = match accept_headers(
         &mut BlockTree::new(),
         &[tampered],
@@ -368,7 +368,7 @@ fn invalid_unknown_suffix_after_duplicate_inputs_propagates_consensus_error_with
     assert_eq!(tip_before.height, 1);
 
     let mut invalid_unknown = headers[2];
-    invalid_unknown.bits = 0x2200_ffff;
+    invalid_unknown.bits = CompactTarget::from_consensus(0x2200_ffff);
 
     let batch = [headers[0], headers[1], invalid_unknown];
     let err = match accept_headers(&mut tree, &batch, Network::Regtest, current_unix_seconds()) {
@@ -428,14 +428,21 @@ fn mine_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
 
 /// Differential proof-of-work oracle: checks that the header hash satisfies
 /// the compact target, using bitcoin's compact-target decode and comparison.
-fn pow_is_met(bits: u32, hash: &BlockHash) -> bool {
+fn pow_is_met(bits: CompactTarget, hash: &BlockHash) -> bool {
     use bitcoin::hashes::Hash as _;
-    let target =
-        bitcoin::pow::Target::from_compact(bitcoin::pow::CompactTarget::from_consensus(bits));
+    let target = bitcoin::pow::Target::from_compact(bitcoin::pow::CompactTarget::from_consensus(
+        bits.to_consensus(),
+    ));
     target.is_met_by(bitcoin::BlockHash::from_byte_array(*hash.as_bytes()))
 }
 
-fn mine_header_with(prev_blockhash: BlockHash, height: u32, time: u32, bits: u32) -> BlockHeader {
+fn mine_header_with(
+    prev_blockhash: BlockHash,
+    height: u32,
+    time: u32,
+    bits: impl Into<CompactTarget>,
+) -> BlockHeader {
+    let bits = bits.into();
     let mut merkle = [0_u8; 32];
     merkle[..4].copy_from_slice(&height.to_le_bytes());
     let mut header = BlockHeader {
@@ -452,7 +459,13 @@ fn mine_header_with(prev_blockhash: BlockHash, height: u32, time: u32, bits: u32
     header
 }
 
-fn raw_header_with(prev_blockhash: BlockHash, height: u32, time: u32, bits: u32) -> BlockHeader {
+fn raw_header_with(
+    prev_blockhash: BlockHash,
+    height: u32,
+    time: u32,
+    bits: impl Into<CompactTarget>,
+) -> BlockHeader {
+    let bits = bits.into();
     let mut merkle = [0_u8; 32];
     merkle[..4].copy_from_slice(&height.to_le_bytes());
     BlockHeader {

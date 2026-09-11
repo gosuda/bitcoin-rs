@@ -7,6 +7,8 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
+mod persistent;
+pub use persistent::{CoinDurability, CoinLedger, PersistentUtxoError, PersistentUtxoSet};
 
 /// Below this many combined add+remove operations, a multi-shard no-listener
 /// commit runs serially: a `rayon` scope plus per-shard task dispatch costs
@@ -783,6 +785,13 @@ impl UtxoSetView<'_> {
 }
 
 impl UtxoSet {
+    /// Byte-level memory report over a stable view (measurement only).
+    #[must_use]
+    pub fn memory_report(&self) -> UtxoMemoryReport {
+        #[expect(clippy::redundant_closure_for_method_calls, reason = "HRTB lifetime")]
+        self.with_stable_view(|view| view.memory_report())
+    }
+
     /// Creates an empty UTXO set.
     #[must_use]
     pub fn new() -> Self {

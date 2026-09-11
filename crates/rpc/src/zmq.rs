@@ -1,14 +1,17 @@
-//! ZMQ publisher trait and transport-backed implementation for node notifications.
+//! Bitcoin Core-compatible ZMQ notification protocol and transport.
 //!
 //! Bitcoin Core publishes "hashblock", "hashtx", "rawblock", and "rawtx" events
-//! via ZMQ for client subscribers. `ChainEffects` consumes committed
-//! transitions through this trait so notification failures cannot affect
-//! block connection.
+//! via ZMQ for client subscribers. The node decides when committed transitions
+//! are published; this module owns how those notifications are represented and
+//! transported.
 
 #[cfg(feature = "zmq")]
 use anyhow::{Context as _, bail};
 use anyhow::{Result, ensure};
 use bitcoin_rs_primitives::{Hash256, Txid};
+
+#[cfg(test)]
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 #[cfg(feature = "zmq")]
 use core::fmt;
 #[cfg(feature = "zmq")]
@@ -277,7 +280,7 @@ pub struct TracingZmqPublisher;
 impl ZmqPublisher for TracingZmqPublisher {
     fn publish_hashblock(&self, hash: Hash256) {
         tracing::info!(
-            target: "bitcoin_rs_node::zmq",
+            target: "bitcoin_rs_rpc::zmq",
             topic = "hashblock",
             hash = %hash.to_string_be(),
         );
@@ -285,7 +288,7 @@ impl ZmqPublisher for TracingZmqPublisher {
 
     fn publish_hashtx(&self, txid: Txid) {
         tracing::info!(
-            target: "bitcoin_rs_node::zmq",
+            target: "bitcoin_rs_rpc::zmq",
             topic = "hashtx",
             txid = %txid,
         );
@@ -293,7 +296,7 @@ impl ZmqPublisher for TracingZmqPublisher {
 
     fn publish_rawblock(&self, bytes: &[u8]) {
         tracing::info!(
-            target: "bitcoin_rs_node::zmq",
+            target: "bitcoin_rs_rpc::zmq",
             topic = "rawblock",
             len = bytes.len(),
         );
@@ -301,7 +304,7 @@ impl ZmqPublisher for TracingZmqPublisher {
 
     fn publish_rawtx(&self, bytes: &[u8]) {
         tracing::info!(
-            target: "bitcoin_rs_node::zmq",
+            target: "bitcoin_rs_rpc::zmq",
             topic = "rawtx",
             len = bytes.len(),
         );
@@ -315,7 +318,7 @@ impl ZmqPublisher for TracingZmqPublisher {
             SequenceEvent::Added(txid, _) | SequenceEvent::Removed(txid, _) => txid.to_string(),
         };
         tracing::info!(
-            target: "bitcoin_rs_node::zmq",
+            target: "bitcoin_rs_rpc::zmq",
             topic = "sequence",
             hash = %subject,
             label = char::from(event.label()).to_string(),
@@ -459,7 +462,7 @@ impl SocketZmqPublisher {
                 socket.send_multipart([topic_bytes, body, sequence.as_slice()], zmq::DONTWAIT)
             {
                 tracing::debug!(
-                    target: "bitcoin_rs_node::zmq",
+                    target: "bitcoin_rs_rpc::zmq",
                     %error,
                     endpoint = %endpoint.endpoint,
                     topic = topic.as_str(),
@@ -579,7 +582,7 @@ fn is_ipv6_tcp_endpoint(endpoint: &str) -> bool {
 ///
 /// Install on the [`bitcoin_rs_mempool::MempoolGateway`] observer slot only
 /// when a `--zmq-pub-sequence` endpoint is configured.
-pub(crate) struct MempoolSequenceObserver {
+pub struct MempoolSequenceObserver {
     publisher: std::sync::Arc<dyn ZmqPublisher>,
 }
 
@@ -594,7 +597,7 @@ impl core::fmt::Debug for MempoolSequenceObserver {
 impl MempoolSequenceObserver {
     /// Observes on behalf of `publisher`.
     #[must_use]
-    pub(crate) fn new(publisher: std::sync::Arc<dyn ZmqPublisher>) -> Self {
+    pub fn new(publisher: std::sync::Arc<dyn ZmqPublisher>) -> Self {
         Self { publisher }
     }
 }
@@ -1066,16 +1069,16 @@ mod compat_manifest_tests {
         use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label].into(),
             }],
         }
     }
@@ -1210,9 +1213,7 @@ mod compat_manifest_tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
-        use crate::mining::{MempoolSequenceWake, MiningGenerationSignal};
         use bitcoin_rs_mempool::{
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
             MempoolObserver,
@@ -1220,6 +1221,7 @@ mod compat_manifest_tests {
         use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
+        use bitcoin_rs_node::mining::{MempoolSequenceWake, MiningGenerationSignal};
         use compact_str::CompactString;
         use parking_lot::{Mutex, RwLock};
 
@@ -1256,13 +1258,6 @@ mod compat_manifest_tests {
                 &self,
                 _block: bitcoin_rs_primitives::Block,
             ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn submit_header(
-                &self,
-                _header: bitcoin_rs_primitives::Header,
-            ) -> Result<(), MiningControlError> {
                 Err(unavailable())
             }
 
@@ -1374,16 +1369,16 @@ mod sequence_observer_tests {
     fn sequence_tx(label: u8) -> Tx {
         Tx {
             version: 2,
-            lock_time: 0,
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Vec::new(),
-                sequence: 0xffff_ffff,
-                witness: Vec::new(),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
             }],
             outputs: vec![TxOut {
-                value: 1_000,
-                script_pubkey: vec![0x51, label],
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51, label].into(),
             }],
         }
     }
@@ -1506,10 +1501,10 @@ mod sequence_observer_tests {
 
     #[test]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
-        use crate::mining::{MempoolSequenceWake, MiningGenerationSignal};
         use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
+        use bitcoin_rs_node::mining::{MempoolSequenceWake, MiningGenerationSignal};
         use compact_str::CompactString;
 
         struct RecordingControl {
@@ -1545,13 +1540,6 @@ mod sequence_observer_tests {
                 &self,
                 _block: bitcoin_rs_primitives::Block,
             ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn submit_header(
-                &self,
-                _header: bitcoin_rs_primitives::Header,
-            ) -> Result<(), MiningControlError> {
                 Err(unavailable())
             }
 

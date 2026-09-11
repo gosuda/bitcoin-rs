@@ -3,6 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
+use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence};
 
 /// Fuzz the production default script interpreter.
 ///
@@ -27,9 +28,9 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// ```
 ///
 /// Scripts from the qa-assets corpus are wrapped into this framing by
-/// `scripts/import-qa-assets.sh`; seeds written by that script use selector
-/// `0x00` (NONE) for raw scripts and `0x03` (TAPROOT) for the wrapped P2TR
-/// variant. Keep those indices in step with `FLAGS` below.
+/// `scripts/import-qa-assets.sh`; seeds written by that script use the harness
+/// `FLAGS` entry `NONE` for raw scripts and, for files >= 32 bytes, a P2TR
+/// variant using its `TAPROOT` entry.
 const FLAGS: [VerifyFlags; 6] = [
     VerifyFlags::NONE,
     VerifyFlags::MANDATORY,
@@ -101,22 +102,22 @@ fuzz_target!(|data: &[u8]| {
     let script_sig = script_sig.to_vec();
     let script_pubkey = script_pubkey.to_vec();
     let prevout = bitcoin_rs_primitives::TxOut {
-        value: 10_000,
-        script_pubkey: script_pubkey.clone(),
+        value: Amount::from_sat(10_000),
+        script_pubkey: script_pubkey.clone().into(),
     };
     let tx = bitcoin_rs_primitives::Tx {
         version: 2,
         inputs: vec![bitcoin_rs_primitives::TxIn {
             previous_output: bitcoin_rs_primitives::OutPoint::default(),
-            script_sig: script_sig.clone(),
-            sequence: u32::MAX,
-            witness: witness.clone(),
+            script_sig: script_sig.clone().into(),
+            sequence: Sequence::MAX,
+            witness: witness.clone().into(),
         }],
         outputs: vec![bitcoin_rs_primitives::TxOut {
-            value: 9_000,
-            script_pubkey: Vec::new(),
+            value: Amount::from_sat(9_000),
+            script_pubkey: Script::new(),
         }],
-        lock_time: 0,
+        lock_time: LockTime::ZERO,
     };
 
     let interpreter = Interpreter::default();
