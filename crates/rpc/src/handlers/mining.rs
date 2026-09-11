@@ -1312,6 +1312,57 @@ mod tests {
     }
 
     #[test]
+    // CONTRACT: API-11
+    fn submitblock_rejects_non_string_bip22_dummy() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        let genesis = sample_block();
+        let hex = to_lower_hex(&consensus_bytes(&genesis));
+        for dummy in [json!(123), json!(true), json!([]), json!({})] {
+            let error = submitblock(&ctx, &json!([hex.as_str(), dummy]))
+                .expect_err("non-string BIP22 dummy must fail");
+            assert!(matches!(error, RpcError::InvalidType(_)));
+            assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+        }
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 0);
+
+        *control.submit.lock() = BlockValidationResult::Accepted;
+        let nulled = submitblock(&ctx, &json!([hex.as_str(), null]))
+            .unwrap_or_else(|err| panic!("null dummy must be accepted and ignored: {err}"));
+        assert!(nulled.is_null());
+        let stringed = submitblock(&ctx, &json!([hex.as_str(), "ignored"]))
+            .unwrap_or_else(|err| panic!("string dummy must be accepted and ignored: {err}"));
+        assert!(stringed.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    // CONTRACT: API-11
+    fn decode_tx_zero_input_zero_flag_accepted_like_core() {
+        let control = FakeMiningControl::with_template(sample_template());
+        let ctx = ctx_with_control(control.clone());
+        // A single transaction encoded as version | zero-input dummy | zero flag |
+        // lock time: Core reads the zero flag as the legacy empty transaction
+        // (zero inputs, zero outputs) and admits it to validation instead of
+        // failing with -22.
+        let empty = Tx {
+            version: 1,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            lock_time: 0,
+        };
+        let block = Block {
+            header: sample_block().header,
+            txs: vec![empty],
+        };
+        let hex = to_lower_hex(&consensus_bytes(&block));
+        let result = submitblock(&ctx, &json!([hex.as_str()]))
+            .unwrap_or_else(|err| panic!("zero-input zero-flag block must decode: {err}"));
+        assert!(result.is_null());
+        assert_eq!(control.submit_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn submitheader_requires_mining_control() {
         let ctx = Arc::new(Context::new());
         let error = submitheader(&ctx, &json!(["00"])).expect_err("missing control must fail");

@@ -214,4 +214,6 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getblocktemplate_proposal_skips_client_rule_negotiation`
 - `API-11`:
   - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
-    `submitblock_ignores_bip22_dummy_and_trailing_bytes`
+    `submitblock_ignores_bip22_dummy_and_trailing_bytes`,
+    `submitblock_rejects_non_string_bip22_dummy`,
+    `decode_tx_zero_input_zero_flag_accepted_like_core`
