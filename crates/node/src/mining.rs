@@ -17,8 +17,11 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
+use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::accept_headers;
+use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
@@ -30,6 +33,7 @@ use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::TemplateId;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 use core::time::Duration;
@@ -313,10 +317,68 @@ impl MiningCoordinator {
         )
         .unwrap_or(u32::MAX)
     }
+
+    /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
+    fn accept_submitted_header(&self, header: Header) -> Result<(), MiningControlError> {
+        let mut tree = self.block_tree.write();
+        // Preserve accept_headers' idempotent duplicate path, including genesis.
+        if tree.lookup(header.compute_hash().into()).is_some() {
+            return accept_headers(
+                &mut tree,
+                std::slice::from_ref(&header),
+                self.network,
+                current_unix_seconds(),
+            )
+            .map(|_| ())
+            .map_err(header_reject_reason);
+        }
+        let parent = tree.lookup(header.prev_blockhash.into()).ok_or_else(|| {
+            MiningControlError::Rejected(missing_parent_reason(Hash256::from(
+                header.prev_blockhash,
+            )))
+        })?;
+        if tree
+            .node(parent)
+            .is_ok_and(|node| node.status == bitcoin_rs_chain::NodeStatus::Invalid)
+        {
+            return Err(MiningControlError::Rejected(CompactString::from(
+                "bad-prevblk",
+            )));
+        }
+        accept_headers(
+            &mut tree,
+            std::slice::from_ref(&header),
+            self.network,
+            current_unix_seconds(),
+        )
+        .map(|_| ())
+        .map_err(header_reject_reason)
+    }
+}
+
+fn missing_parent_reason(prev_hash: Hash256) -> CompactString {
+    CompactString::from(format!("Must submit previous header ({prev_hash}) first"))
+}
+
+fn header_reject_reason(error: ChainError) -> MiningControlError {
+    let reason = match error {
+        ChainError::InvalidPow { .. } => CompactString::from("high-hash"),
+        ChainError::ZeroTarget { .. }
+        | ChainError::TargetExceedsLimit { .. }
+        | ChainError::NbitsMismatch { .. } => CompactString::from("bad-diffbits"),
+        ChainError::TimestampTooEarly { .. } => CompactString::from("time-too-old"),
+        ChainError::TimestampTooFarAhead { .. } => CompactString::from("time-too-new"),
+        ChainError::MissingParent { prev_hash } => missing_parent_reason(prev_hash),
+        other => CompactString::from(other.to_string()),
+    };
+    MiningControlError::Rejected(reason)
 }
 
 #[cfg(test)]
 mod apply_error_tests;
+
+#[cfg(test)]
+mod header_reject_tests;
 
 fn hashps_missing_height() -> MiningControlError {
     MiningControlError::InvalidRequest(CompactString::from(
@@ -364,8 +426,12 @@ fn hash_ps_at(
 
 /// Estimates hashes/s over `lookup` blocks ending at an already-resolved start.
 ///
-/// Height validation lives in [`resolve_hash_ps_start`]. A missing start or
-/// unwalkable window is a zero rate so `getmininginfo` can stay best-effort.
+/// Height validation lives in [`resolve_hash_ps_start`]. The window is Core's
+/// parent walk (`GetNetworkHashPS`): `lookup` parent pointers from the start
+/// node, min/max header time, `chainwork` delta over that span. A missing
+/// start or unwalkable window is a zero rate so `getmininginfo` can stay
+/// best-effort.
+// CONTRACT: docs/contracts/external-api.md#API-06
 fn estimate_network_hashps(
     tree: &BlockTree,
     start_id: Option<NodeId>,
@@ -381,7 +447,7 @@ fn estimate_network_hashps(
     if start_node.height == 0 {
         return 0.0;
     }
-    let walk = if lookup == -1 {
+    let mut walk = if lookup == -1 {
         let interval = i64::from(network.retarget_interval());
         if interval <= 0 {
             1
@@ -391,33 +457,37 @@ fn estimate_network_hashps(
     } else {
         lookup
     };
+    if walk > i64::from(start_node.height) {
+        walk = i64::from(start_node.height);
+    }
     let walk = u32::try_from(walk).unwrap_or(u32::MAX);
-    let walk = walk.min(start_node.height);
     if walk == 0 {
         return 0.0;
     }
-    let target_height = start_node.height.saturating_sub(walk);
-    let Some(earliest_id) = tree.node_at_height_from(start_id, target_height) else {
+
+    let mut min_time = start_node.header.time;
+    let mut max_time = min_time;
+    let mut earliest_id = start_id;
+    for _ in 0..walk {
+        let Ok(node) = tree.node(earliest_id) else {
+            return 0.0;
+        };
+        let Some(parent) = node.parent else {
+            return 0.0;
+        };
+        earliest_id = parent;
+        let Ok(parent_node) = tree.node(earliest_id) else {
+            return 0.0;
+        };
+        min_time = min_time.min(parent_node.header.time);
+        max_time = max_time.max(parent_node.header.time);
+    }
+    if min_time == max_time {
         return 0.0;
-    };
+    }
     let Ok(earliest_node) = tree.node(earliest_id) else {
         return 0.0;
     };
-    if earliest_node.height == start_node.height {
-        return 0.0;
-    }
-    let mut min_time = start_node.header.time;
-    let mut max_time = min_time;
-    for window_height in target_height..=start_node.height {
-        let Some(id) = tree.node_at_height_from(start_id, window_height) else {
-            continue;
-        };
-        let Ok(node) = tree.node(id) else {
-            continue;
-        };
-        min_time = min_time.min(node.header.time);
-        max_time = max_time.max(node.header.time);
-    }
     let work_delta = start_node.chainwork.saturating_sub(earliest_node.chainwork);
     let time_delta_secs = i64::from(max_time).saturating_sub(i64::from(min_time));
     let work_bytes: [u8; 32] = work_delta.to_be_bytes();

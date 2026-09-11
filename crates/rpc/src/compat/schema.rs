@@ -407,6 +407,13 @@ mod tests {
             Ok(BlockValidationResult::Accepted)
         }
 
+        fn submit_header(
+            &self,
+            _header: bitcoin_rs_primitives::Header,
+        ) -> Result<(), MiningControlError> {
+            Ok(())
+        }
+
         fn publish_generation(&self) {}
 
         fn generate(
