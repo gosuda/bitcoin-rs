@@ -1039,6 +1039,7 @@ fn propose_block(
     }
 }
 
+// API-14 executable proofs: preserve the documented submitblock vocabulary.
 #[test]
 fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
     let state = open_regtest()?;
@@ -1125,6 +1126,24 @@ fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after submit"));
     assert_eq!(tip.hash, child_hash);
+    Ok(())
+}
+
+#[test]
+fn resubmitting_a_disconnected_block_is_api14_duplicate() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    mining.publish_generation();
+    let genesis = Network::Regtest.genesis_block();
+    let child = mined_child(genesis.block_hash())?;
+    let child_hash = Hash256::from(child.block_hash());
+    assert_eq!(mining.submit_block(child.clone())?, BlockValidationResult::Accepted);
+    state
+        .chain_followers()
+        .apply_disconnect(state.apply_handles(), &child)?;
+    assert_eq!(mining.submit_block(child)?, BlockValidationResult::Duplicate);
+    assert_eq!(state.applied_tip().load_full().map(|tip| tip.hash), Some(child_hash));
     Ok(())
 }
 

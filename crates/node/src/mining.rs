@@ -725,12 +725,12 @@ impl MiningCoordinator {
         }
     }
 
-    /// Core `LookupBlockIndex` / BIP22 proposal vocabulary.
+    /// Core `LookupBlockIndex` / BIP22 proposal vocabulary; see contract
+    /// `API-14` for the complete classification rule.
     ///
-    /// A node on the applied chain has had its body connected (Core
-    /// `BLOCK_VALID_SCRIPTS`). `Invalid` is `BLOCK_FAILED_VALID`. Any other
-    /// tree entry, including a header-only `Active` tip, is still
-    /// inconclusive — `NodeStatus::Active` is the header chain, not scripts.
+    /// Applied-chain membership indicates that the body reached script
+    /// validation. Header-chain activity alone remains inconclusive.
+    /// `NodeStatus::Active` is the header chain, not scripts.
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
@@ -785,10 +785,18 @@ impl MiningCoordinator {
 
     fn submit(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         let block_hash: Hash256 = block.block_hash().into();
-        // Core v31 `submitblock` dropped the index pre-check. `ProcessNewBlock`
-        // returns `duplicate` only when the block was already accepted
-        // (`!new_block && accepted`). A header-only tree entry must still
-        // receive the body so `submitheader` then `submitblock` works.
+        // Preserve Core's `!new_block` signal across a disconnect. This does
+        // not short-circuit reconnection: a previously accepted body still
+        // needs to be processed, but reports `duplicate` afterwards.
+        let previously_accepted = {
+            let tree = self.block_tree.read();
+            tree.lookup(block_hash)
+                .and_then(|id| tree.node(id).ok())
+                .is_some_and(|node| node.chain_tx_count > 0)
+        };
+        // Core v31 `submitblock` dropped the index pre-check. A header-only
+        // tree entry must still receive the body so `submitheader` then
+        // `submitblock` works.
         if matches!(
             self.known_block_result(block_hash),
             Some(BlockValidationResult::Duplicate)
@@ -809,7 +817,11 @@ impl MiningCoordinator {
                         "applied tip was not published before submit_block returned",
                     )));
                 }
-                Ok(BlockValidationResult::Accepted)
+                Ok(if previously_accepted {
+                    BlockValidationResult::Duplicate
+                } else {
+                    BlockValidationResult::Accepted
+                })
             }
             Err(error) => Ok(map_apply_error(error)),
         }
