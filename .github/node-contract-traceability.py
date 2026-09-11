@@ -79,19 +79,19 @@ def main() -> int:
     for relative, prefix in refs.items():
         prefix_once(work / relative, prefix)
 
-    run("cargo", "+1.95.0", "fmt", "-p", "bitcoin-rs-node", cwd=work)
+    run("cargo", "fmt", "-p", "bitcoin-rs-node", cwd=work)
     run(
-        "cargo", "+1.95.0", "clippy", "--locked", "-p", "bitcoin-rs-node",
+        "cargo", "clippy", "--locked", "-p", "bitcoin-rs-node",
         "--all-targets", "--no-default-features", "--features", "fjall,zmq",
         "--", "-D", "warnings", cwd=work,
     )
     for test_filter in ("recovery_evidence::", "tx_ingress::"):
         run(
-            "cargo", "+1.95.0", "test", "--locked", "-p", "bitcoin-rs-node",
+            "cargo", "test", "--locked", "-p", "bitcoin-rs-node",
             "--no-default-features", "--features", "fjall,zmq", "--lib", test_filter,
             "--", "--test-threads=1", cwd=work,
         )
-    run("cargo", "+1.95.0", "fmt", "-p", "bitcoin-rs-node", "--", "--check", cwd=work)
+    run("cargo", "fmt", "-p", "bitcoin-rs-node", "--", "--check", cwd=work)
     run("git", "diff", "--check", cwd=work)
 
     paths = ["docs/contracts/recovery.md", "crates/node/src/recovery_evidence/reporter.rs", *refs]
