@@ -382,6 +382,11 @@ fn manual_prune_removes_pruned_block_transactions_from_cache() -> anyhow::Result
     config.storage.prune_target_mb = 1;
     let state = NodeState::open(config, None)?;
     publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
+    // The prune is a no-op until a durable tip is published; without it the
+    // candidate window is empty and nothing is evicted from the cache.
+    state
+        .durable_tip_height
+        .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
 
     let pruned_block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     let pruned_hash = Hash256::from_le_bytes(pruned_block.block_hash().as_bytes());

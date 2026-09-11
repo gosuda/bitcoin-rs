@@ -333,7 +333,7 @@ impl MiningCoordinator {
     pub(super) fn template_from_candidate(
         network: Network,
         candidate: Arc<Candidate>,
-        request: &BlockTemplateRequest,
+        _request: &BlockTemplateRequest,
         submit_old: Option<bool>,
         version_bits_available: Vec<AvailableMiningRule>,
         version_bits_required: u32,
@@ -352,18 +352,12 @@ impl MiningCoordinator {
         if signet.is_some() {
             rules.push(MiningRule::new("signet"));
         }
-        let mut capabilities = vec![
+        // Capabilities are the producer's implemented set (`external-api.md`
+        // API-07); client requests never widen the advertised set.
+        let capabilities = vec![
             MiningCapability::new("proposal"),
             MiningCapability::new("longpoll"),
         ];
-        for capability in &request.capabilities {
-            if !capabilities
-                .iter()
-                .any(|known| known.as_str() == capability.as_str())
-            {
-                capabilities.push(capability.clone());
-            }
-        }
         BlockTemplate {
             candidate,
             rules,
