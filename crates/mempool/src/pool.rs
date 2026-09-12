@@ -13,7 +13,9 @@ use thiserror::Error;
 
 use crate::entry::fee_rate;
 use crate::fee_estimator::{FeeEstimator, FeeRate};
-use crate::mutation::{MutationChange, MutationOutcome, MutationResult, RemovalReason};
+use crate::mutation::{
+    MutationChange, MutationOutcome, MutationResult, MutationSequence, RemovalReason,
+};
 use crate::{
     EntryId, MempoolEntry, MempoolLimits, MempoolPolicySnapshot, ParetoFront, PolicyError,
 };
@@ -327,17 +329,14 @@ impl Mempool {
         txid: Txid,
         outcome: MutationOutcome,
     ) {
-        self.mempool_sequence = self.mempool_sequence.wrapping_add(1);
+        self.mempool_sequence = MutationSequence::advance(self.mempool_sequence);
         changes.push(crate::mutation::change(&txid, outcome));
     }
 
     /// Wraps an ordered change list into a result, deriving the batch's
     /// sequence base from the counter the changes just advanced.
     pub(crate) fn finish_mutation(&self, changes: Vec<MutationChange>) -> MutationResult {
-        let batch_len = u64::try_from(changes.len()).unwrap_or(u64::MAX);
-        let sequence_base = changes
-            .first()
-            .map_or(0, |_| self.mempool_sequence.wrapping_sub(batch_len - 1));
+        let sequence_base = MutationSequence::base(self.mempool_sequence, changes.len());
         MutationResult {
             changes,
             sequence_base,

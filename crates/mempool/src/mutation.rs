@@ -11,6 +11,32 @@ use alloc::vec::Vec;
 
 use bitcoin_rs_primitives::{Hash256, Txid};
 
+/// Canonical modulo-2^64 arithmetic for mutation sequence values.
+pub(crate) struct MutationSequence;
+
+impl MutationSequence {
+    /// Advances the sequence for one committed change.
+    pub(crate) const fn advance(current: u64) -> u64 {
+        current.wrapping_add(1)
+    }
+
+    /// Derives the first sequence value of a batch ending at `current`.
+    pub(crate) fn base(current: u64, len: usize) -> u64 {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        if len == 0 {
+            0
+        } else {
+            current.wrapping_sub(len - 1)
+        }
+    }
+
+    /// Returns the sequence value at an index in a batch.
+    pub(crate) fn at(base: u64, index: usize) -> Option<u64> {
+        let offset = u64::try_from(index).ok()?;
+        Some(base.wrapping_add(offset))
+    }
+}
+
 /// Why an entry left the pool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemovalReason {
@@ -101,8 +127,7 @@ impl MutationResult {
         if index >= self.changes.len() {
             return None;
         }
-        let offset = u64::try_from(index).ok()?;
-        Some(self.sequence_base.wrapping_add(offset))
+        MutationSequence::at(self.sequence_base, index)
     }
 
     /// The txid of every change that left the pool, in commit order.
