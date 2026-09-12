@@ -39,6 +39,13 @@ pub struct PeerCapabilities {
     pub addr_v2: bool,
 }
 
+/// BIP152 compact-block protocol version this node speaks and advertises.
+///
+/// v2 identifies transactions by wtxid and carries witness data; we send it
+/// in the handshake so peers serving us compact blocks use the witness
+/// profile. See `docs/policies/p2p-compatibility.md` §4/§5.
+pub const COMPACT_BLOCK_VERSION: u64 = 2;
+
 /// Remote BIP152 compact-block negotiation preference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompactBlockNegotiation {
@@ -46,6 +53,8 @@ pub struct CompactBlockNegotiation {
     pub remote_send_compact: Option<bool>,
     /// Compact-block protocol version requested by the peer.
     pub remote_version: Option<u64>,
+    /// Compact-block version this node advertised in its handshake `sendcmpct`.
+    pub local_version: Option<u64>,
 }
 
 impl CompactBlockNegotiation {
@@ -53,6 +62,26 @@ impl CompactBlockNegotiation {
     pub const fn record_remote_preference(&mut self, preference: &SendCmpct) {
         self.remote_send_compact = Some(preference.send_compact);
         self.remote_version = Some(preference.version);
+    }
+
+    /// Record the version this node sent in its handshake `sendcmpct`.
+    pub const fn record_local_advertised(&mut self, version: u64) {
+        self.local_version = Some(version);
+    }
+
+    /// The transaction-identity profile valid for this peer's compact blocks.
+    ///
+    /// v1 identifies transactions by txid with witness-stripped prefills;
+    /// v2 identifies them by wtxid and carries witness data. A peer that
+    /// never sent `sendcmpct`, or announced an unknown version, falls back to
+    /// the base v1 profile: short IDs are hints, so a wrong guess only costs
+    /// round trips, never a wrong block.
+    #[must_use]
+    pub const fn negotiated_version(&self) -> u64 {
+        match self.remote_version {
+            Some(2) => 2,
+            _ => 1,
+        }
     }
 }
 
