@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use crossbeam_channel::{SendTimeoutError, Sender};
 use parking_lot::RwLock;
@@ -23,6 +24,8 @@ type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 
 type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
 
+type CompactHintsHandle = Option<Arc<dyn crate::compact_blocks::CompactBlockHints + 'static>>;
+
 type SyncWakeHandle = Option<Sender<()>>;
 
 type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
@@ -37,6 +40,9 @@ pub struct ListenerExtras {
     /// Mempool / orphan / recent-rejects view for the `inv` filter and
     /// transaction `getdata` serving.
     pub tx_inventory: TxInventoryHandle,
+    /// Compact-block short-ID hints (the shared mempool gateway) for BIP152
+    /// reconstruction.
+    pub compact_hints: CompactHintsHandle,
     /// Bounded ingress for decoded `tx` bodies from Ready peers.
     pub inbound_tx: Option<Sender<crate::InboundTx>>,
 }
@@ -55,6 +61,7 @@ struct ConnectionShared {
     totals: Option<Arc<crate::TrafficTotals>>,
     chain_query: ChainQueryHandle,
     tx_inventory: TxInventoryHandle,
+    compact_hints: CompactHintsHandle,
     session_cancel: Option<Arc<AtomicBool>>,
     peer_ready: PeerReadyHandle,
 }
@@ -72,6 +79,7 @@ impl ConnectionShared {
             totals: None,
             chain_query,
             tx_inventory: None,
+            compact_hints: None,
             session_cancel: None,
             peer_ready: None,
         }
@@ -88,6 +96,7 @@ impl ConnectionShared {
             totals: Some(Arc::clone(controls.totals())),
             chain_query,
             tx_inventory: None,
+            compact_hints: None,
             session_cancel: None,
             peer_ready: None,
         }
@@ -95,6 +104,11 @@ impl ConnectionShared {
 
     fn with_tx_inventory(mut self, tx_inventory: TxInventoryHandle) -> Self {
         self.tx_inventory = tx_inventory;
+        self
+    }
+
+    fn with_compact_hints(mut self, compact_hints: CompactHintsHandle) -> Self {
+        self.compact_hints = compact_hints;
         self
     }
 
@@ -564,7 +578,8 @@ pub fn serve_bound_with_session_cancel(
     let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
         .with_session_cancel(session_cancel)
         .with_peer_ready(peer_ready)
-        .with_tx_inventory(extras.tx_inventory);
+        .with_tx_inventory(extras.tx_inventory)
+        .with_compact_hints(extras.compact_hints);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -601,7 +616,8 @@ pub fn spawn_outbound_connection_with_session_cancel(
     let mut shared = ConnectionShared::from_parts(peer_table, banned, chain_query)
         .with_session_cancel(session_cancel)
         .with_peer_ready(peer_ready)
-        .with_tx_inventory(extras.tx_inventory);
+        .with_tx_inventory(extras.tx_inventory)
+        .with_compact_hints(extras.compact_hints);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -983,6 +999,7 @@ fn run_connected_session(
         inbound_sync_sinks,
         shared.chain_query.as_deref(),
         shared.tx_inventory.as_deref(),
+        shared.compact_hints.as_deref(),
         shared.totals.as_ref(),
     );
 
@@ -992,7 +1009,12 @@ fn run_connected_session(
     drop(lease);
     let _ = writer.join();
     if let Err(error) = &loop_result {
-        tracing::warn!(peer_addr = %peer_addr, inbound, %error, "p2p peer disconnected with error");
+        tracing::warn!(
+            peer_addr = %peer_addr,
+            inbound,
+            %error,
+            "p2p peer disconnected with error"
+        );
     } else {
         tracing::debug!(peer_addr = %peer_addr, inbound, "p2p peer disconnected cleanly");
     }
@@ -1006,6 +1028,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     inbound_sync_sinks: &InboundSyncSinks,
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
     tx_inventory: Option<&dyn crate::dispatch::TxInventory>,
+    compact_hints: Option<&dyn crate::compact_blocks::CompactBlockHints>,
     totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
@@ -1015,7 +1038,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
 
     let mut last_inbound = Instant::now();
     let budget = lease.budget_handle();
-
+    let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
     loop {
         if peer.state == PeerState::Disconnecting {
             return Ok(());
@@ -1077,6 +1100,22 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     crate::Message::Pong(nonce) => {
                         lease.stats().complete_ping(nonce, unix_micros());
                     }
+                    crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
+                        let identity_version = peer
+                            .compact_blocks
+                            .local_version
+                            .unwrap_or(crate::compact_blocks::COMPACT_BLOCK_VERSION);
+                        process_compact_message(
+                            &mut compact_reconstruction,
+                            &message,
+                            identity_version,
+                            compact_hints,
+                            lease,
+                            peer_addr,
+                            inbound_sync_sinks,
+                            Instant::now(),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -1091,6 +1130,67 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Applies one BIP152 receive-side outcome: a finished block enters the
+/// ordinary block sink exactly like a `block` message, a missing list
+/// becomes a `getblocktxn` request on the same connection, and an
+/// unrecoverable reconstruction falls back to one full-block `getdata` —
+/// the node's download window resolves both by hash on arrival, so no
+/// request ownership is lost or duplicated.
+fn handle_compact_outcome(
+    outcome: crate::compact_blocks::Outcome,
+    lease: &crate::PeerLease,
+    peer_addr: SocketAddr,
+    inbound_sync_sinks: &InboundSyncSinks,
+) {
+    let follow_up = |message: crate::Message| {
+        if let Err(error) = lease.send(message) {
+            tracing::debug!(peer_addr = %peer_addr, %error, "p2p compact-block follow-up dropped");
+        }
+    };
+    match outcome {
+        crate::compact_blocks::Outcome::Complete(block) => {
+            let serialized = bitcoin_rs_primitives::consensus_bytes(&block);
+            inbound_sync_sinks.send_block(lease.source(peer_addr), block, serialized.into());
+        }
+        crate::compact_blocks::Outcome::RequestMissing(request) => {
+            follow_up(crate::Message::GetBlockTxn(request));
+        }
+        crate::compact_blocks::Outcome::Fallback(hash) => {
+            follow_up(crate::Message::GetData(vec![
+                bitcoin::p2p::message_blockdata::Inventory::WitnessBlock(
+                    bitcoin::BlockHash::from_byte_array(*hash.as_bytes()),
+                ),
+            ]));
+        }
+        crate::compact_blocks::Outcome::Idle => {}
+    }
+}
+
+/// Feeds one receive-side BIP152 message into the loop's reconstruction
+/// state and applies the outcome.
+fn process_compact_message(
+    reconstruction: &mut crate::compact_blocks::Reconstruction,
+    message: &crate::Message,
+    identity_version: u64,
+    compact_hints: Option<&dyn crate::compact_blocks::CompactBlockHints>,
+    lease: &crate::PeerLease,
+    peer_addr: SocketAddr,
+    inbound_sync_sinks: &InboundSyncSinks,
+    now: std::time::Instant,
+) {
+    let outcome = match message {
+        crate::Message::CmpctBlock(cmpct) => match compact_hints {
+            Some(hints) => reconstruction.receive_cmpctblock(cmpct, identity_version, hints, now),
+            None => crate::compact_blocks::Outcome::Fallback(
+                crate::compact_blocks::native_block_hash(cmpct.compact_block.header.block_hash()),
+            ),
+        },
+        crate::Message::BlockTxn(txns) => reconstruction.receive_blocktxn(txns, now),
+        _ => return,
+    };
+    handle_compact_outcome(outcome, lease, peer_addr, inbound_sync_sinks);
 }
 
 /// Spawns a per-connection writer thread that drains queued outbound messages
@@ -1682,7 +1782,7 @@ mod writer_shutdown_tests {
             crossbeam_channel::unbounded().0,
             None,
         );
-        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_ok());
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None, None).is_ok());
     }
 
     #[test]
@@ -1713,7 +1813,7 @@ mod writer_shutdown_tests {
         );
         peer.state = PeerState::Ready;
 
-        assert!(run_message_loop(&mut peer, addr, &old, &sinks, None, None, None).is_ok());
+        assert!(run_message_loop(&mut peer, addr, &old, &sinks, None, None, None, None).is_ok());
         assert!(headers_rx.try_recv().is_err());
         assert!(old.is_cancelled());
         assert!(table.is_current(replacement.source(addr)));
@@ -1755,7 +1855,7 @@ mod writer_shutdown_tests {
             None,
         );
 
-        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None).is_err());
+        assert!(run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None, None).is_err());
         assert_eq!(reads.load(Ordering::Relaxed), 2);
     }
 
@@ -2170,7 +2270,7 @@ mod writer_shutdown_tests {
 
         // The Pong response cannot be admitted onto the zero budget, so the
         // saturation policy cancels the lease and ends the loop.
-        let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None);
+        let result = run_message_loop(&mut peer, addr, &lease, &sinks, None, None, None, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
     }

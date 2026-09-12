@@ -111,6 +111,19 @@ impl TxInventory for bitcoin_rs_mempool::MempoolGateway {
     }
 }
 
+impl crate::compact_blocks::CompactBlockHints for bitcoin_rs_mempool::MempoolGateway {
+    fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
+        Self::for_each_identity(self, f);
+    }
+    fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+        Self::get_tx(self, txid)
+    }
+
+    fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+        Self::get_tx_by_wtxid(self, wtxid)
+    }
+}
+
 /// Chainless dispatch: collects the protocol responses and returns them.
 ///
 /// With `chain: None` responses can never contain a block body, so the batch
