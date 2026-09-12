@@ -356,9 +356,14 @@ impl PartialOrd for TxPosition {
 impl TxPosition {
     /// Creates a position from a native-endian offset and length.
     ///
-    /// Both values must fit in 24 bits (`<= U24_MAX`); wider values truncate.
+    /// Both values must fit in 24 bits; serialized blocks never exceed 4 MB,
+    /// so wider values are a caller bug, enforced in all builds.
     #[must_use]
     pub const fn new(offset: u32, byte_len: u32) -> Self {
+        assert!(
+            offset <= U24_MAX && byte_len <= U24_MAX,
+            "position does not fit in u24"
+        );
         Self {
             offset: encode_u24_le(offset),
             len: encode_u24_le(byte_len),
