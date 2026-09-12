@@ -530,6 +530,42 @@ fn p2sh_true_spend_script_sig() -> Script {
     Script::from_bytes(vec![0x01, 0x51])
 }
 
+
+/// Builds a regtest block without applying it, so `submitblock` can exercise
+/// the external-producer path where the transactions were never in the mempool.
+fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Block> {
+    let coinbase = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: null_prevout(),
+            script_sig: Script::from_bytes(
+                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+            ),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let mut block = Block {
+        header: bitcoin_rs_primitives::Header {
+            version: 0x2000_0000,
+            prev_blockhash: bitcoin_rs_primitives::BlockHash::from(prev),
+            merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
+            time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
+            bits: CompactTarget::from_consensus(REGTEST_BITS),
+            nonce: 0,
+        },
+        txs: std::iter::once(coinbase).chain(txs).collect(),
+    };
+    block.header.merkle_root = compute_merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("regtest block must have a merkle root"))?;
+    grind_pow(&mut block)?;
+    Ok(block)
+}
 /// Admits `tx` through the run-composed shared gateway exactly like
 /// `sendrawtransaction` does: full policy admission over the provisional
 /// chain view, no direct pool write.
@@ -1023,5 +1059,32 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
         "a refused parent and its withheld child must stay out"
     );
     assert!(!pool.contains_txid(&parent_txid));
+    Ok(())
+}
+
+#[test]
+fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
+
+    // A consensus-valid spend that never passes through the mempool gateway.
+    let tx = seed_coinbase_spend();
+    assert!(!state.mempool().read().contains_txid(&tx.txid()));
+
+    let block = assemble_regtest_block(seed_tip_hash, SEED_BLOCKS + 1, vec![tx])?;
+    let block_hex = hex_encode(&consensus_bytes(&block));
+
+    let handler = mining_handler(&state);
+    let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
+    assert!(verdict.is_null(), "submitblock must accept a valid block, got: {verdict}");
+
+    let tip = current_tip(&state)?;
+    assert_eq!(tip.height, SEED_BLOCKS + 1, "tip must advance by one");
+    assert_eq!(
+        tip.hash,
+        Hash256::from(block.block_hash()),
+        "tip hash must equal the submitted block hash"
+    );
     Ok(())
 }
