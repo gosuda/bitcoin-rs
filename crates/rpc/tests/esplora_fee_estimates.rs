@@ -59,7 +59,7 @@ fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
     for index in 0_u64..2 {
         let tx = spend(1_000 + u64::from(entry_height) * 16 + index);
         txs.push(tx.clone());
-        guard
+        if guard
             .insert_entry(MempoolEntry::new(
                 Arc::new(tx),
                 VSIZE,
@@ -67,7 +67,10 @@ fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
                 1,
                 entry_height,
             ))
-            .expect("seeded entries must be admissible");
+            .is_err()
+        {
+            panic!("seeded entries must be admissible");
+        }
     }
     txs
 }
@@ -85,7 +88,10 @@ fn fee_estimates(ctx: &Arc<Context>) -> BTreeMap<String, f64> {
     let handler = Handler::new(Arc::clone(ctx));
     let response = route(&handler, Surface::Public, "fee-estimates", "");
     assert_eq!(response.status, 200, "fee-estimates must answer 200");
-    sonic_rs::from_slice(&response.body).expect("fee-estimates body must parse as JSON")
+    let Ok(parsed) = sonic_rs::from_slice(&response.body) else {
+        panic!("fee-estimates body must parse as JSON");
+    };
+    parsed
 }
 
 #[test]
@@ -107,7 +113,7 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
     // the high bucket, because the lows failed target 1 — so the projected
     // number is a real mid-range rate, not the 1 sat/vB floor the old
     // `unwrap_or(1.0)` fabrication emitted.
-    let lows = admit_batch(&ctx, LOW_FEE_SATS, ENTRY_HEIGHT);
+    admit_batch(&ctx, LOW_FEE_SATS, ENTRY_HEIGHT);
     connect_block(&ctx, &[], &[], MISS_HEIGHT);
     let highs = admit_batch(&ctx, HIGH_FEE_SATS, MISS_HEIGHT);
     let high_txids: Vec<_> = highs.iter().map(Tx::txid).collect();
@@ -125,11 +131,9 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
     // RPC surface's own answer projected to sat/vB (BTC/kvB * 100 000), so a
     // wallet sees one rate everywhere; an omitted target would strand it and
     // a fabricated 1.0 would undersell the honest estimate.
-    let estimate = ctx
-        .mempool
-        .read()
-        .estimate_fee_rate(1)
-        .expect("two confirmations against two sampled misses must qualify target 1");
+    let Some(estimate) = ctx.mempool.read().estimate_fee_rate(1) else {
+        panic!("two confirmations against two sampled misses must qualify target 1");
+    };
     let sat_per_kvb = estimate.as_sat_per_kvb();
     let projected =
         f64::from(u32::try_from(sat_per_kvb).unwrap_or(u32::MAX)) / 100_000_000.0 * 100_000.0;

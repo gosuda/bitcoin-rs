@@ -1061,6 +1061,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "confirmation counts are small integers, exact in f64; exact accounting is the assertion"
+    )]
     fn reconnect_of_the_same_block_does_not_double_count_a_confirmation() {
         let mut est = FeeEstimator::new();
         est.tx_entered(test_txid(1), 2_000, 100);
@@ -1085,6 +1089,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "confirmation counts are small integers, exact in f64; exact accounting is the assertion"
+    )]
     fn confirmation_at_a_new_height_after_a_disconnect_records_exactly_once() {
         let mut est = FeeEstimator::new();
         est.tx_entered(test_txid(1), 2_000, 100);
@@ -1178,7 +1186,7 @@ mod tests {
             FeeEstimator::from_history_bytes(&bytes[..bytes.len() - 1]),
             Err(HistoryReject::Corrupt)
         ));
-        let mut trailing = bytes.clone();
+        let mut trailing = bytes;
         trailing.push(0);
         assert!(matches!(
             FeeEstimator::from_history_bytes(&trailing),
