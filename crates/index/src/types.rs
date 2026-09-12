@@ -5,17 +5,44 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 /// Number of bytes retained from hashes in electrs index rows.
 pub const HASH_PREFIX_LEN: usize = 8;
-/// Number of bytes used for little-endian block heights in index rows.
+/// Number of bytes used for big-endian block heights in index rows.
+///
+/// Big-endian makes lexicographic KV order match numeric height order within
+/// one prefix, so LSM prefix compression and chronological scans share the
+/// same key layout.
 pub const HEIGHT_SIZE: usize = 4;
 /// Serialized byte length of a hash-prefix row.
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
 /// Serialized byte length of a Bitcoin block header.
 pub const HEADER_ROW_SIZE: usize = 80;
+/// Exclusive upper bound of a packed 24-bit field (`offset`, `length`, or live `vout`).
+pub const U24_MAX: u32 = 0x00FF_FFFF;
+
+/// Encodes a block height so lexicographic byte order matches numeric order.
+#[must_use]
+pub const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
+    height.to_be_bytes()
+}
+
+/// Decodes a block height stored by [`encode_height`].
+#[must_use]
+pub const fn decode_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
+    u32::from_be_bytes(bytes)
+}
+
+const fn encode_u24_le(value: u32) -> [u8; 3] {
+    let bytes = value.to_le_bytes();
+    [bytes[0], bytes[1], bytes[2]]
+}
+
+const fn decode_u24_le(bytes: [u8; 3]) -> u32 {
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])
+}
 
 /// Prefix used as the seek key for electrs-style hash-prefix rows.
 pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 
-/// A stable electrs hash-prefix row: eight prefix bytes followed by a little-endian height.
+/// A stable electrs hash-prefix row: eight prefix bytes followed by a big-endian height.
 #[derive(
     Copy,
     Clone,
@@ -45,13 +72,13 @@ impl HashPrefixRow {
     pub const fn new(prefix: HashPrefix, height: u32) -> Self {
         Self {
             prefix,
-            height: height.to_le_bytes(),
+            height: encode_height(height),
         }
     }
 
     /// Returns the native-endian block height.
     pub const fn height(self) -> u32 {
-        u32::from_le_bytes(self.height)
+        decode_height(self.height)
     }
 
     /// Returns the serialized database row.
@@ -220,13 +247,13 @@ impl HeaderRow {
     }
 }
 
-/// Byte width of one live script-index row key: `scan-prefix || txid || vout`.
-pub const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 4;
+/// Byte width of one live script-index row key: `scan-prefix || txid || vout_u24`.
+pub const SCRIPT_LIVE_ROW_SIZE: usize = HASH_PREFIX_LEN + 32 + 3;
 
 /// One live-output row: a currently unspent outpoint filed under its script.
 ///
 /// The key is the whole row -- `scan-prefix(8) || txid(32, little-endian as
-/// rust-bitcoin serializes it) || vout(4, little-endian)` -- and the value is
+/// rust-bitcoin serializes it) || vout(3, little-endian u24)` -- and the value is
 /// empty. This is #225's full-outpoint baseline locator: the 8-byte prefix is
 /// lossy exactly like `Funding`'s (readers exact-check the resolved coin's
 /// `script_pubkey`), but the outpoint half is complete, so two scripts that
@@ -244,10 +271,11 @@ pub struct ScriptLiveRow {
 impl ScriptLiveRow {
     /// Builds the row for `outpoint` held by a script hashing to `scripthash`.
     pub fn new(scripthash: ScriptHash, outpoint: &OutPoint) -> Self {
+        debug_assert!(outpoint.vout <= U24_MAX);
         let mut key = [0_u8; SCRIPT_LIVE_ROW_SIZE];
         key[..HASH_PREFIX_LEN].copy_from_slice(&ScriptHashRow::scan_prefix(scripthash));
         key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32].copy_from_slice(outpoint.txid.as_bytes());
-        key[HASH_PREFIX_LEN + 32..].copy_from_slice(&outpoint.vout.to_le_bytes());
+        key[HASH_PREFIX_LEN + 32..].copy_from_slice(&encode_u24_le(outpoint.vout));
         Self { key }
     }
 
@@ -267,17 +295,14 @@ impl ScriptLiveRow {
     pub fn outpoint(&self) -> OutPoint {
         let mut txid = [0_u8; 32];
         txid.copy_from_slice(&self.key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32]);
-        let mut vout = [0_u8; 4];
+        let mut vout = [0_u8; 3];
         vout.copy_from_slice(&self.key[HASH_PREFIX_LEN + 32..]);
-        OutPoint::new(
-            Txid(Hash256::from_le_bytes(&txid)),
-            u32::from_le_bytes(vout),
-        )
+        OutPoint::new(Txid(Hash256::from_le_bytes(&txid)), decode_u24_le(vout))
     }
 }
 
 /// Serialized byte length of one [`TxPosition`].
-pub const TX_POSITION_SIZE: usize = 8;
+pub const TX_POSITION_SIZE: usize = 6;
 
 /// Byte position of one transaction within its block's serialized body.
 ///
@@ -300,9 +325,9 @@ pub const TX_POSITION_SIZE: usize = 8;
 #[repr(C)]
 pub struct TxPosition {
     /// Byte offset of the transaction from the start of the serialized block.
-    offset: [u8; 4],
+    offset: [u8; 3],
     /// Consensus-serialized byte length of the transaction.
-    len: [u8; 4],
+    len: [u8; 3],
 }
 
 /// Ordered numerically, so sorting a position list puts it in block order.
@@ -327,24 +352,26 @@ impl PartialOrd for TxPosition {
 
 impl TxPosition {
     /// Creates a position from a native-endian offset and length.
+    ///
+    /// Both values must fit in 24 bits (`<= U24_MAX`); wider values truncate.
     #[must_use]
     pub const fn new(offset: u32, byte_len: u32) -> Self {
         Self {
-            offset: offset.to_le_bytes(),
-            len: byte_len.to_le_bytes(),
+            offset: encode_u24_le(offset),
+            len: encode_u24_le(byte_len),
         }
     }
 
     /// Returns the native-endian byte offset within the serialized block.
     #[must_use]
     pub const fn offset(self) -> u32 {
-        u32::from_le_bytes(self.offset)
+        decode_u24_le(self.offset)
     }
 
     /// Returns the native-endian serialized transaction length.
     #[must_use]
     pub const fn byte_len(self) -> u32 {
-        u32::from_le_bytes(self.len)
+        decode_u24_le(self.len)
     }
 
     /// Returns the exclusive end offset, or `None` on overflow.
@@ -423,12 +450,12 @@ mod tests {
     };
 
     #[test]
-    fn hash_prefix_row_uses_electrs_layout() {
+    fn hash_prefix_row_uses_big_endian_height() {
         let row = HashPrefixRow::new([0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc], 123_456);
         assert_eq!(
             row.to_db_row(),
             [
-                0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc, 0x40, 0xe2, 0x01, 0x00
+                0xa3, 0x84, 0x49, 0x1d, 0x38, 0x92, 0x9f, 0xcc, 0x00, 0x01, 0xe2, 0x40
             ]
         );
         assert_eq!(row.height(), 123_456);
@@ -467,7 +494,9 @@ mod tests {
             0x1d, 0x1e, 0x1f, 0x20,
         ];
         let txid = Txid::from(Hash256::from_le_bytes(&txid_le));
-        let outpoint = OutPoint::new(txid, 0x0a0b_0c0d);
+        // Nonuniform u24 value: format 5 stores `vout` in 3 bytes, so the
+        // fixture must fit `U24_MAX` (consensus vouts always do).
+        let outpoint = OutPoint::new(txid, 0x0a0b0c);
         let row = ScriptLiveRow::new(scripthash, &outpoint);
 
         assert_eq!(&row.as_bytes()[..HASH_PREFIX_LEN], &[7_u8; 8]);
@@ -475,10 +504,7 @@ mod tests {
             &row.as_bytes()[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32],
             &txid_le
         );
-        assert_eq!(
-            &row.as_bytes()[HASH_PREFIX_LEN + 32..],
-            &[0x0d, 0x0c, 0x0b, 0x0a]
-        );
+        assert_eq!(&row.as_bytes()[HASH_PREFIX_LEN + 32..], &[0x0c, 0x0b, 0x0a]);
         assert_eq!(row.outpoint(), outpoint);
         assert_eq!(
             ScriptLiveRow::from_db_row(row.as_bytes().as_slice()),

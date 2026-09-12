@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{
     types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::SpendingPrefixRow,
-    types::TxidRow,
+    types::TxidRow, types::encode_height,
 };
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid, encode};
 use bitcoin_rs_storage::KvStore;
@@ -61,7 +61,7 @@ fn pending_rows_for_block_with_header(
         let mut visitor = IndexBlockVisitor {
             rows: &mut rows,
             header: &mut header,
-            height_bytes: height.to_le_bytes(),
+            height_bytes: encode_height(height),
             invalid_header_len: None,
             block,
             pending_funding: Vec::new(),

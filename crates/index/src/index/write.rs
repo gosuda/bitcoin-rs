@@ -6,9 +6,9 @@ use super::{
     capability::put_selected_watermarks, capability::selected_watermark, error::IndexError,
     prepared::PreparedBatch, prepared::PreparedBatchLimits, reader::Indexer, rows::IndexRowCounts,
     rows::PendingRows, rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY,
-    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_V3,
-    state::FORMAT_VERSION_VALUE, state::IndexWriteFence, state::capture_write_fence,
-    state::commit_ordinary, state::ensure_fence_live, state::resume_capability_reset,
+    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
+    state::IndexWriteFence, state::capture_write_fence, state::commit_ordinary,
+    state::ensure_fence_live, state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
@@ -30,9 +30,10 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Opens a writer over `store`, rejecting unversioned index tables.
     ///
-    /// Format 3 (Spending keys without positions) is upgraded in place by
-    /// resetting `ScriptHistory` only. Any other version mismatch is
-    /// [`IndexError::UnsupportedTxIndexFormatVersion`].
+    /// Format 5 changed every row family (big-endian heights, 43-byte live
+    /// rows, 6-byte positions), so any older marker is
+    /// [`IndexError::UnsupportedTxIndexFormatVersion`]; recovery full-resets
+    /// the store for rebuild. No in-place upgrade path exists.
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
         let indexer = Indexer::new(store);
         match indexer
@@ -40,16 +41,6 @@ impl<S: KvStore> IndexWriter<S> {
             .get(ColumnFamily::UtxoMeta, FORMAT_VERSION_KEY)?
         {
             Some(value) if value.as_slice() == FORMAT_VERSION_VALUE => {}
-            Some(value) if value.as_slice() == FORMAT_VERSION_V3 => {
-                // Only Spending's representation changed. Reset ScriptHistory
-                // so new spending rows carry positions, and leave TxLookup
-                // serving (`IDX-04`). Foreign versions still refuse start.
-                resume_capability_reset(
-                    indexer.store.as_ref(),
-                    generation,
-                    IndexCapabilities::SCRIPT_HISTORY.to_mask(),
-                )?;
-            }
             Some(value) => {
                 let version = value
                     .get(..4)
