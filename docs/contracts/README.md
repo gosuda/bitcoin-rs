@@ -41,6 +41,7 @@ The overhaul suites map to current contracts, not task numbers:
 
 - `bin/bitcoin-rs/tests/overhaul_process_harness.rs` → `REF-02`, `REF-07`
 - `bin/bitcoin-rs/tests/overhaul_evidence.rs` → `HPA-12`
+- `bin/bitcoin-rs/tests/overhaul_external_miner.rs` → `API-14`, `API-15`
 - `bin/bitcoin-rs/tests/overhaul_ownership.rs` → `ARCH-01`, `ARCH-02`, `ARCH-08`
 - `crates/consensus/tests/overhaul_parse_parity.rs` → `VAL-02`
 - `crates/consensus/tests/overhaul_prepared_inputs.rs` → `POL-03`, `VAL-02`
