@@ -70,14 +70,14 @@ pub struct CapabilitySnapshot {
 }
 
 /// Live txindex row. The worker maps its own lifecycle onto [`CapabilityStatus`].
-pub trait TxIndexCapabilitySource: Send + Sync {
+pub trait DerivedIndexCapabilitySource: Send + Sync {
     /// Compiled/enabled/lifecycle row for the txindex capability.
     fn capability(&self) -> CapabilityStatus;
 }
 
 /// Construct the stable txindex row from its enablement and lifecycle state.
 #[must_use]
-pub fn txindex_status(enabled: bool, state: CapabilityState) -> CapabilityStatus {
+pub fn derived_index_status(enabled: bool, state: CapabilityState) -> CapabilityStatus {
     CapabilityStatus {
         id: TXINDEX_CAPABILITY.to_owned(),
         compiled: true,
@@ -89,15 +89,15 @@ pub fn txindex_status(enabled: bool, state: CapabilityState) -> CapabilityStatus
 /// Disabled txindex row used when no worker is attached.
 #[must_use]
 pub fn disabled_txindex() -> CapabilityStatus {
-    txindex_status(false, CapabilityState::Disabled)
+    derived_index_status(false, CapabilityState::Disabled)
 }
 
 /// Point-in-time `getcapabilities` snapshot for the concrete txindex row.
 #[must_use]
-pub fn txindex_snapshot(source: Option<&dyn TxIndexCapabilitySource>) -> CapabilitySnapshot {
+pub fn txindex_snapshot(source: Option<&dyn DerivedIndexCapabilitySource>) -> CapabilitySnapshot {
     CapabilitySnapshot {
         capabilities: vec![
-            source.map_or_else(disabled_txindex, TxIndexCapabilitySource::capability),
+            source.map_or_else(disabled_txindex, DerivedIndexCapabilitySource::capability),
         ],
     }
 }
@@ -108,9 +108,9 @@ mod tests {
 
     struct ReadyEnabled;
 
-    impl TxIndexCapabilitySource for ReadyEnabled {
+    impl DerivedIndexCapabilitySource for ReadyEnabled {
         fn capability(&self) -> CapabilityStatus {
-            txindex_status(true, CapabilityState::Ready)
+            derived_index_status(true, CapabilityState::Ready)
         }
     }
 
@@ -127,7 +127,7 @@ mod tests {
         let snapshot = txindex_snapshot(Some(&ReadyEnabled));
         assert_eq!(
             snapshot.capabilities,
-            vec![txindex_status(true, CapabilityState::Ready)]
+            vec![derived_index_status(true, CapabilityState::Ready)]
         );
     }
 }

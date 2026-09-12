@@ -109,7 +109,7 @@ fn catch_up_uses_one_body_reader_session() -> Result<(), Box<dyn std::error::Err
     let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
     applied_tip.store(Some(Arc::new(tip.clone())));
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let data_dir = tempfile::tempdir()?;
     let index_store = Arc::new(bitcoin_rs_storage::FjallStore::open(data_dir.path())?);
     let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(

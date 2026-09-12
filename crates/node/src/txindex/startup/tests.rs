@@ -6,18 +6,21 @@ use super::*;
 #[test]
 fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Result<()> {
     for error in [
-        TxIndexWorkerError::OpenStopped,
-        TxIndexWorkerError::OpenTimeout { secs: 1 },
+        DerivedIndexWorkerError::OpenStopped,
+        DerivedIndexWorkerError::OpenTimeout { secs: 1 },
     ] {
         let dir = tempfile::tempdir()?;
         let key = dir.path().join("txindex");
         let generation = Generation::new(1);
-        let runtime = TxIndexRuntime::new(crossbeam_channel::bounded(1).0);
-        let lifecycle = Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+        let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
+        let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
         assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
         finish_worker(&runtime, &lifecycle, &generation, &key, Err(error));
         assert!(runtime.should_stop());
-        assert!(matches!(**lifecycle.load(), TxIndexLifecycle::Failed(_)));
+        assert!(matches!(
+            **lifecycle.load(),
+            DerivedIndexLifecycle::Failed(_)
+        ));
         assert!(NAMESPACE_REGISTRY.is_poisoned(&key));
         assert!(!NAMESPACE_REGISTRY.claim(key, 2));
     }
@@ -29,14 +32,14 @@ fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Res
 fn completed_worker_outcomes_release_without_poisoning() -> std::io::Result<()> {
     for result in [
         Ok(()),
-        Err(TxIndexWorkerError::Stopped),
-        Err(TxIndexWorkerError::NoBodyStore),
+        Err(DerivedIndexWorkerError::Stopped),
+        Err(DerivedIndexWorkerError::NoBodyStore),
     ] {
         let dir = tempfile::tempdir()?;
         let key = dir.path().join("txindex");
         let generation = Generation::new(1);
-        let runtime = TxIndexRuntime::new(crossbeam_channel::bounded(1).0);
-        let lifecycle = Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+        let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
+        let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
         assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
         finish_worker(&runtime, &lifecycle, &generation, &key, result);
         assert!(!NAMESPACE_REGISTRY.is_poisoned(&key));

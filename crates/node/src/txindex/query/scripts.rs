@@ -1,12 +1,12 @@
 //! Script history, spending, and live-view reads under the shared snapshot gate.
 
 use super::{
-    OutPoint, QueryBudget, ScriptHash, ScriptHistoryRecord, ScriptIndexRecord, ScriptIndexSnapshot,
-    ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexQueryEngine, TxIndexScanRow,
-    TxIndexSnapshot, TxQueryError, Txid,
+    DerivedIndexQueryEngine, OutPoint, QueryBudget, ScriptHash, ScriptHistoryRecord,
+    ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx,
+    TxIndexScanRow, TxIndexSnapshot, TxQueryError, Txid,
 };
 
-impl TxIndexQueryEngine {
+impl DerivedIndexQueryEngine {
     fn scan_funding_rows(
         snapshot: &dyn TxIndexSnapshot,
         budget: &mut QueryBudget,

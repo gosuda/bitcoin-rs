@@ -299,7 +299,7 @@ mod tests {
         }
     }
 
-    impl crate::context::TxIndexQuery for StaticTxIndex {
+    impl crate::context::DerivedIndexQuery for StaticTxIndex {
         fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
             Ok((self.transaction.txid() == *txid).then(|| self.transaction.clone()))
         }
@@ -322,8 +322,8 @@ mod tests {
                 .flatten())
         }
 
-        fn index_info(&self) -> Result<crate::context::TxIndexInfo, TxQueryError> {
-            Ok(crate::context::TxIndexInfo {
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            Ok(crate::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 0,
             })
@@ -335,7 +335,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
-    impl crate::context::TxIndexQuery for CountingTxIndex {
+    impl crate::context::DerivedIndexQuery for CountingTxIndex {
         fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(self
@@ -349,8 +349,8 @@ mod tests {
             Ok(None)
         }
 
-        fn index_info(&self) -> Result<crate::context::TxIndexInfo, TxQueryError> {
-            Ok(crate::context::TxIndexInfo {
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            Ok(crate::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 0,
             })
@@ -359,7 +359,7 @@ mod tests {
 
     struct FixtureTxIndex(Vec<(Tx, u32)>);
 
-    impl crate::context::TxIndexQuery for FixtureTxIndex {
+    impl crate::context::DerivedIndexQuery for FixtureTxIndex {
         fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
             Ok(self
                 .0
@@ -390,8 +390,8 @@ mod tests {
                 .map(|(_, height)| *height))
         }
 
-        fn index_info(&self) -> Result<crate::context::TxIndexInfo, TxQueryError> {
-            Ok(crate::context::TxIndexInfo {
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            Ok(crate::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: self.0.iter().map(|(_, height)| *height).max().unwrap_or(0),
             })

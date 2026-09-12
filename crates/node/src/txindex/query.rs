@@ -3,14 +3,14 @@
 //! entrypoints retain health, revision, watermark, and chain-transition checks.
 
 use super::{
-    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, Hash256,
-    IndexCapabilities, IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES,
-    Mutex, Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT,
-    QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, RwLock, ScriptHash, ScriptHistoryRecord,
-    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord,
-    TipSnapshot, Tx, TxIndexInfo, TxIndexQuery, TxIndexRuntime, TxIndexScan, TxIndexScanRow,
-    TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
-    record_at_height,
+    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, DerivedIndexInfo,
+    DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities, IndexCapability,
+    IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Mutex, Ordering, OutPoint,
+    PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT,
+    QUERY_SCAN_ROW_LIMIT, RwLock, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery,
+    ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx,
+    TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid,
+    deserialize, record_at_height,
 };
 
 mod block_source;
@@ -31,14 +31,14 @@ pub(crate) struct QueryEngineLive {
 
 /// Node-owned, snapshot-gated transaction-index query engine.
 ///
-/// Implements `bitcoin_rs_rpc::context::TxIndexQuery` and [`ScriptIndexQuery`] as the
+/// Implements `bitcoin_rs_rpc::context::DerivedIndexQuery` and [`ScriptIndexQuery`] as the
 /// only public read paths for the transaction index. Every query runs against
 /// one typed point-in-time snapshot, captures
 /// health/shutdown/revision/tip before and after work, and returns typed
 /// `Retry`/`Unavailable` when the answer cannot be proven.
 #[derive(Clone)]
-pub(crate) struct TxIndexQueryEngine {
-    runtime: Arc<TxIndexRuntime>,
+pub(crate) struct DerivedIndexQueryEngine {
+    runtime: Arc<DerivedIndexRuntime>,
     reader: Arc<dyn IndexReader>,
     block_source: IndexBlockSource,
     block_tree: Arc<RwLock<BlockTree>>,
@@ -49,17 +49,18 @@ pub(crate) struct TxIndexQueryEngine {
     enabled: IndexCapabilities,
 }
 
-impl core::fmt::Debug for TxIndexQueryEngine {
+impl core::fmt::Debug for DerivedIndexQueryEngine {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("TxIndexQueryEngine").finish_non_exhaustive()
+        f.debug_struct("DerivedIndexQueryEngine")
+            .finish_non_exhaustive()
     }
 }
 
-impl TxIndexQueryEngine {
+impl DerivedIndexQueryEngine {
     /// Builds a query engine over the shared reader and authoritative block source.
     #[must_use]
     pub(crate) fn new(
-        runtime: Arc<TxIndexRuntime>,
+        runtime: Arc<DerivedIndexRuntime>,
         reader: Arc<dyn IndexReader>,
         block_source: IndexBlockSource,
         block_tree: Arc<RwLock<BlockTree>>,
@@ -282,7 +283,7 @@ pub(crate) struct IndexProgress {
     pub target_height: u32,
 }
 
-impl TxIndexQuery for TxIndexQueryEngine {
+impl DerivedIndexQuery for DerivedIndexQueryEngine {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
         self.with_snapshot(IndexCapabilities::TX_LOOKUP, |snapshot, tip, budget| {
             self.transaction_for(snapshot, tip, budget, txid)
@@ -303,16 +304,16 @@ impl TxIndexQuery for TxIndexQueryEngine {
         })
     }
 
-    fn index_info(&self) -> Result<TxIndexInfo, TxQueryError> {
+    fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
         let progress = self.index_progress_for(IndexCapabilities::TX_LOOKUP)?;
-        Ok(TxIndexInfo {
+        Ok(DerivedIndexInfo {
             synced: progress.synced,
             best_block_height: progress.processed_height,
         })
     }
 }
 
-impl ScriptIndexQuery for TxIndexQueryEngine {
+impl ScriptIndexQuery for DerivedIndexQueryEngine {
     fn history_snapshot(
         &self,
         scripthash: ScriptHash,

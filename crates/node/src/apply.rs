@@ -1265,11 +1265,11 @@ impl<'b> BlockLocalUtxoView<'b> {
 
     fn lookup_meta(&self, outpoint: &OutPoint) -> Option<LiveOutputMeta> {
         if let Some(entry) = self.overlay.get(outpoint) {
-            let tx_index = usize::try_from((*entry)?).ok()?;
+            let derived_index = usize::try_from((*entry)?).ok()?;
             let vout = usize::try_from(outpoint.vout).ok()?;
-            self.txdata.get(tx_index)?.outputs.get(vout)?;
+            self.txdata.get(derived_index)?.outputs.get(vout)?;
             return Some(LiveOutputMeta {
-                coinbase: tx_index == 0,
+                coinbase: derived_index == 0,
                 height: self.height,
             });
         }
@@ -1284,14 +1284,14 @@ impl<'b> BlockLocalUtxoView<'b> {
 
     fn add_outputs(
         &mut self,
-        tx_index: u32,
+        derived_index: u32,
         txid: Txid,
         output_count: usize,
     ) -> core::result::Result<(), ApplyError> {
         for vout in 0..output_count {
             let vout = u32::try_from(vout).map_err(|_| ApplyError::HeightOverflow(self.height))?;
             self.overlay
-                .insert(OutPoint::new(txid, vout), Some(tx_index));
+                .insert(OutPoint::new(txid, vout), Some(derived_index));
         }
         Ok(())
     }
@@ -1300,9 +1300,9 @@ impl<'b> BlockLocalUtxoView<'b> {
 impl UtxoView for BlockLocalUtxoView<'_> {
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
         if let Some(entry) = self.overlay.get(outpoint) {
-            let tx_index = usize::try_from((*entry)?).ok()?;
+            let derived_index = usize::try_from((*entry)?).ok()?;
             let vout = usize::try_from(outpoint.vout).ok()?;
-            return self.txdata.get(tx_index)?.outputs.get(vout).cloned();
+            return self.txdata.get(derived_index)?.outputs.get(vout).cloned();
         }
         self.base.lookup(outpoint)
     }

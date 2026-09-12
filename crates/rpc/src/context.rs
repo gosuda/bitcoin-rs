@@ -517,7 +517,7 @@ pub enum ChainControlError {
 
 /// Actual progress reported by the node-owned transaction index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TxIndexInfo {
+pub struct DerivedIndexInfo {
     /// Whether the index has completely caught up to the authoritative chain tip.
     pub synced: bool,
     /// Height of the best block completely covered by the index.
@@ -539,7 +539,7 @@ pub enum TxQueryError {
 }
 
 /// Lockless read-only adapter for complete transaction-index queries.
-pub trait TxIndexQuery: Send + Sync {
+pub trait DerivedIndexQuery: Send + Sync {
     /// Resolves a confirmed transaction, returning `None` only after complete absence is proven.
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError>;
     /// Resolves a confirmed prevout value, returning `None` only after complete absence is proven.
@@ -555,7 +555,7 @@ pub trait TxIndexQuery: Send + Sync {
         Ok(None)
     }
     /// Returns the transaction index's actual durable progress.
-    fn index_info(&self) -> Result<TxIndexInfo, TxQueryError>;
+    fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError>;
 }
 
 /// One current unspent output indexed for a script.
@@ -664,7 +664,7 @@ pub struct ContextHandles {
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
     /// Live txindex status for the `getcapabilities` projection.
-    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexCapabilitySource>>,
+    pub derived_index_status: Option<Arc<dyn crate::capabilities::DerivedIndexCapabilitySource>>,
 }
 
 /// Chain capability handles.
@@ -763,7 +763,7 @@ pub struct MempoolHandles {
 #[derive(Clone)]
 pub struct IndexHandles {
     /// Complete transaction-index query adapter.
-    pub tx_index: Option<Arc<dyn TxIndexQuery>>,
+    pub derived_index: Option<Arc<dyn DerivedIndexQuery>>,
     /// Generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
 }
@@ -836,16 +836,16 @@ pub struct Context {
     pub mining_control: Option<Arc<dyn MiningControl>>,
     /// Optional node-owned complete transaction-index query adapter.
     /// `None` when transaction indexing is disabled.
-    pub tx_index: Option<Arc<dyn TxIndexQuery>>,
+    pub derived_index: Option<Arc<dyn DerivedIndexQuery>>,
     /// Complete transaction lookup used internally by Esplora projections.
     ///
-    /// This may be available with `--scriptindex` even when `tx_index` is
+    /// This may be available with `--scriptindex` even when `derived_index` is
     /// absent, because it does not advertise the Core `--txindex` contract.
-    pub esplora_tx_index: Option<Arc<dyn TxIndexQuery>>,
+    pub esplora_tx_index: Option<Arc<dyn DerivedIndexQuery>>,
     /// Optional node-owned generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
     /// Live txindex status for the `getcapabilities` projection.
-    pub txindex_status: Option<Arc<dyn crate::capabilities::TxIndexCapabilitySource>>,
+    pub derived_index_status: Option<Arc<dyn crate::capabilities::DerivedIndexCapabilitySource>>,
     /// Network counters and peers.
     pub network: Arc<RwLock<NetworkState>>,
     /// Network selector used by handlers needing consensus parameters (e.g.
@@ -926,10 +926,10 @@ impl Context {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             utxo: Arc::new(utxo),
             coin_stats,
-            tx_index: None,
+            derived_index: None,
             esplora_tx_index: None,
             script_index: None,
-            txindex_status: None,
+            derived_index_status: None,
             prune_service: None,
             chain_control: None,
             peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
@@ -978,10 +978,10 @@ impl Context {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             utxo: Arc::new(utxo),
             coin_stats,
-            tx_index: None,
+            derived_index: None,
             esplora_tx_index: None,
             script_index: None,
-            txindex_status: None,
+            derived_index_status: None,
             prune_service: None,
             chain_control: None,
             peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
@@ -1018,7 +1018,7 @@ impl Context {
             mempool: MempoolHandles { mempool },
             indexes:
                 IndexHandles {
-                    tx_index,
+                    derived_index,
                     script_index,
                 },
             network:
@@ -1031,7 +1031,7 @@ impl Context {
                     added_nodes,
                 },
             mining: MiningHandles { mining_control },
-            txindex_status,
+            derived_index_status,
         } = handles;
         Self {
             chain_tip,
@@ -1044,10 +1044,10 @@ impl Context {
             transactions,
             utxo,
             coin_stats,
-            tx_index,
+            derived_index,
             esplora_tx_index: None,
             script_index,
-            txindex_status,
+            derived_index_status,
             network,
             chain_network,
             peer_table,
@@ -1070,8 +1070,11 @@ impl Context {
     /// Attaches the internal transaction lookup required for Esplora output
     /// projections without exposing it to Core transaction-index RPCs.
     #[must_use]
-    pub fn with_esplora_tx_index(mut self, tx_index: Option<Arc<dyn TxIndexQuery>>) -> Self {
-        self.esplora_tx_index = tx_index;
+    pub fn with_esplora_derived_index(
+        mut self,
+        derived_index: Option<Arc<dyn DerivedIndexQuery>>,
+    ) -> Self {
+        self.esplora_tx_index = derived_index;
         self
     }
 
@@ -1719,7 +1722,7 @@ mod tests {
                 )))),
             },
             indexes: IndexHandles {
-                tx_index: None,
+                derived_index: None,
                 script_index: None,
             },
             network: NetworkHandles {
@@ -1733,7 +1736,7 @@ mod tests {
             mining: MiningHandles {
                 mining_control: None,
             },
-            txindex_status: None,
+            derived_index_status: None,
         });
         assert!(
             Arc::ptr_eq(&ctx.chain_tip, &chain_tip),

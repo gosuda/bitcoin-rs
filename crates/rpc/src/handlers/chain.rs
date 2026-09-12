@@ -744,7 +744,7 @@ struct FeeFields {
 }
 
 fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, TxQueryError> {
-    let Some(tx_index) = ctx.tx_index.as_ref() else {
+    let Some(derived_index) = ctx.derived_index.as_ref() else {
         return Err(TxQueryError::Unavailable(
             "transaction index disabled".into(),
         ));
@@ -754,7 +754,7 @@ fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, 
     for tx in block.txs.iter().skip(1) {
         let mut total_in = 0_u64;
         for input in &tx.inputs {
-            match tx_index.outpoint_value(&input.previous_output) {
+            match derived_index.outpoint_value(&input.previous_output) {
                 Ok(Some(value)) => total_in = total_in.saturating_add(value),
                 Ok(None) => {
                     return Err(TxQueryError::Unavailable(
@@ -900,14 +900,14 @@ fn utxo_size_inc_for_block(ctx: &Context, block: &Block) -> Result<i64, TxQueryE
     if block.txs.len() <= 1 {
         return Ok(size_inc);
     }
-    let Some(tx_index) = ctx.tx_index.as_ref() else {
+    let Some(derived_index) = ctx.derived_index.as_ref() else {
         return Err(TxQueryError::Unavailable(
             "transaction index disabled".into(),
         ));
     };
     for tx in block.txs.iter().skip(1) {
         for input in &tx.inputs {
-            let Some(prev) = tx_index.transaction(&input.previous_output.txid)? else {
+            let Some(prev) = derived_index.transaction(&input.previous_output.txid)? else {
                 return Err(TxQueryError::Unavailable(
                     "input transaction missing from complete index".into(),
                 ));
@@ -1115,9 +1115,9 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     };
 
     let txindex_entry = ctx
-        .tx_index
+        .derived_index
         .as_ref()
-        .map(|tx_index| tx_index.index_info())
+        .map(|derived_index| derived_index.index_info())
         .transpose()?;
     let txindex_entry = txindex_entry.map(|info| v31::GetIndexInfoName {
         synced: info.synced,
@@ -1149,7 +1149,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 /// `Status::Extension` in the compatibility manifest.
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let snapshot = crate::capabilities::txindex_snapshot(ctx.txindex_status.as_deref());
+    let snapshot = crate::capabilities::txindex_snapshot(ctx.derived_index_status.as_deref());
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 

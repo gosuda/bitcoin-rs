@@ -1,12 +1,12 @@
 //! Exact-identity block reads and transaction position verification.
 
 use super::{
-    Block, BlockHash, BlockTree, Hash256, MAX_SERIALIZED_BLOCK_BYTES, OutPoint, QueryBudget,
-    TipSnapshot, Tx, TxIndexQueryEngine, TxIndexSnapshot, TxPosition, TxPositionValue,
+    Block, BlockHash, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES,
+    OutPoint, QueryBudget, TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,
     TxQueryError, Txid, deserialize,
 };
 
-impl TxIndexQueryEngine {
+impl DerivedIndexQueryEngine {
     pub(super) fn resolve_hash_at_height(
         &self,
         height: u32,

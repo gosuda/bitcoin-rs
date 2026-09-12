@@ -8,8 +8,8 @@ use super::events::ChainEventPublisher;
 use super::events::ChainSnapshot;
 use super::events::allocate_process_epoch;
 use super::index::TxIndexSpawn;
-use super::index::build_tx_index_open_spec;
-use super::index::tx_index_capabilities;
+use super::index::build_derived_index_open_spec;
+use super::index::derived_index_capabilities;
 use super::restore::InitialChainstate;
 use super::restore::ResumeSource;
 use super::restore::STALE_RESTORE_ERROR_THRESHOLD;
@@ -77,7 +77,7 @@ impl NodeState {
         let cache_budget = bitcoin_rs_storage::clamp_dbcache_bytes(config.storage.dbcache_mb);
         let cache_shares = bitcoin_rs_storage::split_cache_budget(
             cache_budget,
-            !tx_index_capabilities(&config).is_empty(),
+            !derived_index_capabilities(&config).is_empty(),
         );
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
@@ -267,47 +267,52 @@ impl NodeState {
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
         let chain_transition = Arc::new(parking_lot::Mutex::new(()));
-        let tx_index_open_spec = build_tx_index_open_spec(&config, txindex_cache_bytes, epoch)?;
-        let (tx_index_runtime, tx_index_spawn, tx_index_lifecycle, tx_index_adapter) =
-            match tx_index_open_spec {
-                Some(mut spec) => {
-                    spec.utxo = Some(Arc::clone(&utxo));
-                    spec.chain_transition = Some(Arc::clone(&chain_transition));
-                    let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-                    let runtime = Arc::new(crate::txindex::TxIndexRuntime::new(wake_tx));
-                    let body_source: Arc<dyn BlockBodySource> =
-                        Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
-                    let block_source = crate::txindex::IndexBlockSource::new(Arc::clone(&blocks))
-                        .with_block_body_source(Arc::clone(&body_source))
-                        .with_block_tree(Arc::clone(&block_tree));
-                    let lifecycle: Arc<arc_swap::ArcSwap<crate::txindex::TxIndexLifecycle>> =
-                        Arc::new(arc_swap::ArcSwap::from_pointee(
-                            crate::txindex::TxIndexLifecycle::Opening,
-                        ));
-                    let adapter = Arc::new(crate::txindex::TxIndexQueryAdapter::new(Arc::clone(
-                        &lifecycle,
-                    )));
-                    let generation = crate::txindex::Generation::new(spec.epoch);
-                    (
-                        Some(runtime),
-                        Some(TxIndexSpawn {
-                            spec,
-                            generation,
-                            block_source,
-                            body_source,
-                            wake_rx,
-                            recovery_reporter: Arc::clone(&recovery_reporter),
-                        }),
-                        Some(lifecycle),
-                        Some(adapter),
-                    )
-                }
-                None => (None, None, None, None),
-            };
-        let txindex_status = Arc::new(crate::txindex::TxIndexCapability::new(
-            tx_index_lifecycle.clone(),
-            tx_index_runtime.clone(),
-            tx_index_capabilities(&config),
+        let derived_index_open_spec =
+            build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
+        let (
+            derived_index_runtime,
+            derived_index_spawn,
+            derived_index_lifecycle,
+            derived_index_adapter,
+        ) = match derived_index_open_spec {
+            Some(mut spec) => {
+                spec.utxo = Some(Arc::clone(&utxo));
+                spec.chain_transition = Some(Arc::clone(&chain_transition));
+                let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+                let runtime = Arc::new(crate::txindex::DerivedIndexRuntime::new(wake_tx));
+                let body_source: Arc<dyn BlockBodySource> =
+                    Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
+                let block_source = crate::txindex::IndexBlockSource::new(Arc::clone(&blocks))
+                    .with_block_body_source(Arc::clone(&body_source))
+                    .with_block_tree(Arc::clone(&block_tree));
+                let lifecycle: Arc<arc_swap::ArcSwap<crate::txindex::DerivedIndexLifecycle>> =
+                    Arc::new(arc_swap::ArcSwap::from_pointee(
+                        crate::txindex::DerivedIndexLifecycle::Opening,
+                    ));
+                let adapter = Arc::new(crate::txindex::DerivedIndexQueryAdapter::new(Arc::clone(
+                    &lifecycle,
+                )));
+                let generation = crate::txindex::Generation::new(spec.epoch);
+                (
+                    Some(runtime),
+                    Some(TxIndexSpawn {
+                        spec,
+                        generation,
+                        block_source,
+                        body_source,
+                        wake_rx,
+                        recovery_reporter: Arc::clone(&recovery_reporter),
+                    }),
+                    Some(lifecycle),
+                    Some(adapter),
+                )
+            }
+            None => (None, None, None, None),
+        };
+        let derived_index_status = Arc::new(crate::txindex::DerivedIndexCapability::new(
+            derived_index_lifecycle.clone(),
+            derived_index_runtime.clone(),
+            derived_index_capabilities(&config),
         ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
@@ -375,7 +380,7 @@ impl NodeState {
             crate::chain_effects::ChainEffects::new(
                 Arc::clone(&blocks),
                 Arc::clone(&zmq_publisher),
-                tx_index_runtime.clone(),
+                derived_index_runtime.clone(),
             ),
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
@@ -471,12 +476,12 @@ impl NodeState {
             block_body_store,
             utxo,
             coin_stats,
-            tx_index_runtime,
-            tx_index_spawn,
-            tx_index_worker: None,
-            tx_index_lifecycle,
-            tx_index_adapter,
-            txindex_status,
+            derived_index_runtime,
+            derived_index_spawn,
+            derived_index_worker: None,
+            derived_index_lifecycle,
+            derived_index_adapter,
+            derived_index_status,
             prune_service,
             zmq_publisher,
             mempool,

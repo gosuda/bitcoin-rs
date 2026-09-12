@@ -65,7 +65,7 @@ pub(super) fn bind_rpc(
             mempool: state.mempool_gateway(),
         },
         indexes: IndexHandles {
-            tx_index: state.tx_index_query(),
+            derived_index: state.derived_index_query(),
             script_index: state.script_index_query(),
         },
         network: NetworkHandles {
@@ -79,9 +79,9 @@ pub(super) fn bind_rpc(
         mining: MiningHandles {
             mining_control: Some(Arc::clone(mining_control)),
         },
-        txindex_status: Some(state.txindex_status()),
+        derived_index_status: Some(state.derived_index_status()),
     })
-    .with_esplora_tx_index(state.esplora_tx_index_query())
+    .with_esplora_derived_index(state.esplora_derived_index_query())
     .with_block_body_source(block_body_source)
     .with_chain_transition(Arc::clone(&state.chainstate().chain_transition));
     if let Some(prune_service) = state.prune_service() {

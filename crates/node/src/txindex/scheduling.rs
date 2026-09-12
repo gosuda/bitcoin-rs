@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
-use super::TxIndexRuntime;
+use super::DerivedIndexRuntime;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BatchWait {
@@ -17,7 +17,7 @@ pub(super) enum BatchWait {
 }
 
 pub(super) fn wait_for_revision_quiet(
-    runtime: &TxIndexRuntime,
+    runtime: &DerivedIndexRuntime,
     wake_rx: &Receiver<()>,
     quiet_period: Duration,
     mut seen_revision: u64,
@@ -41,7 +41,7 @@ pub(super) fn wait_for_revision_quiet(
 }
 /// Waits for a wake hint or the pending batch's original deadline.
 pub(super) fn wait_for_batch_deadline(
-    runtime: &TxIndexRuntime,
+    runtime: &DerivedIndexRuntime,
     wake_rx: &Receiver<()>,
     deadline: Instant,
 ) -> BatchWait {

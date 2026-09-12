@@ -1,6 +1,6 @@
 //! Capability rollback, selective rebuilding, live seeding, and recovery evidence.
 
-use super::TxIndexWorkerError;
+use super::DerivedIndexWorkerError;
 use super::UndoScripts;
 use super::Worker;
 use bitcoin_rs_chain::TipSnapshot;
@@ -29,12 +29,12 @@ pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> O
 }
 
 impl Worker {
-    pub(super) fn seed_live_from_utxo(&self) -> Result<(), TxIndexWorkerError> {
+    pub(super) fn seed_live_from_utxo(&self) -> Result<(), DerivedIndexWorkerError> {
         let Some(utxo) = self.utxo.as_ref() else {
-            return Err(TxIndexWorkerError::MissingUtxo);
+            return Err(DerivedIndexWorkerError::MissingUtxo);
         };
         let Some(chain_transition) = self.chain_transition.as_ref() else {
-            return Err(TxIndexWorkerError::MissingChainTransition);
+            return Err(DerivedIndexWorkerError::MissingChainTransition);
         };
         // Hold chain-transition until the stable UTXO view is acquired so
         // `target` names the exact state we traverse. Release the transition
@@ -74,7 +74,7 @@ impl Worker {
                 },
                 target,
             )
-            .map_err(TxIndexWorkerError::Index)?;
+            .map_err(DerivedIndexWorkerError::Index)?;
         tracing::info!(
             height = target.height,
             rows = written,
@@ -88,15 +88,15 @@ impl Worker {
     pub(super) fn reset_for_rebuild(
         &self,
         capabilities: IndexCapabilities,
-    ) -> Result<(IndexWriteFence, IndexWatermarks), TxIndexWorkerError> {
+    ) -> Result<(IndexWriteFence, IndexWatermarks), DerivedIndexWorkerError> {
         self.writer
             .reset_capabilities(capabilities)
-            .map_err(TxIndexWorkerError::Index)?;
+            .map_err(DerivedIndexWorkerError::Index)?;
         self.runtime
             .publish_leg(capabilities, ReconcileLeg::Rebuilding);
         self.writer
             .fenced_watermarks()
-            .map_err(TxIndexWorkerError::Index)
+            .map_err(DerivedIndexWorkerError::Index)
     }
 
     /// Publishes the index-ahead rollback evidence for a watermark above the
@@ -107,7 +107,7 @@ impl Worker {
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
         target: &TipSnapshot,
-    ) -> Result<(), TxIndexWorkerError> {
+    ) -> Result<(), DerivedIndexWorkerError> {
         let Some(capability) = index_ahead_capability_label(capabilities) else {
             return Ok(());
         };
@@ -124,7 +124,7 @@ impl Worker {
                 watermark.height.saturating_sub(target.height),
                 now,
             )
-            .map_err(TxIndexWorkerError::RollbackEvidence)
+            .map_err(DerivedIndexWorkerError::RollbackEvidence)
     }
 
     /// Rolls back one complete block for every selected capability.
@@ -134,7 +134,7 @@ impl Worker {
         watermarks: IndexWatermarks,
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
-    ) -> Result<Option<IndexWatermark>, TxIndexWorkerError> {
+    ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
         let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
         let body = self.load_body(watermark.height, watermark_hash)?;
         let anchor = capabilities
@@ -157,7 +157,7 @@ impl Worker {
                     &body,
                     spent,
                 )
-                .map_err(TxIndexWorkerError::Index)?;
+                .map_err(DerivedIndexWorkerError::Index)?;
             Some(IndexWatermark {
                 height: watermark.height.saturating_sub(1),
                 hash: prepared.parent_hash,
@@ -165,7 +165,7 @@ impl Worker {
         };
 
         if self.runtime.should_stop() {
-            return Err(TxIndexWorkerError::Stopped);
+            return Err(DerivedIndexWorkerError::Stopped);
         }
         let cursor = self.cursor_for_result(capabilities, prev, watermarks);
         let cursor = cursor
@@ -182,7 +182,7 @@ impl Worker {
                 cursor,
                 spent,
             )
-            .map_err(TxIndexWorkerError::Index)?;
+            .map_err(DerivedIndexWorkerError::Index)?;
         Ok(prev)
     }
 
@@ -190,30 +190,30 @@ impl Worker {
         &self,
         height: u32,
         hash: Hash256,
-    ) -> Result<Vec<u8>, TxIndexWorkerError> {
+    ) -> Result<Vec<u8>, DerivedIndexWorkerError> {
         let Some(store) = self.body_store.as_ref() else {
-            return Err(TxIndexWorkerError::NoBodyStore);
+            return Err(DerivedIndexWorkerError::NoBodyStore);
         };
         store
             .load_block_body(height, hash)
-            .map_err(TxIndexWorkerError::Storage)?
-            .ok_or(TxIndexWorkerError::MissingBody { height, hash })
+            .map_err(DerivedIndexWorkerError::Storage)?
+            .ok_or(DerivedIndexWorkerError::MissingBody { height, hash })
     }
 
     pub(super) fn live_anchor(
         &self,
         height: u32,
         hash_bytes: [u8; 32],
-    ) -> Result<UndoScripts, TxIndexWorkerError> {
+    ) -> Result<UndoScripts, DerivedIndexWorkerError> {
         let hash = Hash256::from_le_bytes(&hash_bytes);
         let Some(store) = self.body_store.as_ref() else {
-            return Err(TxIndexWorkerError::NoBodyStore);
+            return Err(DerivedIndexWorkerError::NoBodyStore);
         };
         let bytes = store
             .undo_record(height, hash)
-            .map_err(TxIndexWorkerError::Storage)?
-            .ok_or(TxIndexWorkerError::UndoUnavailable { height, hash })?;
+            .map_err(DerivedIndexWorkerError::Storage)?
+            .ok_or(DerivedIndexWorkerError::UndoUnavailable { height, hash })?;
         UndoScripts::from_undo_bytes(&bytes, hash)
-            .map_err(|_| TxIndexWorkerError::UndoUnavailable { height, hash })
+            .map_err(|_| DerivedIndexWorkerError::UndoUnavailable { height, hash })
     }
 }

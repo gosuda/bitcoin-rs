@@ -172,7 +172,7 @@ struct Harness {
     evidence_dir: tempfile::TempDir,
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    runtime: Arc<TxIndexRuntime>,
+    runtime: Arc<DerivedIndexRuntime>,
     warnings: Arc<WarningStore>,
     worker: Worker,
 }
@@ -199,7 +199,7 @@ impl Harness {
         ));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(16);
-        let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
+        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
         let (reporter, warnings) = test_recovery_reporter(evidence_dir.path());
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
         let utxo = enabled

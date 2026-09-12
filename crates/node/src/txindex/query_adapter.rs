@@ -5,13 +5,13 @@
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_primitives::{OutPoint, Tx, Txid};
 use bitcoin_rs_rpc::context::{
-    ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxIndexInfo,
-    TxIndexQuery, TxQueryError,
+    DerivedIndexInfo, DerivedIndexQuery, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
+    SpendingRecord, TxQueryError,
 };
 
-use super::TxIndexQueryAdapter;
+use super::DerivedIndexQueryAdapter;
 
-impl TxIndexQuery for TxIndexQueryAdapter {
+impl DerivedIndexQuery for DerivedIndexQueryAdapter {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
         let engine = self.load_engine()?;
         engine.transaction(txid)
@@ -27,13 +27,13 @@ impl TxIndexQuery for TxIndexQueryAdapter {
         engine.transaction_height(txid)
     }
 
-    fn index_info(&self) -> Result<TxIndexInfo, TxQueryError> {
+    fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
         let engine = self.load_engine()?;
         engine.index_info()
     }
 }
 
-impl ScriptIndexQuery for TxIndexQueryAdapter {
+impl ScriptIndexQuery for DerivedIndexQueryAdapter {
     fn history_snapshot(
         &self,
         scripthash: ScriptHash,

@@ -188,7 +188,7 @@ struct AbaMutation {
     trigger_cf: ColumnFamily,
     trigger_prefix: Vec<u8>,
     triggered: AtomicBool,
-    runtime: Arc<TxIndexRuntime>,
+    runtime: Arc<DerivedIndexRuntime>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     away: Arc<TipSnapshot>,
     home: Arc<TipSnapshot>,
@@ -219,7 +219,7 @@ struct FixtureConfig {
 }
 
 struct QueryFixture {
-    engine: TxIndexQueryEngine,
+    engine: DerivedIndexQueryEngine,
     body: Option<Arc<SingleBlockBody>>,
 }
 
@@ -312,7 +312,7 @@ impl QueryFixture {
         let chain_transition = Arc::new(Mutex::new(()));
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
-        let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
+        let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
         let aba = config.aba_trigger.map(|(trigger_cf, trigger_prefix)| {
             let mut away = tip.clone();
             away.hash = Hash256::from_le_bytes(&[0x5a; 32]);
@@ -363,7 +363,7 @@ impl QueryFixture {
                 .into_iter()
                 .collect::<bitcoin_rs_rpc::context::BlockLog>(),
         )));
-        let engine = TxIndexQueryEngine::new(
+        let engine = DerivedIndexQueryEngine::new(
             runtime,
             reader,
             block_source,
@@ -405,7 +405,7 @@ fn tx_queries_can_be_ready_while_script_history_is_backfilling()
         IndexCapabilities::ALL,
     )?;
 
-    assert!(TxIndexQuery::transaction(&fixture.engine, &txid)?.is_none());
+    assert!(DerivedIndexQuery::transaction(&fixture.engine, &txid)?.is_none());
     assert!(matches!(
         fixture
             .engine

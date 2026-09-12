@@ -95,10 +95,10 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
             return render_raw_transaction(ctx, entry.tx.as_ref(), verbose, None);
         }
     }
-    if let Some(tx_index) = ctx.tx_index.as_ref() {
-        let tx = tx_index.transaction(&txid).map_err(RpcError::from)?;
+    if let Some(derived_index) = ctx.derived_index.as_ref() {
+        let tx = derived_index.transaction(&txid).map_err(RpcError::from)?;
         if let Some(tx) = tx {
-            let record = tx_index
+            let record = derived_index
                 .transaction_height(&txid)
                 .map_err(RpcError::from)?
                 .and_then(|height| ctx.block_by_height(height));
@@ -276,9 +276,9 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 /// catching up, and a call the scan can answer today must not be refused
 /// because the index is behind.
 fn proof_via_index(ctx: &Arc<Context>, wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
-    let tx_index = ctx.tx_index.as_ref()?;
+    let derived_index = ctx.derived_index.as_ref()?;
     for probe in wanted {
-        let height = match tx_index.transaction_height(probe) {
+        let height = match derived_index.transaction_height(probe) {
             Ok(Some(height)) => height,
             Ok(None) => continue,
             Err(error) => {
@@ -954,7 +954,7 @@ mod tests {
     use super::getrawtransaction;
     use super::hex_encode;
     use crate::Handler;
-    use crate::context::{BlockRecord, Context, TxIndexQuery, TxQueryError};
+    use crate::context::{BlockRecord, Context, DerivedIndexQuery, TxQueryError};
     use crate::error::RpcError;
 
     /// Minimal one-coinbase-tx fixture block standing in for the chain genesis.
@@ -1047,7 +1047,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         struct FailingQuery;
 
-        impl TxIndexQuery for FailingQuery {
+        impl DerivedIndexQuery for FailingQuery {
             fn transaction(&self, _txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
                 Err(TxQueryError::Storage("disk full".into()))
             }
@@ -1056,8 +1056,8 @@ mod tests {
                 Ok(None)
             }
 
-            fn index_info(&self) -> Result<crate::context::TxIndexInfo, TxQueryError> {
-                Ok(crate::context::TxIndexInfo {
+            fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+                Ok(crate::context::DerivedIndexInfo {
                     synced: false,
                     best_block_height: 0,
                 })
@@ -1065,7 +1065,7 @@ mod tests {
         }
 
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(FailingQuery));
+        ctx.derived_index = Some(Arc::new(FailingQuery));
         let ctx = Arc::new(ctx);
         let genesis = fixture_genesis();
         let coinbase = genesis
@@ -1121,7 +1121,7 @@ mod tests {
             tx: Tx,
         }
 
-        impl TxIndexQuery for StaticQuery {
+        impl DerivedIndexQuery for StaticQuery {
             fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
                 Ok((self.tx.txid() == *txid).then(|| self.tx.clone()))
             }
@@ -1130,8 +1130,8 @@ mod tests {
                 Ok(None)
             }
 
-            fn index_info(&self) -> Result<crate::context::TxIndexInfo, TxQueryError> {
-                Ok(crate::context::TxIndexInfo {
+            fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+                Ok(crate::context::DerivedIndexInfo {
                     synced: true,
                     best_block_height: 1,
                 })
@@ -1144,7 +1144,7 @@ mod tests {
         };
         let txid = coinbase.txid();
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(StaticQuery {
+        ctx.derived_index = Some(Arc::new(StaticQuery {
             tx: coinbase.clone(),
         }));
         let ctx = Arc::new(ctx);
@@ -1415,13 +1415,13 @@ mod tests {
 
     /// Stands in for the txindex, answering only the query these tests are about.
     ///
-    /// `gettxoutproof` calls nothing else on `TxIndexQuery`, so the other three
+    /// `gettxoutproof` calls nothing else on `DerivedIndexQuery`, so the other three
     /// methods answer emptily and every probe behaviour these tests need — a
     /// fixed height, a selective one, an error, a panic, a counter — is the
     /// closure rather than another stub type.
     struct HeightQuery<F>(F);
 
-    impl<F> TxIndexQuery for HeightQuery<F>
+    impl<F> DerivedIndexQuery for HeightQuery<F>
     where
         F: Fn(&Txid) -> Result<Option<u32>, TxQueryError> + Send + Sync,
     {
@@ -1433,8 +1433,8 @@ mod tests {
             Ok(None)
         }
 
-        fn index_info(&self) -> Result<crate::context::TxIndexInfo, TxQueryError> {
-            Ok(crate::context::TxIndexInfo {
+        fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
+            Ok(crate::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 0,
             })
@@ -1543,7 +1543,7 @@ mod tests {
         };
         let indexed = BlockRecord::from_block(2, &block);
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(2)))));
+        ctx.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(2)))));
         ctx.block_body_source = Some(Arc::new(PanicUnlessBodySource {
             height: indexed.height,
             hash: indexed.hash,
@@ -1601,7 +1601,7 @@ mod tests {
             proof_for(&scan_ctx, &wanted).unwrap_or_else(|err| panic!("scan path failed: {err}"));
 
         let mut index_ctx = Context::new();
-        index_ctx.tx_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        index_ctx.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
         install_blocks(&mut index_ctx, &blocks);
         let index_ctx = Arc::new(index_ctx);
         let fell_back = proof_for(&index_ctx, &wanted)
@@ -1623,7 +1623,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut index_ctx = Context::new();
-        index_ctx.tx_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        index_ctx.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
         install_blocks(&mut index_ctx, &blocks);
         let index_ctx = Arc::new(index_ctx);
 
@@ -1645,7 +1645,7 @@ mod tests {
         let resolvable = wanted.iter().map(|txid| (*txid, 1)).collect::<Vec<_>>();
 
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
+        ctx.derived_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
         let indexed = BlockRecord::from_block(1, &block);
         ctx.block_body_source = Some(Arc::new(PanicUnlessBodySource {
             height: indexed.height,
@@ -1680,7 +1680,7 @@ mod tests {
         };
 
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(HeightQuery(resolving(vec![(only_one, 1)]))));
+        ctx.derived_index = Some(Arc::new(HeightQuery(resolving(vec![(only_one, 1)]))));
         let indexed = BlockRecord::from_block(1, &block);
         ctx.block_body_source = Some(Arc::new(PanicUnlessBodySource {
             height: indexed.height,
@@ -1728,7 +1728,7 @@ mod tests {
 
             let failure = error.clone();
             let mut ctx = Context::new();
-            ctx.tx_index = Some(Arc::new(HeightQuery(move |_: &Txid| Err(failure.clone()))));
+            ctx.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| Err(failure.clone()))));
             install_blocks(&mut ctx, &blocks);
             let ctx = Arc::new(ctx);
 
@@ -1757,7 +1757,7 @@ mod tests {
         let record = BlockRecord::from_block(0, &block);
         let block_hash = record.hash;
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(HeightQuery(
+        ctx.derived_index = Some(Arc::new(HeightQuery(
             |_: &Txid| -> Result<Option<u32>, TxQueryError> {
                 panic!("the explicit-blockhash path must not consult the index");
             },
@@ -1793,7 +1793,7 @@ mod tests {
 
         let counter = Arc::clone(&probes);
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
+        ctx.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
             counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(None)
         })));
@@ -1832,7 +1832,7 @@ mod tests {
         // Every probe names height 0, whose block holds none of the wanted
         // txids, so every candidate fails verification.
         let mut ctx = Context::new();
-        ctx.tx_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
+        ctx.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
             counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(Some(0))
         })));

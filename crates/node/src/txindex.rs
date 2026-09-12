@@ -1,6 +1,6 @@
 //! Asynchronous, durable, node-owned transaction index runtime.
 //!
-//! The node creates and owns exactly one `TxIndexRuntime` when Core txindex or
+//! The node creates and owns exactly one `DerivedIndexRuntime` when Core txindex or
 //! `ScriptIndex` enables an index capability.
 //!
 //! The runtime holds a process-local revision counter and a bounded
@@ -14,7 +14,7 @@
 //! query gating refuses that temporary lag and the next worker pass repairs
 //! it. Independent durable capability watermarks let aligned row families
 //! share one parse and commit while divergent families backfill separately.
-//! A snapshot-gated query engine serves `bitcoin_rs_rpc::context::TxIndexQuery`
+//! A snapshot-gated query engine serves `bitcoin_rs_rpc::context::DerivedIndexQuery`
 //! and the generic [`ScriptIndexQuery`] without raw index mutex paths.
 
 use arc_swap::ArcSwap;
@@ -32,10 +32,12 @@ use bitcoin_rs_index::{
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
 
 use bitcoin_rs_rpc::{
-    capabilities::{CapabilityState, CapabilityStatus, TxIndexCapabilitySource, txindex_status},
+    capabilities::{
+        CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
+    },
     context::{
-        BlockLog, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot,
-        SpendingRecord, TxIndexInfo, TxIndexQuery, TxQueryError, record_at_height,
+        BlockLog, DerivedIndexInfo, DerivedIndexQuery, ScriptHistoryRecord, ScriptIndexQuery,
+        ScriptIndexRecord, ScriptIndexSnapshot, SpendingRecord, TxQueryError, record_at_height,
     },
 };
 
@@ -53,9 +55,9 @@ use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
 
 use parking_lot::{Mutex, RwLock};
 
-use startup::open_tx_index_store_on_worker;
+use startup::open_derived_index_store_on_worker;
 #[cfg(test)]
-use startup::{fail_worker, open_tx_index_on_worker, open_tx_index_with_timeout};
+use startup::{fail_worker, open_derived_index_on_worker, open_derived_index_with_timeout};
 
 #[cfg(test)]
 use std::path::Path;
@@ -81,12 +83,12 @@ mod reconciliation;
 mod rollback;
 mod runtime;
 mod scheduling;
-pub use runtime::TxIndexRuntime;
+pub use runtime::DerivedIndexRuntime;
 mod startup;
 
-pub(crate) use capability::TxIndexCapability;
+pub(crate) use capability::DerivedIndexCapability;
 use query::IndexProgress;
-pub(crate) use query::{IndexBlockSource, QueryEngineLive, TxIndexQueryEngine};
+pub(crate) use query::{DerivedIndexQueryEngine, IndexBlockSource, QueryEngineLive};
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -179,21 +181,21 @@ impl Generation {
 /// One immutable lifecycle snapshot published atomically behind `ArcSwap`.
 ///
 /// Only `Serving` carries a query payload — the complete existing
-/// `TxIndexQueryEngine`, never a raw reader. Readiness is not a lifecycle
+/// `DerivedIndexQueryEngine`, never a raw reader. Readiness is not a lifecycle
 /// state: the engine proves it per query from the durable watermarks
 /// (`IDX-03`), and the worker reports its reconciliation leg through
-/// `TxIndexRuntime::phase`. `Opening`, `Failed`, and `ShutdownAbandoned`
+/// `DerivedIndexRuntime::phase`. `Opening`, `Failed`, and `ShutdownAbandoned`
 /// carry no payload; the adapter returns typed `Unavailable` for them.
 #[derive(Clone)]
-pub(crate) enum TxIndexLifecycle {
+pub(crate) enum DerivedIndexLifecycle {
     Opening,
-    Serving(Arc<TxIndexQueryEngine>),
+    Serving(Arc<DerivedIndexQueryEngine>),
     Failed(CompactString),
     ShutdownAbandoned,
 }
 
-impl TxIndexLifecycle {
-    fn query_payload(&self) -> Option<&Arc<TxIndexQueryEngine>> {
+impl DerivedIndexLifecycle {
+    fn query_payload(&self) -> Option<&Arc<DerivedIndexQueryEngine>> {
         match self {
             Self::Serving(engine) => Some(engine),
             _ => None,
@@ -216,16 +218,16 @@ impl TxIndexLifecycle {
 /// query engine if a payload exists. It never reads lifecycle state and query
 /// payload from separate loads.
 #[derive(Clone)]
-pub(crate) struct TxIndexQueryAdapter {
-    lifecycle: Arc<ArcSwap<TxIndexLifecycle>>,
+pub(crate) struct DerivedIndexQueryAdapter {
+    lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
 }
 
-impl TxIndexQueryAdapter {
-    pub(crate) fn new(lifecycle: Arc<ArcSwap<TxIndexLifecycle>>) -> Self {
+impl DerivedIndexQueryAdapter {
+    pub(crate) fn new(lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>) -> Self {
         Self { lifecycle }
     }
 
-    fn load_engine(&self) -> Result<Arc<TxIndexQueryEngine>, TxQueryError> {
+    fn load_engine(&self) -> Result<Arc<DerivedIndexQueryEngine>, TxQueryError> {
         let snapshot = self.lifecycle.load_full();
         match snapshot.query_payload() {
             Some(engine) => Ok(Arc::clone(engine)),
@@ -238,7 +240,7 @@ impl TxIndexQueryAdapter {
 
 /// Immutable specification for worker-owned store open. Constructed
 /// synchronously in `NodeState::open`; consumed on the worker thread.
-pub(crate) struct TxIndexOpenSpec {
+pub(crate) struct DerivedIndexOpenSpec {
     pub(crate) data_dir: PathBuf,
     pub(crate) namespace: &'static str,
     pub(crate) storage_backend: bitcoin_rs_storage::StorageBackend,
@@ -280,8 +282,8 @@ pub(crate) fn wait_txindex_open_gate() {
 pub(crate) fn wait_txindex_open_gate() {}
 
 /// Handle used to spawn and join the supervised reconciliation worker.
-pub(crate) struct TxIndexWorker {
-    runtime: Arc<TxIndexRuntime>,
+pub(crate) struct DerivedIndexWorker {
+    runtime: Arc<DerivedIndexRuntime>,
     join_handle: Option<JoinHandle<()>>,
     pub(crate) generation: Option<Generation>,
     /// Canonical namespace key for poisoning on abandonment.
@@ -289,21 +291,21 @@ pub(crate) struct TxIndexWorker {
 }
 
 /// Result of opening the txindex store: writer, reader, and batch limits.
-pub(crate) struct OpenTxIndex {
+pub(crate) struct OpenDerivedIndex {
     pub(crate) writer: Arc<dyn TxIndexWriter>,
     pub(crate) reader: Arc<dyn bitcoin_rs_index::IndexReader>,
     #[allow(dead_code)]
     pub(crate) batch_limits: PreparedBatchLimits,
 }
 
-struct TxIndexComposer {
+struct DerivedIndexComposer {
     backend: bitcoin_rs_storage::StorageBackend,
     epoch: u64,
 }
 
-impl crate::storage_backend::StoreConsumer for TxIndexComposer {
-    type Output = OpenTxIndex;
-    type Error = TxIndexWorkerError;
+impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
+    type Output = OpenDerivedIndex;
+    type Error = DerivedIndexWorkerError;
 
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
     where
@@ -314,7 +316,7 @@ impl crate::storage_backend::StoreConsumer for TxIndexComposer {
             bitcoin_rs_storage::StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
             bitcoin_rs_storage::StorageBackend::Redb => REDB_BATCH_LIMITS,
         };
-        open_tx_index_store_on_worker(store, batch_limits, self.epoch)
+        open_derived_index_store_on_worker(store, batch_limits, self.epoch)
     }
 }
 
@@ -378,7 +380,7 @@ pub(crate) fn test_recovery_reporter(
 }
 
 struct Worker {
-    runtime: Arc<TxIndexRuntime>,
+    runtime: Arc<DerivedIndexRuntime>,
     writer: Arc<dyn TxIndexWriter>,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
@@ -464,7 +466,7 @@ enum ReconcileAction {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum TxIndexWorkerError {
+enum DerivedIndexWorkerError {
     #[error("txindex worker stopped")]
     Stopped,
     #[error("txindex store open abandoned on shutdown")]
@@ -495,7 +497,7 @@ enum TxIndexWorkerError {
     RollbackEvidence(#[source] crate::recovery_evidence::EvidenceError),
 }
 
-impl TxIndexWorkerError {
+impl DerivedIndexWorkerError {
     /// The backend helper may still hold or acquire the store after this error.
     fn abandoned_open(&self) -> bool {
         matches!(self, Self::OpenStopped | Self::OpenTimeout { .. })

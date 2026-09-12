@@ -20,8 +20,8 @@ use std::sync::atomic::AtomicBool;
 
 /// Build a minimal open spec for testing. Uses the fjall backend (default
 /// feature) and a temp directory.
-fn test_open_spec(dir: &std::path::Path, epoch: u64) -> TxIndexOpenSpec {
-    TxIndexOpenSpec {
+fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
+    DerivedIndexOpenSpec {
         data_dir: dir.to_path_buf(),
         namespace: "txindex",
         storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
@@ -37,9 +37,9 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> TxIndexOpenSpec {
 
 /// Build the full set of worker inputs for testing.
 struct WorkerInputs {
-    runtime: Arc<TxIndexRuntime>,
-    spec: TxIndexOpenSpec,
-    lifecycle: Arc<ArcSwap<TxIndexLifecycle>>,
+    runtime: Arc<DerivedIndexRuntime>,
+    spec: DerivedIndexOpenSpec,
+    lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: Generation,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
@@ -51,9 +51,9 @@ struct WorkerInputs {
 
 fn build_worker_inputs(dir: &std::path::Path, epoch: u64) -> WorkerInputs {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
-    let runtime = Arc::new(TxIndexRuntime::new(wake_tx));
+    let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
     let spec = test_open_spec(dir, epoch);
-    let lifecycle = Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+    let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
     let generation = Generation::new(epoch);
     let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
@@ -89,12 +89,12 @@ fn worker_open_panic_publishes_failed() {
     // The catch_unwind in spawn_with_open catches panics; open errors
     // are handled by the error path in run_worker_with_open which
     // publishes Failed.
-    let spec = TxIndexOpenSpec {
+    let spec = DerivedIndexOpenSpec {
         data_dir: std::path::PathBuf::from("/dev/null/cannot-create"),
         ..test_open_spec(dir.path(), 1)
     };
 
-    let worker = TxIndexWorker::spawn_with_open(
+    let worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
         spec,
         Arc::clone(&inputs.lifecycle),
@@ -119,7 +119,7 @@ fn worker_open_panic_publishes_failed() {
     // The lifecycle should be Failed (either from error or panic).
     let snapshot = inputs.lifecycle.load();
     assert!(
-        matches!(**snapshot, TxIndexLifecycle::Failed(_)),
+        matches!(**snapshot, DerivedIndexLifecycle::Failed(_)),
         "worker open failure must publish Failed"
     );
 
@@ -147,7 +147,7 @@ fn spawn_failure_publishes_failed_synchronously() {
     let inputs = build_worker_inputs(dir.path(), 1);
 
     // Normal spawn succeeds. This verifies the happy path.
-    let worker = TxIndexWorker::spawn_with_open(
+    let worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
         inputs.spec,
         Arc::clone(&inputs.lifecycle),
@@ -192,7 +192,7 @@ fn blocked_open_drop_detaches_within_deadline() {
 
     let inputs = build_worker_inputs(dir.path(), 1);
 
-    let worker = TxIndexWorker::spawn_with_open(
+    let worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
         inputs.spec,
         Arc::clone(&inputs.lifecycle),
@@ -215,7 +215,7 @@ fn blocked_open_drop_detaches_within_deadline() {
     // Verify the lifecycle is still Opening (worker is blocked).
     let snapshot = inputs.lifecycle.load();
     assert!(
-        matches!(**snapshot, TxIndexLifecycle::Opening),
+        matches!(**snapshot, DerivedIndexLifecycle::Opening),
         "blocked worker should still be Opening"
     );
 
@@ -253,7 +253,7 @@ fn late_open_cannot_publish_after_revocation() {
 
     let inputs = build_worker_inputs(dir.path(), 1);
 
-    let worker = TxIndexWorker::spawn_with_open(
+    let worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
         inputs.spec,
         Arc::clone(&inputs.lifecycle),
@@ -291,7 +291,7 @@ fn late_open_cannot_publish_after_revocation() {
     // publication).
     let snapshot = inputs.lifecycle.load();
     assert!(
-        matches!(**snapshot, TxIndexLifecycle::Opening),
+        matches!(**snapshot, DerivedIndexLifecycle::Opening),
         "revoked generation must prevent publication"
     );
 
@@ -382,7 +382,7 @@ fn wakes_before_store_open_are_reconciled() {
 
 #[test]
 fn async_index_open_preserves_backend() {
-    // Verify that open_tx_index_on_worker dispatches to the correct
+    // Verify that open_derived_index_on_worker dispatches to the correct
     // backend constructor and the store opens successfully on the
     // worker thread.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -391,7 +391,7 @@ fn async_index_open_preserves_backend() {
     {
         let fjall_dir = dir.path().join("txindex-fjall");
         std::fs::create_dir_all(&fjall_dir).expect("create fjall dir");
-        let result = open_tx_index_on_worker(
+        let result = open_derived_index_on_worker(
             bitcoin_rs_storage::StorageBackend::Fjall,
             &fjall_dir,
             8 * 1024 * 1024,
@@ -409,7 +409,7 @@ fn async_index_open_preserves_backend() {
     {
         let redb_dir = dir.path().join("txindex-redb");
         std::fs::create_dir_all(&redb_dir).expect("create redb dir");
-        let result = open_tx_index_on_worker(
+        let result = open_derived_index_on_worker(
             bitcoin_rs_storage::StorageBackend::Redb,
             &redb_dir,
             8 * 1024 * 1024,
@@ -427,7 +427,7 @@ fn async_index_open_preserves_backend() {
     {
         let rocks_dir = dir.path().join("txindex-rocksdb");
         std::fs::create_dir_all(&rocks_dir).expect("create rocksdb dir");
-        let result = open_tx_index_on_worker(
+        let result = open_derived_index_on_worker(
             bitcoin_rs_storage::StorageBackend::RocksDb,
             &rocks_dir,
             8 * 1024 * 1024,
@@ -482,7 +482,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
 
     let inputs = build_worker_inputs(dir.path(), 42);
 
-    let mut worker = TxIndexWorker::spawn_with_open(
+    let mut worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
         inputs.spec,
         Arc::clone(&inputs.lifecycle),
@@ -532,7 +532,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
     }
     inputs
         .lifecycle
-        .store(Arc::new(TxIndexLifecycle::ShutdownAbandoned));
+        .store(Arc::new(DerivedIndexLifecycle::ShutdownAbandoned));
     worker.poison_namespace();
     worker.detach();
 
@@ -556,7 +556,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
     // Lifecycle is ShutdownAbandoned.
     let snapshot = inputs.lifecycle.load();
     assert!(
-        matches!(**snapshot, TxIndexLifecycle::ShutdownAbandoned),
+        matches!(**snapshot, DerivedIndexLifecycle::ShutdownAbandoned),
         "lifecycle must be ShutdownAbandoned after abandonment"
     );
 
@@ -596,7 +596,7 @@ fn open_timeout_publishes_error_not_infinite_spin() {
     // Simulate a stuck open: the helper thread will sleep 10 seconds before
     // even attempting the store open. The timeout is set to 1 second, so the
     // deadline fires while the helper is still sleeping.
-    let result = open_tx_index_with_timeout(
+    let result = open_derived_index_with_timeout(
         bitcoin_rs_storage::StorageBackend::Fjall,
         &dir.path().join("txindex"),
         8 * 1024 * 1024,
@@ -606,7 +606,7 @@ fn open_timeout_publishes_error_not_infinite_spin() {
         || shutdown.load(Ordering::Acquire),
     );
 
-    let Err(TxIndexWorkerError::OpenTimeout { secs }) = result else {
+    let Err(DerivedIndexWorkerError::OpenTimeout { secs }) = result else {
         panic!("expected OpenTimeout, got a different error variant");
     };
     assert_eq!(secs, 1, "timeout seconds must match the override");
