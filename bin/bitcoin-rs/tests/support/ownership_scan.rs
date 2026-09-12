@@ -3,13 +3,17 @@
 //!
 //! The scan walks workspace Rust sources (excluding `tests/`, `benches/`, and
 //! `examples/`) and ignores code inside top-level `#[cfg(test)]` items and
-//! `#[test]` functions. A small Rust lexical mask keeps braces and mutator-like
-//! text inside comments, quoted strings, raw strings, and character literals
-//! from changing item boundaries or producing false matches. Production code
-//! outside `crates/mempool/src/` fails the scan if it directly calls a mutating
-//! `Mempool` method or acquires the pool write lock through a bypass pattern.
+//! `#[test]` functions. Whole files whose module is declared with a
+//! `#[cfg(test)] mod <name>;` attribute — test-support files whose helpers
+//! carry no `#[test]` marks of their own — are skipped as well. A small Rust
+//! lexical mask keeps braces and mutator-like text inside comments, quoted
+//! strings, raw strings, and character literals from changing item boundaries
+//! or producing false matches. Production code outside `crates/mempool/src/`
+//! fails the scan if it directly calls a mutating `Mempool` method or
+//! acquires the pool write lock through a bypass pattern.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 /// Audited cross-crate gateway mutation expressions.
 ///
@@ -83,12 +87,21 @@ fn empty_result() -> WriterScanResult {
 /// Walks the workspace and returns any mempool-writer violations.
 pub(crate) fn scan_mempool_writer_violations() -> WriterScanResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    files.sort();
+    let test_modules = cfg_test_module_stems(&files);
     let mut result = empty_result();
-    scan_dir(&root, &mut result);
+    for path in &files {
+        if is_test_module_file(path, &test_modules) {
+            continue;
+        }
+        scan_file(path, &mut result);
+    }
     result
 }
 
-fn scan_dir(dir: &Path, result: &mut WriterScanResult) {
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -100,12 +113,99 @@ fn scan_dir(dir: &Path, result: &mut WriterScanResult) {
                 if matches!(name, "target" | "tests" | "benches" | "examples") {
                     continue;
                 }
-                scan_dir(&path, result);
+                collect_rust_files(&path, files);
             } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
-                scan_file(&path, result);
+                files.push(path);
             }
         }
     }
+}
+
+/// Collects the stems of modules declared `#[cfg(test)] mod <stem>;`.
+///
+/// Such a declaration compiles its module file only under `cfg(test)`, but a
+/// per-file lexical scan cannot see the parent's attribute. Recording the
+/// stems keeps test-support files such as `sync/tests.rs` — whose helpers
+/// carry no `#[test]` marks of their own — out of the production scan without
+/// guessing from file names alone. An inline `mod <stem> { .. }` block is not
+/// recorded: [`scan_source`] already skips its items line by line.
+fn cfg_test_module_stems(files: &[PathBuf]) -> BTreeSet<String> {
+    let contents = files
+        .iter()
+        .map(|path| std::fs::read_to_string(path).unwrap_or_default());
+    cfg_test_module_stems_from(contents)
+}
+
+fn cfg_test_module_stems_from<I>(contents: I) -> BTreeSet<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut stems = BTreeSet::new();
+    for content in contents {
+        let lines: Vec<&str> = content.lines().collect();
+        for (index, raw_line) in lines.iter().enumerate() {
+            let trimmed = raw_line.trim();
+            let Some(rest) = cfg_test_attribute(trimmed) else {
+                continue;
+            };
+            if let Some(stem) = mod_stem(rest) {
+                stems.insert(stem);
+                continue;
+            }
+            if !rest.trim().is_empty() {
+                continue;
+            }
+            // Attribute-only line: the `mod` declaration follows after any
+            // further attributes, comments, or blank lines.
+            for next in lines.iter().skip(index + 1) {
+                let next_trimmed = next.trim();
+                if next_trimmed.is_empty()
+                    || next_trimmed.starts_with("//")
+                    || next_trimmed.starts_with("#!")
+                    || cfg_test_attribute(next_trimmed).is_some()
+                    || next_trimmed.starts_with("#[")
+                {
+                    continue;
+                }
+                if let Some(stem) = mod_stem(next_trimmed) {
+                    stems.insert(stem);
+                }
+                break;
+            }
+        }
+    }
+    stems
+}
+
+/// Recognizes a `#[cfg(…test…)]` attribute and returns the line remainder
+/// after the closing bracket. `cfg(not(test))` is rejected: it flags
+/// production code, not test code.
+fn cfg_test_attribute(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix("#[cfg(")?;
+    let end = rest.rfind(")]")?;
+    let payload = &rest[..end];
+    if !payload.contains("test") || payload.contains("not(test)") {
+        return None;
+    }
+    Some(&rest[end + ")]".len()..])
+}
+
+/// Extracts `<stem>` from a complete external `mod <stem>;` declaration.
+/// Returns `None` for inline `mod <stem> { .. }` blocks and non-mod items.
+fn mod_stem(rest: &str) -> Option<String> {
+    let tail = rest.trim().strip_prefix("mod ")?;
+    let name = tail.strip_suffix(';')?.trim();
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+    .then(|| name.to_owned())
+}
+
+fn is_test_module_file(path: &Path, test_modules: &BTreeSet<String>) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| test_modules.contains(stem))
 }
 
 fn scan_file(path: &Path, result: &mut WriterScanResult) {
@@ -392,7 +492,11 @@ fn is_authorized_gateway_call(
 
 #[cfg(test)]
 mod tests {
-    use super::{LexState, code_line, empty_result, is_authorized_gateway_call, scan_source};
+    use super::{
+        LexState, cfg_test_module_stems_from, code_line, empty_result, is_authorized_gateway_call,
+        is_test_module_file, scan_source,
+    };
+    use std::path::Path;
 
     const MINING_HANDLER: &str = "/workspace/crates/rpc/src/handlers/mining.rs";
     const NON_OWNER: &str = "/workspace/crates/node/src/fake.rs";
@@ -414,6 +518,48 @@ mod tests {
         let mut result = empty_result();
         scan_source(NON_OWNER, source, &mut result);
         result.violations
+    }
+
+    #[test]
+    fn cfg_test_stems_cover_external_module_declarations_only() {
+        let stems = cfg_test_module_stems_from([
+            "#[cfg(test)]\nmod tests;\n".to_owned(),
+            "#[cfg(all(test, feature = \"fjall\"))]\nmod body_reader_tests;\n".to_owned(),
+            "#[cfg(test)] mod tests;\n".to_owned(),
+            "#[cfg(test)]\n\n// leading comment\n#[expect(unused)]\nmod helpers;\n".to_owned(),
+        ]);
+        assert_eq!(
+            stems,
+            ["body_reader_tests", "helpers", "tests"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+
+        let not_stems = cfg_test_module_stems_from([
+            "#[cfg(not(test))]\nmod production;\n".to_owned(),
+            "#[cfg(test)]\nmod inline {\n    fn helper() {}\n}\n".to_owned(),
+            "#[cfg(test)]\nfn a_test_helper() {}\n".to_owned(),
+            "mod plainly_gated;\n".to_owned(),
+        ]);
+        assert!(not_stems.is_empty(), "{not_stems:?}");
+    }
+
+    #[test]
+    fn a_test_module_file_is_skipped_by_its_stem() {
+        let stems = cfg_test_module_stems_from(["#[cfg(test)]\nmod tests;\n".to_owned()]);
+        assert!(is_test_module_file(
+            Path::new("/workspace/crates/node/src/sync/tests.rs"),
+            &stems
+        ));
+        assert!(!is_test_module_file(
+            Path::new("/workspace/crates/node/src/sync/peers.rs"),
+            &stems
+        ));
+        assert!(!is_test_module_file(
+            Path::new("/workspace/crates/node/src/lib.rs"),
+            &stems
+        ));
     }
 
     #[test]
