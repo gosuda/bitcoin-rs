@@ -54,9 +54,9 @@ fn mid_window_failure_releases_retained_work_to_the_stager()
         "all four bodies start staged"
     );
 
-    // Block 2's persistence fails after block 1 committed: the retained
-    // window work — blocks 2, 3, 4 — must land back on the stager untouched
-    // (block 2 is the refused blocker, dropped for retry).
+    // Block 2's persistence fails after block 1 committed. Block 2 is the
+    // refused blocker and must be re-staged separately; only its dependent
+    // suffix, blocks 3 and 4, is restored to the stager untouched.
     let (applied, failed) = sync.apply_buffered_blocks(None);
     assert_eq!((applied, failed), (1, 1), "prefix commits, suffix releases");
     assert_eq!(
