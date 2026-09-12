@@ -1,8 +1,9 @@
 //! Static source scan used by `overhaul_ownership` to enforce single-owner
 //! boundaries that `cargo metadata` cannot see.
 //!
-//! The scan walks workspace Rust sources (excluding `tests/`, `benches/`, and
-//! `examples/`) and ignores code inside top-level `#[cfg(test)]` items and
+//! The scan walks the cargo-metadata workspace member directories (skipping
+//! `tests/`, `benches/`, and `examples/` subdirectories and any
+//! dot-directory) and ignores code inside top-level `#[cfg(test)]` items and
 //! `#[test]` functions. Whole files whose module is declared with a
 //! `#[cfg(test)] mod <name>;` attribute — test-support files whose helpers
 //! carry no `#[test]` marks of their own — are skipped as well. A small Rust
@@ -17,6 +18,7 @@
 //! cancellation fail the scan outside `crates/p2p/src/` apart from
 //! explicitly audited receiver expressions.
 
+use super::dependency_graph::workspace_member_dirs;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -157,11 +159,13 @@ fn empty_result() -> OwnershipScanResult {
     }
 }
 
-/// Walks the workspace and returns every single-owner boundary violation.
+/// Walks the workspace members and returns every single-owner boundary
+/// violation.
 pub(crate) fn scan_ownership_violations() -> OwnershipScanResult {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
-    collect_rust_files(&root, &mut files);
+    for member in workspace_member_dirs() {
+        collect_rust_files(member, &mut files);
+    }
     files.sort();
     let test_modules = cfg_test_module_stems(&files);
     let mut result = empty_result();
@@ -175,21 +179,23 @@ pub(crate) fn scan_ownership_violations() -> OwnershipScanResult {
 }
 
 fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-                if matches!(name, "target" | "tests" | "benches" | "examples") {
-                    continue;
-                }
-                collect_rust_files(&path, files);
-            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
-                files.push(path);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        panic!("scan cannot read workspace member dir {}", dir.display());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name.starts_with('.') || matches!(name, "target" | "tests" | "benches" | "examples")
+            {
+                continue;
             }
+            collect_rust_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            files.push(path);
         }
     }
 }
@@ -202,10 +208,15 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
 /// carry no `#[test]` marks of their own — out of the production scan without
 /// guessing from file names alone. An inline `mod <stem> { .. }` block is not
 /// recorded: [`scan_source`] already skips its items line by line.
+/// A plain `mod <stem>;` inside an already-skipped file (for example
+/// `consensus_rule_tests/behavior_*.rs`) is transitively test-gated but not
+/// collected; those files stay in the walk and pass today because their
+/// items carry `#[test]` marks.
 fn cfg_test_module_stems(files: &[PathBuf]) -> BTreeSet<String> {
-    let contents = files
-        .iter()
-        .map(|path| std::fs::read_to_string(path).unwrap_or_default());
+    let contents = files.iter().map(|path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("scan cannot read {}: {error}", path.display()))
+    });
     cfg_test_module_stems_from(contents)
 }
 
@@ -293,7 +304,8 @@ fn is_test_module_file(path: &Path, test_modules: &BTreeSet<String>) -> bool {
 
 fn scan_file(path: &Path, result: &mut OwnershipScanResult) {
     let path_str = path.to_string_lossy();
-    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let content = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("scan cannot read {}: {error}", path.display()));
     scan_source(&path_str, &content, result);
     result.files_scanned += 1;
 }

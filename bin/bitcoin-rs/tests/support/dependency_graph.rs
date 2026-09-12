@@ -7,7 +7,9 @@
 //! `docs/contracts/architecture.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::LazyLock;
 
 /// Storage engine crates. Only `bitcoin-rs-storage` may depend on these.
 pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
@@ -124,31 +126,62 @@ pub(crate) fn workspace_root_manifest() -> std::path::PathBuf {
         .join("Cargo.toml")
 }
 
+/// Runs `cargo metadata --locked --offline --no-deps --format-version 1`
+/// against the workspace root manifest.
+fn run_cargo_metadata() -> serde_json::Value {
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            workspace_root_manifest().to_str().expect("utf8 root path"),
+        ])
+        .output()
+        .expect("run cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse cargo metadata JSON")
+}
+
+/// Directories of the cargo-metadata workspace members, resolved once.
+///
+/// The ownership scan walks exactly these directories: sibling checkouts
+/// under `.outline/worktree/`, vendored trees, and any other non-member
+/// production code under the checkout root must never influence a gate run.
+pub(crate) fn workspace_member_dirs() -> &'static [PathBuf] {
+    static DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
+        let metadata = run_cargo_metadata();
+        let mut dirs: Vec<PathBuf> = metadata["packages"]
+            .as_array()
+            .expect("packages array")
+            .iter()
+            .map(|package| {
+                let manifest = package["manifest_path"].as_str().expect("manifest path");
+                std::path::Path::new(manifest)
+                    .parent()
+                    .expect("manifest parent")
+                    .to_owned()
+            })
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    });
+    DIRS.as_slice()
+}
+
 impl WorkspaceGraph {
     /// Runs `cargo metadata --locked --offline --no-deps --format-version 1` and
     /// parses the result.
     pub(crate) fn from_cargo_metadata() -> Self {
-        let output = Command::new(env!("CARGO"))
-            .args([
-                "metadata",
-                "--locked",
-                "--offline",
-                "--no-deps",
-                "--format-version",
-                "1",
-                "--manifest-path",
-                workspace_root_manifest().to_str().expect("utf8 root path"),
-            ])
-            .output()
-            .expect("run cargo metadata");
-        assert!(
-            output.status.success(),
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let metadata: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("parse cargo metadata JSON");
-        Self::from_json(&metadata)
+        Self::from_json(&run_cargo_metadata())
     }
 
     /// Parses the same `cargo metadata --format-version 1` shape from a

@@ -175,6 +175,10 @@ fn real_adapters_forward_their_backend_features() {
         .expect("real workspace feature tables must satisfy the forwarding rules");
 }
 
+/// The workspace members carry hundreds of production sources; a scan below
+/// this floor means the file walk collapsed and a green verdict is void.
+const MIN_SCANNED_FILES: usize = 100;
+
 #[test]
 fn mempool_writer_source_scan_passes() {
     let OwnershipScanResult {
@@ -184,6 +188,11 @@ fn mempool_writer_source_scan_passes() {
         mempool_mutations_found,
         ..
     } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
 
     let _ = writeln!(
         std::io::stderr(),
@@ -208,6 +217,11 @@ fn index_capability_scan_passes() {
         files_scanned,
         ..
     } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
 
     let _ = writeln!(
         std::io::stderr(),
@@ -236,6 +250,11 @@ fn p2p_peer_owner_scan_passes() {
         files_scanned,
         ..
     } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
 
     let _ = writeln!(
         std::io::stderr(),
