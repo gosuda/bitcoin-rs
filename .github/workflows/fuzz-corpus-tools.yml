@@ -24,5 +24,6 @@ jobs:
         run: |
           bash -n scripts/fuzz-policy.sh
           bash -n scripts/run-fuzz-campaign.sh
+          bash -n scripts/validate-corpus-seeds.sh
       - name: Run offline corpus-import regressions
-        run: python3 -m unittest discover -s scripts/tests -p 'test_import_qa_assets*.py' -v
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
