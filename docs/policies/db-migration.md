@@ -37,7 +37,7 @@ In every case:
 - Authoritative startup never fails because of an owner-local version.
 - Owner-local evolution keeps `CURRENT_SCHEMA` unchanged.
 - No translator, converter, or legacy reader exists for any owner-local format.
-- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it.
+- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exception: disposable derived index namespaces, which recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
 - No backup or rotation framework exists. Recovery is reseed, rebuild, or re-admission from canonical data.
 
 ## Operator resync procedure
