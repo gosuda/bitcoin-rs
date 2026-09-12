@@ -93,6 +93,7 @@ pub(crate) const INDEX_CAPABILITY_PATTERNS: &[&str] = &[
 /// no production caller outside the owner; a new one belongs here only
 /// together with an audited receiver.
 pub(crate) const PEER_MUTATION_METHODS: &[&str] = &[
+    "PeerTable::disconnect(",
     "register(",
     "publish_info(",
     "publish_ready(",
@@ -106,10 +107,7 @@ pub(crate) const PEER_MUTATION_METHODS: &[&str] = &[
 /// Receiver-qualified patterns for the peer mutators whose bare name is
 /// shared with another owner's API: `ChainTransition::disconnect` also
 /// reads `disconnect(`, so only a `peer_table` receiver counts here.
-pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[
-    ".peer_table.disconnect(",
-    "PeerTable::disconnect(",
-];
+pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[".peer_table.disconnect("];
 
 /// Audited non-owner peer mutation receivers. The receiver must be the
 /// complete audited expression — the sync worker's shared state handle —
@@ -187,10 +185,7 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     };
     for entry in entries {
         let entry = entry.unwrap_or_else(|error| {
-            panic!(
-                "scan cannot read an entry in workspace member dir {}: {error}",
-                dir.display()
-            )
+            panic!("scan cannot read directory entry in {}: {error}", dir.display())
         });
         let path = entry.path();
         if path.is_dir() {
@@ -484,6 +479,24 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         .collect();
     let mut pending_test_item = false;
     let mut test_depth = 0_i64;
+    // Imports and local aliases are lexical here, but resolving these names is
+    // enough to close the common capability-selection escape hatch.
+    let mut capability_names = BTreeSet::from(["IndexCapabilities".to_owned()]);
+    for line in &code_lines {
+        let compact = line.split_whitespace().collect::<String>();
+        if let Some(alias) = compact
+            .strip_prefix("use")
+            .and_then(|s| s.split("IndexCapabilitiesas").nth(1))
+            .and_then(|s| s.trim_end_matches(';').split("::").next())
+        {
+            if !alias.is_empty() { capability_names.insert(alias.to_owned()); }
+        }
+        if let Some(alias) = compact.strip_prefix("type")
+            .and_then(|s| s.split_once("=IndexCapabilities").map(|(a, _)| a))
+        {
+            if !alias.is_empty() { capability_names.insert(alias.to_owned()); }
+        }
+    }
 
     for (index, line) in code_lines.iter().enumerate() {
         let trimmed = line.trim();
@@ -552,14 +565,20 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         }
 
         for pattern in INDEX_CAPABILITY_PATTERNS {
-            if line.contains(pattern) {
+            let aliased = capability_names.iter().any(|name| {
+                (pattern == "IndexCapabilities {" && line.contains(&format!("{name} {{")))
+                    || (pattern == "IndexCapabilities::" && line.contains(&format!("{name}::")))
+            });
+            let destructuring = pattern == "IndexCapabilities {"
+                && (line.trim_start().starts_with("let ")
+                    || line.trim_start().starts_with("if let ")
+                    || line.trim_start().starts_with("while let "));
+            if (aliased || line.contains(pattern)) && !destructuring {
                 result.index_capability_sites += 1;
                 if !is_index_capability_owner(path_str) {
                     result.index_capability_violations.push(format!(
                         "derived-index capability `{pattern}` at {}:{}: {}",
-                        path_str,
-                        index + 1,
-                        raw_lines[index].trim()
+                        path_str, index + 1, raw_lines[index].trim()
                     ));
                 }
             }
@@ -582,7 +601,11 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         }
 
         for pattern in PEER_TABLE_PATTERNS {
-            if line.contains(pattern) {
+            let multiline_disconnect = pattern == ".peer_table.disconnect("
+                && line.contains(".disconnect(")
+                && index > 0
+                && code_lines[index - 1].contains("peer_table");
+            if line.contains(pattern) || multiline_disconnect {
                 result.peer_mutations_found += 1;
                 let operator_audited = AUTHORIZED_PEER_TABLE_PATHS
                     .iter()
