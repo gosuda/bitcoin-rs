@@ -10,8 +10,9 @@ use bitcoin_rs_primitives::USER_AGENT;
 
 use crate::connection::PeerLease;
 use crate::dispatch::dispatch_inbound;
-use crate::peer::{Peer, PeerState};
+use crate::peer::{COMPACT_BLOCK_VERSION, Peer, PeerState};
 use crate::wire::{Message, PROTOCOL_VERSION, PeerError, read_message};
+use bitcoin::p2p::message_compact_blocks::SendCmpct;
 
 /// Build a local version message for handshake initiation.
 pub fn version_message(nonce: u64, start_height: i32) -> VersionMessage {
@@ -41,6 +42,33 @@ pub const fn feature_messages() -> [Message; 3] {
     ]
 }
 
+/// Messages sent after the handshake completes (post-`verack`).
+///
+/// BIP152 compact-block relay is announced in low-bandwidth mode: we ask for
+/// version 2 (wtxid identity, witness-bearing prefills) but never take a
+/// high-bandwidth announcement slot, so peers relay compact blocks only when
+/// we request them. See `docs/policies/p2p-compatibility.md` §5.
+pub const fn post_verack_messages() -> [Message; 1] {
+    [Message::SendCmpct(SendCmpct {
+        send_compact: false,
+        version: COMPACT_BLOCK_VERSION,
+    })]
+}
+
+/// Sends the post-verack preference messages and records what we advertised.
+pub(crate) fn send_post_verack_messages<S: Read + Write>(
+    peer: &mut Peer<S>,
+    lease: &PeerLease,
+    totals: Option<&Arc<crate::TrafficTotals>>,
+) -> Result<(), PeerError> {
+    for message in post_verack_messages() {
+        send_handshake_message(peer, &message, lease, totals)?;
+    }
+    peer.compact_blocks
+        .record_local_advertised(COMPACT_BLOCK_VERSION);
+    Ok(())
+}
+
 /// Start an outbound handshake and return messages to send to the remote peer.
 pub fn start<S>(peer: &mut Peer<S>, nonce: u64, start_height: i32) -> Vec<Message> {
     peer.state = PeerState::VersionExchange;
@@ -61,6 +89,13 @@ pub fn handshake_cursors(
     exchange(right, left, right_messages)?;
     exchange(left, right, vec![Message::Verack])?;
     exchange(right, left, vec![Message::Verack])?;
+    exchange(left, right, post_verack_messages().to_vec())?;
+    exchange(right, left, post_verack_messages().to_vec())?;
+    left.compact_blocks
+        .record_local_advertised(COMPACT_BLOCK_VERSION);
+    right
+        .compact_blocks
+        .record_local_advertised(COMPACT_BLOCK_VERSION);
     Ok(())
 }
 /// Drive a Bitcoin v1 handshake from the inbound listener side.
@@ -110,7 +145,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
             send_handshake_message(peer, &response, lease, totals)?;
         }
     }
-
+    send_post_verack_messages(peer, lease, totals)?;
     Ok(())
 }
 
@@ -213,7 +248,10 @@ mod tests {
 
     use bitcoin::p2p::Magic;
 
-    use super::{Peer, PeerError, PeerState, run_inbound_handshake, version_message};
+    use super::{
+        COMPACT_BLOCK_VERSION, Peer, PeerError, PeerState, post_verack_messages,
+        run_inbound_handshake, version_message,
+    };
     use crate::handshake::feature_messages;
     use crate::wire::{Message, read_message, write_message};
 
@@ -297,10 +335,20 @@ mod tests {
 
         let (outbound_verack, _) = read_message(&mut outbound, magic)?;
         assert_eq!(outbound_verack, Message::Verack);
+        for expected in post_verack_messages() {
+            let (actual, _) = read_message(&mut outbound, magic)?;
+            assert_eq!(actual, expected, "post-verack preference follows verack");
+        }
         assert_eq!(
             usize::try_from(outbound.position()).unwrap_or(usize::MAX),
             outbound.get_ref().len(),
             "handshake writes each frame once",
+        );
+
+        assert_eq!(
+            peer.compact_blocks.local_version,
+            Some(COMPACT_BLOCK_VERSION),
+            "post-verack advertisement is recorded on the negotiation state",
         );
 
         Ok(())

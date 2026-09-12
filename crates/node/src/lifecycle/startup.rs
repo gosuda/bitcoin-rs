@@ -92,8 +92,10 @@ pub(crate) fn start_node(
     state.mining_generation_signal().attach(&mining_control);
     let gateway = state.mempool_gateway();
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
+    let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
+        compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
     };
     let (relay_queue, relay_rx) =

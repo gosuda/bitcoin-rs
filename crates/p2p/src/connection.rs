@@ -667,6 +667,7 @@ mod tests {
             addr,
             version: 70_016,
             wtxid_relay: false,
+            compact_block_relay: false,
             services: 0,
             user_agent: String::from("/test/"),
             start_height: 0,

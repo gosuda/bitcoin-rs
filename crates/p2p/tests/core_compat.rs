@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
 use bitcoin::consensus::encode as bitcoin_encode;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
@@ -205,8 +206,9 @@ impl ChainQuery for FakeChain {
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
+        _compact_version: Option<u64>,
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError> {
         let mut outcome = InventoryServing::default();
         for item in items {
@@ -225,12 +227,21 @@ impl ChainQuery for FakeChain {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(consensus_bytes(&self.bodies[&native]).into())?;
+                serve(Message::BlockPayload(
+                    consensus_bytes(&self.bodies[&native]).into(),
+                ))?;
             } else {
                 outcome.not_found.push(*item);
             }
         }
         Ok(outcome)
+    }
+
+    fn block_transactions(
+        &self,
+        _request: &BlockTransactionsRequest,
+    ) -> Result<Option<BlockTransactions>, PeerError> {
+        Ok(None)
     }
 }
 
@@ -262,7 +273,10 @@ fn serve_collect(
     items: &[Inventory],
 ) -> Result<(Vec<Block>, Vec<Inventory>), PeerError> {
     let blocks = std::cell::RefCell::new(Vec::new());
-    let outcome = chain.serve_inventory_blocks(items, &|| true, &mut |payload| {
+    let outcome = chain.serve_inventory_blocks(items, None, &|| true, &mut |message| {
+        let Message::BlockPayload(payload) = message else {
+            return Ok(());
+        };
         blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
         Ok(())
     })?;
@@ -1299,7 +1313,7 @@ fn drive_handshake_as_core(
                 assert_eq!(nonce, 0xfeed_face);
                 break;
             }
-            Message::Ping(_) => continue,
+            Message::Ping(_) | Message::SendCmpct(_) => continue,
             other => return Err(format!("unexpected post-handshake message {other:?}").into()),
         }
     }

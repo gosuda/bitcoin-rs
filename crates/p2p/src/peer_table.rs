@@ -152,6 +152,36 @@ impl PeerTable {
         }
     }
 
+    /// Raises the compact-block relay preference for `source` — its live
+    /// connection accepted a post-verack `sendcmpct` with a known version.
+    /// Returns `false` for a stale or unpublished connection.
+    pub fn note_compact_relay(&self, source: PeerSource) -> bool {
+        let mut entries = self.entries.write();
+        match entries.get_mut(&source.addr) {
+            Some(entry) if entry.lease.is_current(source) => {
+                let Some(info) = entry.info.as_mut() else {
+                    return false;
+                };
+                info.compact_block_relay = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports whether the live published connection at `addr` requested
+    /// compact-block relay. Fetch-side eligibility reads this instead of a
+    /// stale per-connection guess.
+    pub fn compact_relay_of(&self, addr: SocketAddr) -> bool {
+        let entries = self.entries.read();
+        entries.get(&addr).is_some_and(|entry| {
+            entry
+                .info
+                .as_ref()
+                .is_some_and(|info| info.compact_block_relay)
+        })
+    }
+
     /// Removes and cancels the connection `lease` refers to. Returns `false`
     /// when a different connection is live at `addr`, leaving it untouched.
     pub fn remove_current(&self, addr: SocketAddr, lease: &PeerLease) -> bool {
@@ -411,6 +441,7 @@ mod tests {
             addr,
             version: 70016,
             wtxid_relay: false,
+            compact_block_relay: false,
             services: 0,
             user_agent: String::new(),
             start_height,
@@ -649,5 +680,37 @@ mod tests {
         };
         let unpublished_source = unpublished.source(addr(3));
         assert!(!table.note_announced_height(unpublished_source, 50));
+    }
+
+    // CONTRACT: docs/policies/p2p-compatibility.md#4-handshake-contract (the
+    // published BIP152 relay preference feeds compact-fetch eligibility).
+    #[test]
+    fn note_compact_relay_credits_only_the_delivering_connection() {
+        let table = PeerTable::new();
+        let (stale_tx, _stale_rx) = crossbeam_channel::unbounded();
+        let stale = PeerLease::new(stale_tx);
+        table.register(addr(1), stale.clone());
+        let stale_source = stale.source(addr(1));
+
+        // Same-address replacement: the stale connection is cancelled and
+        // the new connection takes the slot.
+        let (current_tx, _current_rx) = crossbeam_channel::unbounded();
+        let current = PeerLease::new(current_tx);
+        table.register(addr(1), current.clone());
+        let current_source = current.source(addr(1));
+        assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
+
+        // The stale connection cannot raise the replacement's preference.
+        assert!(!table.note_compact_relay(stale_source));
+        assert!(!table.compact_relay_of(addr(1)));
+
+        // The live connection raises its own entry.
+        assert!(table.note_compact_relay(current_source));
+        assert!(table.compact_relay_of(addr(1)));
+
+        // Unknown and unpublished addresses never report relay.
+        assert!(!table.compact_relay_of(addr(2)));
+        table.register(addr(3), lease());
+        assert!(!table.compact_relay_of(addr(3)));
     }
 }

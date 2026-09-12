@@ -523,6 +523,19 @@ impl MempoolGateway {
             .map(|held| (*held.tx).clone())
     }
 
+    /// Invokes `f` for every resident pool transaction as `(txid, wtxid)`.
+    ///
+    /// The BIP152 compact-block reconstruction scan walks these identities
+    /// to match short IDs. Orphan-pool residents are deliberately excluded:
+    /// their parents are still unknown, so their bodies cannot yet complete
+    /// a connected block reconstruction.
+    pub fn for_each_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
+        let pool = self.pool.read();
+        for entry in pool.iter_entries() {
+            f(entry.txid, entry.wtxid);
+        }
+    }
+
     /// Number of resident orphan transaction bodies.
     #[must_use]
     pub fn orphan_count(&self) -> usize {

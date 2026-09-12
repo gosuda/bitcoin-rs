@@ -20,7 +20,7 @@ use bitcoin_rs_primitives::USER_AGENT;
 use serde_json::Value;
 
 const EVIDENCE_ENV: &str = "P2P_CORE_INTEROP_EVIDENCE";
-const SCHEMA: &str = "bitcoin-rs-core-differential-v1";
+const SCHEMA: &str = "bitcoin-rs-core-differential-v2";
 
 type LiveError = Box<dyn std::error::Error>;
 
@@ -39,6 +39,13 @@ fn evidence_u64(value: &Value, key: &str) -> Result<u64, LiveError> {
     value
         .get(key)
         .and_then(Value::as_u64)
+        .ok_or_else(|| main_error(format!("evidence missing `{key}`")))
+}
+
+fn evidence_bool(value: &Value, key: &str) -> Result<bool, LiveError> {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
         .ok_or_else(|| main_error(format!("evidence missing `{key}`")))
 }
 
@@ -185,6 +192,7 @@ fn live_bitcoin_core_p2p_interop_matches_contract() -> Result<(), LiveError> {
     assert_pinned_core_and_network(&evidence)?;
     assert_inbound_handshake(&evidence)?;
     assert_chain_identity(&evidence)?;
+    assert_bip152_relay(&evidence)?;
     Ok(())
 }
 
@@ -224,6 +232,69 @@ fn pinned_core_line_rejects_31_10() {
         "30.1.0",
         bitcoin_rs_p2p::compat::PINNED_CORE_VERSION
     ));
+}
+
+/// The BIP152 lane: near-tip compact fetches against live Core must show
+/// completed reconstructions, at least one `getblocktxn` recovery, at least
+/// one bounded-missing full-block fallback, and a raw-probe proof that the
+/// serving side answers `cmpctblock`/`blocktxn` and disconnects on
+/// out-of-range `getblocktxn` indexes.
+fn assert_bip152_relay(evidence: &Value) -> Result<(), LiveError> {
+    let compact = evidence
+        .get("compact")
+        .ok_or_else(|| main_error("evidence missing `compact`"))?;
+    let phase_a_blocks = evidence_u64(compact, "phase_a_blocks")?;
+    let batches = evidence_u64(compact, "near_tip_compact_batches")?;
+    let reconstructions = evidence_u64(compact, "reconstructions_complete")?;
+    let recoveries = evidence_u64(compact, "getblocktxn_requests")?;
+    let fallbacks = evidence_u64(compact, "full_block_fallbacks")?;
+    assert!(
+        batches >= 1,
+        "near-tip compact fetches must appear in the log"
+    );
+    assert!(
+        reconstructions >= phase_a_blocks,
+        "every coinbase-only compact block must reconstruct fully: \
+         {reconstructions} reconstructions for {phase_a_blocks} phase-A blocks"
+    );
+    assert!(
+        recoveries >= 1,
+        "the seeded missing-tx block must recover via getblocktxn"
+    );
+    assert!(
+        fallbacks >= 1,
+        "the 130-tx block must exceed the bounded missing list and fall back"
+    );
+
+    let probe = evidence
+        .get("bip152_probe")
+        .ok_or_else(|| main_error("evidence missing `bip152_probe`"))?;
+    for key in [
+        "served_cmpctblock",
+        "served_blocktxn",
+        "cmpct_header_hash_matches_tip",
+        "malformed_getblocktxn_disconnected",
+    ] {
+        assert!(
+            evidence_bool(probe, key)?,
+            "raw BIP152 probe outcome `{key}` must hold"
+        );
+    }
+
+    let performance = evidence
+        .get("performance")
+        .ok_or_else(|| main_error("evidence missing `performance`"))?;
+    for key in [
+        "ibd_seconds",
+        "near_tip_seconds",
+        "ibd_bytes_core_to_rs",
+        "near_tip_bytes_core_to_rs",
+        "ibd_bytes_rs_to_core",
+        "near_tip_bytes_rs_to_core",
+    ] {
+        evidence_u64(performance, key)?;
+    }
+    Ok(())
 }
 
 #[test]

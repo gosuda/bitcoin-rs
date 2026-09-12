@@ -632,6 +632,7 @@ mod tests {
 
         let info = PeerInfo {
             wtxid_relay: false,
+            compact_block_relay: false,
             addr: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
             version: 70_016,
             services: (1_u64 << 0) | (1_u64 << 3),
@@ -821,6 +822,7 @@ mod addnode_validation_tests {
         let ctx = Context::new();
         let info = PeerInfo {
             wtxid_relay: false,
+            compact_block_relay: false,
             addr,
             version: 70_016,
             services: 9,
@@ -1165,6 +1167,7 @@ mod peer_counter_tests {
         };
         PeerInfo {
             wtxid_relay: false,
+            compact_block_relay: false,
             addr: parse(addr),
             version: 70_016,
             services: 0,
@@ -1539,6 +1542,7 @@ mod getnodeaddresses_tests {
         let parsed: SocketAddr = addr.parse().expect("addr");
         PeerInfo {
             wtxid_relay: false,
+            compact_block_relay: false,
             addr: parsed,
             version: 70_016,
             services,
