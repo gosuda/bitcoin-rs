@@ -1224,7 +1224,8 @@ mod compat_manifest_tests {
         use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
-        use bitcoin_rs_node::mining::{MempoolSequenceWake, MiningGenerationSignal};
+        use bitcoin_rs_mining::MempoolSequenceWake;
+use bitcoin_rs_node::mining::MiningGenerationSignal;
         use compact_str::CompactString;
         use parking_lot::{Mutex, RwLock};
 
@@ -1514,7 +1515,8 @@ mod sequence_observer_tests {
         use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
-        use bitcoin_rs_node::mining::{MempoolSequenceWake, MiningGenerationSignal};
+        use bitcoin_rs_mining::MempoolSequenceWake;
+use bitcoin_rs_node::mining::MiningGenerationSignal;
         use compact_str::CompactString;
 
         struct RecordingControl {

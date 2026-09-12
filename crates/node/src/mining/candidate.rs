@@ -1,44 +1,35 @@
 //! Candidate construction, single-flight assembly, and bounded template caching.
 
 use super::CANDIDATE_GENERATION_RETRIES;
-use super::GENERATION_RACE;
 use super::GenerationKey;
 use super::InFlight;
 use super::LONG_POLL_SLICE;
 use super::MAX_BLOCK_SIZE;
 use super::MAX_BLOCK_WEIGHT;
 use super::MiningCoordinator;
-use super::control::signet_info;
+use super::generation_race;
 use super::hex_encode;
+use super::is_generation_race;
+use super::snapshot_for_selection;
 use super::submission::test_block_validity_error;
 use alloc::sync::Arc;
-use bitcoin_rs_mempool::Mempool;
-use bitcoin_rs_mempool::MempoolMiningSnapshot;
-use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_mining::AvailableMiningRule;
-use bitcoin_rs_mining::BlockTemplate;
 use bitcoin_rs_mining::BlockValidationResult;
 use bitcoin_rs_mining::Candidate;
 use bitcoin_rs_mining::CandidateContext;
 use bitcoin_rs_mining::GenerateRequest;
 use bitcoin_rs_mining::GenerateSelection;
-use bitcoin_rs_mining::GenerateTx;
 use bitcoin_rs_mining::GeneratedBlock;
 use bitcoin_rs_mining::LastCandidateInfo;
-use bitcoin_rs_mining::MiningCapability;
 use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::MiningRule;
-use bitcoin_rs_mining::TemplateMutation;
 use bitcoin_rs_mining::assemble_candidate;
 use bitcoin_rs_mining::assemble_ordered_candidate;
 use bitcoin_rs_mining::solve_block;
 use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::Network;
-use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::consensus_bytes;
 use compact_str::CompactString;
-use hashbrown::HashMap;
 use std::sync::atomic::Ordering;
 
 /// Clears an abandoned single-flight slot if candidate assembly unwinds.
@@ -353,48 +344,6 @@ impl MiningCoordinator {
         }
     }
 
-    pub(super) fn template_from_candidate(
-        network: Network,
-        candidate: Arc<Candidate>,
-        submit_old: Option<bool>,
-        version_bits_available: Vec<AvailableMiningRule>,
-        version_bits_required: u32,
-    ) -> BlockTemplate {
-        let mut rules = Vec::new();
-        if candidate.segwit_active {
-            rules.push(MiningRule::new("segwit"));
-        }
-        if candidate.csv_active {
-            rules.push(MiningRule::new("csv"));
-        }
-        if network.is_taproot_active(candidate.height) {
-            rules.push(MiningRule::new("taproot"));
-        }
-        let signet = signet_info(network);
-        if signet.is_some() {
-            rules.push(MiningRule::new("signet"));
-        }
-        // API-11 advertises producer capabilities, never client-requested names.
-        BlockTemplate {
-            rules,
-            candidate,
-            version_bits_available,
-            version_bits_required,
-            capabilities: vec![
-                MiningCapability::new("proposal"),
-                MiningCapability::new("longpoll"),
-            ],
-            mutable: vec![
-                TemplateMutation::Time,
-                TemplateMutation::Transactions,
-                TemplateMutation::PreviousBlock,
-            ],
-            submit_old,
-            signet,
-            work_id: None,
-        }
-    }
-
     pub(super) fn version_bits_for(
         &self,
         candidate: &Candidate,
@@ -422,90 +371,4 @@ impl MiningCoordinator {
         // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
         (available, 0)
     }
-}
-
-pub(super) fn snapshot_for_selection(
-    mempool: &Mempool,
-    selection: &GenerateSelection,
-) -> Result<MempoolMiningSnapshot, MiningControlError> {
-    match selection {
-        GenerateSelection::Mempool => Ok(mempool.mining_snapshot()),
-        GenerateSelection::Ordered(items) => {
-            let full = mempool.mining_snapshot();
-            let mut by_txid = HashMap::with_capacity(full.entries.len());
-            for (index, entry) in full.entries.iter().enumerate() {
-                let position = u32::try_from(index).unwrap_or(u32::MAX);
-                by_txid.insert(entry.txid, position);
-            }
-            let mut selected = Vec::with_capacity(items.len());
-            let mut old_to_new = HashMap::with_capacity(items.len());
-            for item in items {
-                match item {
-                    GenerateTx::Mempool(txid) => {
-                        let Some(&old) = by_txid.get(txid) else {
-                            return Err(MiningControlError::InvalidRequest(CompactString::from(
-                                "transaction not in mempool",
-                            )));
-                        };
-                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
-                        old_to_new.insert(old, new_index);
-                        let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
-                        selected.push(full.entries[old_usize].clone());
-                    }
-                    GenerateTx::ResolvedMempool(entry) => {
-                        let mut entry = entry.clone();
-                        entry.ancestors.clear();
-                        selected.push(entry);
-                    }
-                    GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
-                }
-            }
-            for entry in &mut selected {
-                entry.ancestors.retain_mut(|ancestor| {
-                    if let Some(&new_index) = old_to_new.get(ancestor) {
-                        *ancestor = new_index;
-                        true
-                    } else {
-                        false
-                    }
-                });
-            }
-            Ok(MempoolMiningSnapshot {
-                sequence: full.sequence,
-                entries: selected,
-            })
-        }
-    }
-}
-
-pub(super) fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
-    let tx = Arc::new(tx.clone());
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
-    SnapshotEntry {
-        txid: tx.txid(),
-        wtxid: tx.wtxid(),
-        vsize,
-        bip141_vsize: vsize,
-        size,
-        weight: tx.weight(),
-        sigop_cost: bitcoin_rs_script::count_tx_legacy(&tx),
-        fee: 0,
-        fee_delta: 0,
-        time: 0,
-        height: 0,
-        ancestor_size: u64::from(vsize),
-        ancestor_fee: 0,
-        ancestor_fee_delta: 0,
-        ancestors: Vec::new(),
-        tx,
-    }
-}
-
-pub(super) fn generation_race() -> MiningControlError {
-    MiningControlError::Unavailable(CompactString::from(GENERATION_RACE))
-}
-
-pub(super) fn is_generation_race(error: &MiningControlError) -> bool {
-    matches!(error, MiningControlError::Unavailable(message) if message.as_str() == GENERATION_RACE)
 }

@@ -3,8 +3,9 @@
 use super::MiningCoordinator;
 use super::estimate_network_hashps;
 use super::hash_ps_at;
-use super::hex_decode;
-use super::long_poll::parse_long_poll_id;
+use bitcoin_rs_mining::parse_long_poll_id;
+use bitcoin_rs_mining::signet_info;
+use bitcoin_rs_mining::template_from_candidate;
 use bitcoin_rs_mining::BlockTemplateMode;
 use bitcoin_rs_mining::BlockTemplateRequest;
 use bitcoin_rs_mining::BlockTemplateResult;
@@ -15,12 +16,10 @@ use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::MiningInfo;
-use bitcoin_rs_mining::SignetMiningInfo;
 use bitcoin_rs_mining::difficulty_for_bits;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Header;
-use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 
 impl MiningCoordinator {
@@ -126,7 +125,7 @@ impl MiningControl for MiningCoordinator {
                     waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
                 let (version_bits_available, version_bits_required) =
                     self.version_bits_for(&candidate);
-                let template = Self::template_from_candidate(
+                let template = template_from_candidate(
                     self.network,
                     candidate,
                     submit_old,
@@ -172,18 +171,4 @@ impl MiningControl for MiningCoordinator {
     ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
         self.generate_blocks(&request)
     }
-}
-
-pub(super) fn signet_info(network: Network) -> Option<SignetMiningInfo> {
-    const DEFAULT_SIGNET_CHALLENGE: &str = concat!(
-        "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
-        "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
-    );
-
-    if network != Network::Signet {
-        return None;
-    }
-    let challenge = hex_decode(DEFAULT_SIGNET_CHALLENGE)
-        .unwrap_or_else(|| panic!("Bitcoin Core's default Signet challenge is invalid hex"));
-    Some(SignetMiningInfo { challenge })
 }

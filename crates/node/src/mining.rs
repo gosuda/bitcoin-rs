@@ -1,8 +1,9 @@
-//! Node-owned mining candidate lifecycle coordinator.
+//! Node-owned mining control facade and network-hash-rate helpers.
 //!
-//! Generation is keyed by `(applied_tip_hash, mempool_sequence)`. Template
-//! assembly is single-flight per key, cached by [`TemplateId`], and woken by
-//! explicit generation publication. Proposal mode dry-runs the ordinary apply
+//! Candidate lifecycle state lives in [`bitcoin_rs_mining::coordinator`];
+//! this module keeps the wake seam between authoritative mutations and the
+//! template coordinator, plus the node-owned header admission and
+//! `getnetworkhashps` estimation. Proposal mode dry-runs the ordinary apply
 //! validation path without persistence; solved-block submission returns only
 //! after validation, persistence, and chain-state application complete.
 
@@ -13,7 +14,6 @@ mod submission;
 
 use crate::apply::Chainstate;
 use crate::chain_effects::ChainFollowers;
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
@@ -27,19 +27,23 @@ use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
 #[cfg(test)]
 use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::Candidate;
-use bitcoin_rs_mining::LastCandidateInfo;
+use bitcoin_rs_mining::CANDIDATE_GENERATION_RETRIES;
+use bitcoin_rs_mining::DEFAULT_MEMPOOL_UPDATE_WAIT;
+use bitcoin_rs_mining::GenerationKey;
+use bitcoin_rs_mining::InFlight;
+use bitcoin_rs_mining::LONG_POLL_SLICE;
+use bitcoin_rs_mining::CoordinatorState;
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_mining::TemplateId;
+use bitcoin_rs_mining::MempoolSequenceWake;
+use bitcoin_rs_mining::generation_race;
+use bitcoin_rs_mining::is_generation_race;
+use bitcoin_rs_mining::snapshot_for_selection;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 use core::time::Duration;
-use hashbrown::HashMap;
-#[cfg(test)]
-use long_poll::parse_long_poll_id;
 use parking_lot::Condvar;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -48,114 +52,10 @@ use std::time::Instant;
 #[cfg(test)]
 use submission::map_apply_error;
 
-/// Default number of cached candidates retained by template id.
-const CANDIDATE_CACHE_LIMIT: usize = 8;
-/// Finite bound on generation-key races during candidate assembly.
-const CANDIDATE_GENERATION_RETRIES: usize = 8;
-const GENERATION_RACE: &str = "generation key changed during candidate assembly";
-/// Bitcoin Core's mempool-only long-poll cooldown before returning a new template.
-const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
-/// Upper bound for a single long-poll wait slice while rechecking predicates.
-const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 /// Consensus maximum block weight / serialized size.
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 const MAX_BLOCK_SIZE: u64 = 4_000_000;
 
-/// Applied-tip hash plus mempool sequence that identify one candidate generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct GenerationKey {
-    /// Applied tip hash in consensus little-endian storage order.
-    pub tip_hash: Hash256,
-    /// Mempool sequence captured with the tip.
-    pub mempool_sequence: u64,
-}
-
-impl GenerationKey {
-    /// Opaque BIP22/BIP23 long-poll identity for this generation.
-    #[must_use]
-    pub fn template_id(self) -> TemplateId {
-        TemplateId::new(&self.tip_hash, self.mempool_sequence)
-    }
-}
-
-#[derive(Debug)]
-struct InFlight {
-    key: GenerationKey,
-    id: u64,
-    result: Option<Result<Arc<Candidate>, MiningControlError>>,
-}
-
-struct CoordinatorState {
-    /// Last generation published to long-poll waiters.
-    published: Option<GenerationKey>,
-    /// Bounded LRU of assembled candidates keyed by template id.
-    cache: HashMap<TemplateId, Arc<Candidate>>,
-    /// Insertion order for deterministic eviction of the oldest entry.
-    cache_order: VecDeque<TemplateId>,
-    /// Single in-flight assembly, if any.
-    in_flight: Option<InFlight>,
-    /// Monotonically increasing identity for each installed flight.
-    next_flight_id: u64,
-    /// Facts from the most recently assembled candidate.
-    last_candidate: Option<LastCandidateInfo>,
-}
-
-impl CoordinatorState {
-    fn new() -> Self {
-        Self {
-            published: None,
-            cache: HashMap::new(),
-            cache_order: VecDeque::new(),
-            in_flight: None,
-            next_flight_id: 0,
-            last_candidate: None,
-        }
-    }
-
-    fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
-        self.cache.get(id).cloned()
-    }
-
-    fn cache_insert(&mut self, id: TemplateId, candidate: Arc<Candidate>) {
-        if self.cache.contains_key(&id) {
-            self.cache.insert(id, candidate);
-            return;
-        }
-        while self.cache.len() >= CANDIDATE_CACHE_LIMIT {
-            let Some(oldest) = self.cache_order.pop_front() else {
-                break;
-            };
-            self.cache.remove(&oldest);
-        }
-        self.cache_order.push_back(id.clone());
-        self.cache.insert(id, candidate);
-    }
-
-    fn invalidate_key(&mut self, key: GenerationKey) {
-        let id = key.template_id();
-        if self.cache.remove(&id).is_some() {
-            self.cache_order.retain(|cached| cached != &id);
-        }
-        if self
-            .in_flight
-            .as_ref()
-            .is_some_and(|flight| flight.key == key)
-        {
-            self.in_flight = None;
-        }
-    }
-}
-/// Mempool-sequence wake that avoids the mempool read lock.
-///
-/// The mempool observer fires under the gateway's publish mutex; taking the
-/// pool read lock from that path can deadlock or contend with an in-flight
-/// writer. Implementations build the generation key from `applied_tip` plus
-/// the caller-supplied sequence instead.
-pub trait MempoolSequenceWake: Send + Sync {
-    /// Publishes a generation key built from `applied_tip` and `sequence`
-    /// without taking the mempool read lock, then wakes all waiters.
-    fn publish_generation_from(&self, sequence: u64);
-}
 
 /// Wake seam between authoritative mutations and the template coordinator.
 ///
@@ -516,31 +416,6 @@ fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
         .iter()
         .fold(0.0_f64, |acc, &byte| acc.mul_add(256.0, f64::from(byte)));
     work / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
-}
-
-/// Decodes a lowercase hex string to bytes. Returns `None` on invalid input.
-fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.as_bytes().iter();
-    while let Some(&hi) = chars.next() {
-        let &lo = chars.next()?;
-        let high = decode_nibble(hi)?;
-        let low = decode_nibble(lo)?;
-        bytes.push((high << 4) | low);
-    }
-    Some(bytes)
-}
-
-fn decode_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

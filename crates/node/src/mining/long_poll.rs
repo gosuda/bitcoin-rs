@@ -6,7 +6,6 @@ use super::LONG_POLL_SLICE;
 use super::MempoolSequenceWake;
 use super::MiningCoordinator;
 use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_primitives::Hash256;
 use compact_str::CompactString;
 use std::sync::atomic::Ordering;
 
@@ -112,18 +111,4 @@ impl MempoolSequenceWake for MiningCoordinator {
     fn publish_generation_from(&self, sequence: u64) {
         Self::publish_generation_from(self, sequence);
     }
-}
-
-pub(super) fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
-    let hash_hex = id.get(..64)?;
-    let sequence = id.get(64..)?;
-    if sequence.is_empty() {
-        return None;
-    }
-    let tip_hash = Hash256::from_str_be(hash_hex).ok()?;
-    let mempool_sequence = sequence.parse().ok()?;
-    Some(GenerationKey {
-        tip_hash,
-        mempool_sequence,
-    })
 }

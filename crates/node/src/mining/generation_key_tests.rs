@@ -1,8 +1,8 @@
 // CONTRACT: `crates/mining/README.md` owns the node-facing BIP22/BIP23
 // long-poll identity contract; `docs/contracts/external-api.md#API-11` owns
 // the corresponding `getblocktemplate` long-poll surface.
-use super::GenerationKey;
-use super::parse_long_poll_id;
+use bitcoin_rs_mining::GenerationKey;
+use bitcoin_rs_mining::parse_long_poll_id;
 use bitcoin_rs_mining::TemplateId;
 use bitcoin_rs_primitives::Hash256;
 

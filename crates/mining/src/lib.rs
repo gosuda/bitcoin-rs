@@ -3,6 +3,8 @@
 
 /// Coinbase transaction assembly.
 pub mod coinbase;
+/// Node-backed candidate lifecycle service.
+pub mod coordinator;
 /// Candidate chain context.
 pub mod context;
 /// Node-facing mining control contract.
@@ -22,6 +24,18 @@ pub use control::{
     BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,
     GeneratedBlock, LastCandidateInfo, MiningCapability, MiningControl, MiningControlError,
     MiningInfo, MiningRule, SignetMiningInfo, TemplateMutation, difficulty_for_bits,
+};
+pub use coordinator::{
+    CANDIDATE_CACHE_LIMIT, CANDIDATE_GENERATION_RETRIES, DEFAULT_MEMPOOL_UPDATE_WAIT,
+    GENERATION_RACE, LONG_POLL_SLICE,
+};
+pub use coordinator::{
+    AppliedTipSource, ChainContextSource, CoordinatorState, GenerationKey, InFlight,
+    MempoolSequenceWake, MiningService,
+};
+pub use coordinator::{
+    generation_race, is_generation_race, parse_long_poll_id, signet_info, snapshot_for_selection,
+    template_from_candidate,
 };
 pub use template::{
     Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,
