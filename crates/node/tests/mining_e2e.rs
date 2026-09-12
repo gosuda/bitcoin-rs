@@ -245,6 +245,77 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn template_orders_parent_then_child_with_dependency() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let _seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
+
+    let parent = seed_coinbase_spend();
+    let parent_txid = parent.txid();
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent_txid, 0),
+            script_sig: p2sh_true_spend_script_sig(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
+            script_pubkey: p2sh_true_output(),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let child_txid = child.txid();
+
+    admit_to_mempool(&state, &parent)?;
+    admit_to_mempool(&state, &child)?;
+
+    let handler = mining_handler(&state);
+    let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let template_txs = template
+        .get("transactions")
+        .and_then(|entry| entry.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert_eq!(template_txs.len(), 2, "both txs must be selected");
+    assert_eq!(
+        template_txs[0]
+            .get("txid")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("first template tx missing txid"))?,
+        parent_txid.to_string(),
+        "parent must precede child in topological template order"
+    );
+    assert_eq!(
+        template_txs[1]
+            .get("txid")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("second template tx missing txid"))?,
+        child_txid.to_string(),
+        "child must follow parent in topological template order"
+    );
+
+    let parent_depends = template_txs[0]
+        .get("depends")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(parent_depends.is_empty(), "parent has no in-template dependencies");
+
+    let child_depends = template_txs[1]
+        .get("depends")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert_eq!(child_depends.len(), 1, "child depends on the one in-template parent");
+    assert_eq!(
+        child_depends[0].as_i64().and_then(|n| u64::try_from(n).ok()),
+        Some(1_u64),
+        "child depends index must be the one-based parent position"
+    );
+
+    Ok(())
+}
+
 /// Opens an isolated regtest `NodeState`; the returned guard keeps the data
 /// directory alive for the whole test body (freed when the guard drops).
 fn open_regtest() -> Result<(NodeState, tempfile::TempDir)> {
