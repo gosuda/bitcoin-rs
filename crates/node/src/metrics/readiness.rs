@@ -3,8 +3,9 @@
 //! The gauge reads the same live snapshot the RPC `getcapabilities`
 //! projection reads — [`DerivedIndexCapabilitySource`] — and never
 //! re-derives what ready, catching up, rebuilding, failed, or disabled
-//! means. Each pass writes every outcome label, so a scrape always shows
-//! exactly one active outcome even right after a transition.
+//! means. Each pass writes every outcome label independently, so a scrape
+//! that lands between two writes may briefly show zero or two active
+//! outcomes; see [`publish_txindex_readiness`] for the scrape caveats.
 
 use alloc::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,8 +51,9 @@ pub(crate) fn readiness_state_name(state: &CapabilityState) -> &'static str {
 
 /// Publishes one readiness sample from the RPC capability source.
 ///
-/// The active outcome carries 1 and every other outcome 0, all within one
-/// pass, so a scrape never reports two active outcomes across a transition.
+/// Outcome labels are set independently, so a scrape during a transition may
+/// observe zero or two active outcomes; the 1s sample interval bounds the window.
+/// Treat a single scrape as approximate and the RPC source as authoritative.
 pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySource) {
     let status = source.capability();
     let active = readiness_state_name(&status.state);
