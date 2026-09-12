@@ -13,7 +13,9 @@
 //! acquires the pool write lock through a bypass pattern. Derived-index
 //! capability selection fails the scan outside its three owners: the
 //! `crates/index` crate, the `crates/node` txindex runtime, and the
-//! `crates/node/src/state` config projection.
+//! `crates/node/src/state` config projection. Peer registration and
+//! cancellation fail the scan outside `crates/p2p/src/` apart from
+//! explicitly audited receiver expressions.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -81,6 +83,44 @@ pub(crate) const INDEX_CAPABILITY_PATTERNS: &[&str] = &[
     "build_derived_index_open_spec(",
 ];
 
+/// Peer registration and cancellation mutators on `PeerTable`,
+/// `P2pService`, and the connections they own. The names are distinctive
+/// enough to scan bare. Owner-owned free functions such as
+/// `apply_network_active` keep their mutation inside `crates/p2p` and are
+/// not second owners. `PeerLease::cancel` and `PeerConnection::cancel` have
+/// no production caller outside the owner; a new one belongs here only
+/// together with an audited receiver.
+pub(crate) const PEER_MUTATION_METHODS: &[&str] = &[
+    "register(",
+    "publish_info(",
+    "publish_ready(",
+    "remove_current(",
+    "disconnect_source(",
+    "disconnect_connection(",
+    "disconnect_matching(",
+    "cancel_all(",
+];
+
+/// Receiver-qualified patterns for the peer mutators whose bare name is
+/// shared with another owner's API: `ChainTransition::disconnect` also
+/// reads `disconnect(`, so only a `peer_table` receiver counts here.
+pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[".peer_table.disconnect("];
+
+/// Audited non-owner peer mutation receivers. The receiver must be the
+/// complete audited expression — the sync worker's shared state handle —
+/// never a lookalike local.
+pub(crate) const AUTHORIZED_PEER_TABLE_CALLS: &[(&str, &str)] = &[
+    // Header sync tears down the peer a fault was blamed on.
+    ("crates/node/src/sync/headers.rs", "self.peer_table"),
+    // Download-window selection drops a stale peer connection.
+    ("crates/node/src/sync/peers.rs", "self.peer_table"),
+];
+
+/// Paths allowed to call the receiver-qualified peer mutators from non-owner
+/// code: the RPC operator surface (`disconnectnode`) is the one permitted
+/// caller.
+pub(crate) const AUTHORIZED_PEER_TABLE_PATHS: &[&str] = &["crates/rpc/src/handlers/network.rs"];
+
 /// Result of the source scan.
 #[derive(Debug)]
 pub(crate) struct OwnershipScanResult {
@@ -88,6 +128,8 @@ pub(crate) struct OwnershipScanResult {
     pub mempool_writer_violations: Vec<String>,
     /// Derived-index capability selection outside the index owners.
     pub index_capability_violations: Vec<String>,
+    /// Peer registration/cancellation outside the P2P owner and its audits.
+    pub peer_owner_violations: Vec<String>,
     /// Number of production source files examined.
     pub files_scanned: usize,
     /// Number of raw pool write sites found.
@@ -98,16 +140,20 @@ pub(crate) struct OwnershipScanResult {
     /// Number of derived-index capability expressions found (including
     /// owner files).
     pub index_capability_sites: usize,
+    /// Number of peer mutation call sites found (including owner files).
+    pub peer_mutations_found: usize,
 }
 
 fn empty_result() -> OwnershipScanResult {
     OwnershipScanResult {
         mempool_writer_violations: Vec::new(),
         index_capability_violations: Vec::new(),
+        peer_owner_violations: Vec::new(),
         files_scanned: 0,
         pool_writes_found: 0,
         mempool_mutations_found: 0,
         index_capability_sites: 0,
+        peer_mutations_found: 0,
     }
 }
 
@@ -220,7 +266,17 @@ fn cfg_test_attribute(trimmed: &str) -> Option<&str> {
 /// Extracts `<stem>` from a complete external `mod <stem>;` declaration.
 /// Returns `None` for inline `mod <stem> { .. }` blocks and non-mod items.
 fn mod_stem(rest: &str) -> Option<String> {
-    let tail = rest.trim().strip_prefix("mod ")?;
+    let mut declared = rest.trim();
+    if let Some(tail) = declared.strip_prefix("pub") {
+        declared = tail.trim_start();
+    }
+    if let Some(tail) = declared
+        .strip_prefix("(crate)")
+        .or_else(|| declared.strip_prefix("(super)"))
+    {
+        declared = tail.trim_start();
+    }
+    let tail = declared.strip_prefix("mod ")?;
     let name = tail.strip_suffix(';')?.trim();
     (!name.is_empty()
         && name
@@ -393,6 +449,10 @@ fn is_test_attribute(trimmed: &str) -> bool {
         || trimmed.starts_with("#[test(")
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "each single-owner boundary runs as one visible loop inside the shared line walk"
+)]
 fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) {
     let is_mempool_owner = path_str.replace('\\', "/").contains("/crates/mempool/src/");
     let raw_lines: Vec<&str> = content.lines().collect();
@@ -483,6 +543,39 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
                 }
             }
         }
+
+        for method in PEER_MUTATION_METHODS {
+            if let Some(pos) = line.find(method) {
+                result.peer_mutations_found += 1;
+                if !is_p2p_owner(path_str)
+                    && !is_authorized_peer_table_call(path_str, line, pos, &code_lines, index)
+                {
+                    result.peer_owner_violations.push(format!(
+                        "peer mutation `{method}` at {}:{}: {}",
+                        path_str,
+                        index + 1,
+                        raw_lines[index].trim()
+                    ));
+                }
+            }
+        }
+
+        for pattern in PEER_TABLE_PATTERNS {
+            if line.contains(pattern) {
+                result.peer_mutations_found += 1;
+                let operator_audited = AUTHORIZED_PEER_TABLE_PATHS
+                    .iter()
+                    .any(|allowed| authorized_path(path_str, allowed));
+                if !is_p2p_owner(path_str) && !operator_audited {
+                    result.peer_owner_violations.push(format!(
+                        "peer table mutation `{pattern}` at {}:{}: {}",
+                        path_str,
+                        index + 1,
+                        raw_lines[index].trim()
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -495,39 +588,11 @@ fn is_authorized_gateway_call(
     lines: &[String],
     line_index: usize,
 ) -> bool {
-    let normalized_path = path.replace('\\', "/");
     AUTHORIZED_GATEWAY_CALLS
         .iter()
         .any(|(allowed_path, allowed_receiver)| {
-            let path_matches = normalized_path == *allowed_path
-                || normalized_path
-                    .strip_suffix(allowed_path)
-                    .is_some_and(|prefix| prefix.ends_with('/'));
-            if !path_matches {
-                return false;
-            }
-
-            // Rustfmt can split both field access and the method call across
-            // lines. Read the masked code backwards, skipping only whitespace,
-            // and require the entire audited receiver rather than a suffix.
-            let mut before = line[..method_pos]
-                .chars()
-                .rev()
-                .chain(
-                    lines[..line_index]
-                        .iter()
-                        .rev()
-                        .flat_map(|previous| previous.chars().rev()),
-                )
-                .filter(|ch| !ch.is_whitespace());
-            before.next() == Some('.')
-                && allowed_receiver
-                    .chars()
-                    .rev()
-                    .all(|expected| before.next() == Some(expected))
-                && before
-                    .next()
-                    .is_none_or(|ch| ch != '.' && ch != '_' && ch.is_ascii_punctuation())
+            authorized_path(path, allowed_path)
+                && receiver_expression_is(line, method_pos, lines, line_index, allowed_receiver)
         })
 }
 
@@ -544,12 +609,103 @@ fn is_index_capability_owner(path: &str) -> bool {
         || normalized.contains("/crates/node/src/txindex/")
 }
 
+/// Returns true when `path` is `allowed` or reaches it across a directory
+/// boundary, so a lookalike sibling directory cannot inherit an audit.
+fn authorized_path(path: &str, allowed: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized == allowed
+        || normalized
+            .strip_suffix(allowed)
+            .is_some_and(|prefix| prefix.ends_with('/'))
+}
+
+/// Reads the masked code backwards from the method position and requires
+/// the entire audited receiver rather than a suffix. Rustfmt can split both
+/// field access and the method call across lines, so the chain continues
+/// through the preceding lines. The boundary before the receiver passes
+/// when the run of code is separated there — whitespace, and therefore any
+/// control-flow keyword, or plain punctuation. A glued identifier
+/// (`my_self`), a `_`, or a longer chain (`other.`) reads as a different
+/// expression and fails.
+fn receiver_expression_is(
+    line: &str,
+    method_pos: usize,
+    lines: &[String],
+    line_index: usize,
+    receiver: &str,
+) -> bool {
+    let mut stream = line[..method_pos].chars().rev().chain(
+        lines[..line_index]
+            .iter()
+            .rev()
+            .flat_map(|previous| previous.chars().rev()),
+    );
+    // The method's own dot.
+    let Some((dot, _)) = next_code_char(&mut stream) else {
+        return false;
+    };
+    if dot != '.' {
+        return false;
+    }
+    for expected in receiver.chars().rev() {
+        let Some((got, _)) = next_code_char(&mut stream) else {
+            return false;
+        };
+        if got != expected {
+            return false;
+        }
+    }
+    match next_code_char(&mut stream) {
+        None => true,
+        Some((ch, separated)) => {
+            separated || (ch.is_ascii_punctuation() && !matches!(ch, '.' | '_'))
+        }
+    }
+}
+
+/// Returns the next non-whitespace character and whether whitespace was
+/// skipped before it.
+fn next_code_char(stream: &mut impl Iterator<Item = char>) -> Option<(char, bool)> {
+    let mut separated = false;
+    loop {
+        match stream.next() {
+            Some(ch) if ch.is_whitespace() => separated = true,
+            other => return other.map(|ch| (ch, separated)),
+        }
+    }
+}
+
+/// Returns true only when a peer mutation sits on a receiver expression
+/// explicitly audited in [`AUTHORIZED_PEER_TABLE_CALLS`].
+fn is_authorized_peer_table_call(
+    path: &str,
+    line: &str,
+    method_pos: usize,
+    lines: &[String],
+    line_index: usize,
+) -> bool {
+    AUTHORIZED_PEER_TABLE_CALLS
+        .iter()
+        .any(|(allowed_path, allowed_receiver)| {
+            authorized_path(path, allowed_path)
+                && receiver_expression_is(line, method_pos, lines, line_index, allowed_receiver)
+        })
+}
+
+/// Returns true when `path` is inside the P2P owner crate: `PeerTable`,
+/// `P2pService`, and the connections they spawn are the single peer
+/// registration and cancellation owner.
+fn is_p2p_owner(path: &str) -> bool {
+    path.replace('\\', "/").contains("/crates/p2p/src/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         LexState, cfg_test_module_stems_from, code_line, empty_result, is_authorized_gateway_call,
         is_test_module_file, scan_source,
     };
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     const MINING_HANDLER: &str = "/workspace/crates/rpc/src/handlers/mining.rs";
@@ -581,14 +737,20 @@ mod tests {
             "#[cfg(all(test, feature = \"fjall\"))]\nmod body_reader_tests;\n".to_owned(),
             "#[cfg(test)] mod tests;\n".to_owned(),
             "#[cfg(test)]\n\n// leading comment\n#[expect(unused)]\nmod helpers;\n".to_owned(),
+            "#[cfg(test)]\npub(crate) mod testing;\n".to_owned(),
+            "#[cfg(test)]\npub mod published;\n".to_owned(),
         ]);
-        assert_eq!(
-            stems,
-            ["body_reader_tests", "helpers", "tests"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect()
-        );
+        let expected: BTreeSet<String> = [
+            "body_reader_tests",
+            "helpers",
+            "published",
+            "testing",
+            "tests",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(stems, expected);
 
         let not_stems = cfg_test_module_stems_from([
             "#[cfg(not(test))]\nmod production;\n".to_owned(),
@@ -686,12 +848,107 @@ mod tests {
         ] {
             let mut result = empty_result();
             scan_source(NON_OWNER, source, &mut result);
-            assert!(
-                result.index_capability_violations.is_empty(),
-                "{source}"
-            );
+            assert!(result.index_capability_violations.is_empty(), "{source}");
             assert_eq!(result.index_capability_sites, 0, "{source}");
         }
+    }
+
+    #[test]
+    fn only_the_p2p_owner_and_audited_handles_mutate_peers() {
+        for (path, call, expected_violations) in [
+            (
+                "/workspace/crates/p2p/src/peer_table.rs",
+                "table.register(addr, lease.clone());",
+                0,
+            ),
+            (
+                "/workspace/crates/p2p/src/connection.rs",
+                "self.table.cancel_all();",
+                0,
+            ),
+            (
+                "/workspace/crates/node/src/sync/headers.rs",
+                "self.peer_table.disconnect_source(source)",
+                0,
+            ),
+            (
+                "/workspace/crates/node/src/sync/headers.rs",
+                "if self.peer_table.disconnect_source(source) {",
+                0,
+            ),
+            (
+                "/workspace/crates/node/src/sync/headers.rs",
+                "xself.peer_table.disconnect_source(source)",
+                1,
+            ),
+            (
+                "/workspace/crates/node/src/sync/peers.rs",
+                "if !self\n    .peer_table\n    .disconnect_connection(peer_addr, connection_id)\n{\n}",
+                0,
+            ),
+            (
+                "/workspace/crates/rpc/src/handlers/network.rs",
+                "ctx.peer_table.disconnect(addr);",
+                0,
+            ),
+            (
+                "/workspace/crates/node/src/fake.rs",
+                "self.peer_table.disconnect_source(source)",
+                1,
+            ),
+            (
+                "/workspace/crates/node/src/sync/headers.rs",
+                "other.peer_table.disconnect_source(source)",
+                1,
+            ),
+            (
+                "/workspace/crates/rpc/src/handlers/mining.rs",
+                "ctx.peer_table.register(addr, lease.clone());",
+                1,
+            ),
+            (
+                "/workspace/crates/rpc/src/handlers/network.rs",
+                "ctx.peer_table.register(addr, lease.clone());",
+                1,
+            ),
+            (
+                "/workspace/crates/node/src/fake.rs",
+                "ctx.peer_table.disconnect(addr);",
+                1,
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(path, call, &mut result);
+            assert_eq!(
+                result.peer_owner_violations.len(),
+                expected_violations,
+                "{path}: {call}"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_scan_excludes_other_disconnects_and_masked_text() {
+        // `ChainTransition::disconnect` shares the bare name and must stay
+        // outside the peer scan entirely.
+        let mut result = empty_result();
+        scan_source(
+            "/workspace/crates/node/src/apply/entrypoints.rs",
+            "let result = transition.disconnect(block);",
+            &mut result,
+        );
+        assert!(result.peer_owner_violations.is_empty());
+        assert_eq!(result.peer_mutations_found, 0);
+
+        // Text that only looks like a mutator is masked out.
+        let mut result = empty_result();
+        scan_source(
+            NON_OWNER,
+            "const T: &str = \"peer_table.register(addr)\";",
+            &mut result,
+        );
+        assert!(result.peer_owner_violations.is_empty());
+        assert_eq!(result.peer_mutations_found, 0);
     }
 
     #[test]

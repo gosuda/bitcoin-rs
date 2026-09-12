@@ -1,8 +1,9 @@
 //! ARCH-01/ARCH-02/ARCH-08 ownership boundary checks.
 //!
 //! The suite validates dependency direction, storage-engine confinement,
-//! single mempool mutation ownership, and the frozen P2P forwarding-wrapper
-//! inventory.
+//! single mempool mutation ownership, derived-index capability ownership,
+//! peer registration/cancellation ownership, and the frozen P2P
+//! forwarding-wrapper inventory.
 
 #![expect(
     clippy::expect_used,
@@ -212,6 +213,34 @@ fn index_capability_scan_passes() {
     assert!(
         index_capability_sites > 0,
         "the index capability scan matched no production capability selection"
+    );
+}
+
+#[test]
+fn p2p_peer_owner_scan_passes() {
+    let OwnershipScanResult {
+        peer_owner_violations,
+        peer_mutations_found,
+        files_scanned,
+        ..
+    } = scan_ownership_violations();
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "p2p peer owner scan: files={files_scanned}, \
+         peer mutation sites={peer_mutations_found}, \
+         violations={}",
+        peer_owner_violations.len()
+    );
+    assert!(
+        peer_owner_violations.is_empty(),
+        "peer registration and cancellation must stay with the P2P owner \
+         (PeerTable/P2pService) apart from the audited sync teardown handles \
+         and the RPC disconnectnode operator path: {peer_owner_violations:?}"
+    );
+    assert!(
+        peer_mutations_found > 0,
+        "the p2p peer owner scan matched no production peer mutation"
     );
 }
 
