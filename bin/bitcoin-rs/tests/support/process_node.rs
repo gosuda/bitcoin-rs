@@ -557,7 +557,7 @@ impl ProcessNode {
     /// external kill keeps the support crate dependency-free.
     fn send_sigterm(&self) {
         let pid = self.pid().to_string();
-        let _status = Command::new("kill").args(["-TERM", pid.as_str()]).status();
+        let _child = Command::new("kill").args(["-TERM", pid.as_str()]).spawn();
     }
 }
 
