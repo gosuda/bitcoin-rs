@@ -194,6 +194,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Update fuzz corpus from bitcoin-rs ${GITHUB_SHA:0:12}"
           publication_base="${{ steps.apply.outputs.base_head }}"
+          publication_commit="$(git rev-parse HEAD)"
           read -r -a changed_targets <<< "${{ steps.apply.outputs.changed_targets }}"
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
@@ -203,6 +204,9 @@ jobs:
               break
             fi
             git fetch origin main
+            if git merge-base --is-ancestor "${publication_commit}" origin/main; then
+              exit 0
+            fi
             git merge-base --is-ancestor "${publication_base}" origin/main || {
               echo "corpus history no longer descends from ${publication_base}" >&2
               exit 1
@@ -215,6 +219,7 @@ jobs:
             done
             git rebase origin/main
             publication_base="$(git rev-parse origin/main)"
+            publication_commit="$(git rev-parse HEAD)"
           done
           echo "failed to publish corpus after 3 push attempts" >&2
           exit 1
