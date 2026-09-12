@@ -44,7 +44,7 @@ cargo +nightly fuzz run p2p_message -- -max_total_time=60
 The companion corpus repository is
 [gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
 It is the destination for the evolving exploration corpus; fuzz targets and
-local execution instructions live here in `bitcoin-rs`. A weekly campaign runs
+local execution instructions live here in `bitcoin-rs`. A daily campaign runs
 each target for one hour, minimizes its corpus, and commits through
 `github-actions[bot]` only when the minimized set changes. Reports and crash
 inputs are retained with the workflow run.
