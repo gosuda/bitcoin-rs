@@ -337,7 +337,7 @@ impl Mempool {
         let batch_len = u64::try_from(changes.len()).unwrap_or(u64::MAX);
         let sequence_base = changes
             .first()
-            .map_or(0, |_| self.mempool_sequence - batch_len + 1);
+            .map_or(0, |_| self.mempool_sequence.wrapping_sub(batch_len - 1));
         MutationResult {
             changes,
             sequence_base,
@@ -1918,6 +1918,27 @@ mod tests {
     /// The txid of every change in a mutation result, in commit order.
     fn change_txids(result: &crate::mutation::MutationResult) -> Vec<Hash256> {
         result.changes.iter().map(|change| change.txid).collect()
+    }
+
+    // MPL-02 (docs/contracts/mempool-mutations.md): sequence assignment,
+    // batch-base reconstruction, and per-change lookup are modulo 2^64, so a
+    // batch assigned `[u64::MAX, 0]` carries sequence zero as a valid
+    // in-range value rather than an empty mutation.
+    #[test]
+    fn mutation_batch_crossing_sequence_rollover_keeps_base_and_lookups() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.mempool_sequence = u64::MAX - 1;
+
+        let mut changes = Vec::new();
+        pool.push_change(&mut changes, txid_of([0xAA; 32]), MutationOutcome::Accepted);
+        pool.push_change(&mut changes, txid_of([0xBB; 32]), MutationOutcome::Accepted);
+        assert_eq!(pool.sequence_number(), 0, "assignment wraps modulo 2^64");
+
+        let result = pool.finish_mutation(changes);
+        assert_eq!(result.sequence_base, u64::MAX);
+        assert_eq!(result.sequence_of(0), Some(u64::MAX));
+        assert_eq!(result.sequence_of(1), Some(0));
+        assert_eq!(result.sequence_of(2), None);
     }
 
     #[test]
