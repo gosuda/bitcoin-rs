@@ -53,10 +53,17 @@ pub(crate) fn start_node(
     } else {
         None
     };
-    guard.services.readiness_sampler = Some(crate::metrics::spawn_readiness_sampler(
-        state.derived_index_status(),
-        state.shutdown(),
-    )?);
+    // The sampler only publishes to the metrics recorder: without a bound
+    // server its writes go nowhere, so do not spend the thread (and its
+    // join latency in every start_node test) when metrics are off.
+    guard.services.readiness_sampler = if guard.services.metrics.is_some() {
+        Some(crate::metrics::spawn_readiness_sampler(
+            state.derived_index_status(),
+            state.shutdown(),
+        )?)
+    } else {
+        None
+    };
 
     let shutdown = state.shutdown();
     let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
