@@ -99,12 +99,14 @@ impl NodeServices {
             set_first_error(&mut first_error, error);
         }
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
-        publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
-        // Owner-local fee-estimator history: the event loop has drained, so
-        // no further mempool mutations run and this snapshot is final.
+        let checkpoint_published =
+            publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
+        // Only persist estimator state alongside a durable clean chainstate.
         // docs/policies/db-migration.md — owner-local, degrade-not-fail.
-        if let Some(state) = state {
-            crate::fee_history::save(state.data_dir(), &state.mempool());
+        if checkpoint_published {
+            if let Some(state) = state {
+                crate::fee_history::save(state.data_dir(), &state.mempool());
+            }
         }
         if let Some(error) = first_error {
             return Err(error);
@@ -226,22 +228,26 @@ fn publish_clean_checkpoint_if_eligible(
     state: Option<&NodeState>,
     mode: TeardownMode,
     first_error: &mut Option<anyhow::Error>,
-) {
+) -> bool {
     if let (Some(state), TeardownMode::CleanShutdown, None) = (state, mode, first_error.as_ref()) {
         match state.write_clean_checkpoint() {
             Ok(crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip) => {
                 tracing::info!("no applied tip; clean checkpoint publication skipped");
+                true
             }
             Ok(crate::checkpoint::CheckpointWrite::Published { generation }) => {
                 tracing::info!(generation, "published clean chainstate checkpoint");
+                true
             }
             Err(error) => {
                 tracing::error!(%error, "clean checkpoint publication failed");
                 set_first_error(first_error, anyhow::Error::new(error));
+                false
             }
         }
     } else {
         tracing::info!("clean checkpoint publication skipped: the node did not shut down cleanly");
+        false
     }
 }
 
