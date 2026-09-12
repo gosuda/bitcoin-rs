@@ -12,6 +12,8 @@ pub const TXINDEX_CAPABILITY: &str = "txindex";
 /// Lifecycle state reported for a compiled RPC capability.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CapabilityState {
+    // Wire names and the complete state set are exposed below so consumers do
+    // not maintain independent copies of this vocabulary.
     /// The capability is current with the applied chain tip.
     Ready,
     /// The capability is catching up to the applied chain tip.
@@ -47,6 +49,29 @@ pub enum CapabilityState {
     Opening,
     /// The capability worker was abandoned during shutdown.
     ShutdownAbandoned,
+}
+
+impl CapabilityState {
+    /// All lifecycle states in their stable wire vocabulary order.
+    pub const ALL_WIRE_NAMES: [&'static str; 8] = [
+        "Ready", "CatchingUp", "RollingBack", "Rebuilding", "Failed", "Disabled",
+        "Opening", "ShutdownAbandoned",
+    ];
+
+    /// Returns the stable wire spelling of this state.
+    #[must_use]
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::CatchingUp { .. } => "CatchingUp",
+            Self::RollingBack { .. } => "RollingBack",
+            Self::Rebuilding { .. } => "Rebuilding",
+            Self::Failed { .. } => "Failed",
+            Self::Disabled => "Disabled",
+            Self::Opening => "Opening",
+            Self::ShutdownAbandoned => "ShutdownAbandoned",
+        }
+    }
 }
 
 /// Status of one concrete node capability exposed through RPC.
