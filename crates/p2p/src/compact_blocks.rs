@@ -212,28 +212,24 @@ impl Reconstruction {
             if entry.fallback {
                 return Outcome::Idle;
             }
-            if txn.transactions.transactions.len() != entry.missing.len() {
+            let mut invalid = txn.transactions.transactions.len() != entry.missing.len();
+            if !invalid {
+                for (slot, tx) in entry.missing.iter().zip(&txn.transactions.transactions) {
+                    let Some(body) = native_tx(tx) else { invalid = true; break };
+                    let Some(slot) = usize::try_from(*slot)
+                        .ok().filter(|slot| *slot < entry.filled.len())
+                    else { invalid = true; break };
+                    entry.filled[slot] = Some(body);
+                }
+                invalid |= entry.filled.iter().any(Option::is_none);
+            }
+            if invalid {
                 entry.fallback = true;
-                return Outcome::Fallback(hash);
             }
-            for (slot, tx) in entry.missing.iter().zip(&txn.transactions.transactions) {
-                let Some(body) = native_tx(tx) else {
-                    entry.fallback = true;
-                    return Outcome::Fallback(hash);
-                };
-                let Some(slot) = usize::try_from(*slot)
-                    .ok()
-                    .filter(|slot| *slot < entry.filled.len())
-                else {
-                    entry.fallback = true;
-                    return Outcome::Fallback(hash);
-                };
-                entry.filled[slot] = Some(body);
-            }
-            if entry.filled.iter().any(Option::is_none) {
-                entry.fallback = true;
-                return Outcome::Fallback(hash);
-            }
+        }
+        if self.pending.get(&hash).is_some_and(|entry| entry.fallback) {
+            self.pending.remove(&hash);
+            return Outcome::Fallback(hash);
         }
         let Some(entry) = self.pending.remove(&hash) else {
             return Outcome::Idle;
