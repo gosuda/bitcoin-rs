@@ -1088,3 +1088,36 @@ fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let old_tip = seed_chain(&state, SEED_BLOCKS)?;
+
+    let tx = seed_coinbase_spend();
+    admit_to_mempool(&state, &tx)?;
+
+    let handler = mining_handler(&state);
+    let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let template_txs = template
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let accepted = assemble_from_template(&template, template_txs)?;
+    let accepted_hex = hex_encode(&consensus_bytes(&accepted));
+    let verdict = handler.dispatch("submitblock", &json!([accepted_hex]))?;
+    assert!(verdict.is_null(), "first block must be accepted, got: {verdict}");
+
+    // A competing block built on the superseded template still points at old_tip.
+    let stale_block = assemble_regtest_block(old_tip, SEED_BLOCKS + 1, Vec::new())?;
+    let stale_hex = hex_encode(&consensus_bytes(&stale_block));
+    let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;
+    let reason = reject.as_str().ok_or_else(|| anyhow::anyhow!("submitblock"))?;
+    assert!(
+        reason.contains("inconclusive-not-best-prevblk"),
+        "stale template must be rejected with PrevHashMismatch: {reason}"
+    );
+
+    Ok(())
+}
