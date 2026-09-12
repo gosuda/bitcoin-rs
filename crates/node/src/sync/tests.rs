@@ -1604,6 +1604,9 @@ mod behavior_5;
 mod behavior_6;
 
 #[cfg(test)]
+mod behavior_7;
+
+#[cfg(test)]
 mod transitions_1;
 
 #[cfg(test)]
