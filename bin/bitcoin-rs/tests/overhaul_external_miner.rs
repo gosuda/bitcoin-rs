@@ -31,6 +31,8 @@ const COINBASE_MATURITY: u32 = 100;
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-14
+// CONTRACT: docs/contracts/external-api.md#API-15
 fn external_miner_assembles_template_and_submits_block() -> TestResult {
     let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
 
