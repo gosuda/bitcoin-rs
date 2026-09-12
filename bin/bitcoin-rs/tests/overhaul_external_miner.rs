@@ -15,7 +15,7 @@ use bitcoin::script::Builder;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
     Amount, Block, CompactTarget, Network, OutPoint, ScriptBuf, Sequence, Target, Transaction,
-    TxIn, TxMerkleNode, TxOut, Witness, WPubkeyHash,
+    TxIn, TxMerkleNode, TxOut, WPubkeyHash, Witness,
 };
 use serde_json::{Value, json};
 
@@ -46,11 +46,12 @@ fn external_miner_assembles_template_and_submits_block() -> TestResult {
     }
 
     let coinbase = height_1_coinbase(&mut node)?;
-    let spend = spend_coinbase(&coinbase)?;
+    let spend = spend_coinbase(&coinbase);
     let spend_hex = serialize_hex(&spend);
     let send = node.rpc("sendrawtransaction", &json!([spend_hex, 0]))?;
     assert!(
-        send.as_str().is_some_and(|s| s == spend.compute_txid().to_string()),
+        send.as_str()
+            .is_some_and(|s| s == spend.compute_txid().to_string()),
         "sendrawtransaction must return the spend txid: {send}"
     );
 
@@ -144,9 +145,9 @@ fn height_1_coinbase(node: &mut ProcessNode) -> TestResult<Transaction> {
     deserialize_hex(hex).map_err(|error| format!("decode coinbase: {error}").into())
 }
 
-fn spend_coinbase(coinbase: &Transaction) -> TestResult<Transaction> {
+fn spend_coinbase(coinbase: &Transaction) -> Transaction {
     let p2wpkh = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]));
-    Ok(Transaction {
+    Transaction {
         version: TxVersion::TWO,
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
@@ -159,7 +160,7 @@ fn spend_coinbase(coinbase: &Transaction) -> TestResult<Transaction> {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - FEE_SATS),
             script_pubkey: p2wpkh,
         }],
-    })
+    }
 }
 
 fn assemble_from_template(template: &Value) -> TestResult<Block> {

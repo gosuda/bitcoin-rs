@@ -46,6 +46,7 @@ const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
 const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -113,7 +114,10 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         .get("depends")
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
-    assert!(depends.is_empty(), "single tx has no in-template dependencies");
+    assert!(
+        depends.is_empty(),
+        "single tx has no in-template dependencies"
+    );
     assert_eq!(
         required_str(entry, "hash")?,
         mempool_tx.wtxid().to_string(),
@@ -128,7 +132,10 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     assert_eq!(required_u64(&template, "sizelimit")?, 4_000_000);
     assert_eq!(required_u64(&template, "weightlimit")?, 4_000_000);
     let long_poll_id = required_str(&template, "longpollid")?;
-    assert!(long_poll_id.len() > 64, "longpollid carries tip hash and sequence");
+    assert!(
+        long_poll_id.len() > 64,
+        "longpollid carries tip hash and sequence"
+    );
     assert!(
         long_poll_id.starts_with(&seed_tip_hash.to_string_be()),
         "longpollid begins with the applied tip hash"
@@ -140,12 +147,12 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         .get("mutable")
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
-    let mutables: Vec<&str> = mutable
-        .iter()
-        .filter_map(|value| value.as_str())
-        .collect();
+    let mutables: Vec<&str> = mutable.iter().filter_map(|value| value.as_str()).collect();
     for expected in ["time", "transactions", "prevblock"] {
-        assert!(mutables.contains(&expected), "mutable must contain {expected}");
+        assert!(
+            mutables.contains(&expected),
+            "mutable must contain {expected}"
+        );
     }
     let capabilities = template
         .get("capabilities")
@@ -165,8 +172,13 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         .get("rules")
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
-    let rule_set: Vec<&str> = rules.iter().filter_map(|value| value.as_str()).collect();
-    assert!(rule_set.contains(&"!segwit"), "segwit is a mandatory rule on regtest");
+    assert!(
+        rules
+            .iter()
+            .filter_map(|value| value.as_str())
+            .any(|x| x == "!segwit"),
+        "segwit is a mandatory rule on regtest"
+    );
     assert_eq!(required_str(&template, "noncerange")?, "00000000ffffffff");
     assert!(
         required_u64(&template, "mintime")? <= required_u64(&template, "curtime")?,
@@ -180,10 +192,13 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         .get("flags")
         .and_then(|value| value.as_str())
         .ok_or_else(|| anyhow::anyhow!("coinbaseaux.flags missing"))?;
-    assert!(flags.is_empty(), "coinbaseaux.flags is the empty hex string");
+    assert!(
+        flags.is_empty(),
+        "coinbaseaux.flags is the empty hex string"
+    );
     let commitment = required_str(&template, "default_witness_commitment")?;
     assert!(
-        commitment.starts_with(&"6a24aa21a9ed"),
+        commitment.starts_with("6a24aa21a9ed"),
         "default witness commitment carries the BIP141 commitment prefix"
     );
     let expected_root = compute_witness_merkle_root(std::slice::from_ref(&mempool_tx))
@@ -300,15 +315,24 @@ fn template_orders_parent_then_child_with_dependency() -> Result<()> {
         .get("depends")
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
-    assert!(parent_depends.is_empty(), "parent has no in-template dependencies");
+    assert!(
+        parent_depends.is_empty(),
+        "parent has no in-template dependencies"
+    );
 
     let child_depends = template_txs[1]
         .get("depends")
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
-    assert_eq!(child_depends.len(), 1, "child depends on the one in-template parent");
     assert_eq!(
-        child_depends[0].as_i64().and_then(|n| u64::try_from(n).ok()),
+        child_depends.len(),
+        1,
+        "child depends on the one in-template parent"
+    );
+    assert_eq!(
+        child_depends[0]
+            .as_i64()
+            .and_then(|n| u64::try_from(n).ok()),
         Some(1_u64),
         "child depends index must be the one-based parent position"
     );
@@ -481,7 +505,6 @@ fn seed_coinbase_spend() -> Tx {
 /// Builds the transaction spending the height-1 seed coinbase (matured at
 /// height 101) with a caller-chosen fee; the caller inserts it into the
 /// mempool.
-
 fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
     let seed_coinbase = Tx {
         version: 2,
@@ -530,7 +553,6 @@ fn p2sh_true_spend_script_sig() -> Script {
     Script::from_bytes(vec![0x01, 0x51])
 }
 
-
 /// Builds a regtest block without applying it, so `submitblock` can exercise
 /// the external-producer path where the transactions were never in the mempool.
 fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Block> {
@@ -568,7 +590,7 @@ fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Bl
 }
 /// Admits `tx` through the run-composed shared gateway exactly like
 /// `sendrawtransaction` does: full policy admission over the provisional
-/// chain view, no direct pool write.
+#[allow(clippy::unnecessary_wraps)]
 fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
     let utxo = state.utxo();
     let applied_tip = state.applied_tip();
@@ -1077,7 +1099,10 @@ fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
 
     let handler = mining_handler(&state);
     let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
-    assert!(verdict.is_null(), "submitblock must accept a valid block, got: {verdict}");
+    assert!(
+        verdict.is_null(),
+        "submitblock must accept a valid block, got: {verdict}"
+    );
 
     let tip = current_tip(&state)?;
     assert_eq!(tip.height, SEED_BLOCKS + 1, "tip must advance by one");
@@ -1107,13 +1132,18 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
     let accepted = assemble_from_template(&template, template_txs)?;
     let accepted_hex = hex_encode(&consensus_bytes(&accepted));
     let verdict = handler.dispatch("submitblock", &json!([accepted_hex]))?;
-    assert!(verdict.is_null(), "first block must be accepted, got: {verdict}");
+    assert!(
+        verdict.is_null(),
+        "first block must be accepted, got: {verdict}"
+    );
 
     // A competing block built on the superseded template still points at old_tip.
     let stale_block = assemble_regtest_block(old_tip, SEED_BLOCKS + 1, Vec::new())?;
     let stale_hex = hex_encode(&consensus_bytes(&stale_block));
     let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;
-    let reason = reject.as_str().ok_or_else(|| anyhow::anyhow!("submitblock"))?;
+    let reason = reject
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("submitblock"))?;
     assert!(
         reason.contains("inconclusive-not-best-prevblk"),
         "stale template must be rejected with PrevHashMismatch: {reason}"
@@ -1130,7 +1160,10 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
 
     let handler = mining_handler(&state);
     let before = handler.dispatch("estimatesmartfee", &json!([1, "conservative"]))?;
-    assert!(before.get("feerate").is_none(), "empty estimator omits feerate");
+    assert!(
+        before.get("feerate").is_none(),
+        "empty estimator omits feerate"
+    );
     let before_errors = before
         .get("errors")
         .and_then(|value| value.as_array())
@@ -1171,14 +1204,20 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
     let block = assemble_from_template(&template, template_txs)?;
     let block_hex = hex_encode(&consensus_bytes(&block));
     let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
-    assert!(verdict.is_null(), "submitblock must accept the block: {verdict}");
+    assert!(
+        verdict.is_null(),
+        "submitblock must accept the block: {verdict}"
+    );
 
     let next = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
     let next_txs = next
         .get("transactions")
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
-    assert!(next_txs.is_empty(), "next template must have no transactions after connect");
+    assert!(
+        next_txs.is_empty(),
+        "next template must have no transactions after connect"
+    );
     assert_eq!(
         required_str(&next, "previousblockhash")?,
         block.block_hash().to_string(),
@@ -1196,10 +1235,16 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
     let raw_mempool_array = raw_mempool
         .as_array()
         .map_or(&[][..], |entries| entries.as_slice());
-    assert!(raw_mempool_array.is_empty(), "getrawmempool must return no txids");
+    assert!(
+        raw_mempool_array.is_empty(),
+        "getrawmempool must return no txids"
+    );
 
     let after = handler.dispatch("estimatesmartfee", &json!([1, "conservative"]))?;
-    assert!(after.get("errors").is_none(), "estimate with data has no errors: {after}");
+    assert!(
+        after.get("errors").is_none(),
+        "estimate with data has no errors: {after}"
+    );
     let feerate = after
         .get("feerate")
         .and_then(sonic_rs::JsonValueTrait::as_f64)
