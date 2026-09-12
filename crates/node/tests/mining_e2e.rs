@@ -87,6 +87,117 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         "the selected template tx must be the mempool tx"
     );
 
+    // --- rendered BIP22/BIP23 template fields -----------------------------
+    assert_eq!(
+        required_u64(&template, "coinbasevalue")?,
+        REGTEST_SUBSIDY_SATS + MEMPOOL_TX_FEE_SATS,
+        "coinbasevalue must be subsidy plus selected fees"
+    );
+    let entry = &template_txs[0];
+    assert_eq!(
+        required_u64(entry, "fee")?,
+        MEMPOOL_TX_FEE_SATS,
+        "rendered fee must match the mempool fee"
+    );
+    assert_eq!(
+        required_u64(entry, "weight")?,
+        mempool_tx.weight(),
+        "rendered weight must match the transaction weight"
+    );
+    assert_eq!(
+        required_u64(entry, "sigops")?,
+        0,
+        "p2sh-true spend has no legacy sigops"
+    );
+    let depends = entry
+        .get("depends")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(depends.is_empty(), "single tx has no in-template dependencies");
+    assert_eq!(
+        required_str(entry, "hash")?,
+        mempool_tx.wtxid().to_string(),
+        "rendered hash is the wtxid"
+    );
+    assert_eq!(
+        native_deserialize::<Tx>(&hex_decode(&required_str(entry, "data")?)?)?,
+        mempool_tx,
+        "rendered data round-trips to the mempool tx"
+    );
+    assert_eq!(required_u64(&template, "sigoplimit")?, 80_000);
+    assert_eq!(required_u64(&template, "sizelimit")?, 4_000_000);
+    assert_eq!(required_u64(&template, "weightlimit")?, 4_000_000);
+    let long_poll_id = required_str(&template, "longpollid")?;
+    assert!(long_poll_id.len() > 64, "longpollid carries tip hash and sequence");
+    assert!(
+        long_poll_id.starts_with(&seed_tip_hash.to_string_be()),
+        "longpollid begins with the applied tip hash"
+    );
+    long_poll_id[64..]
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("longpollid suffix must be the mempool sequence"))?;
+    let mutable = template
+        .get("mutable")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let mutables: Vec<&str> = mutable
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect();
+    for expected in ["time", "transactions", "prevblock"] {
+        assert!(mutables.contains(&expected), "mutable must contain {expected}");
+    }
+    let capabilities = template
+        .get("capabilities")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let capability_set: Vec<&str> = capabilities
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect();
+    for expected in ["proposal", "longpoll"] {
+        assert!(
+            capability_set.contains(&expected),
+            "capabilities must contain {expected}"
+        );
+    }
+    let rules = template
+        .get("rules")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let rule_set: Vec<&str> = rules.iter().filter_map(|value| value.as_str()).collect();
+    assert!(rule_set.contains(&"!segwit"), "segwit is a mandatory rule on regtest");
+    assert_eq!(required_str(&template, "noncerange")?, "00000000ffffffff");
+    assert!(
+        required_u64(&template, "mintime")? <= required_u64(&template, "curtime")?,
+        "mintime must not exceed curtime"
+    );
+    let coinbase_aux = template
+        .get("coinbaseaux")
+        .ok_or_else(|| anyhow::anyhow!("coinbaseaux must be present"))?;
+    assert!(coinbase_aux.is_object(), "coinbaseaux must be an object");
+    let flags = coinbase_aux
+        .get("flags")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("coinbaseaux.flags missing"))?;
+    assert!(flags.is_empty(), "coinbaseaux.flags is the empty hex string");
+    let commitment = required_str(&template, "default_witness_commitment")?;
+    assert!(
+        commitment.starts_with(&"6a24aa21a9ed"),
+        "default witness commitment carries the BIP141 commitment prefix"
+    );
+    let expected_root = compute_witness_merkle_root(std::slice::from_ref(&mempool_tx))
+        .ok_or_else(|| anyhow::anyhow!("single-tx witness merkle root must exist"))?;
+    let mut commitment_input = [0_u8; 64];
+    commitment_input[..32].copy_from_slice(&expected_root.to_le_bytes());
+    commitment_input[32..].copy_from_slice(&WITNESS_RESERVED);
+    let expected_commitment = double_sha256(&commitment_input).to_le_bytes();
+    assert_eq!(
+        &commitment[12..],
+        hex_encode(&expected_commitment),
+        "rendered commitment must be SHA256D(witness merkle root || witness reserved value)"
+    );
+
     // --- external-miner-style assembly from JSON fields only -----------------
     let block = assemble_from_template(&template, template_txs)?;
 
@@ -559,6 +670,32 @@ fn compute_merkle_root(txs: &[Tx]) -> Option<Hash256> {
         return None;
     }
     let mut level: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pos in 0..level.len().div_ceil(2) {
+            let left = level[2 * pos];
+            let right = level[(2 * pos + 1).min(level.len() - 1)];
+            let mut pair = [0_u8; 64];
+            pair[..32].copy_from_slice(&left);
+            pair[32..].copy_from_slice(&right);
+            next.push(*double_sha256(&pair).as_byte_array());
+        }
+        level = next;
+    }
+    Some(Hash256::from_le_bytes(&level[0]))
+}
+
+/// Native BIP141 witness merkle fold with the odd-leaf duplication rule.
+/// The coinbase wtxid is replaced by all-zeroes before folding.
+fn compute_witness_merkle_root(txs: &[Tx]) -> Option<Hash256> {
+    if txs.is_empty() {
+        return None;
+    }
+    let mut level: Vec<[u8; 32]> = Vec::with_capacity(txs.len().saturating_add(1));
+    level.push([0_u8; 32]);
+    for tx in txs {
+        level.push(*tx.wtxid().as_bytes());
+    }
     while level.len() > 1 {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pos in 0..level.len().div_ceil(2) {
