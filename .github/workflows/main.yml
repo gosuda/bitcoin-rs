@@ -74,35 +74,22 @@ jobs:
       - name: Kernel consensus Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets -- -D warnings
-      # Run every binary test, including the pinned process and formal gates.
+      # Run every binary test except the formal model gate: g20 needs ~30h+
+      # at K=128 (measured) and lives in the operator-invoked model-checker
+      # lane, so a main push does not spend days in the model checker. The
+      # two cheap g20 pin tests still run here; only the solver run is skipped.
       - name: Full-node binary tests
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
         run: |
-          # Never attribute cached or earlier-profile diagnostics to this run.
-          rm -rf -- target/apalache
-          mkdir -p target/apalache
-          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=full-node\n' \
-            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
-            > target/apalache/run-context.txt
           cargo test --locked -p bitcoin-rs --no-fail-fast \
-            --no-default-features --features "${FULL_NODE_FEATURES}"
+            --no-default-features --features "${FULL_NODE_FEATURES}" \
+            -- --skip all_model_specs_check_with_apalache
       - name: Preserve public process compatibility evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: process-compatibility-full-node-${{ github.run_attempt }}
           path: target/process-harness/**
-          if-no-files-found: warn
-          retention-days: 7
-      - name: Preserve full-node formal evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: apalache-full-node-${{ github.run_attempt }}
-          path: |
-            target/apalache/**/run-*.txt
-            target/apalache/**/detailed*.log
-            target/apalache/**/counterexample*
           if-no-files-found: warn
           retention-days: 7
 

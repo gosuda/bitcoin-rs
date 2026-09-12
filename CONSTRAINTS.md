@@ -63,6 +63,17 @@ apalache-mc check --config=docs/models/<M>.cfg --inv=TypeOK,Safety,TransitionSaf
 apalache-mc check --config=docs/models/<M>.cfg --temporal=ConditionalProgress --length=128 --out-dir=target/apalache/<M> docs/models/<M>.tla
 ```
 
+Lane: the solver run is owned by the operator-invoked `model-check-manual`
+lane at K=128 unchanged (workflow_dispatch only; no schedule until a runner
+exists that can finish K=128). PR (`ci-pr.sh`) and main-push (`main.yml`
+full-node) lanes skip `all_model_specs_check_with_apalache` and run only the
+two cheap pin tests. Inventory rows above stay BLOCKED until a manual run
+returns rc 0. Measured 2026-09-12: ChainAdmission Safety needs ~30h+ at the
+pinned 4g heap, so no `ubuntu-latest` job (360-min cap) can return rc 0; the
+manual lane exercises the harness and preserves evidence but is not expected
+to go green on hosted runners. Revisit on a self-hosted/unbounded runner or
+a replacement validator (see research/formal-validator-replacement.md).
+
 Native to skill rc mapping, native rc preserved verbatim: `0 -> 0`; `150`
 parse and `120` typecheck `-> 12`; `12` counterexample `-> 13`; `75`
 spec-eval, `255` system error, timeout `-> 14`; hash divergence from this

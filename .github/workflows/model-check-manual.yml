@@ -1,0 +1,57 @@
+name: model-check-manual
+
+# Operator-invoked owner of gate g20 (issue: K=128 ChainAdmission Safety needs
+# ~30h+ at the pinned 4g heap, measured 2026-09-12; no hosted PR/main lane can
+# hold it). Runs the solver UNCHANGED at K=128. MANUAL ONLY, no schedule: a
+# cron on hosted runners (360-min cap) would fail every run and train everyone
+# to ignore the lane. Add a schedule back when a self-hosted/unbounded runner
+# exists. Informational: failures never block merges; they update the
+# CONSTRAINTS.md proof inventory only when green.
+on:
+  workflow_dispatch:
+concurrency:
+  group: model-check-manual
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  model-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Provision pinned Core and Apalache fixtures
+        run: bash scripts/provision-ci-reference-fixtures.sh
+      - name: Formal model gate at K=128
+        run: |
+          set -o pipefail
+          rm -rf -- target/apalache
+          mkdir -p target/apalache
+          printf 'commit=%s\nrun_id=%s\nattempt=%s\nprofile=model-check-manual\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > target/apalache/run-context.txt
+          # --exact plus the count check: a filter matching zero tests exits 0
+          # and must never read as a green gate (CL-23: no invented zeroes).
+          cargo test --locked -p bitcoin-rs --no-fail-fast \
+            --no-default-features --features "rocksdb,fjall,redb" \
+            --test g20_formal_models -- --exact all_model_specs_check_with_apalache \
+            2>&1 | tee target/apalache/g20-summary.txt
+          grep -q '^test result: ok\. 1 passed' target/apalache/g20-summary.txt
+      - name: Preserve manual formal evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apalache-manual-${{ github.run_attempt }}
+          path: |
+            target/apalache/g20-summary.txt
+            target/apalache/**/run-*.txt
+            target/apalache/**/detailed*.log
+            target/apalache/**/counterexample*
+          if-no-files-found: warn
+          retention-days: 7
