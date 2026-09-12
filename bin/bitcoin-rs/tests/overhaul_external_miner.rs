@@ -22,17 +22,20 @@ use serde_json::{Value, json};
 mod support;
 
 use support::process_node::{NodeBinary, ProcessNode};
+use bitcoin_rs_mining::WITNESS_RESERVED_VALUE;
 
 const FEE_SATS: u64 = 10_000;
 const REGTEST_SUBSIDY_SATS: u64 = 5_000_000_000;
-const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
+use bitcoin_rs_mining::WITNESS_RESERVED_VALUE as WITNESS_RESERVED;
 const COINBASE_MATURITY: u32 = 100;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 #[test]
-// CONTRACT: docs/contracts/external-api.md#API-14
-// CONTRACT: docs/contracts/external-api.md#API-15
+// CONTRACT: docs/contracts/external-api.md#API-11 (template transaction fields)
+// CONTRACT: docs/contracts/external-api.md#API-14 (client rule negotiation)
+// CONTRACT: docs/contracts/external-api.md#API-15 (block submission and decoding)
+// CONTRACT: docs/contracts/external-api.md#API-18 (submission result vocabulary)
 fn external_miner_assembles_template_and_submits_block() -> TestResult {
     let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
 
