@@ -22,30 +22,12 @@ const READINESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// Readiness outcomes, spelled exactly as the `getcapabilities` wire
 /// rendering of [`CapabilityState`] spells them, so a scraped label and the
 /// RPC row for one poll are the same token.
-pub(crate) const READINESS_OUTCOMES: [&str; 8] = [
-    "Ready",
-    "CatchingUp",
-    "RollingBack",
-    "Rebuilding",
-    "Failed",
-    "Disabled",
-    "Opening",
-    "ShutdownAbandoned",
-];
+pub(crate) const READINESS_OUTCOMES: [&str; 8] = CapabilityState::WIRE_NAMES;
 
 /// Returns the `getcapabilities` wire spelling of a capability state.
 #[must_use]
 pub(crate) fn readiness_state_name(state: &CapabilityState) -> &'static str {
-    match state {
-        CapabilityState::Ready => "Ready",
-        CapabilityState::CatchingUp { .. } => "CatchingUp",
-        CapabilityState::RollingBack { .. } => "RollingBack",
-        CapabilityState::Rebuilding { .. } => "Rebuilding",
-        CapabilityState::Failed { .. } => "Failed",
-        CapabilityState::Disabled => "Disabled",
-        CapabilityState::Opening => "Opening",
-        CapabilityState::ShutdownAbandoned => "ShutdownAbandoned",
-    }
+    state.wire_name()
 }
 
 /// Publishes one readiness sample from the RPC capability source.
