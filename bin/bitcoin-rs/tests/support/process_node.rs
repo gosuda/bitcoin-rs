@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 // Cold storage initialization needs more time than a single loopback request.
-const START_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(30);
 // A failed graceful shutdown must not retain a test child indefinitely.
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -142,7 +142,7 @@ impl From<serde_json::Error> for HarnessError {
 
 pub(crate) struct ProcessNode {
     child: Child,
-    _datadir: TempDir,
+    datadir: Option<TempDir>,
     addr: SocketAddr,
     binary: NodeBinary,
     pub(crate) p2p_addr: SocketAddr,
@@ -292,6 +292,20 @@ impl ProcessNode {
         timeout: Duration,
     ) -> Result<Self, HarnessError> {
         let datadir = tempfile::tempdir()?;
+        Self::start_with_datadir(binary, extra_args, timeout, datadir)
+    }
+
+    /// Starts a node over an existing datadir, keeping its bytes in place.
+    ///
+    /// Restart scenarios move the `TempDir` out of a stopped process with
+    /// [`Self::take_datadir`] and hand it here, so custody of the directory
+    /// never leaves the harness and cleanup stays bound to the last owner.
+    pub(crate) fn start_with_datadir(
+        binary: NodeBinary,
+        extra_args: &[&str],
+        timeout: Duration,
+        datadir: TempDir,
+    ) -> Result<Self, HarnessError> {
         let evidence_root = workspace().join("target/process-harness");
         fs::create_dir_all(&evidence_root)?;
         let evidence = tempfile::Builder::new()
@@ -345,7 +359,7 @@ impl ProcessNode {
         // Establish drop custody before taking the pipes or starting readers.
         let mut node = Self {
             child,
-            _datadir: datadir,
+            datadir: Some(datadir),
             addr,
             binary,
             p2p_addr,
@@ -395,6 +409,24 @@ impl ProcessNode {
 
     pub(crate) fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Path of the datadir this process owns.
+    ///
+    /// Panics only if `take_datadir` already moved custody, which no
+    /// scenario may do while the process is still running.
+    pub(crate) fn datadir_path(&self) -> &Path {
+        self.datadir
+            .as_ref()
+            .map(TempDir::path)
+            .expect("datadir custody moved while the process still holds it")
+    }
+
+    /// Moves datadir custody out of a stopped process for a restart.
+    pub(crate) fn take_datadir(&mut self) -> Result<TempDir, HarnessError> {
+        self.datadir
+            .take()
+            .ok_or_else(|| HarnessError::Protocol("datadir custody already moved".into()))
     }
 
     pub(crate) fn rpc(&mut self, method: &str, params: &Value) -> Result<Value, HarnessError> {
@@ -491,23 +523,41 @@ impl ProcessNode {
 
     pub(crate) fn stop(mut self) -> Result<(), HarnessError> {
         let deadline = Instant::now() + STOP_TIMEOUT;
-        if self.binary == NodeBinary::ReferenceCore {
-            // Even a lost stop reply must converge on a reaped child.
-            if let Err(error) = self.rpc_until("stop", &json!([]), deadline) {
-                eprintln!("graceful stop: {error}");
-            }
-            while Instant::now() < deadline {
-                if self.child.try_wait()?.is_some() {
-                    return self.finish_output();
+        match self.binary {
+            NodeBinary::ReferenceCore => {
+                // Even a lost stop reply must converge on a reaped child.
+                if let Err(error) = self.rpc_until("stop", &json!([]), deadline) {
+                    eprintln!("graceful stop: {error}");
                 }
-                std::thread::sleep(Duration::from_millis(20));
             }
+            NodeBinary::BitcoinRs => {
+                // bitcoin-rs exposes no lifecycle RPC (`stop` is declared
+                // unimplemented); SIGTERM is its graceful shutdown input and
+                // the only path that publishes a clean checkpoint. A kill
+                // scenario must not depend on an uncheckpointed chainstate.
+                self.send_sigterm();
+            }
+        }
+        while Instant::now() < deadline {
+            if self.child.try_wait()?.is_some() {
+                return self.finish_output();
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
         if self.child.try_wait()?.is_none() {
             self.child.kill()?;
         }
         self.child.wait()?;
         self.finish_output()
+    }
+
+    /// Delivers SIGTERM to the child through the platform `kill` tool.
+    ///
+    /// The harness is Linux-only (it reads `/proc/<pid>` custody), so the
+    /// external kill keeps the support crate dependency-free.
+    fn send_sigterm(&self) {
+        let pid = self.pid().to_string();
+        let _status = Command::new("kill").args(["-TERM", pid.as_str()]).status();
     }
 }
 
