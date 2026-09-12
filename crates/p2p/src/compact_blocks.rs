@@ -175,6 +175,9 @@ impl Reconstruction {
                 txs: filled.into_txs(),
             });
         }
+        if missing.len() > MAX_REQUESTED_MISSING {
+            return Outcome::Fallback(hash);
+        }
         self.pending.insert(
             hash,
             Pending {
@@ -592,4 +595,27 @@ mod tests {
             Outcome::Idle
         ));
     }
+
+    /// More than [`MAX_REQUESTED_MISSING`] missing transactions skips the
+    /// `getblocktxn` round trip in favor of the full-block fallback; the
+    /// bound itself is still worth one request.
+    #[test]
+    fn cmpctblock_missing_above_the_request_bound_falls_back() {
+        let hints = SetHints { txs: Vec::new() };
+        let mut reconstruction = Reconstruction::new();
+
+        let (_, cmpct) = sample_cmpct((0_u8..130).map(test_tx).collect(), 2, 0x1234);
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+        assert!(matches!(outcome, Outcome::Fallback(_)));
+
+        let (_, cmpct) = sample_cmpct((0_u8..129).map(test_tx).collect(), 2, 0x1234);
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("expected a missing-list request at the bound, got {outcome:?}");
+        };
+        assert_eq!(request.txs_request.indexes.len(), MAX_REQUESTED_MISSING);
+    }
 }
+
