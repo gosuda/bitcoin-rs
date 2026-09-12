@@ -1,6 +1,6 @@
 # Generic index on-disk format
 
-This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes increment `INDEX_FORMAT_VERSION` only and keep `CURRENT_SCHEMA` unchanged. There is no translator and no legacy reader; an unknown index version degrades that capability to unavailable or rebuilding through the existing `CapabilityState` vocabulary, rebuilds from retained canonical data, and never fails authoritative startup. A rejected index file is left in place until explicit authorized rebuild.
+This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump whichever version axis they move and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 5) is the hard open gate with full-reset recovery, and the row-value marker (`INDEX_FORMAT_VERSION`, currently 3) is the soft capability report that degrades to scans. There is no translator and no legacy reader; an unknown durability marker refuses start and recovery unattended-resets the derived namespace for rebuild from retained chainstate (operator cost of a format bump: one derived re-index on first start; authoritative data untouched). A rejected non-derived file is left in place until explicit authorized rebuild.
 
 ## Row families
 
@@ -155,7 +155,7 @@ contract. A finding is **informational** if it confirms an existing decision.
   re-run.
 
 The disposable-fixture guard: any fixture created for this audit (the
-`le_order.rs` test blocks) is test-only, behind `#[test]`, and never shipped
+`be_order.rs` test blocks) is test-only, behind `#[test]`, and never shipped
 as a benchmark corpus or a data file.
 
 ### Logical vs physical bytes
@@ -164,16 +164,16 @@ as a benchmark corpus or a data file.
 
 | Row type | Column family | Key bytes | Value bytes | Total per row |
 |---|---|---|---|---|
-| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Funding | `Funding` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
-| Spending | `Spending` | 8 (prefix) + 4 (LE height) = 12 | `n × 8` (TxPosition array, n ≥ 1) | 12 + 8n |
+| TxConfirmed | `TxConfirmed` | 8 (prefix) + 4 (BE height) = 12 | `n × 6` (TxPosition array, n ≥ 1) | 12 + 6n |
+| Funding | `Funding` | 8 (prefix) + 4 (BE height) = 12 | `n × 6` (TxPosition array, n ≥ 1) | 12 + 6n |
+| Spending | `Spending` | 8 (prefix) + 4 (BE height) = 12 | `n × 6` (TxPosition array, n ≥ 1) | 12 + 6n |
 | BlockHeaders | `BlockHeaders` | 80 (raw header = block hash) | 0 (empty value) | 80 |
 
 **Key observations:**
 
-- `TxPosition` is 8 bytes: 4-byte LE offset + 4-byte LE length (`TX_POSITION_SIZE = 8`).
+- `TxPosition` is 6 bytes: 3-byte LE offset + 3-byte LE length (`TX_POSITION_SIZE = 6`).
 - The common case is n = 1 (one transaction at one height funds one script),
-  so the typical Funding and TxConfirmed row is **20 bytes** (12 key + 8 value).
+  so the typical Funding and TxConfirmed row is **18 bytes** (12 key + 6 value).
 - Spending rows carry positions for the transactions that spend the outpoint.
   An empty value never means "no spending" — it is a legacy row value that
   requires a full-block scan.
@@ -239,6 +239,11 @@ spend path the same one-transaction read as funding.
 
 **Verdict: keep LE. Sort in the reader.**
 
+> Superseded by on-disk format 5: the height suffix is now big-endian, so
+> store iteration already arrives in numeric height order. The reader-side
+> numeric sort stays as a contract guarantee. The frozen verdict above is
+> retained as the audit trail for the format-4 decision.
+
 Switching the height suffix from little-endian to big-endian would make
 lexicographic key order match numeric height order. That is not a
 compatibility constraint: derived ScriptIndex bytes are disposable.
@@ -294,11 +299,11 @@ outpoint locators per script), not a mempool index and not a Coin copy.
 Rows were **not implemented** when this audit was frozen. This verdict
 froze the baseline key shape so the implementation did not need to
 revisit the decision. Since then `ScriptLiveRow` landed in
-`crates/index/src/types.rs` with exactly this 44-byte key
-(`SCRIPT_LIVE_ROW_SIZE = HASH_PREFIX_LEN + 32 + 4`) and its own
-watermark key (`SCRIPT_LIVE_WATERMARK_KEY` in `crates/index/src/index.rs`).
+`crates/index/src/types.rs` with a 44-byte key, and format 5 narrowed the
+`vout` suffix to u24: the key is now 43 bytes
+(`SCRIPT_LIVE_ROW_SIZE = HASH_PREFIX_LEN + 32 + 3`).
 
-**Baseline key: `prefix(8) || txid(32) || vout(4)` = 44 bytes, empty value.**
+**Baseline key: `prefix(8) || txid(32) || vout_u24(3)` = 43 bytes, empty value.**
 
 Rationale:
 
@@ -306,7 +311,7 @@ Rationale:
   mempool row must be deletable when the transaction confirms or is evicted.
   A prefix-only key is lossy: multiple outpoints can share a prefix, so
   deletion by prefix would remove unrelated rows.
-- The full outpoint (`txid(32) || vout(4)`) is injective: each outpoint
+- The full outpoint (`txid(32) || vout(3, u24)`) is injective: each outpoint
   maps to exactly one key. The 8-byte prefix is prepended to preserve the
   same scan-prefix contract as confirmed rows (`ScriptHashRow::scan_prefix`
   returns the first 8 bytes of the scripthash), so a single prefix scan
@@ -320,8 +325,8 @@ Rationale:
 **A smaller locator (e.g. dropping the prefix, or hashing the outpoint to
 fewer bytes) requires an injectivity proof:** a demonstration that no two
 live outpoints can produce the same key, and that prefix-scan efficiency is
-preserved. No such proof is offered here; the 44-byte baseline is the
-default until one is.
+preserved. The u24 narrowing keeps the full txid and every consensus-valid
+vout (all `<= U24_MAX`), so injectivity holds; the 43-byte key is current.
 
 ### Versioning: per-capability format and reset
 
@@ -334,11 +339,10 @@ The index tracks two independently versioned capabilities via
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
 
 **Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 2) is a single marker in `UtxoMeta`. It
-governs whether Funding, Spending, and TxConfirmed values carry `TxPosition`
-arrays.
-A future format bump (e.g. changing `TxPosition` width) would increment this
-version. Readers already handle
+(`INDEX_FORMAT_VERSION`, currently 3) is the soft report marker in `UtxoMeta` (the
+hard open-gate marker is the durability key `[0x00, b'V']`, row-format 5). It
+arrays, and at which width (version 3: 6-byte u24 positions). The anticipated
+`TxPosition`-width bump is this version. Readers already handle
 `IndexFormat::Legacy` by falling back to full block scans, so an old-format
 index remains correct, just slower.
 
@@ -349,9 +353,10 @@ requested capability and clear only that capability's watermark. The reset
 state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
 prevents ABA across repeated resets.
 
-Opening a format-3 store (Spending keys without positions) is this kind of
-reset: `IndexWriter::open` rebuilds `ScriptHistory` only and leaves
-`TxLookup` ready. A foreign format version still refuses start.
+Every durability marker (`[0x00, b'V']`) older than the current row-format 5
+refuses start (`UnsupportedTxIndexFormatVersion`) and recovery full-resets
+the store for rebuild: format 5 changed every row family, so no in-place
+upgrade path exists. (Row-value format 3 is the soft report axis, not the gate.)
 
 **Adding ScriptLive later must not force a History reindex.** ScriptLive
 rows would occupy a new column family (not one of the existing four). The

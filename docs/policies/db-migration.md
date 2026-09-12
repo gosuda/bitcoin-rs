@@ -30,14 +30,14 @@ Estimator, discovery, and index formats evolve outside `CURRENT_SCHEMA`. Each ca
 
 - Fee estimator state carries an estimator-owned version. A corrupt, missing, or unknown version degrades to insufficient-data status. The node starts. It never fabricates a rate or a default confidence.
 - Peer discovery state carries a discovery-owned version. A corrupt, missing, or unknown version degrades to seeded or empty discovery with a typed reseed or rebuild status. The node starts.
-- Index-only layout changes increment `INDEX_FORMAT_VERSION` only. An unknown index version makes the affected capability report unavailable or rebuilding through the existing status vocabulary. The capability rebuilds from retained canonical data.
+- Index layout carries two markers in `UtxoMeta`, one per axis. The durability marker (`[0x00, b'V']`, currently row-format 5) is the hard gate: a mismatch refuses open and recovery full-resets for rebuild. The row-value marker (`b"index:format_version"`, currently 3) is the soft capability report: an unknown value degrades the affected capability to unavailable or rebuilding through the existing status vocabulary, which rebuilds from retained canonical data. A layout change bumps whichever axis it moves (format 5 moved both: key layout on the gate axis, value width on the report axis).
 
 In every case:
 
 - Authoritative startup never fails because of an owner-local version.
 - Owner-local evolution keeps `CURRENT_SCHEMA` unchanged.
 - No translator, converter, or legacy reader exists for any owner-local format.
-- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it.
+- A rejected owner-local file stays in place until an explicit authorized rebuild. The node never silently deletes it. Exception: disposable derived index namespaces, which recovery full-resets for rebuild from retained canonical chainstate on a version mismatch (operator cost of an index format bump: one unattended derived re-index on first start, no authoritative data touched).
 - No backup or rotation framework exists. Recovery is reseed, rebuild, or re-admission from canonical data.
 
 ## Operator resync procedure

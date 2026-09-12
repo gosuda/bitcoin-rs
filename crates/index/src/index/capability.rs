@@ -169,6 +169,9 @@ impl IndexWatermarks {
 
 impl IndexWatermark {
     /// Encodes the durable representation as `height (4 LE) || hash (32)`.
+    ///
+    /// Watermarks are decoded numerically, never ordered as KV row keys, so
+    /// they stay little-endian while row heights are big-endian (format 5).
     pub fn to_bytes(&self) -> [u8; WATERMARK_LEN] {
         let mut bytes = [0_u8; WATERMARK_LEN];
         bytes[..crate::types::HEIGHT_SIZE].copy_from_slice(&self.height.to_le_bytes());
