@@ -6,7 +6,10 @@
 
 use anyhow::{Result, bail};
 
-use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
+use bitcoin_rs_mempool::{
+    AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
+    SubmitOutcome,
+};
 
 use bitcoin_rs_mining::MiningControl;
 
@@ -20,8 +23,8 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_rpc::{
     Handler,
     context::{
-        ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
-        NetworkHandles,
+        ChainAdmissionView, ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles,
+        MiningHandles, NetworkHandles,
     },
 };
 
@@ -50,18 +53,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
 
     // A spend of the height-1 seed coinbase matures exactly at height 101.
     let mempool_tx = seed_coinbase_spend();
-    {
-        let mempool = state.mempool();
-        let mut guard = mempool.write();
-        let vsize = u32::try_from(mempool_tx.vsize()).unwrap_or(u32::MAX);
-        guard.insert_entry(bitcoin_rs_mempool::MempoolEntry::new(
-            Arc::new(mempool_tx.clone()),
-            vsize,
-            MEMPOOL_TX_FEE_SATS,
-            1,
-            1,
-        ))?;
-    }
+    admit_to_mempool(&state, &mempool_tx)?;
 
     let handler = mining_handler(&state);
 
@@ -307,6 +299,7 @@ fn seed_coinbase_spend() -> Tx {
 /// Builds the transaction spending the height-1 seed coinbase (matured at
 /// height 101) with a caller-chosen fee; the caller inserts it into the
 /// mempool.
+
 fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
     let seed_coinbase = Tx {
         version: 2,
@@ -334,10 +327,53 @@ fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - fee_sats),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     }
+}
+
+/// A P2SH output that commits to a one-byte `OP_1` redeem script.
+///
+/// The output is standard, the first spend uses an empty `scriptSig`, and
+/// later spends push the one-byte redeem script, so the whole chain is both
+/// policy-standard and consensus-valid without real signatures.
+fn p2sh_true_output() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+/// `PUSHBYTES_1 <0x51>`: the `scriptSig` that satisfies a `p2sh_true_output`.
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
+/// Admits `tx` through the run-composed shared gateway exactly like
+/// `sendrawtransaction` does: full policy admission over the provisional
+/// chain view, no direct pool write.
+fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
+    let utxo = state.utxo();
+    let applied_tip = state.applied_tip();
+    let block_tree = state.block_tree();
+    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree);
+    let outcome = state.mempool_gateway().submit_transaction(
+        Arc::new(tx.clone()),
+        AdmissionOrigin::Rpc,
+        None,
+        unix_time_secs(),
+        &view,
+    );
+    assert!(
+        matches!(outcome, Ok(SubmitOutcome::Committed(_))),
+        "gateway admission must commit the spend, got: {outcome:?}"
+    );
+    Ok(())
+}
+
+fn unix_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Mines and applies the regtest block at `height` over `prev`: the seed
@@ -604,36 +640,21 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     };
     let child_txid = child.txid();
 
-    let sequence_before_reorg = {
-        let mempool = state.mempool();
-        let mut guard = mempool.write();
-        for (tx, fee) in [
-            (&parent, MEMPOOL_TX_FEE_SATS),
-            (&child, MEMPOOL_TX_FEE_SATS),
-        ] {
-            let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-            guard.insert_entry(bitcoin_rs_mempool::MempoolEntry::new(
-                Arc::new(tx.clone()),
-                vsize,
-                fee,
-                1,
-                1,
-            ))?;
-        }
-        guard.sequence_number()
-    };
+    admit_to_mempool(&state, &parent)?;
+    admit_to_mempool(&state, &child)?;
+    let sequence_before_reorg = state.mempool().read().sequence_number();
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     assert_eq!(
@@ -715,13 +736,13 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     };
@@ -765,13 +786,13 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 1 - 5_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     };
