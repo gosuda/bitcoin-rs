@@ -149,7 +149,7 @@ The companion corpus repository is
 [gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
 For local campaigns, see [shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns)
 for a separate writable corpus and contribution guidance. The scheduled
-campaign is defined in [`.github/workflows/weekly-fuzz.yml`](.github/workflows/weekly-fuzz.yml).
+campaign is defined in [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml).
 
 ### Dependency-range check
 

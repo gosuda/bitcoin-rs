@@ -1,9 +1,9 @@
-name: weekly-fuzz
+name: daily-fuzz
 
 on:
   schedule:
-    # Sunday 03:17 UTC / Sunday 12:17 KST.
-    - cron: "17 3 * * 0"
+    # Every day at 03:17 UTC / 12:17 KST.
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       duration_minutes:
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: weekly-fuzz-corpus
+  group: daily-fuzz-corpus
   cancel-in-progress: false
 
 env:
@@ -80,7 +80,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           workspaces: fuzz -> target
-          shared-key: weekly-fuzz-${{ matrix.target }}
+          shared-key: daily-fuzz-${{ matrix.target }}
       - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # cargo-fuzz
         with:
           tool: cargo-fuzz@0.13.2
@@ -98,7 +98,7 @@ jobs:
         if: ${{ always() && !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: weekly-fuzz-${{ matrix.target }}
+          name: daily-fuzz-${{ matrix.target }}
           retention-days: 14
           if-no-files-found: error
           path: |
@@ -117,7 +117,7 @@ jobs:
       - name: Download campaign outputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          pattern: weekly-fuzz-*
+          pattern: daily-fuzz-*
           path: campaign-output
           merge-multiple: true
       - name: Check out corpus repository
