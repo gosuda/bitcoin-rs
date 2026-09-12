@@ -1,6 +1,8 @@
 //! BIP125 replacement-by-fee policy vectors.
-// A failed pool or fixture invariant is a test failure, and panicking reports
-// it with the offending call site. `expect` is deliberate.
+//!
+//! Preview-surface BIP125 rule-1 coverage that used the removed
+//! `evaluate_package_acceptance` helper now lives in
+//! `crates/rpc/tests/policy_contract.rs::bip125_rule1_nonsignaling_originals_reject_on_both_rpcs`.
 #![allow(clippy::expect_used)]
 
 extern crate alloc;
@@ -8,9 +10,6 @@ extern crate alloc;
 use alloc::sync::Arc;
 use std::error::Error;
 
-use bitcoin_rs_mempool::standardness::{
-    AcceptanceRejectReason, PackageTxContext, StandardnessPolicy, evaluate_package_acceptance,
-};
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolError, MempoolLimits, MempoolStats, PolicyError, RbfError,
     ReplacementCandidate,
@@ -233,51 +232,6 @@ fn rule_one_requires_every_conflict_to_opt_in() -> Result<(), Box<dyn Error>> {
             "{name}"
         );
     }
-    Ok(())
-}
-#[test]
-fn package_acceptance_surfaces_bip125_replacement_boundaries() -> Result<(), Box<dyn Error>> {
-    let (pool, mut replacement_tx) = pool_with_conflict(
-        OriginalSpec {
-            sequence: 0xFFFF_FFFF,
-            fee: 1_000,
-            vsize: 100,
-        },
-        ReplacementSpec {
-            fee: 1_200,
-            vsize: 100,
-            min_relay_fee_rate: 1,
-            new_unconfirmed_input: false,
-            extra_descendants: 0,
-        },
-        false,
-    )?;
-    // insert_entry does not enforce standardness, but package acceptance does.
-    replacement_tx.outputs[0].script_pubkey = {
-        // P2WPKH scriptPubKey: OP_0 PUSHBYTES_20 <20-byte hash>
-        let mut script = vec![0x00, 0x14];
-        script.extend([0x02; 20]);
-        script.into()
-    };
-
-    let policy = StandardnessPolicy {
-        dust_relay_fee: 3_000,
-        max_datacarrier_bytes: Some(83),
-    };
-    let context = PackageTxContext {
-        fee: 1_200,
-        vsize: 100,
-        sigop_cost: 4,
-        missing_inputs: false,
-    };
-    let facts =
-        evaluate_package_acceptance(&pool, &policy, &[replacement_tx], &[context], None, 1_000);
-    assert_eq!(
-        facts.results[0].reject_reason,
-        Some(AcceptanceRejectReason::Replacement(RbfError::Rule1NoOptIn))
-    );
-    assert_eq!(facts.results[0].allowed, Some(false));
-    assert_eq!(facts.results[0].sigop_cost, 4);
     Ok(())
 }
 
