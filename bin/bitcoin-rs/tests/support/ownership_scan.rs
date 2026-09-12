@@ -106,10 +106,8 @@ pub(crate) const PEER_MUTATION_METHODS: &[&str] = &[
 /// Receiver-qualified patterns for the peer mutators whose bare name is
 /// shared with another owner's API: `ChainTransition::disconnect` also
 /// reads `disconnect(`, so only a `peer_table` receiver counts here.
-pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[
-    ".peer_table.disconnect(",
-    "PeerTable::disconnect(",
-];
+pub(crate) const PEER_TABLE_PATTERNS: &[&str] =
+    &[".peer_table.disconnect(", "PeerTable::disconnect("];
 
 /// Audited non-owner peer mutation receivers. The receiver must be the
 /// complete audited expression — the sync worker's shared state handle —
