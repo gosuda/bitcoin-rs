@@ -31,7 +31,6 @@ use bitcoin_rs_mining::AvailableMiningRule;
 #[cfg(test)]
 use bitcoin_rs_mining::BlockValidationResult;
 use bitcoin_rs_mining::ChainContextSource;
-use bitcoin_rs_mining::DEFAULT_MEMPOOL_UPDATE_WAIT;
 use bitcoin_rs_mining::GenerateSelection;
 use bitcoin_rs_mining::MempoolSequenceWake;
 use bitcoin_rs_mining::MempoolSnapshotSource;
@@ -49,7 +48,6 @@ use compact_str::CompactString;
 use core::time::Duration;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 #[cfg(test)]
 use submission::map_apply_error;
 
@@ -152,10 +150,6 @@ pub struct MiningCoordinator {
     apply_handles: Chainstate,
     followers: ChainFollowers,
     shutdown: Arc<AtomicBool>,
-    /// Wall clock used for long-poll cooldowns.
-    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
-    /// Controllable mempool-only long-poll cooldown (Core default: 10s).
-    mempool_update_wait: Duration,
     /// Mining-domain lifecycle service over the capability adapters.
     service: MiningService,
 }
@@ -197,24 +191,8 @@ impl MiningCoordinator {
             apply_handles,
             followers,
             shutdown,
-            clock: Arc::new(Instant::now),
-            mempool_update_wait: DEFAULT_MEMPOOL_UPDATE_WAIT,
             service,
         }
-    }
-
-    /// Overrides the wall clock. Intended for deterministic tests.
-    #[must_use]
-    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
-        self.clock = clock;
-        self
-    }
-
-    /// Overrides the mempool-only long-poll cooldown. Tests may set this to zero.
-    #[must_use]
-    pub const fn with_mempool_update_wait(mut self, wait: Duration) -> Self {
-        self.mempool_update_wait = wait;
-        self
     }
 
     /// Reduces shutdown latency after the caller sets the shared shutdown flag.

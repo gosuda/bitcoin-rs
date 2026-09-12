@@ -408,20 +408,31 @@ impl MiningService {
         } else {
             None
         };
-        let tip = self.applied_tip.applied_tip().ok_or_else(|| {
-            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
-        })?;
-        let candidate = self.live_candidate()?;
-        let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-        let (version_bits_available, version_bits_required) =
-            self.version_bits_for(&candidate, &tip);
-        Ok(template_from_candidate(
-            self.network,
-            candidate,
-            submit_old,
-            version_bits_available,
-            version_bits_required,
-        ))
+        // Candidate assembly may retry after a tip move.  Pair the deployment
+        // snapshot with the candidate it describes, rather than with a stale
+        // snapshot captured before assembly.
+        for _ in 0..CANDIDATE_GENERATION_RETRIES {
+            let candidate = self.live_candidate()?;
+            let Some(tip) = self.applied_tip.applied_tip() else {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "applied tip is not available",
+                )));
+            };
+            if tip.hash != candidate.previous_block_hash {
+                continue;
+            }
+            let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
+            let (version_bits_available, version_bits_required) =
+                self.version_bits_for(&candidate, &tip);
+            return Ok(template_from_candidate(
+                self.network,
+                candidate,
+                submit_old,
+                version_bits_available,
+                version_bits_required,
+            ));
+        }
+        Err(generation_race())
     }
 
     /// Captures one coherent mining-state report.
@@ -558,10 +569,12 @@ impl MiningService {
         };
 
         let assembled = self.assemble_for_key(key);
+        // Capability reads can take the mempool lock; perform this before
+        // reacquiring the lifecycle mutex.
+        let live = self.live_generation_key();
         let mut state = self.state.lock();
         let returned = match &assembled {
             Ok(candidate) => {
-                let live = self.live_generation_key();
                 if live == key {
                     state.cache_insert(template_id, Arc::clone(candidate));
                     state.last_candidate = Some(LastCandidateInfo {
