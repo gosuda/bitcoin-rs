@@ -3,8 +3,9 @@
 See docs/contracts/qa-corpus.md, fuzz/CORPUS_PROVENANCE.md, and the framing
 comments in fuzz/fuzz_targets/{p2p_message,script_eval}.rs. Fixtures here are
 synthetic wire bytes with hand-written expected frames, not Bitcoin validity
-vectors. The importer owns MAX_SEED_BYTES; Rust owners supply the inventories
-and element limits. Failure publication cases are documented in PR #747.
+vectors. scripts/fuzz-policy.sh owns FUZZ_MAX_SEED_BYTES; Rust owners supply
+the inventories and element limits. Failure publication cases are documented
+in PR #747.
 """
 
 from contextlib import contextmanager, redirect_stdout
@@ -22,9 +23,14 @@ from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "import-qa-assets.sh"
-_budget = re.search(r"^readonly MAX_SEED_BYTES=([0-9]+)\s*(?:#.*)?$", SCRIPT.read_text(), re.M)
+POLICY = SCRIPT.with_name("fuzz-policy.sh")
+_budget = re.search(
+    r"^readonly FUZZ_MAX_SEED_BYTES=([0-9]+)\s*(?:#.*)?$",
+    POLICY.read_text(),
+    re.M,
+)
 if _budget is None or int(_budget.group(1)) < 1:
-    raise RuntimeError("Cannot read the importer's positive MAX_SEED_BYTES limit")
+    raise RuntimeError("Cannot read the positive FUZZ_MAX_SEED_BYTES policy")
 BUDGET = int(_budget.group(1))
 
 

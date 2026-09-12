@@ -4,9 +4,12 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-readonly REPO_ROOT="$(pwd)"
-readonly HOST_TARGET="$(rustc +nightly -vV | sed -n 's/^host: //p')"
-readonly MAX_SEED_BYTES=65536
+REPO_ROOT="$(pwd)"
+readonly REPO_ROOT
+# shellcheck source=scripts/fuzz-policy.sh
+source "${REPO_ROOT}/scripts/fuzz-policy.sh"
+HOST_TARGET="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+readonly HOST_TARGET
 
 usage() {
     echo "usage: $0 <target> <duration-seconds> <corpus-dir> <output-dir>" >&2
@@ -64,7 +67,8 @@ mkdir -p \
 
 readonly REPORT_DIR="${OUTPUT_DIR}/reports/${TARGET}"
 readonly COVERAGE_BINARY="${REPO_ROOT}/fuzz/target/${HOST_TARGET}/release/${TARGET}"
-readonly LLVM_COV="$(rustc +nightly --print sysroot)/lib/rustlib/${HOST_TARGET}/bin/llvm-cov"
+LLVM_COV="$(rustc +nightly --print sysroot)/lib/rustlib/${HOST_TARGET}/bin/llvm-cov"
+readonly LLVM_COV
 [[ -x "${LLVM_COV}" ]] || {
     echo "llvm-cov is missing; install nightly's llvm-tools-preview component" >&2
     exit 2
@@ -100,32 +104,49 @@ coverage_report() {
     mv "${COVERAGE_PATH}" "${saved_path}"
 }
 
-readonly STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly START_COUNT="$(count_inputs)"
-readonly START_BYTES="$(count_bytes)"
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly STARTED_AT
+START_COUNT="$(count_inputs)"
+readonly START_COUNT
+START_BYTES="$(count_bytes)"
+readonly START_BYTES
 
 coverage_report before
 
-set +e
-env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
+FUZZ_STATUS=0
+if env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
     cargo +nightly fuzz run \
-    --target "${HOST_TARGET}" \
-    --target-dir "${REPO_ROOT}/fuzz/target" \
-    "${TARGET}" "${CORPUS_DIR}" -- \
-    -max_total_time="${DURATION_SECONDS}" \
-    -max_len="${MAX_SEED_BYTES}" \
-    -timeout=10 \
-    2>&1 | tee "${REPORT_DIR}/fuzz.log"
-FUZZ_STATUS="${PIPESTATUS[0]}"
+        --target "${HOST_TARGET}" \
+        --target-dir "${REPO_ROOT}/fuzz/target" \
+        "${TARGET}" "${CORPUS_DIR}" -- \
+        -max_total_time="${DURATION_SECONDS}" \
+        -max_len="${FUZZ_MAX_SEED_BYTES}" \
+        -timeout=10 \
+        2>&1 | tee "${REPORT_DIR}/fuzz.log"; then
+    :
+else
+    fuzz_pipeline_status=("${PIPESTATUS[@]}")
+    if (( fuzz_pipeline_status[1] != 0 )); then
+        exit "${fuzz_pipeline_status[1]}"
+    fi
+    FUZZ_STATUS="${fuzz_pipeline_status[0]}"
+fi
 
-env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
+CMIN_STATUS=0
+if env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
     cargo +nightly fuzz cmin \
-    --target "${HOST_TARGET}" \
-    --target-dir "${REPO_ROOT}/fuzz/target" \
-    "${TARGET}" "${CORPUS_DIR}" -- -timeout=10 \
-    2>&1 | tee "${REPORT_DIR}/cmin.log"
-CMIN_STATUS="${PIPESTATUS[0]}"
-set -e
+        --target "${HOST_TARGET}" \
+        --target-dir "${REPO_ROOT}/fuzz/target" \
+        "${TARGET}" "${CORPUS_DIR}" -- -timeout=10 \
+        2>&1 | tee "${REPORT_DIR}/cmin.log"; then
+    :
+else
+    cmin_pipeline_status=("${PIPESTATUS[@]}")
+    if (( cmin_pipeline_status[1] != 0 )); then
+        exit "${cmin_pipeline_status[1]}"
+    fi
+    CMIN_STATUS="${cmin_pipeline_status[0]}"
+fi
 if grep -Fq 'Failed to minimize corpus:' "${REPORT_DIR}/cmin.log"; then
     CMIN_STATUS=1
 fi
@@ -150,18 +171,25 @@ if (( CMIN_STATUS == 0 )); then
     cp -a "${CORPUS_DIR}/." "${OUTPUT_DIR}/corpus/${TARGET}/"
 fi
 
-readonly END_COUNT="$(count_inputs)"
-readonly END_BYTES="$(count_bytes)"
-readonly COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-readonly BEFORE_TOTAL="$(tail -n 1 "${REPORT_DIR}/before-coverage.txt")"
-readonly AFTER_TOTAL="$(tail -n 1 "${REPORT_DIR}/after-coverage.txt")"
+END_COUNT="$(count_inputs)"
+readonly END_COUNT
+END_BYTES="$(count_bytes)"
+readonly END_BYTES
+COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+readonly COMPLETED_AT
+BEFORE_TOTAL="$(tail -n 1 "${REPORT_DIR}/before-coverage.txt")"
+readonly BEFORE_TOTAL
+AFTER_TOTAL="$(tail -n 1 "${REPORT_DIR}/after-coverage.txt")"
+readonly AFTER_TOTAL
 FUZZ_LEAK_DETECTION=true
 if [[ "${ASAN_OPTIONS:-}" == *detect_leaks=0* ]]; then
     FUZZ_LEAK_DETECTION=false
 fi
 readonly FUZZ_LEAK_DETECTION
-readonly SOURCE_COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD)}"
-readonly SOURCE_REPOSITORY="${GITHUB_REPOSITORY:-gosuda/bitcoin-rs}"
+SOURCE_COMMIT="${GITHUB_SHA:-$(git rev-parse HEAD)}"
+readonly SOURCE_COMMIT
+SOURCE_REPOSITORY="${GITHUB_REPOSITORY:-gosuda/bitcoin-rs}"
+readonly SOURCE_REPOSITORY
 if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
     RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${SOURCE_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 else
@@ -180,7 +208,7 @@ jq -n \
     --arg coverage_before_total "${BEFORE_TOTAL}" \
     --arg coverage_after_total "${AFTER_TOTAL}" \
     --argjson duration_seconds "${DURATION_SECONDS}" \
-    --argjson max_seed_bytes "${MAX_SEED_BYTES}" \
+    --argjson max_seed_bytes "${FUZZ_MAX_SEED_BYTES}" \
     --argjson start_count "${START_COUNT}" \
     --argjson start_bytes "${START_BYTES}" \
     --argjson end_count "${END_COUNT}" \
