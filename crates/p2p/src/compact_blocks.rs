@@ -621,4 +621,3 @@ mod tests {
         assert_eq!(request.txs_request.indexes.len(), MAX_REQUESTED_MISSING);
     }
 }
-

@@ -76,6 +76,55 @@ impl BlockSync {
         );
     }
 
+    /// Builds one getdata inventory entry per planned block in the chosen
+    /// flavor and collects the hashes of the request's contiguous leading
+    /// run starting at `applied_height + 1` for the fast-apply cache.
+    fn build_inventory(
+        request: &bitcoin_rs_p2p::download_window::PeerRequest,
+        compact_fetch: bool,
+        applied_height: u32,
+    ) -> (Vec<Inventory>, ExpectedBlockHashes, bool) {
+        let mut inventory = Vec::with_capacity(request.len());
+        let mut expected_hashes = ExpectedBlockHashes::with_capacity(request.len());
+        let mut expected_height = applied_height.saturating_add(1);
+        let mut is_contiguous = true;
+        for (height, hash) in request.entries() {
+            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
+            inventory.push(if compact_fetch {
+                Inventory::CompactBlock(block_hash)
+            } else {
+                Inventory::WitnessBlock(block_hash)
+            });
+            if is_contiguous && height == expected_height {
+                expected_hashes.push(hash);
+                expected_height = if let Some(next) = expected_height.checked_add(1) {
+                    next
+                } else {
+                    is_contiguous = false;
+                    expected_height
+                };
+            } else {
+                is_contiguous = false;
+            }
+        }
+        (inventory, expected_hashes, is_contiguous)
+    }
+
+    /// Compact flavor is worth its reconstruction round trip only when the
+    /// peer announced BIP152 relay and the whole batch sits within the
+    /// near-tip window of the header tip.
+    fn compact_fetch_eligible(
+        &self,
+        request: &bitcoin_rs_p2p::download_window::PeerRequest,
+        chain_tip: &TipSnapshot,
+    ) -> bool {
+        let Some((first_height, _)) = request.entries().next() else {
+            return false;
+        };
+        chain_tip.height.saturating_sub(first_height) < COMPACT_RELAY_NEAR_TIP_BLOCKS
+            && self.peer_table.compact_relay_of(request.peer_addr())
+    }
+
     pub(super) fn send_getdata_for_pending_blocks(
         &self,
         sync_peer_addr: SocketAddr,
@@ -108,38 +157,10 @@ impl BlockSync {
         };
         drop(window);
 
-        let near_tip = match request.entries().next() {
-            Some((first_height, _)) => {
-                chain_tip.height.saturating_sub(first_height) < COMPACT_RELAY_NEAR_TIP_BLOCKS
-            }
-            None => false,
-        };
-        let compact_fetch = near_tip && self.peer_table.compact_relay_of(request.peer_addr());
-
-        let count = request.len();
-        let mut inventory = Vec::with_capacity(count);
-        let mut expected_hashes = ExpectedBlockHashes::with_capacity(count);
-        let mut expected_height = applied_tip.height.saturating_add(1);
-        let mut is_contiguous = true;
-        for (height, hash) in request.entries() {
-            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
-            inventory.push(if compact_fetch {
-                Inventory::CompactBlock(block_hash)
-            } else {
-                Inventory::WitnessBlock(block_hash)
-            });
-            if is_contiguous && height == expected_height {
-                expected_hashes.push(hash);
-                expected_height = if let Some(next) = expected_height.checked_add(1) {
-                    next
-                } else {
-                    is_contiguous = false;
-                    expected_height
-                };
-            } else {
-                is_contiguous = false;
-            }
-        }
+        let compact_fetch = self.compact_fetch_eligible(&request, chain_tip);
+        let (inventory, expected_hashes, is_contiguous) =
+            Self::build_inventory(&request, compact_fetch, applied_tip.height);
+        let count = inventory.len();
         let msg = Message::GetData(inventory);
 
         let tx = self.peer_table.lease(request.peer_addr());

@@ -248,7 +248,10 @@ fn assert_bip152_relay(evidence: &Value) -> Result<(), LiveError> {
     let reconstructions = evidence_u64(compact, "reconstructions_complete")?;
     let recoveries = evidence_u64(compact, "getblocktxn_requests")?;
     let fallbacks = evidence_u64(compact, "full_block_fallbacks")?;
-    assert!(batches >= 1, "near-tip compact fetches must appear in the log");
+    assert!(
+        batches >= 1,
+        "near-tip compact fetches must appear in the log"
+    );
     assert!(
         reconstructions >= phase_a_blocks,
         "every coinbase-only compact block must reconstruct fully: \

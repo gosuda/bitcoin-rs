@@ -156,7 +156,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
             match rx.try_recv() {
                 Ok(Message::GetData(inventory)) => return inventory,
                 Ok(_) => continue,
-                Err(_) => panic!("expected a getdata batch"),
+                Err(error) => panic!("expected a getdata batch: {error}"),
             }
         }
     };

@@ -12,8 +12,8 @@
 use bitcoin::bip152::BlockTransactions;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
-use bitcoin_rs_p2p::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
 use bitcoin_rs_p2p::compact_blocks::COMPACT_BLOCK_VERSION;
+use bitcoin_rs_p2p::compact_blocks::{CompactBlockHints, Outcome, Reconstruction};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx,
     TxIn, TxOut, Witness, consensus_bytes,
@@ -26,7 +26,10 @@ struct SetHints {
 }
 
 impl CompactBlockHints for SetHints {
-    fn for_each_identity(&self, f: &mut dyn FnMut(bitcoin_rs_primitives::Txid, bitcoin_rs_primitives::Wtxid)) {
+    fn for_each_identity(
+        &self,
+        f: &mut dyn FnMut(bitcoin_rs_primitives::Txid, bitcoin_rs_primitives::Wtxid),
+    ) {
         for tx in &self.txs {
             f(tx.txid(), tx.wtxid());
         }
@@ -129,7 +132,10 @@ fn missing_transactions_request_getblocktxn() {
         panic!("expected getblocktxn request, got {outcome:?}");
     };
     assert_eq!(request.txs_request.indexes, vec![1, 2]);
-    assert_eq!(request.txs_request.block_hash.to_byte_array(), *native.block_hash().as_bytes());
+    assert_eq!(
+        request.txs_request.block_hash.to_byte_array(),
+        *native.block_hash().as_bytes()
+    );
 }
 
 // CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (BIP152

@@ -174,9 +174,12 @@ impl PeerTable {
     /// stale per-connection guess.
     pub fn compact_relay_of(&self, addr: SocketAddr) -> bool {
         let entries = self.entries.read();
-        entries
-            .get(&addr)
-            .is_some_and(|entry| entry.info.as_ref().is_some_and(|info| info.compact_block_relay))
+        entries.get(&addr).is_some_and(|entry| {
+            entry
+                .info
+                .as_ref()
+                .is_some_and(|info| info.compact_block_relay)
+        })
     }
 
     /// Removes and cancels the connection `lease` refers to. Returns `false`
