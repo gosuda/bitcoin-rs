@@ -6,8 +6,10 @@
 //! and backend feature-forwarding rules described in
 //! `docs/contracts/architecture.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::LazyLock;
 
 /// Storage engine crates. Only `bitcoin-rs-storage` may depend on these.
 pub(crate) const ENGINE_CRATES: [&str; 3] = ["fjall", "redb", "rust-rocksdb"];
@@ -91,6 +93,31 @@ pub(crate) struct Validation {
     pub summary: String,
 }
 
+/// One operator-facing binary feature profile, mirroring a CI build lane.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FeatureProfile {
+    /// Lane name used in violation messages.
+    pub(crate) name: &'static str,
+    /// CLI `--features` tokens applied to the binary crate.
+    pub(crate) features: &'static [&'static str],
+    /// Whether the binary's default features participate.
+    pub(crate) defaults: bool,
+}
+
+impl FeatureProfile {
+    pub(crate) const fn new(
+        name: &'static str,
+        features: &'static [&'static str],
+        defaults: bool,
+    ) -> Self {
+        Self {
+            name,
+            features,
+            defaults,
+        }
+    }
+}
+
 /// Locates the workspace root `Cargo.toml` from the integration test's
 /// manifest directory.
 pub(crate) fn workspace_root_manifest() -> std::path::PathBuf {
@@ -99,31 +126,62 @@ pub(crate) fn workspace_root_manifest() -> std::path::PathBuf {
         .join("Cargo.toml")
 }
 
+/// Runs `cargo metadata --locked --offline --no-deps --format-version 1`
+/// against the workspace root manifest.
+fn run_cargo_metadata() -> serde_json::Value {
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            workspace_root_manifest().to_str().expect("utf8 root path"),
+        ])
+        .output()
+        .expect("run cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse cargo metadata JSON")
+}
+
+/// Directories of the cargo-metadata workspace members, resolved once.
+///
+/// The ownership scan walks exactly these directories: sibling checkouts
+/// under `.outline/worktree/`, vendored trees, and any other non-member
+/// production code under the checkout root must never influence a gate run.
+pub(crate) fn workspace_member_dirs() -> &'static [PathBuf] {
+    static DIRS: LazyLock<Vec<PathBuf>> = LazyLock::new(|| {
+        let metadata = run_cargo_metadata();
+        let mut dirs: Vec<PathBuf> = metadata["packages"]
+            .as_array()
+            .expect("packages array")
+            .iter()
+            .map(|package| {
+                let manifest = package["manifest_path"].as_str().expect("manifest path");
+                std::path::Path::new(manifest)
+                    .parent()
+                    .expect("manifest parent")
+                    .to_owned()
+            })
+            .collect();
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    });
+    DIRS.as_slice()
+}
+
 impl WorkspaceGraph {
     /// Runs `cargo metadata --locked --offline --no-deps --format-version 1` and
     /// parses the result.
     pub(crate) fn from_cargo_metadata() -> Self {
-        let output = Command::new(env!("CARGO"))
-            .args([
-                "metadata",
-                "--locked",
-                "--offline",
-                "--no-deps",
-                "--format-version",
-                "1",
-                "--manifest-path",
-                workspace_root_manifest().to_str().expect("utf8 root path"),
-            ])
-            .output()
-            .expect("run cargo metadata");
-        assert!(
-            output.status.success(),
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let metadata: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("parse cargo metadata JSON");
-        Self::from_json(&metadata)
+        Self::from_json(&run_cargo_metadata())
     }
 
     /// Parses the same `cargo metadata --format-version 1` shape from a
@@ -413,5 +471,156 @@ impl WorkspaceGraph {
             ),
         }
         checked
+    }
+
+    /// Resolves one binary feature profile to the activated workspace
+    /// crate/feature sets, walking the same `crate/feature` and `dep:` token
+    /// chains as `g19_validation_default`.
+    ///
+    /// Dependency-edge default features are deliberately not modeled: the
+    /// workspace pins `default-features = false` on the consensus and node
+    /// edges, and every engine surface (kernel, zmq, backends) reaches the
+    /// binary only through the explicit forwarding chains this walk follows.
+    pub(crate) fn resolve_profile(
+        &self,
+        profile: &FeatureProfile,
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        let mut activated: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut queue: Vec<(String, String)> = Vec::new();
+        if profile.defaults
+            && let Some(defaults) = self
+                .features
+                .get(BIN_CRATE)
+                .and_then(|features| features.get("default"))
+        {
+            for feature in defaults {
+                queue.push((BIN_CRATE.to_owned(), feature.clone()));
+            }
+        }
+        for feature in profile.features {
+            queue.push((BIN_CRATE.to_owned(), (*feature).to_owned()));
+        }
+        while let Some((package, feature)) = queue.pop() {
+            if !activated
+                .entry(package.clone())
+                .or_default()
+                .insert(feature.clone())
+            {
+                continue;
+            }
+            let Some(implies) = self
+                .features
+                .get(&package)
+                .and_then(|features| features.get(&feature))
+            else {
+                continue;
+            };
+            for token in implies {
+                if let Some((target, target_feature)) = token.split_once('/') {
+                    let target = target.trim_end_matches('?');
+                    queue.push((target.to_owned(), target_feature.to_owned()));
+                } else if token == "default" {
+                    if let Some(defaults) = self
+                        .features
+                        .get(&package)
+                        .and_then(|features| features.get("default"))
+                    {
+                        for default in defaults {
+                            queue.push((package.clone(), default.clone()));
+                        }
+                    }
+                } else {
+                    // Same-package features and `dep:` activation markers.
+                    queue.push((package.clone(), token.clone()));
+                }
+            }
+        }
+        activated
+    }
+
+    /// Returns the ownership violations of one binary feature profile: the
+    /// profile must reach a storage backend through the node forwarding
+    /// chain, backend features must stay on the forwarding allowlist, and
+    /// the kernel and ZMQ engines must follow their explicit selection
+    /// chains — present exactly when the profile selects them.
+    pub(crate) fn profile_ownership_violations(&self, profile: &FeatureProfile) -> Vec<String> {
+        let activated = self.resolve_profile(profile);
+        let mut violations = Vec::new();
+
+        // The backend must reach the storage crate as an activated feature
+        // through the node forwarding chain: a backend feature name at node
+        // alone does not compose storage. Storage declares every backend by
+        // its plain name (`fjall`, `redb`, `rocksdb`), so the plain test
+        // covers every engine uniformly.
+        let backend_reached = activated.get(STORAGE_CRATE).is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| BACKEND_FEATURES.contains(&feature.as_str()))
+        });
+        if !backend_reached {
+            violations.push(format!(
+                "profile `{}` activates no storage backend through the node \
+                 forwarding chain; a node without a backend cannot compose its \
+                 storage",
+                profile.name
+            ));
+        }
+
+        let node_features = activated.get(NODE_CRATE);
+        for (package, features) in &activated {
+            for feature in features {
+                if BACKEND_FEATURES.contains(&feature.as_str())
+                    && !BACKEND_FORWARDING_CRATES.contains(&package.as_str())
+                {
+                    violations.push(format!(
+                        "profile `{}` activates backend feature `{feature}` on \
+                         non-forwarding crate `{package}`",
+                        profile.name
+                    ));
+                }
+            }
+        }
+
+        let kernel_selected = node_features.is_some_and(|features| features.contains("kernel"));
+        let consensus_kernel = activated
+            .get("bitcoin-rs-consensus")
+            .is_some_and(|features| features.contains("dep:bitcoinkernel"));
+        if kernel_selected != consensus_kernel {
+            violations.push(if kernel_selected {
+                format!(
+                    "profile `{}` selects `kernel` without reaching `dep:bitcoinkernel` \
+                     on `bitcoin-rs-consensus`",
+                    profile.name
+                )
+            } else {
+                format!(
+                    "profile `{}` must keep the kernel engine out of the production graph",
+                    profile.name
+                )
+            });
+        }
+
+        let zmq_selected = activated
+            .get(BIN_CRATE)
+            .is_some_and(|features| features.contains("zmq"));
+        let zmq_owned = activated
+            .get(RPC_CRATE)
+            .is_some_and(|features| features.contains("dep:zmq"));
+        if zmq_selected != zmq_owned {
+            violations.push(if zmq_selected {
+                format!(
+                    "profile `{}` selects `zmq` without enabling the owned `dep:zmq` \
+                     dependency on `{RPC_CRATE}`",
+                    profile.name
+                )
+            } else {
+                format!(
+                    "profile `{}` must keep the ZMQ surface out of the production graph",
+                    profile.name
+                )
+            });
+        }
+
+        violations
     }
 }

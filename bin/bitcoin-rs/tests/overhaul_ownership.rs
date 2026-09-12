@@ -1,8 +1,9 @@
 //! ARCH-01/ARCH-02/ARCH-08 ownership boundary checks.
 //!
 //! The suite validates dependency direction, storage-engine confinement,
-//! single mempool mutation ownership, and the frozen P2P forwarding-wrapper
-//! inventory.
+//! single mempool mutation ownership, derived-index capability ownership,
+//! peer registration/cancellation ownership, and the frozen P2P
+//! forwarding-wrapper inventory.
 
 #![expect(
     clippy::expect_used,
@@ -13,9 +14,21 @@ mod support;
 
 use std::io::Write as _;
 use std::path::Path;
+use support::dependency_graph::{BIN_CRATE, FeatureProfile, Validation, WorkspaceGraph};
+use support::ownership_scan::{OwnershipScanResult, scan_ownership_violations};
 
-use support::dependency_graph::{BIN_CRATE, Validation, WorkspaceGraph};
-use support::ownership_scan::{WriterScanResult, scan_mempool_writer_violations};
+/// Operator-facing binary feature profiles, mirroring the CI build lanes in
+/// `.github/workflows/main.yml`: the shipped default, the minimal native
+/// storage lane that executes this gate, the portable minimal-plus-zmq
+/// lane, the full-node matrix lane with every backend and the kernel
+/// oracle, and the defaults-plus-kernel optional lane.
+const FEATURE_PROFILES: &[FeatureProfile] = &[
+    FeatureProfile::new("default", &[], true),
+    FeatureProfile::new("minimal-native", &["fjall"], false),
+    FeatureProfile::new("minimal-zmq", &["fjall", "zmq"], false),
+    FeatureProfile::new("full-node", &["rocksdb", "fjall", "redb", "kernel"], false),
+    FeatureProfile::new("optional-kernel", &["kernel"], true),
+];
 
 #[test]
 fn real_metadata_validates() {
@@ -162,27 +175,189 @@ fn real_adapters_forward_their_backend_features() {
         .expect("real workspace feature tables must satisfy the forwarding rules");
 }
 
+/// The workspace members carry hundreds of production sources; a scan below
+/// this floor means the file walk collapsed and a green verdict is void.
+const MIN_SCANNED_FILES: usize = 100;
+
 #[test]
 fn mempool_writer_source_scan_passes() {
-    let WriterScanResult {
-        violations,
+    let OwnershipScanResult {
+        mempool_writer_violations,
         files_scanned,
         pool_writes_found,
-        mutating_calls_found,
-    } = scan_mempool_writer_violations();
+        mempool_mutations_found,
+        ..
+    } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
 
     let _ = writeln!(
         std::io::stderr(),
         "mempool writer scan: files={files_scanned}, \
          .pool().write()/.mempool().write()={pool_writes_found}, \
-         mutating_calls={mutating_calls_found}, \
+         mutating_calls={mempool_mutations_found}, \
          violations={}",
-        violations.len()
+        mempool_writer_violations.len()
     );
     assert!(
-        violations.is_empty(),
+        mempool_writer_violations.is_empty(),
         "non-owner production code must not call mutating mempool methods or \
-         .pool().write(): {violations:?}"
+         .pool().write(): {mempool_writer_violations:?}"
+    );
+}
+
+#[test]
+fn index_capability_scan_passes() {
+    let OwnershipScanResult {
+        index_capability_violations,
+        index_capability_sites,
+        files_scanned,
+        ..
+    } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "index capability scan: files={files_scanned}, \
+         capability sites={index_capability_sites}, \
+         violations={}",
+        index_capability_violations.len()
+    );
+    assert!(
+        index_capability_violations.is_empty(),
+        "config-optional derived-index capability selection must stay with its \
+         owners (crates/index, the node txindex runtime, and the node state \
+         config projection): {index_capability_violations:?}"
+    );
+    assert!(
+        index_capability_sites > 0,
+        "the index capability scan matched no production capability selection"
+    );
+}
+
+#[test]
+fn p2p_peer_owner_scan_passes() {
+    let OwnershipScanResult {
+        peer_owner_violations,
+        peer_mutations_found,
+        files_scanned,
+        ..
+    } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "p2p peer owner scan: files={files_scanned}, \
+         peer mutation sites={peer_mutations_found}, \
+         violations={}",
+        peer_owner_violations.len()
+    );
+    assert!(
+        peer_owner_violations.is_empty(),
+        "peer registration and cancellation must stay with the P2P owner \
+         (PeerTable/P2pService) apart from the audited sync teardown handles \
+         and the RPC disconnectnode operator path: {peer_owner_violations:?}"
+    );
+    assert!(
+        peer_mutations_found > 0,
+        "the p2p peer owner scan matched no production peer mutation"
+    );
+}
+
+#[test]
+fn feature_profiles_preserve_ownership_rules() {
+    let graph = WorkspaceGraph::from_cargo_metadata();
+    for profile in FEATURE_PROFILES {
+        let violations = graph.profile_ownership_violations(profile);
+        let _ = writeln!(
+            std::io::stderr(),
+            "feature profile `{}`: violations={}",
+            profile.name,
+            violations.len()
+        );
+        assert!(
+            violations.is_empty(),
+            "profile `{}` must preserve the ownership rules: {violations:?}",
+            profile.name
+        );
+    }
+}
+
+#[test]
+fn synthetic_backendless_minimal_profile_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    // Sever node's `fjall` forwarding: the minimal lane loses its backend.
+    graph.set_feature("bitcoin-rs-node", "fjall", &[]);
+
+    let violations = graph.profile_ownership_violations(&FeatureProfile::new(
+        "minimal-native",
+        &["fjall"],
+        false,
+    ));
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("activates no storage backend")),
+        "a backendless minimal profile must fail profile parity: {violations:?}"
+    );
+}
+
+#[test]
+fn synthetic_kernel_leak_into_minimal_profile_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    // A kernel engine smuggled onto the backend forwarding chain.
+    graph.set_feature(
+        "bitcoin-rs-node",
+        "fjall",
+        &[
+            "bitcoin-rs-chain/fjall",
+            "bitcoin-rs-index/fjall",
+            "bitcoin-rs-p2p/fjall",
+            "bitcoin-rs-storage/fjall",
+            "bitcoin-rs-utxo/fjall",
+            "bitcoin-rs-consensus/kernel",
+        ],
+    );
+
+    let violations = graph.profile_ownership_violations(&FeatureProfile::new(
+        "minimal-native",
+        &["fjall"],
+        false,
+    ));
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("kernel engine out of the production graph")),
+        "a kernel leak into the minimal profile must fail profile parity: {violations:?}"
+    );
+}
+
+/// Storage's rocksdb feature implies `dep:rust-rocksdb`, whose crate name
+/// is not one of the backend feature names: the backend rule must follow
+/// storage's own feature names, so a rocksdb-only lane composes too.
+#[test]
+fn synthetic_rocksdb_only_profile_reaches_its_backend() {
+    let graph = WorkspaceGraph::from_cargo_metadata();
+
+    let violations = graph.profile_ownership_violations(&FeatureProfile::new(
+        "rocksdb-only",
+        &["rocksdb"],
+        false,
+    ));
+    assert!(
+        violations.is_empty(),
+        "a rocksdb-only profile composes and must pass profile parity: {violations:?}"
     );
 }
 
