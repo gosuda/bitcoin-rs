@@ -66,7 +66,7 @@ pub use sigops::transaction_sigop_cost;
 pub use sigops::transaction_sigop_cost as total_sigop_cost;
 pub use verify_block::{
     BlockRuleContext, compute_merkle_root, verify_block_rules, verify_block_rules_precomputed,
-    verify_merkle_root_with_txids,
+    verify_merkle_root_with_txids, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT,
 };
 pub use verify_tx::{
     ScriptStageTimings, is_final_tx, verify_block_input_scripts, verify_coinbase_script_sig_size,

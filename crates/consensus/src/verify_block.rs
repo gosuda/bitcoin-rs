@@ -18,7 +18,10 @@ pub use legacy::{
 pub(crate) use legacy::{merkle_root_and_mutation_borrowed, witness_commitment};
 
 /// BIP141 maximum block weight in weight units.
-const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+
+/// Consensus maximum serialized block size.
+pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
 
 /// Verifies non-contextual block rules that do not require a UTXO set.
 pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
