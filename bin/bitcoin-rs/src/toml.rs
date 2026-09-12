@@ -12,6 +12,13 @@ use serde::Deserialize;
 
 use crate::cli::{parse_connect_endpoint, parse_p2p_magic};
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScriptIndexToml {
+    Bool(bool),
+    String(String),
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct TomlFile {
@@ -24,7 +31,7 @@ struct TomlFile {
     rpc_user: Option<String>,
     rpc_password: Option<String>,
     rpc_cookie: Option<PathBuf>,
-    script_index: Option<String>,
+    script_index: Option<ScriptIndexToml>,
     p2p_listen: Option<Vec<SocketAddr>>,
     dns_seeds_enabled: Option<bool>,
     connect: Option<Vec<String>>,
@@ -89,9 +96,12 @@ impl TomlFile {
                 txindex: self.txindex,
                 script_index: self
                     .script_index
-                    .as_deref()
                     .map(|value| {
-                        ScriptIndexMode::parse(value).ok_or_else(|| {
+                        let value = match value {
+                            ScriptIndexToml::Bool(value) => value.to_string(),
+                            ScriptIndexToml::String(value) => value,
+                        };
+                        ScriptIndexMode::parse(&value).ok_or_else(|| {
                             anyhow::anyhow!(
                                 "invalid scriptindex value `{value}`: expected `utxo`, `full`, or a boolean"
                             )
