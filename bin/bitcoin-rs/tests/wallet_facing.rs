@@ -85,17 +85,19 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         "tip must have moved past genesis"
     );
 
+    // API-26: coinbase-only blocks leave the estimator with no observations,
+    // so targets are honestly omitted until real wallet traffic confirms.
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
-        fees.get("6").and_then(Value::as_f64).is_some(),
-        "fee estimates must include the 6-block target wallets use: {fees}"
+        fees.get("6").is_none(),
+        "with no confirmed wallet traffic the 6-block target must be omitted, not fabricated: {fees}"
     );
     assert_esplora_namespace(&client, &height, &tip_hash, &genesis_hash)?;
 
     client.wait_for_scriptindex(&address)?;
     assert_script_activity(&client, &address, &p2wpkh)?;
 
-    let spend_hex = spend_first_anyone_can_spend(&client, &p2wpkh)?;
+    let spend_hex = spend_anyone_can_spend(&client, 1, &p2wpkh)?;
     let broadcast = client.esplora_post("/api/tx", spend_hex.as_bytes())?;
     assert_eq!(broadcast.status, 200, "POST /api/tx: {}", broadcast.text());
     let txid = broadcast.text();
@@ -119,6 +121,27 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         tx_status.get("confirmed").and_then(Value::as_bool),
         Some(false),
         "GET /api/tx/{{id}}/status must report unconfirmed: {tx_status}"
+    );
+    // Confirming the first spend matures the height-2 coinbase, so a second
+    // spend confirms in the next block. API-26 needs more than a lone fresh
+    // observation (one sample decays below the minimum), and two
+    // confirmations at full success rate honestly qualify the estimate.
+    client.mine(Coinbase::AnyoneCanSpend)?;
+    wait_for_confirmation(&client, txid.trim())?;
+    let second_hex = spend_anyone_can_spend(&client, 2, &p2wpkh)?;
+    let second_broadcast = client.esplora_post("/api/tx", second_hex.as_bytes())?;
+    assert_eq!(
+        second_broadcast.status,
+        200,
+        "POST /api/tx: {}",
+        second_broadcast.text()
+    );
+    client.mine(Coinbase::AnyoneCanSpend)?;
+    wait_for_confirmation(&client, second_broadcast.text().trim())?;
+    let fees = client.esplora_json("/api/fee-estimates")?;
+    assert!(
+        fees.get("6").and_then(Value::as_f64).is_some(),
+        "two confirmed spends must qualify the 6-block target wallets use: {fees}"
     );
     Ok(())
 }
@@ -637,10 +660,12 @@ fn assert_esplora_namespace(
         160,
         "GET /api/block/{{hash}}/header must return 80-byte header hex: {header}"
     );
+    // API-26 (see above): no confirmed wallet traffic exists yet at this
+    // point, so the 6-block target must still be omitted here.
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
-        fees.get("6").and_then(Value::as_f64).is_some(),
-        "GET /api/fee-estimates must include the 6-block target: {fees}"
+        fees.get("6").is_none(),
+        "GET /api/fee-estimates must omit the 6-block target without history: {fees}"
     );
 
     let leaked = client.esplora_post("/api/not-esplora", b"{}")?;
@@ -738,13 +763,13 @@ fn assert_script_activity(client: &Client, address: &str, script: &ScriptBuf) ->
     Ok(())
 }
 
-fn spend_first_anyone_can_spend(client: &Client, payout: &ScriptBuf) -> TestResult<String> {
-    // Height-1 coinbase is anyone-can-spend (`OP_TRUE`). The default binary's
-    // portable interpreter verifies that class; it does not verify P2WPKH, and
-    // the node holds no keys. A wallet would sign here. Broadcast still goes
-    // through the public `POST /api/tx` path, paying a standard P2WPKH so policy
-    // accepts the output.
-    let block_hash = client.esplora_text("/api/block-height/1")?;
+fn spend_anyone_can_spend(client: &Client, height: u32, payout: &ScriptBuf) -> TestResult<String> {
+    // The coinbase at `height` is anyone-can-spend (`OP_TRUE`) and must be
+    // mature under the current tip. The default binary's portable interpreter
+    // verifies that class; it does not verify P2WPKH, and the node holds no
+    // keys. A wallet would sign here. Broadcast still goes through the public
+    // `POST /api/tx` path, paying a standard P2WPKH so policy accepts the output.
+    let block_hash = client.esplora_text(&format!("/api/block-height/{height}"))?;
     let txid_hex = client.esplora_text(&format!("/api/block/{}/txid/0", block_hash.trim()))?;
     let txid: Txid = txid_hex.trim().parse()?;
     let spend = Transaction {
@@ -762,6 +787,26 @@ fn spend_first_anyone_can_spend(client: &Client, payout: &ScriptBuf) -> TestResu
         }],
     };
     Ok(serialize_hex(&spend))
+}
+
+/// Polls `/api/tx/{txid}/status` past the post-mine index settle (the
+/// endpoint answers 503 until the new tip is queryable) until the spend
+/// confirms or the index timeout expires.
+fn wait_for_confirmation(client: &Client, txid: &str) -> TestResult<()> {
+    let deadline = Instant::now() + INDEX_TIMEOUT;
+    loop {
+        let response = client.esplora_get(&format!("/api/tx/{txid}/status"))?;
+        if response.status == 200 {
+            let status = response.json()?;
+            if status.get("confirmed").and_then(Value::as_bool) == Some(true) {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("the mined block must confirm the broadcast spend {txid}").into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn assemble_from_template(template: &Value, coinbase: Coinbase<'_>) -> TestResult<Block> {

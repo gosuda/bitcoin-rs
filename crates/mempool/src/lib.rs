@@ -40,7 +40,7 @@ pub use admission::{
 };
 pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;
-pub use fee_estimator::{FeeEstimator, FeeRate};
+pub use fee_estimator::{FeeEstimator, FeeRate, HistoryReject};
 pub use gateway::{
     AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, ChainChangeGuard,
     CompositeObserver, MempoolGateway, MempoolObserver,

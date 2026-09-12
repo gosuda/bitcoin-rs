@@ -12,7 +12,7 @@ use slab::Slab;
 use thiserror::Error;
 
 use crate::entry::fee_rate;
-use crate::fee_estimator::{FeeEstimator, FeeRate};
+use crate::fee_estimator::{FeeEstimator, FeeRate, HistoryReject};
 use crate::mutation::{
     MutationChange, MutationOutcome, MutationResult, MutationSequence, RemovalReason,
 };
@@ -280,6 +280,14 @@ impl Mempool {
     /// cleared entry commits as one `Removed(Clear)` change — in entry-id
     /// order — each taking the next mempool sequence value. A clear of an
     /// already-empty pool commits nothing and moves no sequence.
+    ///
+    /// The fee-history reset is intentional and specific to this wholesale
+    /// action: the estimator returns to the empty, insufficient-data state
+    /// because every observation it held described transactions this pool no
+    /// longer tracks. A reorg never routes through `clear` — disconnected
+    /// transactions return through reconsideration (re-admission), which
+    /// keeps the recorded confirmations and re-arms only the re-admitted
+    /// entries — so chain recovery cannot silently discard fee history.
     pub fn clear(&mut self) -> MutationResult {
         let txids: Vec<Txid> = self.entries.iter().map(|(_id, entry)| entry.txid).collect();
         self.entries.clear();
@@ -742,8 +750,22 @@ impl Mempool {
         self.estimator.last_decayed_height()
     }
 
+    /// Returns the estimator's encoded recoverable state for the owner-local
+    /// history file (docs/policies/db-migration.md). Deterministic bytes.
+    #[must_use]
+    pub fn estimator_history(&self) -> Vec<u8> {
+        self.estimator.to_history_bytes()
+    }
+
+    /// Adopts persisted estimator state. A payload this build cannot
+    /// interpret — wrong magic, unknown version, corrupt layout — is
+    /// rejected and the estimator stays exactly as it was, which for a pool
+    /// that just opened is the empty, insufficient-data state.
+    pub fn restore_estimator_history(&mut self, bytes: &[u8]) -> Result<(), HistoryReject> {
+        self.estimator = FeeEstimator::from_history_bytes(bytes)?;
+        Ok(())
+    }
     /// Copies the pool's mining state into one immutable snapshot.
-    ///
     /// Everything block-template selection needs is read in this single
     /// coherent pass — shared transaction payloads, per-entry fee, sigop,
     /// weight, and size metadata, the signed overlay, ancestor-package

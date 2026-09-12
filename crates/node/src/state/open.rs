@@ -251,6 +251,10 @@ impl NodeState {
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
         let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        // Owner-local fee-estimator history: adopt the persisted
+        // confirmation history before any admission can run. A corrupt or
+        // unknown-version file degrades to insufficient data (docs/policies/db-migration.md).
+        crate::fee_history::load(&config.data_dir, &mempool);
         let block_tree = Arc::new(RwLock::new(block_tree_value));
         let chain_tip = block_tree.read().tip_handle();
         let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());

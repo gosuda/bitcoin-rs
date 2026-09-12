@@ -513,15 +513,24 @@ fn mempool_recent(ctx: &Context) -> Response {
     )
 }
 fn fee_estimates(handler: &Handler) -> Response {
+    // CONTRACT: docs/contracts/external-api.md#API-26 — one horizon, honest
+    // refusal. A target without enough admitted-and-confirmed history has no
+    // answer: the entry is omitted from the map rather than fabricated as a
+    // 1 sat/vB floor, so a wallet can tell "no data" from "cheap". The
+    // dispatched `estimatesmartfee` feerate is the RPC surface's own
+    // `sat_to_btc` projection of the estimator's sat/kvB rate (see the
+    // util.rs handler); this endpoint is a consumer of that value, so the
+    // unit projection cannot drift between the two surfaces.
     let mut values = serde_json::Map::new();
     for target in (1_u32..=25).chain([144, 504, 1008]) {
-        let fee = handler
+        if let Some(fee) = handler
             .dispatch("estimatesmartfee", &sonic_json!([target]))
             .ok()
             .and_then(|v| v.get("feerate").and_then(sonic_rs::JsonValueTrait::as_f64))
             .map(fee_rate_sat_per_vbyte)
-            .unwrap_or(1.0);
-        values.insert(target.to_string(), json!(fee));
+        {
+            values.insert(target.to_string(), json!(fee));
+        }
     }
     json_response(values)
 }
