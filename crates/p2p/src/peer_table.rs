@@ -153,7 +153,7 @@ impl PeerTable {
     }
 
     /// Raises the compact-block relay preference for `source` — its live
-    /// connection accepted a post-verack `sendcmpct` with `send_compact=true`.
+    /// connection accepted a post-verack `sendcmpct` with a known version.
     /// Returns `false` for a stale or unpublished connection.
     pub fn note_compact_relay(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();

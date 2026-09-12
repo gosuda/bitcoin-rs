@@ -1103,7 +1103,14 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         lease.stats().complete_ping(nonce, unix_micros());
                     }
                     crate::Message::SendCmpct(send_cmpct) => {
-                        if send_cmpct.send_compact {
+                        // Any `sendcmpct` (v1 or v2) announces BIP152 relay:
+                        // the peer may serve `MSG_CMPCT_BLOCK` getdata at our
+                        // advertised version. The high-bandwidth push
+                        // preference is a separate per-peer choice and must
+                        // not gate compact-fetch eligibility — an inbound peer
+                        // (how the node sees its Core dial) is never selected
+                        // for push announcements.
+                        if matches!(send_cmpct.version, 1 | 2) {
                             peer_table.note_compact_relay(lease.source(peer_addr));
                         }
                     }
@@ -1834,14 +1841,14 @@ mod writer_shutdown_tests {
 
     #[test]
     fn sendcmpct_raises_published_compact_relay_preference() {
-        let sendcmpct = |send_compact: bool| {
+        let sendcmpct = |send_compact: bool, version: u64| {
             let mut wire = Vec::new();
             crate::wire::write_message(
                 &mut wire,
                 Magic::BITCOIN,
                 &crate::Message::SendCmpct(bitcoin::p2p::message_compact_blocks::SendCmpct {
                     send_compact,
-                    version: 2,
+                    version,
                 }),
             )
             .expect("sendcmpct encodes");
@@ -1879,7 +1886,7 @@ mod writer_shutdown_tests {
         table.register(addr, lease.clone());
         assert!(table.publish_info(addr, &lease, published(addr)));
         let mut peer = Peer::new(
-            ScriptedEof(io::Cursor::new(sendcmpct(true))),
+            ScriptedEof(io::Cursor::new(sendcmpct(true, 2))),
             Magic::BITCOIN,
         );
         peer.state = PeerState::Ready;
@@ -1890,8 +1897,9 @@ mod writer_shutdown_tests {
                 .is_err()
         );
         assert!(table.compact_relay_of(addr));
-        // `send_compact=false` announces BIP152 awareness without the relay
-        // preference; fetch-side eligibility must stay false.
+        // `send_compact=false` still announces BIP152 relay: the high-bandwidth
+        // push preference is separate from compact-fetch eligibility, and an
+        // inbound peer is never selected for push announcements.
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_449));
         let table = crate::PeerTable::new();
         let (tx, _rx) = crossbeam_channel::unbounded();
@@ -1899,7 +1907,26 @@ mod writer_shutdown_tests {
         table.register(addr, lease.clone());
         assert!(table.publish_info(addr, &lease, published(addr)));
         let mut peer = Peer::new(
-            ScriptedEof(io::Cursor::new(sendcmpct(false))),
+            ScriptedEof(io::Cursor::new(sendcmpct(false, 2))),
+            Magic::BITCOIN,
+        );
+        peer.state = PeerState::Ready;
+
+        assert!(
+            run_message_loop(&mut peer, addr, &lease, &table, &sinks(), None, None, None, None)
+                .is_err()
+        );
+        assert!(table.compact_relay_of(addr));
+
+        // An unknown BIP152 version is not a relay announcement.
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_450));
+        let table = crate::PeerTable::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        table.register(addr, lease.clone());
+        assert!(table.publish_info(addr, &lease, published(addr)));
+        let mut peer = Peer::new(
+            ScriptedEof(io::Cursor::new(sendcmpct(false, 7))),
             Magic::BITCOIN,
         );
         peer.state = PeerState::Ready;

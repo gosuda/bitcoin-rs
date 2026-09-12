@@ -17,10 +17,12 @@ pub struct PeerInfo {
     /// Whether this connection requested BIP339 witness-id announcements.
     /// Published with the completed handshake; never inherited by a replacement.
     pub wtxid_relay: bool,
-    /// Whether this connection requested BIP152 compact-block relay (sent
-    /// `sendcmpct` with `send_compact=true`). Published `false` at handshake
-    /// and raised by the listener when the peer's post-verack preference
+    /// Whether this connection announced BIP152 compact-block relay (sent a
+    /// `sendcmpct` with a known version). Published `false` at handshake and
+    /// raised by the listener when the peer's post-verack announcement
     /// arrives; compact-fetch eligibility reads this, never a stale guess.
+    /// The high-bandwidth push preference is a separate per-peer decision and
+    /// does not gate eligibility.
     pub compact_block_relay: bool,
     /// Service flags advertised by the remote (`ServiceFlags::to_u64`).
     pub services: u64,
