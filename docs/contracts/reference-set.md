@@ -101,10 +101,11 @@ The product corpora are defined in
   response at height 709,635. A cell may not close on a guessed or recalled
   UTXO total.
 
-`manifest_sha256` is optional until the archive exists. C150 carries its
-exported digest; Cmodern has no exported digest yet. `corpus_custody()` in
-`bin/bitcoin-rs/tests/support/reference_set.rs` reports such a corpus as
-`Blocked { missing: "manifest_sha256" }` rather than inventing a digest.
+`manifest_sha256` is optional until the archive exists. C150 (exported
+2026-09-07) and Cmodern (exported 2026-09-09) carry their exported digests.
+`corpus_custody()` in `bin/bitcoin-rs/tests/support/reference_set.rs` reports
+a corpus without one as `Blocked { missing: "manifest_sha256" }` rather than
+inventing a digest.
 
 Each corpus archive uses the Core-framed format with a manifest digest
 produced at export time. A length-prefixed diagnostic file is not a product

@@ -76,9 +76,9 @@ bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888
 version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"
 
 # Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
-# the corpus archive is exported and is deliberately ABSENT until then: a
-# placeholder digest here would be an invented one, so the loader reports the
-# corpus as custody-blocked instead.
+# the corpus archive is exported; until then it stays ABSENT (a placeholder
+# digest would be an invented one, so the loader reports the corpus as
+# custody-blocked instead). Both corpora below now carry exported digests.
 
 [[reference.corpora]]
 id = "C150"
@@ -95,6 +95,12 @@ manifest_sha256 = "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b
 id = "Cmodern"
 stop_height = 709635
 stop_hash = "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f"
+# Exported 2026-09-09 by the pinned bitcoind (digest 986e63b3); see the
+# campaign-corpora contract and products.json for canonical corpus
+# measurements and terminal-state evidence.
+# Canonical manifest identity per CORP-02: the `manifest_sha256` field the
+# exporter embeds inside the manifest, NOT the SHA-256 of the manifest file.
+manifest_sha256 = "b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd"
 
 # The formal model checker, pinned by archive and jar digest. Evidence tool
 # only; no checker run is claimed anywhere in this file.
