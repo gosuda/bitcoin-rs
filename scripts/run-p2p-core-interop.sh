@@ -200,7 +200,7 @@ seed_mempool_txs() {
   local count=$1
   local seed_addr
   seed_addr=$(core_rpc getnewaddress | json_field result)
-  local i txid vout amount raw signed hex
+  local i utxo txid vout amount raw signed hex
   for ((i = 0; i < count; i++)); do
     utxo=$(core_result listunspent 100 999999 "[${MINING_ADDRESS}]" | python3 -c '
 import json, sys
