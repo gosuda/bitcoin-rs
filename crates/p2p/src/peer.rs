@@ -91,8 +91,9 @@ impl CompactBlockNegotiation {
     #[must_use]
     pub const fn servable_version(&self) -> Option<u64> {
         match self.remote_send_compact {
-            Some(_) => Some(self.negotiated_version()),
-            None => None,
+            Some(1) => Some(1),
+            Some(2) => Some(2),
+            _ => None,
         }
     }
 }
