@@ -77,16 +77,15 @@ case "$1" in
     # Isolated so node's default zmq feature cannot unify this package on.
     profile "test: bitcoin-rs-rpc (no default features)" \
       cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast
-    # The workspace pass below owns the single formal solver run on `main`;
-    # this binary profile skips it (six invocations with unchanged inputs,
-    # properties, and bound, per CONSTRAINTS.md's Formal model tool identity).
+    # The formal solver run lives in the operator-invoked model-check-manual
+    # lane (K=128 needs ~30h+, measured); every CI lane skips it and runs
+    # only the cheap pin tests.
     profile "test: bitcoin-rs binary (rocksdb,fjall,redb)" \
       cargo test --locked -p bitcoin-rs --no-fail-fast \
         --no-default-features --features "rocksdb,fjall,redb" \
         -- --exact --skip all_model_specs_check_with_apalache
-    # The formal solver run (g20) is main-only: main.yml's unfiltered
-    # full-node tests own it, so a PR does not spend hours in the model
-    # checker for the same reason the binary profile skips it.
+    # Same skip for the workspace profile: no CI lane spends hours in the
+    # model checker for unchanged inputs, properties, and bound.
     profile "test: workspace (kernel-free)" \
       cargo test --locked --workspace --no-fail-fast \
         --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
