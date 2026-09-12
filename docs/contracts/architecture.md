@@ -141,8 +141,12 @@ Owners:
   mempool admission and mutation sequencing in mempool, connection lifecycle in
   p2p, template assembly and the mining control contract in mining, and index
   schemas in their owning crates. `bitcoin-rs-mining` owns `Candidate`,
-  `BlockTemplate`, `MiningInfo`, and `MiningControl`. RPC maps those types onto
-  BIP22/BIP23 JSON and does not cache templates or long-poll.
+  `BlockTemplate`, `MiningInfo`, and `MiningControl`, plus the candidate
+  lifecycle: the `(applied_tip_hash, mempool_sequence)` generation key, the
+  bounded template cache with single-flight assembly, long-poll publication,
+  and BIP22/BIP23 template projection (`MiningService`, fed by node-owned
+  capability sources). RPC maps those types onto BIP22/BIP23 JSON and does
+  not cache templates or long-poll.
 - `bitcoin-rs-mempool` owns transaction admission preparation and retry,
   orphan bodies and their indexes, ready-orphan work, and recent rejects
   through the shared `MempoolGateway`. `bitcoin-rs-p2p` owns the transaction
@@ -155,7 +159,9 @@ Owners:
   deviations follow [P2P-01](p2p-wire.md).
 - `bitcoin-rs-node` owns runtime startup/shutdown sequencing, configuration
   resolution and validation (`UserConfig` layers → `NodeConfig`), the mining
-  generation coordinator keyed by `(applied_tip_hash, mempool_sequence)`,
+  control facade (`MiningCoordinator`: it composes the mining lifecycle
+  service with the chainstate/follower handles, publishes applied tips,
+  submits solved blocks, and admits headers),
   watch-only coinbase payout configuration (`MiningConfig::payout_script`), and
   process-level cache budgeting (`dbcache` distribution across chainstate and
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and

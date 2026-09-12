@@ -47,7 +47,9 @@ impl MiningCoordinator {
                     "node is shutting down",
                 )));
             }
-            let candidate = self.service.assemble_fresh(&request.payout, &request.selection)?;
+            let candidate = self
+                .service
+                .assemble_fresh(&request.payout, &request.selection)?;
             let mut block = candidate.into_unsolved_block();
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
                 // CONTRACT: docs/contracts/external-api.md#API-30
@@ -93,5 +95,4 @@ impl MiningCoordinator {
             Err(error) => Err(test_block_validity_error(error)),
         }
     }
-
 }

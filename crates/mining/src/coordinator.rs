@@ -14,10 +14,10 @@ use std::sync::atomic::Ordering;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::current_unix_seconds;
+use bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
-use bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
@@ -29,39 +29,39 @@ use hashbrown::HashMap;
 use parking_lot::Condvar;
 use parking_lot::Mutex;
 
+use crate::context::MiningChainContext;
 use crate::control::AvailableMiningRule;
-use crate::control::MiningInfo;
-use crate::control::difficulty_for_bits;
 use crate::control::BlockTemplate;
 use crate::control::GenerateSelection;
 use crate::control::GenerateTx;
 use crate::control::LastCandidateInfo;
 use crate::control::MiningCapability;
 use crate::control::MiningControlError;
+use crate::control::MiningInfo;
 use crate::control::MiningRule;
 use crate::control::SignetMiningInfo;
 use crate::control::TemplateMutation;
-use crate::context::MiningChainContext;
+use crate::control::difficulty_for_bits;
 use crate::template::Candidate;
 use crate::template::CandidateContext;
+use crate::template::TemplateId;
 use crate::template::assemble_candidate;
 use crate::template::assemble_ordered_candidate;
-use crate::template::TemplateId;
 
 /// Default number of cached candidates retained by template id.
-pub const CANDIDATE_CACHE_LIMIT: usize = 8;
+const CANDIDATE_CACHE_LIMIT: usize = 8;
 /// Finite bound on generation-key races during candidate assembly.
-pub const CANDIDATE_GENERATION_RETRIES: usize = 8;
+const CANDIDATE_GENERATION_RETRIES: usize = 8;
 /// Error message identifying a generation-key race during candidate assembly.
-pub const GENERATION_RACE: &str = "generation key changed during candidate assembly";
+const GENERATION_RACE: &str = "generation key changed during candidate assembly";
 /// Bitcoin Core's mempool-only long-poll cooldown before returning a new template.
 pub const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
 /// Upper bound for a single long-poll wait slice while rechecking predicates.
-pub const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
+const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 /// Consensus maximum block weight.
-pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 /// Consensus maximum serialized block size.
-pub const MAX_BLOCK_SIZE: u64 = 4_000_000;
+const MAX_BLOCK_SIZE: u64 = 4_000_000;
 
 /// Applied-tip hash plus mempool sequence that identify one candidate generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -93,11 +93,11 @@ struct InFlight {
 
 /// Bounded template cache, single-flight guard, and published generation.
 #[derive(Debug, Default)]
-pub struct CoordinatorState {
+struct CoordinatorState {
     /// Last generation published to long-poll waiters.
     published: Option<GenerationKey>,
     /// Bounded LRU of assembled candidates keyed by template id.
-    pub cache: HashMap<TemplateId, Arc<Candidate>>,
+    cache: HashMap<TemplateId, Arc<Candidate>>,
     /// Insertion order for deterministic eviction of the oldest entry.
     cache_order: VecDeque<TemplateId>,
     /// Single in-flight assembly, if any.
@@ -111,7 +111,7 @@ pub struct CoordinatorState {
 impl CoordinatorState {
     /// Creates the empty lifecycle state.
     #[must_use]
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             published: None,
             cache: HashMap::new(),
@@ -128,7 +128,7 @@ impl CoordinatorState {
     }
 
     /// Inserts or refreshes `id`, evicting the oldest entry at the bound.
-    pub fn cache_insert(&mut self, id: TemplateId, candidate: Arc<Candidate>) {
+    fn cache_insert(&mut self, id: TemplateId, candidate: Arc<Candidate>) {
         if self.cache.contains_key(&id) {
             self.cache.insert(id, candidate);
             return;
@@ -228,8 +228,7 @@ pub trait ChainContextSource: Send + Sync {
     fn tip_bits(&self, tip: &TipSnapshot) -> Result<CompactTarget, ChainError>;
 
     /// Versionbit deployments signalling for a candidate at `height` on `tip`.
-    fn signalling_rules(&self, tip: &TipSnapshot, height: u32)
-    -> Vec<AvailableMiningRule>;
+    fn signalling_rules(&self, tip: &TipSnapshot, height: u32) -> Vec<AvailableMiningRule>;
 }
 
 /// Mining-domain candidate lifecycle service driven by capability sources.
@@ -396,9 +395,7 @@ impl MiningService {
     ) -> Result<BlockTemplate, MiningControlError> {
         let waited = if let Some(long_poll_id) = long_poll_id {
             let waited = parse_long_poll_id(long_poll_id).ok_or_else(|| {
-                MiningControlError::InvalidRequest(CompactString::from(
-                    "longpollid is malformed",
-                ))
+                MiningControlError::InvalidRequest(CompactString::from("longpollid is malformed"))
             })?;
             let live = {
                 let mut state = self.state.lock();
@@ -412,13 +409,12 @@ impl MiningService {
             None
         };
         let tip = self.applied_tip.applied_tip().ok_or_else(|| {
-            MiningControlError::Unavailable(CompactString::from(
-                "applied tip is not available",
-            ))
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
         let candidate = self.live_candidate()?;
         let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-        let (version_bits_available, version_bits_required) = self.version_bits_for(&candidate, &tip);
+        let (version_bits_available, version_bits_required) =
+            self.version_bits_for(&candidate, &tip);
         Ok(template_from_candidate(
             self.network,
             candidate,
@@ -447,15 +443,16 @@ impl MiningService {
         let blocks = tip.as_ref().map_or(0, |tip| tip.height);
         let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
             Some(tip) => {
-                let tip_bits = self
-                    .chain
-                    .tip_bits(tip)
-                    .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+                let tip_bits = self.chain.tip_bits(tip).map_err(|error| {
+                    MiningControlError::Failed(CompactString::from(error.to_string()))
+                })?;
                 let current_time = current_unix_seconds().max(1);
                 let next = self
                     .chain
                     .resolve_mining_context(tip, current_time)
-                    .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+                    .map_err(|error| {
+                        MiningControlError::Failed(CompactString::from(error.to_string()))
+                    })?;
                 (
                     tip_bits,
                     difficulty_for_bits(tip_bits),
@@ -517,10 +514,7 @@ impl MiningService {
     }
 
     /// Cache lookup or single-flight assembly for one generation key.
-    fn candidate_for_key(
-        &self,
-        key: GenerationKey,
-    ) -> Result<Arc<Candidate>, MiningControlError> {
+    fn candidate_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
         let template_id = key.template_id();
         let mut state = self.state.lock();
         if let Some(cached) = state.cache_get(&template_id) {
@@ -601,10 +595,7 @@ impl MiningService {
     }
 
     /// Assembles the candidate for `key`, refusing a raced tip or mempool.
-    fn assemble_for_key(
-        &self,
-        key: GenerationKey,
-    ) -> Result<Arc<Candidate>, MiningControlError> {
+    fn assemble_for_key(&self, key: GenerationKey) -> Result<Arc<Candidate>, MiningControlError> {
         let tip = self.applied_tip.applied_tip().ok_or_else(|| {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
@@ -732,7 +723,7 @@ impl Drop for InFlightAssemblyGuard<'_> {
 ///
 /// Rule advertisement follows the candidate's own deployment facts and
 /// producer capabilities, never caller-requested names.
-pub fn template_from_candidate(
+fn template_from_candidate(
     network: Network,
     candidate: Arc<Candidate>,
     submit_old: Option<bool>,
@@ -862,18 +853,18 @@ fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
 }
 
 /// Constructs the generation-race error callers retry against.
-pub fn generation_race() -> MiningControlError {
+fn generation_race() -> MiningControlError {
     MiningControlError::Unavailable(CompactString::from(GENERATION_RACE))
 }
 
 /// Reports whether `error` is the generation-race error.
-pub fn is_generation_race(error: &MiningControlError) -> bool {
+fn is_generation_race(error: &MiningControlError) -> bool {
     matches!(error, MiningControlError::Unavailable(message) if message.as_str() == GENERATION_RACE)
 }
 
 /// Parses a BIP22/BIP23 long-poll id into its generation key.
 #[must_use]
-pub fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
+fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
     let hash_hex = id.get(..64)?;
     let sequence = id.get(64..)?;
     if sequence.is_empty() {
@@ -889,7 +880,7 @@ pub fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 
 /// Signet challenge and flag for `network`, or `None` off signet.
 #[must_use]
-pub fn signet_info(network: Network) -> Option<SignetMiningInfo> {
+fn signet_info(network: Network) -> Option<SignetMiningInfo> {
     const DEFAULT_SIGNET_CHALLENGE: &str = concat!(
         "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
         "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
@@ -927,3 +918,9 @@ fn decode_nibble(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod candidate_template_tests;
+
+#[cfg(test)]
+mod generation_key_tests;

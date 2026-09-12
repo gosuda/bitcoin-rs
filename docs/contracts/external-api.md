@@ -105,7 +105,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 
 - **Owner**: `MiningControl::generate` in `crates/mining/src/control.rs`,
   implemented by `MiningCoordinator::generate_blocks` in
-  `crates/node/src/mining.rs`.
+  `crates/node/src/mining/candidate.rs`, which assembles each block through
+  `MiningService::assemble_fresh` in `crates/mining/src/coordinator.rs`.
 - The operation assembles a fresh candidate (no GBT cache). `generateblock`
   validates the unsolved block first (`API-30`), then both generate paths
   solve and either submit through the chainstate owner or dry-validate
@@ -230,8 +231,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-11`: BIP22/BIP23 template extras
 
 
-- **Owner**: `MiningCoordinator::template_from_candidate` in
-  `crates/node/src/mining/candidate.rs`; JSON projection in
+- **Owner**: `template_from_candidate` in `crates/mining/src/coordinator.rs`,
+  driven by `MiningService::get_block_template`; JSON projection in
   `crates/rpc/src/handlers/mining.rs` `render_block_template`.
 - Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
   Client-advertised names are not echoed.
@@ -313,7 +314,7 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 
 - **Owner**: `update_uncommitted_block_structures` in
   `crates/mining/src/coinbase.rs`, called from
-  `MiningCoordinator::submit_block` in `crates/node/src/mining.rs`.
+  `MiningCoordinator::submit_block` in `crates/node/src/mining/control.rs`.
 - When the previous header is known, SegWit is active for the submitted
   height, the coinbase already has a BIP141 commitment output, and the
   coinbase witness is empty, `submitblock` inserts the 32-byte reserved
@@ -337,7 +338,7 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-19`: BIP22 reject reasons
 
 
-- **Owner**: `bip22_reject_reason` in `crates/node/src/mining.rs`.
+- **Owner**: `bip22_reject_reason` in `crates/node/src/mining/submission.rs`.
 - Proposal and `submitblock` project apply/consensus failures as Core
   `GetRejectReason` strings (`bad-cb-missing`, `bad-txnmrklroot`,
   `bad-cb-amount`, `high-hash`, `time-too-old`, …). Operational apply
@@ -348,8 +349,9 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-20`: GBT `vbrequired` is always 0
 
 
-- **Owner**: `MiningCoordinator::version_bits_for` in
-  `crates/node/src/mining.rs`.
+- **Owner**: `MiningService::version_bits_for` in
+  `crates/mining/src/coordinator.rs`; signalling deployments are read from
+  the applied tree through the node-implemented `ChainContextSource`.
 - Core v31 `getblocktemplate` hardcodes `vbrequired` to 0. Signalling
   deployments still appear in `vbavailable`; locked-in bits are not OR'd
   into `vbrequired`.
@@ -550,7 +552,7 @@ owned by [wallet-facing.md](wallet-facing.md).
   `generateblock_raw_tx_does_not_require_mempool_admission`,
   `generate_without_submit_does_not_advance_the_tip`,
   `network_hash_ps_rejects_core_invalid_windows`;
-  `crates/node/src/mining.rs` test
+  `crates/node/src/mining/network_hashps_oracle_tests.rs` tests
   `hash_ps_at_rejects_a_height_the_tip_cannot_resolve`;
   `crates/mining/tests/template_shape.rs` tests
   `candidate_solves_an_unsolved_regtest_header`,
@@ -560,7 +562,8 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
     `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
     `getblocktemplate_requires_signet_rule_on_signet`
-  - `crates/node/src/mining.rs` test `signet_template_carries_challenge_and_mandatory_rule`
+  - `crates/mining/src/coordinator/candidate_template_tests.rs` test
+    `signet_template_carries_challenge_and_mandatory_rule`
   - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
     `signet_template_includes_challenge_and_signet_rule`
 
@@ -576,7 +579,7 @@ owned by [wallet-facing.md](wallet-facing.md).
     `submit_header_requires_the_previous_header`,
     `submit_header_rejects_bad_diffbits`,
     `submit_header_rejects_time_too_new`
-  - `crates/node/src/mining.rs` tests `pow_failure_is_high_hash`,
+  - `crates/node/src/mining/header_reject_tests.rs` tests `pow_failure_is_high_hash`,
     `nbits_mismatch_is_bad_diffbits`
     - Execution evidence: `cargo test -p bitcoin-rs-node header_reject_tests` and
       `cargo test -p bitcoin-rs-rpc submitheader` (CI job `test`, commit `adc8e37`).
@@ -611,8 +614,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `applied_ancestor_with_unset_chain_tx_count_is_duplicate`,
     `duplicate_submit_returns_duplicate`
 - `API-19`:
-  - `crates/node/src/mining.rs` tests `consensus_failures_use_core_bip22_reasons`,
-    `header_failures_use_core_bip22_reasons`
+  - `crates/node/src/mining/apply_error_tests.rs` tests
+    `consensus_failures_use_core_bip22_reasons`, `header_failures_use_core_bip22_reasons`
   - `crates/node/tests/mining.rs` tests `proposal_without_coinbase_is_bad_cb_missing`,
     `proposal_merkle_mismatch_is_bad_txnmrklroot`,
     `proposal_rejects_excess_coinbase_without_side_effects`
@@ -624,7 +627,8 @@ owned by [wallet-facing.md](wallet-facing.md).
     `contextual_rules_enforce_bip141_commitment_after_segwit_activation`,
     `bip141_coinbase_witness_must_have_exactly_one_32_byte_element`,
     `bip141_witness_commitment_last_output_wins`
-  - `crates/node/src/mining.rs` test `consensus_failures_use_core_bip22_reasons`
+  - `crates/node/src/mining/apply_error_tests.rs` test
+    `consensus_failures_use_core_bip22_reasons`
   - `crates/node/tests/mining.rs` tests
     `proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size`,
     `proposal_witness_without_commitment_is_unexpected_witness`,

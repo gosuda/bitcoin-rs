@@ -1,21 +1,20 @@
 // CONTRACT: `docs/contracts/external-api.md#API-11` owns BIP22/BIP23
 // template capabilities, submitold, signet projection, and template rules.
-use alloc::sync::Arc;
-use bitcoin_rs_mining::CANDIDATE_CACHE_LIMIT;
-use bitcoin_rs_mining::Candidate;
-use bitcoin_rs_mining::CoordinatorState;
-use bitcoin_rs_mining::TemplateId;
-use bitcoin_rs_mining::template_from_candidate;
+use super::CANDIDATE_CACHE_LIMIT;
+use super::CoordinatorState;
+use super::template_from_candidate;
+use crate::control::MiningCapability;
+use crate::control::MiningRule;
+use crate::template::Candidate;
+use crate::template::TemplateId;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::TxOut;
+use std::sync::Arc;
 
 #[test]
 fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
-    use alloc::sync::Arc;
-    use bitcoin_rs_mining::CANDIDATE_CACHE_LIMIT;
-use bitcoin_rs_mining::Candidate;
     use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
 
     let mut state = CoordinatorState::new();
@@ -112,7 +111,7 @@ fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) ->
 fn template_for(
     candidate: Candidate,
     submit_old: Option<bool>,
-) -> bitcoin_rs_mining::BlockTemplate {
+) -> super::super::control::BlockTemplate {
     template_from_candidate(
         Network::Regtest,
         Arc::new(candidate),
@@ -124,8 +123,6 @@ fn template_for(
 
 #[test]
 fn template_facts_follow_mutated_candidate_generation() {
-    use bitcoin_rs_mining::MiningRule;
-
     let first_prev = Hash256::from_le_bytes(&[0x11; 32]);
     let first = template_for(sample_candidate(first_prev, false, true), Some(true));
     assert_eq!(first.candidate.previous_block_hash, first_prev);
@@ -155,7 +152,7 @@ fn template_facts_follow_mutated_candidate_generation() {
         first
             .capabilities
             .iter()
-            .map(bitcoin_rs_mining::MiningCapability::as_str)
+            .map(MiningCapability::as_str)
             .collect::<Vec<_>>(),
         vec!["proposal", "longpoll"]
     );
@@ -164,8 +161,6 @@ fn template_facts_follow_mutated_candidate_generation() {
 
 #[test]
 fn signet_template_carries_challenge_and_mandatory_rule() {
-    use bitcoin_rs_mining::MiningRule;
-
     let template = template_from_candidate(
         Network::Signet,
         Arc::new(sample_candidate(
@@ -189,7 +184,7 @@ fn signet_template_carries_challenge_and_mandatory_rule() {
         template
             .capabilities
             .iter()
-            .map(bitcoin_rs_mining::MiningCapability::as_str)
+            .map(MiningCapability::as_str)
             .collect::<Vec<_>>(),
         vec!["proposal", "longpoll"]
     );
@@ -197,8 +192,6 @@ fn signet_template_carries_challenge_and_mandatory_rule() {
 
 #[test]
 fn deployment_boundary_rules_follow_candidate_flags() {
-    use bitcoin_rs_mining::MiningRule;
-
     let prev = Hash256::from_le_bytes(&[0x33; 32]);
     let cases = [
         (false, false, vec!["taproot"]),

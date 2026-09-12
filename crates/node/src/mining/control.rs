@@ -21,15 +21,17 @@ impl MiningCoordinator {
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
             let tip = self.applied_tip.load_full();
-            tip.as_ref()
-                .map_or(0.0, |tip| estimate_network_hashps(&tree, Some(tip.tip_id), 120, self.network))
+            tip.as_ref().map_or(0.0, |tip| {
+                estimate_network_hashps(&tree, Some(tip.tip_id), 120, self.network)
+            })
         };
         let warnings = crate::metrics::node_warnings()
             .messages()
             .into_iter()
             .map(CompactString::from)
             .collect();
-        self.service.mining_info(network_hashes_per_second, warnings)
+        self.service
+            .mining_info(network_hashes_per_second, warnings)
     }
 }
 

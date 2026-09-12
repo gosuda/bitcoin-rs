@@ -20,27 +20,27 @@ use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::accept_headers;
-use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_chain::current_unix_seconds;
+use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
+use bitcoin_rs_mining::AppliedTipSource;
+use bitcoin_rs_mining::AvailableMiningRule;
 #[cfg(test)]
 use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::AppliedTipSource;
 use bitcoin_rs_mining::ChainContextSource;
 use bitcoin_rs_mining::DEFAULT_MEMPOOL_UPDATE_WAIT;
-use bitcoin_rs_mining::MempoolSequenceWake;
 use bitcoin_rs_mining::GenerateSelection;
+use bitcoin_rs_mining::MempoolSequenceWake;
+use bitcoin_rs_mining::MempoolSnapshotSource;
+use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::MiningRule;
 use bitcoin_rs_mining::MiningService;
 use bitcoin_rs_mining::snapshot_for_selection;
-use bitcoin_rs_mining::MempoolSnapshotSource;
-use bitcoin_rs_mining::AvailableMiningRule;
-use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
@@ -52,8 +52,6 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 #[cfg(test)]
 use submission::map_apply_error;
-
-
 
 /// Wake seam between authoritative mutations and the template coordinator.
 ///
@@ -184,9 +182,7 @@ impl MiningCoordinator {
             Arc::new(AppliedTipAdapter {
                 tip: Arc::clone(&applied_tip),
             }),
-            Arc::new(MempoolAdapter {
-                mempool: Arc::clone(&mempool),
-            }),
+            Arc::new(MempoolAdapter { mempool }),
             Arc::new(ChainContextAdapter {
                 block_tree: Arc::clone(&block_tree),
                 network,
@@ -343,7 +339,12 @@ impl ChainContextSource for ChainContextAdapter {
         tip: &TipSnapshot,
         candidate_time: u32,
     ) -> Result<MiningChainContext, ChainError> {
-        MiningChainContext::resolve(&self.block_tree.read(), self.network, tip.tip_id, candidate_time)
+        MiningChainContext::resolve(
+            &self.block_tree.read(),
+            self.network,
+            tip.tip_id,
+            candidate_time,
+        )
     }
 
     fn tip_bits(&self, tip: &TipSnapshot) -> Result<CompactTarget, ChainError> {
@@ -353,11 +354,7 @@ impl ChainContextSource for ChainContextAdapter {
             .map(|node| node.header.bits)
     }
 
-    fn signalling_rules(
-        &self,
-        tip: &TipSnapshot,
-        height: u32,
-    ) -> Vec<AvailableMiningRule> {
+    fn signalling_rules(&self, tip: &TipSnapshot, height: u32) -> Vec<AvailableMiningRule> {
         signalling_deployments(&self.block_tree.read(), self.network, tip.tip_id, height)
             .into_iter()
             .map(|deployment| AvailableMiningRule {
@@ -514,9 +511,6 @@ fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
     work / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
 }
 
-#[cfg(test)]
-mod generation_key_tests;
-
 /// Oracle: Bitcoin Core `GetNetworkHashPS` in `src/rpc/mining.cpp` (kernel 31.99).
 ///
 /// `workDiff = nChainWork[end] - nChainWork[start]` over `lookup` parent walks,
@@ -525,9 +519,6 @@ mod generation_key_tests;
 /// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
 #[cfg(test)]
 mod network_hashps_oracle_tests;
-
-#[cfg(test)]
-mod candidate_template_tests;
 
 #[cfg(test)]
 mod generation_signal_tests;

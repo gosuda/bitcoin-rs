@@ -1,9 +1,9 @@
 //! Focused behavioral tests for the node-owned mining coordinator.
 
 use bitcoin_rs_mining::{
-    BlockTemplate, MempoolSequenceWake, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
-    BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MiningCapability,
-    MiningControl, MiningControlError,
+    BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
+    BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MempoolSequenceWake,
+    MiningCapability, MiningControl, MiningControlError,
 };
 
 use bitcoin_rs_node::{
