@@ -312,6 +312,56 @@ domains = ["p2p"]
 seams = ["crates/p2p/src/wire.rs", "crates/p2p/src/peer.rs"]
 disposition = "blocked"
 evidence = "No product-safe skip of checksum/decode. Diagnostic bench: crates/p2p/benches/write_message.rs."
+# Pinned baseline, #650 hot-path bench campaign, measured
+# 2026-09-12T23:09:31Z at tree a445e95d5c2c500f9eec121ee3813cbdaf3d783b on
+# branch bench/hot-path-650. Criterion diagnostic only (HPA-09): these numbers
+# never fill a product cell and no residual, noise floor, or disposition here
+# derives from them.
+#   Host: Intel(R) Xeon(R) Gold 6138 CPU @ 2.00GHz, 80 logical CPUs,
+#     cpufreq governor powersave, shared CI-class host (no frequency pinning,
+#     no isolation: treat absolute values as soft).
+#   CPU features: avx, avx2, avx512f, bmi2, sse4_2; no sha_ni on this host
+#     (SHA-NI / ARM SHA2 levers stay blocked; scalar/AVX2 parity claim
+#     unaffected).
+#   Toolchain: rustc 1.98.1 (48a229cea 2026-09-01), stable channel pin from
+#     rust-toolchain.toml; criterion 0.8.2 from Cargo.lock.
+#   Flags: no RUSTFLAGS set; [profile.bench] (Cargo.toml:296-300) is
+#     opt-level=3, lto="fat", codegen-units=1, debug="line-tables-only".
+#     RUSTC_WRAPPER unset (env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR),
+#     CARGO_TARGET_DIR=/home/alpha/.omp/wt/i650-target,
+#     TMPDIR=$PWD/target/tmp.
+#   Binary: sha256 d96a9b723303c9d052a8e313d63247f7c8939873951754fbe2c4899f344fc1ae
+#     (/home/alpha/.omp/wt/i650-target/release/deps/write_message-ebf9e5e102a632af).
+#   Method: Criterion 0.8.2 linear sampling, 100 samples, 3 s warmup, iteration
+#     counts 121..12100 (ping) and 103..10300 (block). b.iter issues the next
+#     write on completion of the previous (synchronous back-to-back call loop);
+#     a dedicated drain thread on the loopback reader (64 KiB reads) removes
+#     socket-buffer backpressure, so the measured per-call latency excludes
+#     queueing but is not open-loop. Open-loop p50/p95 is a product-benchmark
+#     quantity belonging to the #34/#35/#41 comparator lanes and was not run
+#     in this diagnostic.
+#   Percentiles: nearest-rank x_{ceil(pn/100)} over n=100 per-sample
+#     per-iteration ns = time/iters recomputed from the saved baseline's
+#     sample.json. No mean is recorded.
+#   p2p.wire figures, per message:
+#     ping_8B_payload    p50 6493.2 ns  p95 7027.1 ns  p99 7792.3 ns
+#     block_285B_payload p50 8550.9 ns  p95 9759.2 ns  p99 10818.3 ns
+#   Product-cell comparator lanes (bounded out this wave): seven interleaved
+#     Core 31.1 / bitcoin-rs pairs per cell (HPA-02) over C150 (150,001 blocks)
+#     or Cmodern (709,636 blocks, 374,930,063,373-byte archive at
+#     .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/corpora/
+#     Cmodern.archive.bin, manifest file sha256
+#     b694c91880ac15edbb3e8dbb8a62bf8c0a0c1c64ef7dbec2e3f79eadf918db7d,
+#     logical manifest_sha256
+#     b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd,
+#     stop hash 00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f).
+#     Core 31.1 oracle binary is staged at
+#     .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/tools/bitcoind
+#     (sha256 986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08),
+#     so custody is available, but the campaign is out of this wave's budget and
+#     #650 defers final product measurements to #629/#625. Per-cell samples stay
+#     empty and the noise floor stays unobserved until those runs append through
+#     bitcoin_rs_node::metrics::Ledger with the six-way identity (HPA-12).
 
 [[paths]]
 id = "p2p.channels"
