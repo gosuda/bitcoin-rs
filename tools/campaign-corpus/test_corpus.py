@@ -414,6 +414,9 @@ class FreezePins(unittest.TestCase):
         self.assertEqual(cmodern.stop_hash, CMODERN_HASH)
         self.assertEqual(cmodern.block_count, 709_636)
         self.assertEqual(cmodern.census["specials"], "all_positive")
+        self.assertEqual(cmodern.state["txouts"], 75_903_651)
+        self.assertEqual(cmodern.state["total_amount_sat"], 1_887_251_879_232_217)
+        self.assertEqual(cmodern.state["muhash"], "71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a")
         self.assertEqual(cmodern.state["oracle"], "core_gettxoutsetinfo_muhash_at_stop")
 
     def test_validation_posture_and_oracle(self) -> None:

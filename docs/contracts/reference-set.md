@@ -97,14 +97,17 @@ The product corpora are defined in
   response at height 150,000.
 - `Cmodern`: mainnet blocks `0 .. 709,635`; stop hash
   `00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f`.
+  `txouts` 75,903,651; `total_amount_sat` 1,887,251,879,232,217;
+  `muhash` `71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a`.
   The Cmodern oracle is the first certified Core 31.1 `gettxoutsetinfo`
   response at height 709,635. A cell may not close on a guessed or recalled
   UTXO total.
 
-`manifest_sha256` is optional until the archive exists. C150 carries its
-exported digest; Cmodern has no exported digest yet. `corpus_custody()` in
-`bin/bitcoin-rs/tests/support/reference_set.rs` reports such a corpus as
-`Blocked { missing: "manifest_sha256" }` rather than inventing a digest.
+`manifest_sha256` is optional until the archive exists. C150 (exported
+2026-09-07) and Cmodern (exported 2026-09-09) carry their exported digests.
+`corpus_custody()` in `bin/bitcoin-rs/tests/support/reference_set.rs` reports
+a corpus without one as `Blocked { missing: "manifest_sha256" }` rather than
+inventing a digest.
 
 Each corpus archive uses the Core-framed format with a manifest digest
 produced at export time. A length-prefixed diagnostic file is not a product

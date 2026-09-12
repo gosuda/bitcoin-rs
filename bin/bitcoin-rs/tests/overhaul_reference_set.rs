@@ -39,15 +39,16 @@ const FORMAL_ARCHIVE_SHA256: &str =
 /// Pinned formal-tool jar digest; see [`RELEASE_ARCHIVE_SHA256`].
 const FORMAL_JAR_SHA256: &str = "079b6c2320252469dcf79afec6886b8255d3dd1b34a9484433c88986752efaa8";
 
-/// Stand-in digest used to prove a corpus can be pinned once exported.
-const SAMPLE_CORPUS_MANIFEST_SHA256: &str =
-    "1111111111111111111111111111111111111111111111111111111111111111";
 /// The canonical C150 manifest identity recorded at export on 2026-09-07: the
 /// `manifest_sha256` field embedded inside the manifest, not the SHA-256 of the
 /// manifest file itself. Used here to prove that removing it returns that
 /// corpus to blocked custody.
 const C150_MANIFEST_SHA256: &str =
     "5eff01d897b6f3b39039d1ff7b9b4b0872a7a15463fa516b4cc7bfe7c001b91d";
+/// The canonical Cmodern manifest identity, recorded at export on 2026-09-09;
+/// see [`C150_MANIFEST_SHA256`].
+const CMODERN_MANIFEST_SHA256: &str =
+    "b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd";
 
 /// Decodes a 64-hex-character literal into the digest bytes a loader must
 /// produce.
@@ -332,6 +333,12 @@ fn a_missing_corpus_is_named_by_id() {
             "stop_height = 709635\n",
             "stop_hash = ",
             "\"00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f\"\n",
+            "# Exported 2026-09-09 by the pinned bitcoind (digest 986e63b3); see the\n",
+            "# campaign-corpora contract and products.json for canonical corpus\n",
+            "# measurements and terminal-state evidence.\n",
+            "# Canonical manifest identity per CORP-02: the `manifest_sha256` field the\n",
+            "# exporter embeds inside the manifest, NOT the SHA-256 of the manifest file.\n",
+            "manifest_sha256 = \"b87bac6720d1b68acadaa9863b56073ee213f4613e8dfa4a93c4459dc5f017cd\"\n",
         ),
         "",
     );
@@ -343,10 +350,10 @@ fn a_missing_corpus_is_named_by_id() {
     );
 }
 
-/// Custody is honest about what is absent. C150 was exported on 2026-09-07 so
-/// it carries a real manifest digest, while Cmodern awaits its own export and
-/// stays blocked by name. Removing a recorded digest must put that corpus
-/// back to blocked rather than leaving a stale claim.
+/// Custody is honest about what is absent. C150 was exported on 2026-09-07 and
+/// Cmodern on 2026-09-09, so both carry real manifest digests. Removing a
+/// recorded digest must put that corpus — and only that corpus — back to
+/// blocked rather than leaving a stale claim.
 #[test]
 fn corpus_custody_distinguishes_pinned_from_blocked() {
     let blocked = CorpusCustody::Blocked {
@@ -357,34 +364,34 @@ fn corpus_custody_distinguishes_pinned_from_blocked() {
         set.corpus_custody(),
         vec![
             ("C150".to_owned(), CorpusCustody::Pinned),
-            ("Cmodern".to_owned(), blocked.clone()),
-        ]
-    );
-
-    let pinned_both = edit_manifest(
-        "id = \"Cmodern\"\n",
-        &format!("id = \"Cmodern\"\nmanifest_sha256 = \"{SAMPLE_CORPUS_MANIFEST_SHA256}\"\n"),
-    );
-    let set =
-        load_reference_set(&pinned_both).expect("a pinned corpus manifest digest still loads");
-    assert_eq!(
-        set.corpus_custody(),
-        vec![
-            ("C150".to_owned(), CorpusCustody::Pinned),
             ("Cmodern".to_owned(), CorpusCustody::Pinned),
         ]
     );
 
-    let unpinned = edit_manifest(
+    let unpinned_c150 = edit_manifest(
         &format!("manifest_sha256 = \"{C150_MANIFEST_SHA256}\"\n"),
         "",
     );
-    let set = load_reference_set(&unpinned)
+    let set = load_reference_set(&unpinned_c150)
         .expect("a corpus without its export digest still loads, blocked");
     assert_eq!(
         set.corpus_custody(),
         vec![
             ("C150".to_owned(), blocked.clone()),
+            ("Cmodern".to_owned(), CorpusCustody::Pinned),
+        ]
+    );
+
+    let unpinned_cmodern = edit_manifest(
+        &format!("manifest_sha256 = \"{CMODERN_MANIFEST_SHA256}\"\n"),
+        "",
+    );
+    let set = load_reference_set(&unpinned_cmodern)
+        .expect("a corpus without its export digest still loads, blocked");
+    assert_eq!(
+        set.corpus_custody(),
+        vec![
+            ("C150".to_owned(), CorpusCustody::Pinned),
             ("Cmodern".to_owned(), blocked),
         ]
     );

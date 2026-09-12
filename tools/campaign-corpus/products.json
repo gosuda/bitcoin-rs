@@ -61,6 +61,9 @@
       "state": {
         "height": 709635,
         "bestblock": "00000000000000000001f9ee4f69cbc75ce61db5178175c2ad021fe1df5bad8f",
+        "txouts": 75903651,
+        "total_amount_sat": 1887251879232217,
+        "muhash": "71f94b3136225ba9f77ae89b68fdace431470af64bd29dd055e173830f837e5a",
         "oracle": "core_gettxoutsetinfo_muhash_at_stop"
       }
     }
