@@ -30,7 +30,14 @@ pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 
 /// The node binary.
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
+/// The mempool admission owner.
+pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
 
+/// Crates the mempool owner must never depend on. The real edges point
+/// the other way: `p2p` consumes the mempool inventory view, `rpc` and
+/// `node` submit transactions to it, and `bitcoin-rs` composes the node.
+pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
+    ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
 /// Crates permitted to define and forward storage backend feature selection.
 pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 7] = [
     STORAGE_CRATE,
@@ -89,6 +96,8 @@ pub(crate) struct Validation {
     pub checked_features: usize,
     /// Number of crate packages classified.
     pub classified: usize,
+    /// Number of crate packages checked for dependency cycles.
+    pub cycle_checked_crates: usize,
     /// Human-readable summary.
     pub summary: String,
 }
@@ -303,6 +312,24 @@ impl WorkspaceGraph {
             }
         }
 
+        // 1b. Mempool must not depend on its transaction consumers. The real
+        //     edges point the other way; this keeps admission owning the pool
+        //     while consumers read or submit through the gateway.
+        if let Some(mempool_edges) = self.normal_deps.get(MEMPOOL_CRATE) {
+            for dep in mempool_edges {
+                if MEMPOOL_CONSUMER_CRATES.contains(&dep.as_str()) {
+                    violations.push(format!(
+                        "dependency direction violation: `{MEMPOOL_CRATE}` must not depend on \
+                         its transaction consumer `{dep}`; consumers depend on the mempool"
+                    ));
+                }
+            }
+        }
+
+        // 1c. Workspace dependency diagrams must stay acyclic; a cycle would
+        //     make the one-way layer model vacuously satisfiable.
+        let cycle_checked_crates = self.detect_cycles(&mut violations);
+
         // 2. No crate outside storage names a storage-engine dependency.
         let mut checked_engine_edges = 0_usize;
         for (name, engines) in &self.engine_deps {
@@ -362,10 +389,11 @@ impl WorkspaceGraph {
                 checked_engine_edges,
                 checked_features,
                 classified: self.classified,
+                cycle_checked_crates,
                 summary: format!(
                     "dependency direction: {checked_edges} edges; \
                      engine edges: {checked_engine_edges}; features: {checked_features}; \
-                     classified crates: {}",
+                     cycle-checked crates: {cycle_checked_crates}; classified crates: {}",
                     self.classified
                 ),
             })
@@ -471,6 +499,53 @@ impl WorkspaceGraph {
             ),
         }
         checked
+    }
+    /// Detects cycles in the internal bitcoin-rs-* dependency graph using
+    /// a depth-first coloring. Returns the number of crates visited.
+    fn detect_cycles(&self, violations: &mut Vec<String>) -> usize {
+        let mut color: BTreeMap<&str, u8> = BTreeMap::new();
+        let mut stack: Vec<String> = Vec::new();
+
+        #[allow(clippy::items_after_statements)]
+        fn visit<'a>(
+            graph: &'a WorkspaceGraph,
+            color: &mut BTreeMap<&'a str, u8>,
+            stack: &mut Vec<String>,
+            violations: &mut Vec<String>,
+            node: &'a str,
+        ) {
+            color.insert(node, 1);
+            stack.push(node.to_owned());
+            for next in graph.normal_deps.get(node).into_iter().flatten() {
+                match color.get(next.as_str()).copied().unwrap_or(0) {
+                    0 => visit(graph, color, stack, violations, next),
+                    1 => {
+                        let cycle = stack
+                            .iter()
+                            .skip_while(|n| n.as_str() != next.as_str())
+                            .cloned()
+                            .chain(std::iter::once(next.to_owned()))
+                            .collect::<Vec<_>>()
+                            .join("` -> `");
+                        violations.push(format!(
+                            "dependency direction violation: workspace dependency cycle: \
+                             `{cycle}`; edges must form an acyclic DAG"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            stack.pop();
+            color.insert(node, 2);
+        }
+
+        for node in self.normal_deps.keys() {
+            if color.get(node.as_str()).copied().unwrap_or(0) == 0 {
+                visit(self, &mut color, &mut stack, violations, node);
+            }
+        }
+
+        color.len()
     }
 
     /// Resolves one binary feature profile to the activated workspace

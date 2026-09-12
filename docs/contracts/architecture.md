@@ -50,6 +50,8 @@ Owners:
 - A crate may depend only on crates in the same layer or a strictly lower layer.
   Edges pointing upward or across forbidden boundaries fail the
   `g17_dependency_direction` gate.
+- The resolved workspace dependency graph is a directed acyclic graph. Any
+  cycle among workspace crates, even within the same layer, fails the gate.
 - Crate layer assignments:
   - **Layer 0 (Core)**: `bitcoin-rs-primitives`, `bitcoin-rs-script`,
     `bitcoin-rs-consensus`. Pure protocol types, consensus verification, and
@@ -262,15 +264,29 @@ Owners:
 - `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`:
   - `workspace_dependency_direction_is_one_way`: parses `cargo metadata --no-deps`,
     validates every internal workspace dependency edge against the approved
-    layer table, verifies `bitcoin-rs-storage` exclusively owns storage engine
-    dependencies, confirms `bitcoin-rs-rpc` has no dependency on storage and
-    forwards no backend features, and verifies backend feature forwarding is
-    confined to operator tiers and service adapters, and rejects empty
-    backend markers on crates that do not own an engine.
-    It also rejects mempool dependencies on transaction consumers, including
-    the same-layer P2P edge; `transaction_consumers_can_depend_on_mempool`
-    and `mempool_cannot_depend_on_transaction_consumers` exercise the allowed
-    and forbidden directions.
+    layer table, rejects any workspace dependency cycle, and verifies
+    `bitcoin-rs-mempool` does not depend on its transaction consumers (`p2p`,
+    `rpc`, `node`, or the binary). It also verifies `bitcoin-rs-storage`
+    exclusively owns storage engine dependencies, confirms `bitcoin-rs-rpc` has
+    no dependency on storage and forwards no backend features, and verifies
+    backend feature forwarding is confined to operator tiers and service
+    adapters, and rejects empty backend markers on crates that do not own an
+    engine.
+  - `workspace_single_writer_boundaries_are_respected`: walks all production
+    `.rs` files under workspace member `src/` directories and confirms the
+    single-writer boundaries: mempool mutations go through the `MempoolGateway`,
+    derived-index capability selection stays with its owners (`crates/index`,
+    the node txindex runtime, and the node state config projection), peer
+    registration/cancellation stays with `crates/p2p`, and chainstate
+    transition promotion (`lock_transition`, `begin_transition_locked`) stays
+    inside `crates/node/src/`.
+- `bin/bitcoin-rs/tests/overhaul_ownership.rs`:
+  - `transaction_consumers_can_depend_on_mempool` and
+    `mempool_cannot_depend_on_transaction_consumers` exercise the allowed and
+    forbidden consumer directions.
+  - `synthetic_same_layer_cycle_fails` demonstrates the acyclicity check.
+  - `chainstate_transition_scan_passes` demonstrates the chainstate transition
+    promotion boundary stays inside `crates/node/src/`.
 - Manifest enforcement:
   - Root `Cargo.toml`: workspace member list and package versions.
   - `crates/storage/Cargo.toml`: engine dependency definitions.
