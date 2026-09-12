@@ -233,6 +233,9 @@ pub fn dispatch_inbound_full<S>(
         }
         Message::GetBlockTxn(request) => {
             step(peer, message)?;
+            if request.txs_request.indexes.len() > 100_000 || !headroom() {
+                return Ok(());
+            }
             if let Some(chain) = chain {
                 if let Some(transactions) = chain.block_transactions(&request.txs_request)? {
                     send(Message::BlockTxn(BlockTxn { transactions }))?;
