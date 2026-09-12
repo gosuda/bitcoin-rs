@@ -1827,7 +1827,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
         store
             .get(ColumnFamily::UtxoMeta, b"index:format_version")?
             .as_deref(),
-        Some(2u32.to_le_bytes().as_slice()),
+        Some(3u32.to_le_bytes().as_slice()),
         "the row-format marker survives reset and rebuild"
     );
     assert!(
