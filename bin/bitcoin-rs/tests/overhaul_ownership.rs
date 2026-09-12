@@ -14,9 +14,21 @@ mod support;
 
 use std::io::Write as _;
 use std::path::Path;
-
-use support::dependency_graph::{BIN_CRATE, Validation, WorkspaceGraph};
+use support::dependency_graph::{BIN_CRATE, FeatureProfile, Validation, WorkspaceGraph};
 use support::ownership_scan::{OwnershipScanResult, scan_ownership_violations};
+
+/// Operator-facing binary feature profiles, mirroring the CI build lanes in
+/// `.github/workflows/main.yml`: the shipped default, the minimal native
+/// storage lane that executes this gate, the portable minimal-plus-zmq
+/// lane, the full-node matrix lane with every backend and the kernel
+/// oracle, and the defaults-plus-kernel optional lane.
+const FEATURE_PROFILES: &[FeatureProfile] = &[
+    FeatureProfile::new("default", &[], true),
+    FeatureProfile::new("minimal-native", &["fjall"], false),
+    FeatureProfile::new("minimal-zmq", &["fjall", "zmq"], false),
+    FeatureProfile::new("full-node", &["rocksdb", "fjall", "redb", "kernel"], false),
+    FeatureProfile::new("optional-kernel", &["kernel"], true),
+];
 
 #[test]
 fn real_metadata_validates() {
@@ -241,6 +253,74 @@ fn p2p_peer_owner_scan_passes() {
     assert!(
         peer_mutations_found > 0,
         "the p2p peer owner scan matched no production peer mutation"
+    );
+}
+
+#[test]
+fn feature_profiles_preserve_ownership_rules() {
+    let graph = WorkspaceGraph::from_cargo_metadata();
+    for profile in FEATURE_PROFILES {
+        let violations = graph.profile_ownership_violations(profile);
+        let _ = writeln!(
+            std::io::stderr(),
+            "feature profile `{}`: violations={}",
+            profile.name,
+            violations.len()
+        );
+        assert!(
+            violations.is_empty(),
+            "profile `{}` must preserve the ownership rules: {violations:?}",
+            profile.name
+        );
+    }
+}
+
+#[test]
+fn synthetic_backendless_minimal_profile_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    // Sever node's `fjall` forwarding: the minimal lane loses its backend.
+    graph.set_feature("bitcoin-rs-node", "fjall", &[]);
+
+    let violations = graph.profile_ownership_violations(&FeatureProfile::new(
+        "minimal-native",
+        &["fjall"],
+        false,
+    ));
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("activates no storage backend")),
+        "a backendless minimal profile must fail profile parity: {violations:?}"
+    );
+}
+
+#[test]
+fn synthetic_kernel_leak_into_minimal_profile_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    // A kernel engine smuggled onto the backend forwarding chain.
+    graph.set_feature(
+        "bitcoin-rs-node",
+        "fjall",
+        &[
+            "bitcoin-rs-chain/fjall",
+            "bitcoin-rs-index/fjall",
+            "bitcoin-rs-p2p/fjall",
+            "bitcoin-rs-storage/fjall",
+            "bitcoin-rs-utxo/fjall",
+            "bitcoin-rs-consensus/kernel",
+        ],
+    );
+
+    let violations = graph.profile_ownership_violations(&FeatureProfile::new(
+        "minimal-native",
+        &["fjall"],
+        false,
+    ));
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation.contains("kernel engine out of the production graph")),
+        "a kernel leak into the minimal profile must fail profile parity: {violations:?}"
     );
 }
 
