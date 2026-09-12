@@ -57,6 +57,8 @@ pub(crate) struct NodeServices {
     /// Joined before the final clean checkpoint publication.
     pub(super) checkpoint_worker: Option<std::thread::JoinHandle<()>>,
     pub(super) tx_ingress: Option<std::thread::JoinHandle<()>>,
+    /// Publishes the capability readiness gauge until shutdown.
+    pub(super) readiness_sampler: Option<std::thread::JoinHandle<()>>,
     pub(super) tx_relay: Option<std::thread::JoinHandle<()>>,
     pub(super) signal_handler: Option<crate::signal::ShutdownHandler>,
     teardown_started: bool,
@@ -135,6 +137,12 @@ impl NodeServices {
             }
         }
         self.metrics.take();
+        if let Some(handle) = self.readiness_sampler.take() {
+            if handle.join().is_err() {
+                tracing::error!("readiness sampler panicked");
+                set_first_error(first_error, anyhow::anyhow!("readiness sampler panicked"));
+            }
+        }
         #[cfg(test)]
         if let Some(handle) = self.outbound_worker.take() {
             if matches!(handle.join(), Ok(())) {

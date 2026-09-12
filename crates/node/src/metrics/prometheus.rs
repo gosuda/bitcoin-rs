@@ -68,6 +68,10 @@ fn describe_node_metrics() {
         "storage.cache_capacity_bytes",
         "configured per-engine cache capacity in bytes"
     );
+    metrics::describe_gauge!(
+        super::readiness::TXINDEX_READINESS_GAUGE,
+        "txindex capability readiness from the live getcapabilities source; 1 for the active state label, 0 for the others"
+    );
 }
 
 pub(super) static PROMETHEUS_HANDLE: Mutex<Option<(EvidenceIdentity, PrometheusHandle)>> =

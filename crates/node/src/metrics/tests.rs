@@ -1,6 +1,13 @@
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
+
 use super::{WarningKind, Warnings, process_start, process_uptime, record_process_start};
+
+/// `MetricsServer::bind` installs a process-global recorder. Serialize every
+/// test that publishes or scrapes metrics so another test cannot change the
+/// recorder mid-assertion. Production is unchanged.
+pub(super) static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn process_start_is_recorded_once_and_uptime_advances() {
@@ -58,5 +65,7 @@ fn warnings_keep_first_message_and_report_in_kind_order() {
         ["unknown rules".to_owned(), "fatal".to_owned()]
     );
 }
+
+mod readiness;
 
 mod server;
