@@ -113,7 +113,9 @@ impl Node {
     /// Returns the live txindex capability report.
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {
-        bitcoin_rs_rpc::capabilities::txindex_snapshot(Some(self.state.txindex_status().as_ref()))
+        bitcoin_rs_rpc::capabilities::txindex_snapshot(Some(
+            self.state.derived_index_status().as_ref(),
+        ))
     }
 
     /// Returns a decoded block, distinguishing unknown from unavailable data.
@@ -164,7 +166,7 @@ impl Node {
         if let Some(tx) = cached {
             return Ok(tx);
         }
-        let Some(query) = self.state.esplora_tx_index_query() else {
+        let Some(query) = self.state.esplora_derived_index_query() else {
             return Err(NodeError::Unavailable(
                 "confirmed transaction lookup requires txindex or scriptindex".to_owned(),
             ));

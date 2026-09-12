@@ -92,14 +92,14 @@ pub struct NodeState {
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     utxo: Arc<UtxoSet>,
     coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-    tx_index_runtime: Option<Arc<crate::txindex::TxIndexRuntime>>,
-    tx_index_spawn: Option<TxIndexSpawn>,
-    tx_index_worker: Option<crate::txindex::TxIndexWorker>,
-    tx_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex::TxIndexLifecycle>>>,
+    derived_index_runtime: Option<Arc<crate::txindex::DerivedIndexRuntime>>,
+    derived_index_spawn: Option<TxIndexSpawn>,
+    derived_index_worker: Option<crate::txindex::DerivedIndexWorker>,
+    derived_index_lifecycle: Option<Arc<arc_swap::ArcSwap<crate::txindex::DerivedIndexLifecycle>>>,
     /// Stable query adapter for txindex/script-index, constructed before open.
-    tx_index_adapter: Option<Arc<crate::txindex::TxIndexQueryAdapter>>,
+    derived_index_adapter: Option<Arc<crate::txindex::DerivedIndexQueryAdapter>>,
     /// Live txindex facts for the RPC `getcapabilities` projection.
-    txindex_status: Arc<crate::txindex::TxIndexCapability>,
+    derived_index_status: Arc<crate::txindex::DerivedIndexCapability>,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     mempool: Arc<RwLock<Mempool>>,
@@ -146,10 +146,10 @@ impl Drop for NodeState {
         // Safety net: if `bounded_index_shutdown` was not called (e.g. in
         // tests that drop `NodeState` directly), request shutdown and join
         // any worker not already taken by `bounded_index_shutdown`.
-        if let Some(runtime) = &self.tx_index_runtime {
+        if let Some(runtime) = &self.derived_index_runtime {
             runtime.request_shutdown();
         }
-        if let Some(worker) = self.tx_index_worker.take() {
+        if let Some(worker) = self.derived_index_worker.take() {
             worker.join();
         }
     }

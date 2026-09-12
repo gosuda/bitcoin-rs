@@ -414,7 +414,7 @@ fn mining_handler(state: &NodeState) -> Handler {
             mempool: MempoolGateway::shared(state.mempool()),
         },
         indexes: IndexHandles {
-            tx_index: None,
+            derived_index: None,
             script_index: None,
         },
         network: NetworkHandles {
@@ -428,7 +428,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         mining: MiningHandles {
             mining_control: Some(mining_control),
         },
-        txindex_status: None,
+        derived_index_status: None,
     });
     Handler::new(Arc::new(ctx))
 }

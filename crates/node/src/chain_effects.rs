@@ -11,7 +11,7 @@ use bitcoin_rs_rpc::context::{BlockLog, BlockRecord};
 use parking_lot::RwLock;
 
 use crate::apply::{ConnectOutcome, DisconnectOutcome};
-use crate::txindex::TxIndexRuntime;
+use crate::txindex::DerivedIndexRuntime;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
@@ -23,7 +23,7 @@ use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 pub struct ChainEffects {
     blocks: Arc<RwLock<BlockLog>>,
     zmq: Arc<dyn ZmqPublisher>,
-    tx_index: Option<Arc<TxIndexRuntime>>,
+    derived_index: Option<Arc<DerivedIndexRuntime>>,
 }
 
 impl ChainEffects {
@@ -32,12 +32,12 @@ impl ChainEffects {
     pub fn new(
         blocks: Arc<RwLock<BlockLog>>,
         zmq: Arc<dyn ZmqPublisher>,
-        tx_index: Option<Arc<TxIndexRuntime>>,
+        derived_index: Option<Arc<DerivedIndexRuntime>>,
     ) -> Self {
         Self {
             blocks,
             zmq,
-            tx_index,
+            derived_index,
         }
     }
 
@@ -60,8 +60,8 @@ impl ChainEffects {
 
     /// Returns `self` with the `TxIndex` wake handle swapped.
     #[must_use]
-    pub fn with_tx_index(mut self, tx_index: Option<Arc<TxIndexRuntime>>) -> Self {
-        self.tx_index = tx_index;
+    pub fn with_tx_index(mut self, derived_index: Option<Arc<DerivedIndexRuntime>>) -> Self {
+        self.derived_index = derived_index;
         self
     }
 
@@ -74,7 +74,7 @@ impl ChainEffects {
     /// Whether apply should serialize the full block for a derived consumer.
     #[must_use]
     pub fn needs_block_bytes(&self) -> bool {
-        self.tx_index.is_some() || self.zmq.wants_rawblock()
+        self.derived_index.is_some() || self.zmq.wants_rawblock()
     }
 
     /// Pushes the RPC block-log record. See `ARCH-07` for effect ordering.
@@ -142,7 +142,7 @@ impl ChainEffects {
     }
 
     fn wake_tx_index(&self) {
-        if let Some(runtime) = &self.tx_index {
+        if let Some(runtime) = &self.derived_index {
             runtime.wake();
         }
     }
@@ -155,14 +155,14 @@ impl ChainEffects {
 
     /// `TxIndex` runtime, when one is wired.
     #[must_use]
-    pub fn tx_index(&self) -> Option<&Arc<TxIndexRuntime>> {
-        self.tx_index.as_ref()
+    pub fn derived_index(&self) -> Option<&Arc<DerivedIndexRuntime>> {
+        self.derived_index.as_ref()
     }
 
     /// Replaces the `TxIndex` wake handle in place for tests that attach a worker
     /// after constructing the facade.
-    pub fn set_tx_index(&mut self, tx_index: Option<Arc<TxIndexRuntime>>) {
-        self.tx_index = tx_index;
+    pub fn set_tx_index(&mut self, derived_index: Option<Arc<DerivedIndexRuntime>>) {
+        self.derived_index = derived_index;
     }
 
     /// RPC log, ZMQ, and index wake for a committed connect.
@@ -337,7 +337,7 @@ mod tests {
         let effects = ChainEffects::noop();
         assert!(!effects.needs_rawtx());
         assert!(!effects.needs_block_bytes());
-        assert!(effects.tx_index().is_none());
+        assert!(effects.derived_index().is_none());
         assert!(effects.block_log().read().is_empty());
     }
 

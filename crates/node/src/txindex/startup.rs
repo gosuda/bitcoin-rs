@@ -1,18 +1,18 @@
 //! Supervised index backend opening, failure publication, and worker handoff.
 
+use super::DerivedIndexComposer;
+use super::DerivedIndexLifecycle;
+use super::DerivedIndexOpenSpec;
+use super::DerivedIndexQueryEngine;
+use super::DerivedIndexRuntime;
+use super::DerivedIndexWorkerError;
 use super::FORWARD_BATCH_DELAY;
 use super::Generation;
 use super::IndexBlockSource;
-use super::OpenTxIndex;
+use super::OpenDerivedIndex;
 use super::QueryEngineLive;
 use super::REVISION_QUIET_PERIOD;
 use super::TXINDEX_OPEN_TIMEOUT;
-use super::TxIndexComposer;
-use super::TxIndexLifecycle;
-use super::TxIndexOpenSpec;
-use super::TxIndexQueryEngine;
-use super::TxIndexRuntime;
-use super::TxIndexWorkerError;
 use super::Worker;
 use super::heartbeat::Heartbeat;
 use super::namespace::NAMESPACE_REGISTRY;
@@ -50,9 +50,9 @@ use std::time::Duration;
     clippy::needless_borrow
 )]
 pub(super) fn run_worker_with_open(
-    runtime: &Arc<TxIndexRuntime>,
-    spec: TxIndexOpenSpec,
-    lifecycle: &Arc<ArcSwap<TxIndexLifecycle>>,
+    runtime: &Arc<DerivedIndexRuntime>,
+    spec: DerivedIndexOpenSpec,
+    lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
@@ -120,11 +120,11 @@ pub(super) fn run_worker_with_open(
 /// An abandoned backend may still touch the store, so its claim must stay
 /// poisoned for the process lifetime (`IDX-07`).
 fn finish_worker(
-    runtime: &TxIndexRuntime,
-    lifecycle: &Arc<ArcSwap<TxIndexLifecycle>>,
+    runtime: &DerivedIndexRuntime,
+    lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
     namespace_key: &Path,
-    result: Result<(), TxIndexWorkerError>,
+    result: Result<(), DerivedIndexWorkerError>,
 ) {
     let registry = &*NAMESPACE_REGISTRY;
     if let Err(error) = result {
@@ -144,8 +144,8 @@ fn finish_worker(
 /// revoked generation; the runtime write is unconditional because the
 /// runtime belongs to this worker alone.
 pub(super) fn fail_worker(
-    runtime: &TxIndexRuntime,
-    lifecycle: &Arc<ArcSwap<TxIndexLifecycle>>,
+    runtime: &DerivedIndexRuntime,
+    lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
     reason: &str,
 ) {
@@ -153,16 +153,16 @@ pub(super) fn fail_worker(
     publish_lifecycle(
         lifecycle,
         generation,
-        TxIndexLifecycle::Failed(reason.into()),
+        DerivedIndexLifecycle::Failed(reason.into()),
     );
 }
 
 /// Publishes a lifecycle transition with generation-checked `rcu`.
 /// A stale token returns the current `Arc` unchanged.
 pub(super) fn publish_lifecycle(
-    lifecycle: &Arc<ArcSwap<TxIndexLifecycle>>,
+    lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
-    new: TxIndexLifecycle,
+    new: DerivedIndexLifecycle,
 ) {
     if generation.is_revoked() {
         return;
@@ -180,9 +180,9 @@ pub(super) fn publish_lifecycle(
 /// Opens the store, constructs the engine, publishes lifecycle, and runs.
 #[allow(clippy::too_many_arguments, clippy::ref_option)]
 pub(super) fn open_and_run(
-    runtime: &Arc<TxIndexRuntime>,
-    spec: &TxIndexOpenSpec,
-    lifecycle: &Arc<ArcSwap<TxIndexLifecycle>>,
+    runtime: &Arc<DerivedIndexRuntime>,
+    spec: &DerivedIndexOpenSpec,
+    lifecycle: &Arc<ArcSwap<DerivedIndexLifecycle>>,
     generation: &Generation,
     applied_tip: &Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: &Arc<RwLock<BlockTree>>,
@@ -193,15 +193,15 @@ pub(super) fn open_and_run(
     reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
     shutdown: &Arc<AtomicBool>,
     wake_rx: &Receiver<()>,
-) -> Result<(), TxIndexWorkerError> {
+) -> Result<(), DerivedIndexWorkerError> {
     // Wait for the test-only open gate before touching the store.
     wait_txindex_open_gate();
 
     let txindex_dir = spec.data_dir.join(spec.namespace);
     std::fs::create_dir_all(&txindex_dir)
-        .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
+        .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    let open: OpenTxIndex = open_tx_index_with_timeout(
+    let open: OpenDerivedIndex = open_derived_index_with_timeout(
         spec.storage_backend,
         &txindex_dir,
         spec.cache_bytes,
@@ -218,7 +218,7 @@ pub(super) fn open_and_run(
         return Ok(());
     }
 
-    let query_engine = Arc::new(TxIndexQueryEngine::new(
+    let query_engine = Arc::new(DerivedIndexQueryEngine::new(
         Arc::clone(runtime),
         open.reader,
         block_source.clone(),
@@ -236,7 +236,7 @@ pub(super) fn open_and_run(
     publish_lifecycle(
         lifecycle,
         generation,
-        TxIndexLifecycle::Serving(query_engine),
+        DerivedIndexLifecycle::Serving(query_engine),
     );
 
     // Check shutdown immediately after publication.
@@ -274,7 +274,7 @@ pub(super) fn open_and_run(
 /// helper thread is detached (it may eventually finish or hang — we cannot
 /// kill a thread) and `OpenTimeout` is returned so the worker publishes
 /// `Failed` and the node stays operable without the index.
-pub(super) fn open_tx_index_with_timeout(
+pub(super) fn open_derived_index_with_timeout(
     storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
@@ -282,10 +282,10 @@ pub(super) fn open_tx_index_with_timeout(
     open_delay: Duration,
     open_timeout: Duration,
     should_stop: impl Fn() -> bool,
-) -> Result<OpenTxIndex, TxIndexWorkerError> {
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     // No helper exists yet: cancellation here can release the namespace.
     if should_stop() {
-        return Err(TxIndexWorkerError::Stopped);
+        return Err(DerivedIndexWorkerError::Stopped);
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let backend = storage_backend;
@@ -293,13 +293,14 @@ pub(super) fn open_tx_index_with_timeout(
     let _join = thread::Builder::new()
         .name("bitcoin-rs-txindex-open".to_owned())
         .spawn(move || {
-            let result = open_tx_index_on_worker(backend, &dir, cache_bytes, epoch, open_delay);
+            let result =
+                open_derived_index_on_worker(backend, &dir, cache_bytes, epoch, open_delay);
             let _ = tx.send(result);
         })
-        .map_err(|e| TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
+        .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
     let result = open_wait::wait_for_open_result(&rx, open_timeout, should_stop);
-    if matches!(&result, Err(TxIndexWorkerError::OpenTimeout { .. })) {
+    if matches!(&result, Err(DerivedIndexWorkerError::OpenTimeout { .. })) {
         tracing::error!(
             timeout_secs = open_timeout.as_secs(),
             backend = %storage_backend,
@@ -312,13 +313,13 @@ pub(super) fn open_tx_index_with_timeout(
 
 /// Opens the txindex store on the worker thread through the namespace's single
 /// runtime composition owner.
-pub(super) fn open_tx_index_on_worker(
+pub(super) fn open_derived_index_on_worker(
     storage_backend: bitcoin_rs_storage::StorageBackend,
     txindex_dir: &Path,
     cache_bytes: u64,
     epoch: u64,
     open_delay: Duration,
-) -> Result<OpenTxIndex, TxIndexWorkerError> {
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
     if !open_delay.is_zero() {
         std::thread::sleep(open_delay);
     }
@@ -326,7 +327,7 @@ pub(super) fn open_tx_index_on_worker(
         storage_backend,
         txindex_dir,
         Some(cache_bytes),
-        TxIndexComposer {
+        DerivedIndexComposer {
             backend: storage_backend,
             epoch,
         },
@@ -334,11 +335,11 @@ pub(super) fn open_tx_index_on_worker(
 }
 
 /// Constructs the writer and reader from the opened store.
-pub(super) fn open_tx_index_store_on_worker<S>(
+pub(super) fn open_derived_index_store_on_worker<S>(
     store: Arc<S>,
     batch_limits: PreparedBatchLimits,
     epoch: u64,
-) -> Result<OpenTxIndex, TxIndexWorkerError>
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError>
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
@@ -346,7 +347,7 @@ where
     let writer: Arc<dyn TxIndexWriter> = Arc::new(parking_lot::RwLock::new(writer));
     let reader: Arc<dyn bitcoin_rs_index::IndexReader> =
         Arc::new(bitcoin_rs_index::Indexer::new(store));
-    Ok(OpenTxIndex {
+    Ok(OpenDerivedIndex {
         writer,
         reader,
         batch_limits,

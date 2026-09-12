@@ -1,6 +1,6 @@
 //! IDX-07 / IDX-08: cancellation is bounded without pretending to cancel a backend.
 
-use super::super::open_tx_index_with_timeout;
+use super::super::open_derived_index_with_timeout;
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -23,7 +23,10 @@ fn pending_open_rechecks_shutdown_before_the_open_deadline() {
     // fails promptly rather than leaking a 30-second test thread.
     drop(open_tx);
     assert!(worker.join().is_ok());
-    assert!(matches!(result, Ok(Err(TxIndexWorkerError::OpenStopped))));
+    assert!(matches!(
+        result,
+        Ok(Err(DerivedIndexWorkerError::OpenStopped))
+    ));
 }
 
 #[test]
@@ -31,7 +34,7 @@ fn shutdown_wins_over_an_expired_open_deadline() {
     let (_tx, rx) = mpsc::channel();
     assert!(matches!(
         wait_for_open_result(&rx, Duration::ZERO, || true),
-        Err(TxIndexWorkerError::OpenStopped)
+        Err(DerivedIndexWorkerError::OpenStopped)
     ));
 }
 
@@ -40,7 +43,7 @@ fn expired_open_deadline_is_typed() {
     let (_tx, rx) = mpsc::channel();
     assert!(matches!(
         wait_for_open_result(&rx, Duration::ZERO, || false),
-        Err(TxIndexWorkerError::OpenTimeout { secs: 0 })
+        Err(DerivedIndexWorkerError::OpenTimeout { secs: 0 })
     ));
 }
 
@@ -50,7 +53,7 @@ fn disconnected_open_helper_is_a_storage_failure() {
     drop(tx);
     assert!(matches!(
         wait_for_open_result(&rx, Duration::from_secs(1), || false),
-        Err(TxIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Backend(reason)))
+        Err(DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Backend(reason)))
             if reason == "txindex open helper thread exited without result"
     ));
 }
@@ -59,14 +62,14 @@ fn disconnected_open_helper_is_a_storage_failure() {
 fn backend_error_is_preserved_without_becoming_abandonment() {
     let (tx, rx) = mpsc::channel();
     assert!(
-        tx.send(Err(TxIndexWorkerError::Storage(
+        tx.send(Err(DerivedIndexWorkerError::Storage(
             bitcoin_rs_storage::StorageError::InvalidOperation("backend sentinel")
         )))
         .is_ok()
     );
     assert!(matches!(
         wait_for_open_result(&rx, Duration::from_secs(1), || false),
-        Err(TxIndexWorkerError::Storage(
+        Err(DerivedIndexWorkerError::Storage(
             bitcoin_rs_storage::StorageError::InvalidOperation("backend sentinel")
         ))
     ));
@@ -76,7 +79,7 @@ fn backend_error_is_preserved_without_becoming_abandonment() {
 fn shutdown_before_helper_creation_never_touches_the_store() -> std::io::Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("must-not-be-created");
-    let result = open_tx_index_with_timeout(
+    let result = open_derived_index_with_timeout(
         bitcoin_rs_storage::StorageBackend::Fjall,
         &path,
         8 << 20,
@@ -85,7 +88,7 @@ fn shutdown_before_helper_creation_never_touches_the_store() -> std::io::Result<
         Duration::from_secs(30),
         || true,
     );
-    assert!(matches!(result, Err(TxIndexWorkerError::Stopped)));
+    assert!(matches!(result, Err(DerivedIndexWorkerError::Stopped)));
     assert!(!path.exists());
     Ok(())
 }

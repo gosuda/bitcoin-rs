@@ -9,43 +9,46 @@ fn publication_boundaries_never_expose_half_installed_state() {
     // The lifecycle is published atomically behind ArcSwap. Every load returns
     // a complete, self-consistent snapshot — never a torn mix of state and
     // payload.
-    let lifecycle: Arc<ArcSwap<TxIndexLifecycle>> =
-        Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+    let lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>> =
+        Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
 
     // Publish CatchingUp with a dummy engine reference (None payload path
     // is tested separately; here we verify Opening → ShutdownAbandoned
     // transitions are atomic).
-    lifecycle.store(Arc::new(TxIndexLifecycle::ShutdownAbandoned));
+    lifecycle.store(Arc::new(DerivedIndexLifecycle::ShutdownAbandoned));
     let snapshot = lifecycle.load();
-    assert!(matches!(**snapshot, TxIndexLifecycle::ShutdownAbandoned));
+    assert!(matches!(
+        **snapshot,
+        DerivedIndexLifecycle::ShutdownAbandoned
+    ));
 
     // Publish Failed.
-    lifecycle.store(Arc::new(TxIndexLifecycle::Failed(CompactString::from(
-        "test failure",
-    ))));
+    lifecycle.store(Arc::new(DerivedIndexLifecycle::Failed(
+        CompactString::from("test failure"),
+    )));
     let snapshot = lifecycle.load();
-    assert!(matches!(**snapshot, TxIndexLifecycle::Failed(_)));
+    assert!(matches!(**snapshot, DerivedIndexLifecycle::Failed(_)));
 
     // Publish Opening again.
-    lifecycle.store(Arc::new(TxIndexLifecycle::Opening));
+    lifecycle.store(Arc::new(DerivedIndexLifecycle::Opening));
     let snapshot = lifecycle.load();
-    assert!(matches!(**snapshot, TxIndexLifecycle::Opening));
+    assert!(matches!(**snapshot, DerivedIndexLifecycle::Opening));
 }
 
 #[test]
 fn stale_generation_rcu_is_a_noop() {
-    let lifecycle: Arc<ArcSwap<TxIndexLifecycle>> =
-        Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+    let lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>> =
+        Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
     let generation_tok = Generation::new(1);
     generation_tok.revoke();
 
     // Attempt to publish Failed via the generation-checked rcu. Since the
     // generation is revoked, the snapshot must stay Opening.
-    let runtime = TxIndexRuntime::new(crossbeam_channel::bounded(1).0);
+    let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
     fail_worker(&runtime, &lifecycle, &generation_tok, "should not publish");
     let snapshot = lifecycle.load();
     assert!(
-        matches!(**snapshot, TxIndexLifecycle::Opening),
+        matches!(**snapshot, DerivedIndexLifecycle::Opening),
         "revoked generation must not publish"
     );
 
@@ -54,16 +57,16 @@ fn stale_generation_rcu_is_a_noop() {
     fail_worker(&runtime, &lifecycle, &gen2, "should publish");
     let snapshot = lifecycle.load();
     assert!(
-        matches!(**snapshot, TxIndexLifecycle::Failed(_)),
+        matches!(**snapshot, DerivedIndexLifecycle::Failed(_)),
         "active generation must publish"
     );
 }
 
 #[test]
 fn query_adapter_returns_unavailable_for_opening() {
-    let lifecycle: Arc<ArcSwap<TxIndexLifecycle>> =
-        Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
-    let adapter = TxIndexQueryAdapter::new(lifecycle);
+    let lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>> =
+        Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
+    let adapter = DerivedIndexQueryAdapter::new(lifecycle);
 
     let result = adapter.transaction(&Txid::from(Hash256::from_le_bytes(&[0u8; 32])));
     assert!(
@@ -74,10 +77,10 @@ fn query_adapter_returns_unavailable_for_opening() {
 
 #[test]
 fn query_adapter_returns_unavailable_for_failed() {
-    let lifecycle: Arc<ArcSwap<TxIndexLifecycle>> = Arc::new(ArcSwap::from_pointee(
-        TxIndexLifecycle::Failed(CompactString::from("schema mismatch")),
+    let lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>> = Arc::new(ArcSwap::from_pointee(
+        DerivedIndexLifecycle::Failed(CompactString::from("schema mismatch")),
     ));
-    let adapter = TxIndexQueryAdapter::new(lifecycle);
+    let adapter = DerivedIndexQueryAdapter::new(lifecycle);
 
     let result = adapter.transaction(&Txid::from(Hash256::from_le_bytes(&[0u8; 32])));
     assert!(
@@ -88,9 +91,10 @@ fn query_adapter_returns_unavailable_for_failed() {
 
 #[test]
 fn query_adapter_returns_unavailable_for_shutdown_abandoned() {
-    let lifecycle: Arc<ArcSwap<TxIndexLifecycle>> =
-        Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::ShutdownAbandoned));
-    let adapter = TxIndexQueryAdapter::new(lifecycle);
+    let lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>> = Arc::new(ArcSwap::from_pointee(
+        DerivedIndexLifecycle::ShutdownAbandoned,
+    ));
+    let adapter = DerivedIndexQueryAdapter::new(lifecycle);
 
     let result = adapter.transaction(&Txid::from(Hash256::from_le_bytes(&[0u8; 32])));
     assert!(
@@ -119,10 +123,10 @@ fn generation_clone_shares_revocation() {
 /// IDX-07: revocation fences publication, not this worker's failure signal.
 #[test]
 fn revoked_failure_stops_runtime_without_replacing_lifecycle_snapshot() {
-    let lifecycle = Arc::new(ArcSwap::from_pointee(TxIndexLifecycle::Opening));
+    let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
     let before = lifecycle.load_full();
     let generation = Generation::new(1);
-    let runtime = TxIndexRuntime::new(crossbeam_channel::bounded(1).0);
+    let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
     generation.revoke();
     fail_worker(&runtime, &lifecycle, &generation, "detached failure");
     assert!(runtime.should_stop());

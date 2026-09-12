@@ -66,7 +66,7 @@ use bitcoin_rs_node::metrics::{
     Sha256Hex,
 };
 use bitcoin_rs_node::{
-    BlockSync, Network, NodeConfig, TxIndexRuntime, apply::Chainstate, state::NodeState,
+    BlockSync, DerivedIndexRuntime, Network, NodeConfig, apply::Chainstate, state::NodeState,
     sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
@@ -292,7 +292,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_pure_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Disabled).prebuild_run(),
+                || SyncFixture::new(DerivedIndexMode::Disabled).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -302,7 +302,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_indexed_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Noop).prebuild_run(),
+                || SyncFixture::new(DerivedIndexMode::Noop).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -312,7 +312,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_received_scan_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Disabled).prebuild_unsolicited(),
+                || SyncFixture::new(DerivedIndexMode::Disabled).prebuild_unsolicited(),
                 |fixture| black_box(fixture.request_after_unsolicited_received()),
                 BatchSize::SmallInput,
             );
@@ -322,7 +322,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_reverse_scan_overflow_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new_reverse_scan_overflow(TxIndexMode::Disabled),
+                || SyncFixture::new_reverse_scan_overflow(DerivedIndexMode::Disabled),
                 |fixture| black_box(fixture.run_reverse_scan_overflow()),
                 BatchSize::SmallInput,
             );
@@ -332,7 +332,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_in_order_inbound_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::Disabled).prebuild_in_order(),
+                || SyncFixture::new(DerivedIndexMode::Disabled).prebuild_in_order(),
                 |fixture| black_box(fixture.run_in_order_inbound()),
                 BatchSize::SmallInput,
             );
@@ -341,7 +341,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
     bench_production_state_sync(c);
     c.bench_function("deterministic_initial_sync_proxy_many_peers_512", |b| {
         b.iter_batched(
-            || SyncFixture::new_with_peers(TxIndexMode::Disabled, SYNC_PROXY_PEERS),
+            || SyncFixture::new_with_peers(DerivedIndexMode::Disabled, SYNC_PROXY_PEERS),
             |fixture| black_box(fixture.run_many_peer_tick()),
             BatchSize::SmallInput,
         );
@@ -352,7 +352,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     SyncFixture::new_with_block_count(
-                        TxIndexMode::Disabled,
+                        DerivedIndexMode::Disabled,
                         1,
                         SYNC_OVERSIZED_BURST_BLOCKS,
                     )
@@ -368,7 +368,7 @@ fn deterministic_initial_sync_proxy(c: &mut Criterion) {
         "deterministic_initial_sync_proxy_deep_headers_txindex_rocksdb_128_blocks",
         |b| {
             b.iter_batched(
-                || SyncFixture::new(TxIndexMode::RocksDb).prebuild_run(),
+                || SyncFixture::new(DerivedIndexMode::RocksDb).prebuild_run(),
                 |fixture| black_box(fixture.run()),
                 BatchSize::SmallInput,
             );
@@ -582,7 +582,7 @@ struct SyncFixture {
 }
 
 #[derive(Clone, Copy)]
-enum TxIndexMode {
+enum DerivedIndexMode {
     Disabled,
     Noop,
     #[cfg(feature = "rocksdb")]
@@ -590,16 +590,16 @@ enum TxIndexMode {
 }
 
 impl SyncFixture {
-    fn new(tx_index_mode: TxIndexMode) -> Self {
+    fn new(tx_index_mode: DerivedIndexMode) -> Self {
         Self::new_with_peers(tx_index_mode, 1)
     }
 
-    fn new_with_peers(tx_index_mode: TxIndexMode, peer_count: usize) -> Self {
+    fn new_with_peers(tx_index_mode: DerivedIndexMode, peer_count: usize) -> Self {
         Self::new_with_block_count(tx_index_mode, peer_count, SYNC_PROXY_BLOCKS)
     }
 
     fn new_with_block_count(
-        tx_index_mode: TxIndexMode,
+        tx_index_mode: DerivedIndexMode,
         peer_count: usize,
         block_count: u32,
     ) -> Self {
@@ -616,9 +616,9 @@ impl SyncFixture {
         let (inbound_blocks_tx, inbound_blocks_rx_raw) =
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-        let tx_index_runtime = tx_index_for_mode(tx_index_mode);
+        let derived_index_runtime = tx_index_for_mode(tx_index_mode);
         let followers = bitcoin_rs_node::ChainFollowers::new(
-            bitcoin_rs_node::ChainEffects::noop().with_tx_index(tx_index_runtime),
+            bitcoin_rs_node::ChainEffects::noop().with_tx_index(derived_index_runtime),
             Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
             None,
         );
@@ -694,7 +694,7 @@ impl SyncFixture {
         self
     }
 
-    fn new_reverse_scan_overflow(tx_index_mode: TxIndexMode) -> Self {
+    fn new_reverse_scan_overflow(tx_index_mode: DerivedIndexMode) -> Self {
         let mut fixture =
             Self::new_with_block_count(tx_index_mode, 0, SYNC_REVERSE_SCAN_OVERFLOW_BODY_BLOCKS);
         // The bench stages 128 received blocks and still needs to request a
@@ -1212,17 +1212,17 @@ fn apply_handles(
     )
 }
 
-fn tx_index_for_mode(mode: TxIndexMode) -> Option<Arc<TxIndexRuntime>> {
+fn tx_index_for_mode(mode: DerivedIndexMode) -> Option<Arc<DerivedIndexRuntime>> {
     match mode {
-        TxIndexMode::Disabled => None,
-        TxIndexMode::Noop => {
+        DerivedIndexMode::Disabled => None,
+        DerivedIndexMode::Noop => {
             let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);
-            Some(Arc::new(TxIndexRuntime::new(wake_tx)))
+            Some(Arc::new(DerivedIndexRuntime::new(wake_tx)))
         }
         #[cfg(feature = "rocksdb")]
-        TxIndexMode::RocksDb => {
+        DerivedIndexMode::RocksDb => {
             let (wake_tx, _wake_rx) = crossbeam_channel::bounded(1);
-            Some(Arc::new(TxIndexRuntime::new(wake_tx)))
+            Some(Arc::new(DerivedIndexRuntime::new(wake_tx)))
         }
     }
 }

@@ -1,15 +1,15 @@
 //! Process-owned worker spawning, joining, and explicit abandonment.
 
+use super::DerivedIndexLifecycle;
+use super::DerivedIndexOpenSpec;
+use super::DerivedIndexRuntime;
+use super::DerivedIndexWorker;
 #[cfg(test)]
 use super::FORWARD_BATCH_DELAY;
 use super::Generation;
 use super::IndexBlockSource;
 #[cfg(test)]
 use super::REVISION_QUIET_PERIOD;
-use super::TxIndexLifecycle;
-use super::TxIndexOpenSpec;
-use super::TxIndexRuntime;
-use super::TxIndexWorker;
 #[cfg(test)]
 use super::Worker;
 use super::namespace::NAMESPACE_REGISTRY;
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::thread;
 
-impl TxIndexWorker {
+impl DerivedIndexWorker {
     /// Spawns a worker over an already-open `writer`. Test seam for writer
     /// fakes; production workers open their own store via `spawn_with_open`.
     ///
@@ -46,7 +46,7 @@ impl TxIndexWorker {
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
-        runtime: Arc<TxIndexRuntime>,
+        runtime: Arc<DerivedIndexRuntime>,
         writer: Arc<dyn TxIndexWriter>,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
@@ -111,16 +111,16 @@ impl TxIndexWorker {
     /// reconciliation — all behind one `catch_unwind`.
     ///
     /// The `lifecycle` `ArcSwap` is the publication surface: the caller
-    /// constructs a stable `TxIndexQueryAdapter` over it before this call.
+    /// constructs a stable `DerivedIndexQueryAdapter` over it before this call.
     /// The `generation` token makes late publication a no-op after
     /// abandonment. The `shutdown` signal is checked immediately after
     /// backend open returns. `reporter` receives the index-ahead rollback
     /// evidence the worker detects against the restored tip.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_with_open(
-        runtime: Arc<TxIndexRuntime>,
-        spec: TxIndexOpenSpec,
-        lifecycle: Arc<ArcSwap<TxIndexLifecycle>>,
+        runtime: Arc<DerivedIndexRuntime>,
+        spec: DerivedIndexOpenSpec,
+        lifecycle: Arc<ArcSwap<DerivedIndexLifecycle>>,
         generation: Generation,
         applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
@@ -217,7 +217,7 @@ impl TxIndexWorker {
     }
 }
 
-impl Drop for TxIndexWorker {
+impl Drop for DerivedIndexWorker {
     fn drop(&mut self) {
         self.runtime.request_shutdown();
         if let Some(handle) = self.join_handle.take() {

@@ -2084,7 +2084,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
                 mempool: MempoolGateway::shared(state.mempool()),
             },
             indexes: IndexHandles {
-                tx_index: None,
+                derived_index: None,
                 script_index: None,
             },
             network: NetworkHandles {
@@ -2098,7 +2098,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             mining: MiningHandles {
                 mining_control: None,
             },
-            txindex_status: None,
+            derived_index_status: None,
         })
         .with_chain_control(Arc::new(NodeInvalidator {
             handles: state.chainstate(),

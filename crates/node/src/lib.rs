@@ -93,7 +93,7 @@ pub use storage_footprint::{
 
 pub use sync::BlockSync;
 
-pub use txindex::TxIndexRuntime;
+pub use txindex::DerivedIndexRuntime;
 
 #[cfg(feature = "zmq")]
 pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

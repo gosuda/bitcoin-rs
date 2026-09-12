@@ -41,12 +41,12 @@ fn import_decodes_a_well_formed_block() -> Result<()> {
         .first()
         .ok_or_else(|| anyhow::anyhow!("genesis block has no transactions"))?;
     let txid = coinbase.txid();
-    let tx_index = state
-        .tx_index_query()
+    let derived_index = state
+        .derived_index_query()
         .ok_or_else(|| anyhow::anyhow!("txindex missing after enabled open"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match tx_index.index_info() {
+        match derived_index.index_info() {
             Ok(info) if info.synced => break,
             Ok(_)
             | Err(
@@ -60,7 +60,7 @@ fn import_decodes_a_well_formed_block() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    let resolved = tx_index.transaction(&txid)?;
+    let resolved = derived_index.transaction(&txid)?;
     assert_eq!(
         resolved.as_ref().map(Tx::txid),
         Some(txid),

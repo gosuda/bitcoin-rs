@@ -7,25 +7,28 @@ fn script_index_capabilities_match_the_storage_contract() {
     config.indexes.txindex = false;
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
-    assert_eq!(tx_index_capabilities(&config), IndexCapabilities::NONE);
+    assert_eq!(derived_index_capabilities(&config), IndexCapabilities::NONE);
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     assert_eq!(
-        tx_index_capabilities(&config),
+        derived_index_capabilities(&config),
         IndexCapabilities::SCRIPT_LIVE,
         "utxo mode owns only the compact live-output view"
     );
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Full;
-    assert_eq!(tx_index_capabilities(&config), IndexCapabilities::ALL);
+    assert_eq!(derived_index_capabilities(&config), IndexCapabilities::ALL);
 
     config.indexes.txindex = true;
     config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
-    assert_eq!(tx_index_capabilities(&config), IndexCapabilities::TX_LOOKUP);
+    assert_eq!(
+        derived_index_capabilities(&config),
+        IndexCapabilities::TX_LOOKUP
+    );
 
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     assert_eq!(
-        tx_index_capabilities(&config),
+        derived_index_capabilities(&config),
         IndexCapabilities {
             tx_lookup: true,
             script_history: false,
@@ -43,7 +46,7 @@ fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
 
     assert!(
-        state.tx_index_query().is_none(),
+        state.derived_index_query().is_none(),
         "txindex disabled by default"
     );
     assert!(
@@ -62,7 +65,7 @@ fn open_constructs_tx_index_when_enabled() -> anyhow::Result<()> {
     config.indexes.txindex = true;
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
-    let (Some(a), Some(b)) = (state.tx_index_query(), state.tx_index_query()) else {
+    let (Some(a), Some(b)) = (state.derived_index_query(), state.derived_index_query()) else {
         panic!("txindex query engine missing when enabled");
     };
     assert!(Arc::ptr_eq(&a, &b), "txindex query handle must be stable");
@@ -88,23 +91,32 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     config.indexes.txindex = true;
     let mut state = NodeState::open(config, None)?;
 
-    assert!(state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
-        matches!(
-            lifecycle.load().as_ref(),
-            crate::txindex::TxIndexLifecycle::Opening
-        )
-    }));
-    assert!(state.tx_index_worker.is_none());
+    assert!(
+        state
+            .derived_index_lifecycle
+            .as_ref()
+            .is_some_and(|lifecycle| {
+                matches!(
+                    lifecycle.load().as_ref(),
+                    crate::txindex::DerivedIndexLifecycle::Opening
+                )
+            })
+    );
+    assert!(state.derived_index_worker.is_none());
 
     state.start_index_workers()?;
-    assert!(state.tx_index_worker.is_some());
+    assert!(state.derived_index_worker.is_some());
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while state.tx_index_lifecycle.as_ref().is_some_and(|lifecycle| {
-        matches!(
-            lifecycle.load().as_ref(),
-            crate::txindex::TxIndexLifecycle::Opening
-        )
-    }) {
+    while state
+        .derived_index_lifecycle
+        .as_ref()
+        .is_some_and(|lifecycle| {
+            matches!(
+                lifecycle.load().as_ref(),
+                crate::txindex::DerivedIndexLifecycle::Opening
+            )
+        })
+    {
         assert!(
             std::time::Instant::now() < deadline,
             "txindex lifecycle remained Opening"
@@ -126,9 +138,9 @@ fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> 
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
 
-    assert!(state.chain_followers().effects().tx_index().is_some());
-    assert!(state.tx_index_query().is_none());
-    assert!(state.esplora_tx_index_query().is_some());
+    assert!(state.chain_followers().effects().derived_index().is_some());
+    assert!(state.derived_index_query().is_none());
+    assert!(state.esplora_derived_index_query().is_some());
     assert!(state.script_index_query().is_some());
     // The script-index worker shares the txindex storage; it is created
     // asynchronously once the worker's open completes.
@@ -266,11 +278,11 @@ fn drop_joins_txindex_worker_before_reopen() -> anyhow::Result<()> {
     {
         let mut state = NodeState::open(config.clone(), None)?;
         state.start_index_workers()?;
-        assert!(state.tx_index_query().is_some());
+        assert!(state.derived_index_query().is_some());
     }
 
     let reopened = NodeState::open(config, None)?;
-    assert!(reopened.tx_index_query().is_some());
+    assert!(reopened.derived_index_query().is_some());
     Ok(())
 }
 
@@ -304,13 +316,13 @@ fn apply_handles_follow_txindex_availability() -> anyhow::Result<()> {
     config.p2p.listen.clear();
     config.indexes.txindex = false;
     let state = NodeState::open(config, None)?;
-    assert!(state.chain_followers().effects().tx_index().is_none());
+    assert!(state.chain_followers().effects().derived_index().is_none());
 
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("with-txindex");
     config.p2p.listen.clear();
     config.indexes.txindex = true;
     let state = NodeState::open(config, None)?;
-    assert!(state.chain_followers().effects().tx_index().is_some());
+    assert!(state.chain_followers().effects().derived_index().is_some());
     Ok(())
 }

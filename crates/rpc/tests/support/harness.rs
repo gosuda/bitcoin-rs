@@ -119,7 +119,7 @@ impl ServerHarness {
                 mempool: MempoolGateway::shared(state.mempool()),
             },
             indexes: IndexHandles {
-                tx_index: state.tx_index_query(),
+                derived_index: state.derived_index_query(),
                 script_index: state.script_index_query(),
             },
             network: NetworkHandles {
@@ -133,7 +133,7 @@ impl ServerHarness {
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: None,
             },
-            txindex_status: Some(state.txindex_status()),
+            derived_index_status: Some(state.derived_index_status()),
         });
         let handler = Arc::new(Handler::new(Arc::new(ctx)));
         let auth = Arc::new(Auth::basic(REPLAY_USER, REPLAY_PASSWORD));
