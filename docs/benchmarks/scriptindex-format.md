@@ -1,6 +1,6 @@
 # Generic index on-disk format
 
-This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes increment `INDEX_FORMAT_VERSION` only and keep `CURRENT_SCHEMA` unchanged. There is no translator and no legacy reader; an unknown index version degrades that capability to unavailable or rebuilding through the existing `CapabilityState` vocabulary, rebuilds from retained canonical data, and never fails authoritative startup. A rejected index file is left in place until explicit authorized rebuild.
+This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump whichever version axis they move and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 5) is the hard open gate with full-reset recovery, and the row-value marker (`INDEX_FORMAT_VERSION`, currently 3) is the soft capability report that degrades to scans. There is no translator and no legacy reader; an unknown durability marker refuses start for rebuild through the existing `CapabilityState` vocabulary, rebuilds from retained canonical data, and never fails authoritative startup. A rejected index file is left in place until explicit authorized rebuild.
 
 ## Row families
 
@@ -353,9 +353,10 @@ requested capability and clear only that capability's watermark. The reset
 state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
 prevents ABA across repeated resets.
 
-Every marker older than the current format refuses start
-(`UnsupportedTxIndexFormatVersion`) and recovery full-resets the store for
-rebuild: format 5 changed every row family, so no in-place upgrade path exists.
+Every durability marker (`[0x00, b'V']`) older than the current row-format 5
+refuses start (`UnsupportedTxIndexFormatVersion`) and recovery full-resets
+the store for rebuild: format 5 changed every row family, so no in-place
+upgrade path exists. (Row-value format 3 is the soft report axis, not the gate.)
 
 **Adding ScriptLive later must not force a History reindex.** ScriptLive
 rows would occupy a new column family (not one of the existing four). The
