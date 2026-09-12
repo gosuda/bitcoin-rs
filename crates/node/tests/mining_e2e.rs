@@ -46,6 +46,8 @@ const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
 const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
 
 #[test]
+// This end-to-end scenario intentionally keeps template assembly, submission,
+// and post-connect state assertions together to cover the complete miner flow.
 #[allow(clippy::too_many_lines)]
 fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     let (state, _guard) = open_regtest()?;
@@ -261,6 +263,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
 }
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-11 (template ordering and depends)
 fn template_orders_parent_then_child_with_dependency() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -590,6 +593,8 @@ fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Bl
 }
 /// Admits `tx` through the run-composed shared gateway exactly like
 /// `sendrawtransaction` does: full policy admission over the provisional
+// Keep a fallible helper signature so callers uniformly propagate admission
+// failures while the assertion below documents the expected infallible outcome.
 #[allow(clippy::unnecessary_wraps)]
 fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
     let utxo = state.utxo();
@@ -1085,6 +1090,7 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
 }
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-15 (submitblock decoding)
 fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -1115,6 +1121,7 @@ fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
 }
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-19 (submitblock rejection reasons)
 fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -1153,6 +1160,8 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
 }
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-26 (estimatesmartfee response)
+// CONTRACT: docs/contracts/external-api.md#API-11 (post-connect template state)
 fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
