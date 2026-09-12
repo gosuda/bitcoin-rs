@@ -31,7 +31,7 @@ impl MiningCoordinator {
             .map(CompactString::from)
             .collect();
         self.service
-            .mining_info(network_hashes_per_second, warnings, tip.as_deref().cloned())
+            .mining_info(network_hashes_per_second, warnings, tip.as_deref())
     }
 }
 

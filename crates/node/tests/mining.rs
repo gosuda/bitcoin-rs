@@ -55,7 +55,6 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.config().mining.payout_script.clone(),
         state.shutdown(),
     )
-    .with_mempool_update_wait(Duration::ZERO)
 }
 
 fn apply_genesis(state: &NodeState) -> anyhow::Result<()> {
@@ -917,19 +916,16 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    let mining = Arc::new(
-        MiningCoordinator::new(
-            state.config().network,
-            state.applied_tip(),
-            state.block_tree(),
-            state.mempool(),
-            state.chainstate(),
-            state.chain_followers(),
-            state.config().mining.payout_script.clone(),
-            Arc::clone(&shutdown),
-        )
-        .with_mempool_update_wait(Duration::ZERO),
-    );
+    let mining = Arc::new(MiningCoordinator::new(
+        state.config().network,
+        state.applied_tip(),
+        state.block_tree(),
+        state.mempool(),
+        state.chainstate(),
+        state.chain_followers(),
+        state.config().mining.payout_script.clone(),
+        Arc::clone(&shutdown),
+    ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
     let long_poll_id = CompactString::from(current.candidate.template_id.as_str());
@@ -954,19 +950,16 @@ fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    let mining = Arc::new(
-        MiningCoordinator::new(
-            state.config().network,
-            state.applied_tip(),
-            state.block_tree(),
-            state.mempool(),
-            state.chainstate(),
-            state.chain_followers(),
-            state.config().mining.payout_script.clone(),
-            Arc::clone(&shutdown),
-        )
-        .with_mempool_update_wait(Duration::ZERO),
-    );
+    let mining = Arc::new(MiningCoordinator::new(
+        state.config().network,
+        state.applied_tip(),
+        state.block_tree(),
+        state.mempool(),
+        state.chainstate(),
+        state.chain_followers(),
+        state.config().mining.payout_script.clone(),
+        Arc::clone(&shutdown),
+    ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
     let long_poll_id = CompactString::from(current.candidate.template_id.as_str());
@@ -1523,19 +1516,16 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
 
     // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
     // before returning on a mempool-only change. The fix returns immediately.
-    let mining = Arc::new(
-        MiningCoordinator::new(
-            state.config().network,
-            state.applied_tip(),
-            state.block_tree(),
-            state.mempool(),
-            state.chainstate(),
-            state.chain_followers(),
-            state.config().mining.payout_script.clone(),
-            state.shutdown(),
-        )
-        .with_mempool_update_wait(Duration::from_secs(10)),
-    );
+    let mining = Arc::new(MiningCoordinator::new(
+        state.config().network,
+        state.applied_tip(),
+        state.block_tree(),
+        state.mempool(),
+        state.chainstate(),
+        state.chain_followers(),
+        state.config().mining.payout_script.clone(),
+        state.shutdown(),
+    ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
     let long_poll_id = CompactString::from(current.candidate.template_id.as_str());

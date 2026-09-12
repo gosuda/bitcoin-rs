@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::current_unix_seconds;
-use bitcoin_rs_consensus::{MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT, MAX_BLOCK_SERIALIZED_SIZE};
+use bitcoin_rs_consensus::{MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT};
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
@@ -445,10 +445,10 @@ impl MiningService {
         &self,
         network_hashes_per_second: f64,
         warnings: Vec<CompactString>,
-        tip: Option<TipSnapshot>,
+        tip: Option<&TipSnapshot>,
     ) -> Result<MiningInfo, MiningControlError> {
-        let blocks = tip.as_ref().map_or(0, |tip| tip.height);
-        let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
+        let blocks = tip.map_or(0, |tip| tip.height);
+        let (bits, difficulty, next_bits, next_difficulty) = match tip {
             Some(tip) => {
                 let tip_bits = self.chain.tip_bits(tip).map_err(|error| {
                     MiningControlError::Failed(CompactString::from(error.to_string()))

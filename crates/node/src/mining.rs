@@ -45,7 +45,6 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
-use core::time::Duration;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
