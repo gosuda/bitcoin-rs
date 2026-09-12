@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Resolve the workspace against the declared dependency range, not the
-# Resolve the workspace against the declared dependency range, not the
 # committed lockfile, and prove it still compiles.
 #
 #   scripts/check-dep-range.sh minimal
 #     cargo +nightly update -Zdirect-minimal-versions
-#     then cargo +nightly check --workspace --all-targets --all-features
+#     then cargo +nightly check --workspace --all-targets
 #     then G20 (+ cargo deny check bans when cargo-deny is on PATH)
 #
 #   scripts/check-dep-range.sh maximum
@@ -16,10 +15,10 @@
 # Mutates Cargo.lock. CI checks out a throwaway tree. Locally, the original
 # lockfile is restored on exit unless KEEP_LOCK=1.
 #
-# The minimal endpoint uses --all-features so the resolved oldest versions
-# are also checked with every optional feature enabled. The maximum endpoint
-# uses the default feature set; the named feature matrix is owned by
-# FEAT-01 / scripts/check-feature-matrix.sh.
+# Both endpoints check the default workspace graph (DEP-01). Optional
+# native engines and the named feature matrix are owned by FEAT-01 /
+# scripts/check-feature-matrix.sh; --all-features here would drag in
+# build-time bindgen probes (rust-rocksdb lz4) the contract never asks for.
 #
 # Owner: docs/contracts/dependency-range.md (DEP-01, DEP-02).
 
@@ -77,8 +76,8 @@ case "${RANGE}" in
   minimal)
     log "resolving direct dependencies at their oldest allowed versions"
     "${CARGO[@]}" update -Zdirect-minimal-versions
-    log "checking the resolved minimal graph with all features"
-    "${CARGO[@]}" check --workspace --all-targets --all-features
+    log "checking the resolved minimal graph with default features"
+    "${CARGO[@]}" check --workspace --all-targets
     ;;
   maximum)
     log "resolving every crate to the newest version inside its declared range"
