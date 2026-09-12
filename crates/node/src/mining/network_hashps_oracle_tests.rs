@@ -171,3 +171,24 @@ fn hash_ps_at_rejects_a_height_the_tip_cannot_resolve() {
         other => panic!("unresolvable height must be invalid, got {other:?}"),
     }
 }
+
+#[test]
+fn hashes_per_second_divides_work_by_elapsed_seconds() {
+    let mut work = [0_u8; 32];
+    work[31] = 120;
+    let rate = super::hashes_per_second(work, 60);
+    assert!(
+        (rate - 2.0).abs() < f64::EPSILON,
+        "120 work over 60s must be 2.0 hashes/s, got {rate}"
+    );
+    let zero_elapsed = super::hashes_per_second(work, 0);
+    assert!(
+        zero_elapsed.abs() < f64::EPSILON,
+        "zero elapsed must report 0.0 hashes/s, got {zero_elapsed}"
+    );
+    let negative_elapsed = super::hashes_per_second(work, -1);
+    assert!(
+        negative_elapsed.abs() < f64::EPSILON,
+        "negative elapsed must report 0.0 hashes/s, got {negative_elapsed}"
+    );
+}

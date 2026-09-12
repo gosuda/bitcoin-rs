@@ -82,7 +82,7 @@ pub use config::{
 
 pub use embed::{Node, NodeError, SyncProgress};
 
-pub use mining::{GenerationKey, MiningCoordinator};
+pub use mining::MiningCoordinator;
 
 pub use run::run;
 

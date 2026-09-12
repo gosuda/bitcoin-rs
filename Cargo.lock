@@ -341,6 +341,7 @@ dependencies = [
  "compact_str",
  "criterion",
  "hashbrown 0.17.1",
+ "parking_lot",
  "proptest",
  "thiserror",
 ]

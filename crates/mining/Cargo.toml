@@ -19,6 +19,7 @@ bitcoin-rs-chain.workspace = true
 bitcoin-rs-mempool.workspace = true
 hashbrown.workspace = true
 compact_str.workspace = true
+parking_lot.workspace = true
 thiserror.workspace = true
 
 [features]

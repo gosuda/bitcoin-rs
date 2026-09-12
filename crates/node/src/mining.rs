@@ -1,19 +1,18 @@
-//! Node-owned mining candidate lifecycle coordinator.
+//! Node-owned mining control facade and network-hash-rate helpers.
 //!
-//! Generation is keyed by `(applied_tip_hash, mempool_sequence)`. Template
-//! assembly is single-flight per key, cached by [`TemplateId`], and woken by
-//! explicit generation publication. Proposal mode dry-runs the ordinary apply
+//! Candidate lifecycle state lives in [`bitcoin_rs_mining::coordinator`];
+//! this module keeps the wake seam between authoritative mutations and the
+//! template coordinator, plus the node-owned header admission and
+//! `getnetworkhashps` estimation. Proposal mode dry-runs the ordinary apply
 //! validation path without persistence; solved-block submission returns only
 //! after validation, persistence, and chain-state application complete.
 
 mod candidate;
 mod control;
-mod long_poll;
 mod submission;
 
 use crate::apply::Chainstate;
 use crate::chain_effects::ChainFollowers;
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
@@ -22,140 +21,34 @@ use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::accept_headers;
 use bitcoin_rs_chain::current_unix_seconds;
+use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_mempool::Mempool;
+use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
+use bitcoin_rs_mining::AppliedTipSource;
+use bitcoin_rs_mining::AvailableMiningRule;
 #[cfg(test)]
 use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::Candidate;
-use bitcoin_rs_mining::LastCandidateInfo;
+use bitcoin_rs_mining::ChainContextSource;
+use bitcoin_rs_mining::GenerateSelection;
+use bitcoin_rs_mining::MempoolSequenceWake;
+use bitcoin_rs_mining::MempoolSnapshotSource;
+use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_mining::TemplateId;
+use bitcoin_rs_mining::MiningRule;
+use bitcoin_rs_mining::MiningService;
+use bitcoin_rs_mining::snapshot_for_selection;
+use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
-use core::time::Duration;
-use hashbrown::HashMap;
-#[cfg(test)]
-use long_poll::parse_long_poll_id;
-use parking_lot::Condvar;
-use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 #[cfg(test)]
 use submission::map_apply_error;
-
-/// Default number of cached candidates retained by template id.
-const CANDIDATE_CACHE_LIMIT: usize = 8;
-/// Finite bound on generation-key races during candidate assembly.
-const CANDIDATE_GENERATION_RETRIES: usize = 8;
-const GENERATION_RACE: &str = "generation key changed during candidate assembly";
-/// Bitcoin Core's mempool-only long-poll cooldown before returning a new template.
-const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
-/// Upper bound for a single long-poll wait slice while rechecking predicates.
-const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
-/// Consensus maximum block weight / serialized size.
-const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
-const MAX_BLOCK_SIZE: u64 = 4_000_000;
-
-/// Applied-tip hash plus mempool sequence that identify one candidate generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct GenerationKey {
-    /// Applied tip hash in consensus little-endian storage order.
-    pub tip_hash: Hash256,
-    /// Mempool sequence captured with the tip.
-    pub mempool_sequence: u64,
-}
-
-impl GenerationKey {
-    /// Opaque BIP22/BIP23 long-poll identity for this generation.
-    #[must_use]
-    pub fn template_id(self) -> TemplateId {
-        TemplateId::new(&self.tip_hash, self.mempool_sequence)
-    }
-}
-
-#[derive(Debug)]
-struct InFlight {
-    key: GenerationKey,
-    id: u64,
-    result: Option<Result<Arc<Candidate>, MiningControlError>>,
-}
-
-struct CoordinatorState {
-    /// Last generation published to long-poll waiters.
-    published: Option<GenerationKey>,
-    /// Bounded LRU of assembled candidates keyed by template id.
-    cache: HashMap<TemplateId, Arc<Candidate>>,
-    /// Insertion order for deterministic eviction of the oldest entry.
-    cache_order: VecDeque<TemplateId>,
-    /// Single in-flight assembly, if any.
-    in_flight: Option<InFlight>,
-    /// Monotonically increasing identity for each installed flight.
-    next_flight_id: u64,
-    /// Facts from the most recently assembled candidate.
-    last_candidate: Option<LastCandidateInfo>,
-}
-
-impl CoordinatorState {
-    fn new() -> Self {
-        Self {
-            published: None,
-            cache: HashMap::new(),
-            cache_order: VecDeque::new(),
-            in_flight: None,
-            next_flight_id: 0,
-            last_candidate: None,
-        }
-    }
-
-    fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
-        self.cache.get(id).cloned()
-    }
-
-    fn cache_insert(&mut self, id: TemplateId, candidate: Arc<Candidate>) {
-        if self.cache.contains_key(&id) {
-            self.cache.insert(id, candidate);
-            return;
-        }
-        while self.cache.len() >= CANDIDATE_CACHE_LIMIT {
-            let Some(oldest) = self.cache_order.pop_front() else {
-                break;
-            };
-            self.cache.remove(&oldest);
-        }
-        self.cache_order.push_back(id.clone());
-        self.cache.insert(id, candidate);
-    }
-
-    fn invalidate_key(&mut self, key: GenerationKey) {
-        let id = key.template_id();
-        if self.cache.remove(&id).is_some() {
-            self.cache_order.retain(|cached| cached != &id);
-        }
-        if self
-            .in_flight
-            .as_ref()
-            .is_some_and(|flight| flight.key == key)
-        {
-            self.in_flight = None;
-        }
-    }
-}
-/// Mempool-sequence wake that avoids the mempool read lock.
-///
-/// The mempool observer fires under the gateway's publish mutex; taking the
-/// pool read lock from that path can deadlock or contend with an in-flight
-/// writer. Implementations build the generation key from `applied_tip` plus
-/// the caller-supplied sequence instead.
-pub trait MempoolSequenceWake: Send + Sync {
-    /// Publishes a generation key built from `applied_tip` and `sequence`
-    /// without taking the mempool read lock, then wakes all waiters.
-    fn publish_generation_from(&self, sequence: u64);
-}
 
 /// Wake seam between authoritative mutations and the template coordinator.
 ///
@@ -253,17 +146,11 @@ pub struct MiningCoordinator {
     network: Network,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    mempool: Arc<RwLock<Mempool>>,
     apply_handles: Chainstate,
     followers: ChainFollowers,
-    coinbase_script: Vec<u8>,
     shutdown: Arc<AtomicBool>,
-    /// Wall clock used for long-poll cooldowns.
-    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
-    /// Controllable mempool-only long-poll cooldown (Core default: 10s).
-    mempool_update_wait: Duration,
-    state: Mutex<CoordinatorState>,
-    wake: Condvar,
+    /// Mining-domain lifecycle service over the capability adapters.
+    service: MiningService,
 }
 
 impl MiningCoordinator {
@@ -283,43 +170,36 @@ impl MiningCoordinator {
         coinbase_script: Vec<u8>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
+        let service = MiningService::new(
+            network,
+            Arc::new(AppliedTipAdapter {
+                tip: Arc::clone(&applied_tip),
+            }),
+            Arc::new(MempoolAdapter { mempool }),
+            Arc::new(ChainContextAdapter {
+                block_tree: Arc::clone(&block_tree),
+                network,
+            }),
+            coinbase_script,
+            Arc::clone(&shutdown),
+        );
         Self {
             network,
             applied_tip,
             block_tree,
-            mempool,
             apply_handles,
             followers,
-            coinbase_script,
             shutdown,
-            clock: Arc::new(Instant::now),
-            mempool_update_wait: DEFAULT_MEMPOOL_UPDATE_WAIT,
-            state: Mutex::new(CoordinatorState::new()),
-            wake: Condvar::new(),
+            service,
         }
     }
 
-    /// Overrides the wall clock. Intended for deterministic tests.
-    #[must_use]
-    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
-        self.clock = clock;
-        self
-    }
-
-    /// Overrides the mempool-only long-poll cooldown. Tests may set this to zero.
-    #[must_use]
-    pub const fn with_mempool_update_wait(mut self, wait: Duration) -> Self {
-        self.mempool_update_wait = wait;
-        self
-    }
-
-    fn current_time_secs() -> u32 {
-        u32::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_secs()),
-        )
-        .unwrap_or(u32::MAX)
+    /// Reduces shutdown latency after the caller sets the shared shutdown flag.
+    ///
+    /// Correctness does not depend on this notification: every wait is bounded
+    /// and rechecks the shutdown predicate.
+    pub fn notify_shutdown(&self) {
+        self.service.notify_shutdown();
     }
 
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
@@ -376,6 +256,96 @@ fn header_reject_reason(error: ChainError) -> MiningControlError {
         other => CompactString::from(other.to_string()),
     };
     MiningControlError::Rejected(reason)
+}
+
+/// Serves the lifecycle the applied-tip snapshot the node publishes.
+struct AppliedTipAdapter {
+    tip: Arc<ArcSwapOption<TipSnapshot>>,
+}
+
+impl AppliedTipSource for AppliedTipAdapter {
+    fn applied_tip(&self) -> Option<TipSnapshot> {
+        self.tip.load_full().map(|snapshot| (*snapshot).clone())
+    }
+}
+
+/// Serves mempool reads for candidate assembly, one read lock per call.
+struct MempoolAdapter {
+    mempool: Arc<RwLock<Mempool>>,
+}
+
+impl MempoolSnapshotSource for MempoolAdapter {
+    fn current_sequence(&self) -> u64 {
+        self.mempool.read().sequence_number()
+    }
+
+    fn mining_snapshot_at(&self, expected_sequence: u64) -> Option<MempoolMiningSnapshot> {
+        let mempool = self.mempool.read();
+        if mempool.sequence_number() != expected_sequence {
+            return None;
+        }
+        Some(mempool.mining_snapshot())
+    }
+
+    fn pooled_transaction_count(&self) -> u64 {
+        u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX)
+    }
+
+    fn selection_snapshot(
+        &self,
+        selection: &GenerateSelection,
+    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+        let mempool = self.mempool.read();
+        snapshot_for_selection(&mempool, selection)
+    }
+
+    fn min_relay_fee_sat_per_kvb(&self) -> u64 {
+        self.mempool.read().min_relay_fee_sat_per_kvb()
+    }
+}
+
+/// Resolves applied-tree facts for the lifecycle.
+struct ChainContextAdapter {
+    block_tree: Arc<RwLock<BlockTree>>,
+    network: Network,
+}
+
+impl ChainContextSource for ChainContextAdapter {
+    fn resolve_mining_context(
+        &self,
+        tip: &TipSnapshot,
+        candidate_time: u32,
+    ) -> Result<MiningChainContext, ChainError> {
+        MiningChainContext::resolve(
+            &self.block_tree.read(),
+            self.network,
+            tip.tip_id,
+            candidate_time,
+        )
+    }
+
+    fn tip_bits(&self, tip: &TipSnapshot) -> Result<CompactTarget, ChainError> {
+        self.block_tree
+            .read()
+            .node(tip.tip_id)
+            .map(|node| node.header.bits)
+    }
+
+    fn signalling_rules(&self, tip: &TipSnapshot, height: u32) -> Vec<AvailableMiningRule> {
+        signalling_deployments(&self.block_tree.read(), self.network, tip.tip_id, height)
+            .into_iter()
+            .map(|deployment| AvailableMiningRule {
+                rule: MiningRule::new(deployment.name),
+                bit: deployment.bit,
+            })
+            .collect()
+    }
+}
+
+impl MempoolSequenceWake for MiningCoordinator {
+    fn publish_generation_from(&self, sequence: u64) {
+        self.service.publish_generation_from(sequence);
+    }
 }
 
 #[cfg(test)]
@@ -518,34 +488,6 @@ fn hashes_per_second(work_be_bytes: [u8; 32], time_delta_secs: i64) -> f64 {
     work / f64::from(u32::try_from(time_delta_secs).unwrap_or(u32::MAX))
 }
 
-/// Decodes a lowercase hex string to bytes. Returns `None` on invalid input.
-fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.as_bytes().iter();
-    while let Some(&hi) = chars.next() {
-        let &lo = chars.next()?;
-        let high = decode_nibble(hi)?;
-        let low = decode_nibble(lo)?;
-        bytes.push((high << 4) | low);
-    }
-    Some(bytes)
-}
-
-fn decode_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod generation_key_tests;
-
 /// Oracle: Bitcoin Core `GetNetworkHashPS` in `src/rpc/mining.cpp` (kernel 31.99).
 ///
 /// `workDiff = nChainWork[end] - nChainWork[start]` over `lookup` parent walks,
@@ -554,9 +496,6 @@ mod generation_key_tests;
 /// first/last. `lookup == -1` walks `height % DifficultyAdjustmentInterval + 1`.
 #[cfg(test)]
 mod network_hashps_oracle_tests;
-
-#[cfg(test)]
-mod candidate_template_tests;
 
 #[cfg(test)]
 mod generation_signal_tests;

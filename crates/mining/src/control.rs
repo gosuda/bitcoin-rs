@@ -1,7 +1,9 @@
 //! Node-facing mining contract: one template model, one control trait.
 //!
 //! RPC projects these types onto BIP22/BIP23 JSON. The node implements
-//! [`MiningControl`]. This crate does not cache, long-poll, or submit.
+//! [`MiningControl`]. Caching and long-poll live in this crate's
+//! [`coordinator`](crate::coordinator); proposal validation and solved-block
+//! submission stay on the node's authoritative apply path.
 
 use std::sync::Arc;
 use std::vec::Vec;

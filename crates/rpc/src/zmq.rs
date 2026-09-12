@@ -1221,10 +1221,11 @@ mod compat_manifest_tests {
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
             MempoolObserver,
         };
+        use bitcoin_rs_mining::MempoolSequenceWake;
         use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
-        use bitcoin_rs_node::mining::{MempoolSequenceWake, MiningGenerationSignal};
+        use bitcoin_rs_node::mining::MiningGenerationSignal;
         use compact_str::CompactString;
         use parking_lot::{Mutex, RwLock};
 
@@ -1511,10 +1512,11 @@ mod sequence_observer_tests {
 
     #[test]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
+        use bitcoin_rs_mining::MempoolSequenceWake;
         use bitcoin_rs_mining::{
             BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
         };
-        use bitcoin_rs_node::mining::{MempoolSequenceWake, MiningGenerationSignal};
+        use bitcoin_rs_node::mining::MiningGenerationSignal;
         use compact_str::CompactString;
 
         struct RecordingControl {

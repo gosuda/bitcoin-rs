@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -396,8 +396,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
         state.shutdown(),
-    )
-    .with_mempool_update_wait(Duration::ZERO);
+    );
     let mining_control: Arc<dyn MiningControl> = Arc::new(coordinator);
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
