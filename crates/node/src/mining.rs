@@ -9,7 +9,6 @@
 
 mod candidate;
 mod control;
-mod long_poll;
 mod submission;
 
 use crate::apply::Chainstate;
@@ -21,31 +20,32 @@ use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::accept_headers;
+use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_mempool::Mempool;
+use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::MempoolObserver;
 use bitcoin_rs_mempool::MutationEnvelope;
 #[cfg(test)]
 use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::CANDIDATE_GENERATION_RETRIES;
+use bitcoin_rs_mining::AppliedTipSource;
+use bitcoin_rs_mining::ChainContextSource;
 use bitcoin_rs_mining::DEFAULT_MEMPOOL_UPDATE_WAIT;
-use bitcoin_rs_mining::GenerationKey;
-use bitcoin_rs_mining::InFlight;
-use bitcoin_rs_mining::LONG_POLL_SLICE;
-use bitcoin_rs_mining::CoordinatorState;
+use bitcoin_rs_mining::MempoolSequenceWake;
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_mining::MempoolSequenceWake;
-use bitcoin_rs_mining::generation_race;
-use bitcoin_rs_mining::is_generation_race;
+use bitcoin_rs_mining::MiningRule;
+use bitcoin_rs_mining::MiningService;
+use bitcoin_rs_mining::MempoolSnapshotSource;
+use bitcoin_rs_mining::AvailableMiningRule;
 use bitcoin_rs_mining::snapshot_for_selection;
+use bitcoin_rs_mining::MiningChainContext;
+use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 use core::time::Duration;
-use parking_lot::Condvar;
-use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -156,14 +156,13 @@ pub struct MiningCoordinator {
     mempool: Arc<RwLock<Mempool>>,
     apply_handles: Chainstate,
     followers: ChainFollowers,
-    coinbase_script: Vec<u8>,
     shutdown: Arc<AtomicBool>,
     /// Wall clock used for long-poll cooldowns.
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     /// Controllable mempool-only long-poll cooldown (Core default: 10s).
     mempool_update_wait: Duration,
-    state: Mutex<CoordinatorState>,
-    wake: Condvar,
+    /// Mining-domain lifecycle service over the capability adapters.
+    service: MiningService,
 }
 
 impl MiningCoordinator {
@@ -183,6 +182,21 @@ impl MiningCoordinator {
         coinbase_script: Vec<u8>,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
+        let service = MiningService::new(
+            network,
+            Arc::new(AppliedTipAdapter {
+                tip: Arc::clone(&applied_tip),
+            }),
+            Arc::new(MempoolAdapter {
+                mempool: Arc::clone(&mempool),
+            }),
+            Arc::new(ChainContextAdapter {
+                block_tree: Arc::clone(&block_tree),
+                network,
+            }),
+            coinbase_script,
+            Arc::clone(&shutdown),
+        );
         Self {
             network,
             applied_tip,
@@ -190,12 +204,10 @@ impl MiningCoordinator {
             mempool,
             apply_handles,
             followers,
-            coinbase_script,
             shutdown,
             clock: Arc::new(Instant::now),
             mempool_update_wait: DEFAULT_MEMPOOL_UPDATE_WAIT,
-            state: Mutex::new(CoordinatorState::new()),
-            wake: Condvar::new(),
+            service,
         }
     }
 
@@ -213,13 +225,12 @@ impl MiningCoordinator {
         self
     }
 
-    fn current_time_secs() -> u32 {
-        u32::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_secs()),
-        )
-        .unwrap_or(u32::MAX)
+    /// Reduces shutdown latency after the caller sets the shared shutdown flag.
+    ///
+    /// Correctness does not depend on this notification: every wait is bounded
+    /// and rechecks the shutdown predicate.
+    pub fn notify_shutdown(&self) {
+        self.service.notify_shutdown();
     }
 
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
@@ -276,6 +287,87 @@ fn header_reject_reason(error: ChainError) -> MiningControlError {
         other => CompactString::from(other.to_string()),
     };
     MiningControlError::Rejected(reason)
+}
+
+/// Serves the lifecycle the applied-tip snapshot the node publishes.
+struct AppliedTipAdapter {
+    tip: Arc<ArcSwapOption<TipSnapshot>>,
+}
+
+impl AppliedTipSource for AppliedTipAdapter {
+    fn applied_tip(&self) -> Option<TipSnapshot> {
+        self.tip.load_full().map(|snapshot| (*snapshot).clone())
+    }
+}
+
+/// Serves mempool reads for candidate assembly, one read lock per call.
+struct MempoolAdapter {
+    mempool: Arc<RwLock<Mempool>>,
+}
+
+impl MempoolSnapshotSource for MempoolAdapter {
+    fn current_sequence(&self) -> u64 {
+        self.mempool.read().sequence_number()
+    }
+
+    fn mining_snapshot_at(&self, expected_sequence: u64) -> Option<MempoolMiningSnapshot> {
+        let mempool = self.mempool.read();
+        if mempool.sequence_number() != expected_sequence {
+            return None;
+        }
+        Some(mempool.mining_snapshot())
+    }
+
+    fn pooled_transaction_count(&self) -> u64 {
+        u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX)
+    }
+
+    fn min_relay_fee_sat_per_kvb(&self) -> u64 {
+        self.mempool.read().min_relay_fee_sat_per_kvb()
+    }
+}
+
+/// Resolves applied-tree facts for the lifecycle.
+struct ChainContextAdapter {
+    block_tree: Arc<RwLock<BlockTree>>,
+    network: Network,
+}
+
+impl ChainContextSource for ChainContextAdapter {
+    fn resolve_mining_context(
+        &self,
+        tip: &TipSnapshot,
+        candidate_time: u32,
+    ) -> Result<MiningChainContext, ChainError> {
+        MiningChainContext::resolve(&self.block_tree.read(), self.network, tip.tip_id, candidate_time)
+    }
+
+    fn tip_bits(&self, tip: &TipSnapshot) -> Result<CompactTarget, ChainError> {
+        self.block_tree
+            .read()
+            .node(tip.tip_id)
+            .map(|node| node.header.bits)
+    }
+
+    fn signalling_rules(
+        &self,
+        tip: &TipSnapshot,
+        height: u32,
+    ) -> Vec<AvailableMiningRule> {
+        signalling_deployments(&self.block_tree.read(), self.network, tip.tip_id, height)
+            .into_iter()
+            .map(|deployment| AvailableMiningRule {
+                rule: MiningRule::new(deployment.name),
+                bit: deployment.bit,
+            })
+            .collect()
+    }
+}
+
+impl MempoolSequenceWake for MiningCoordinator {
+    fn publish_generation_from(&self, sequence: u64) {
+        self.service.publish_generation_from(sequence);
+    }
 }
 
 #[cfg(test)]

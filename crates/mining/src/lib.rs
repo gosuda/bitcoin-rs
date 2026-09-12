@@ -27,11 +27,11 @@ pub use control::{
 };
 pub use coordinator::{
     CANDIDATE_CACHE_LIMIT, CANDIDATE_GENERATION_RETRIES, DEFAULT_MEMPOOL_UPDATE_WAIT,
-    GENERATION_RACE, LONG_POLL_SLICE,
+    GENERATION_RACE, LONG_POLL_SLICE, MAX_BLOCK_SIZE, MAX_BLOCK_WEIGHT,
 };
 pub use coordinator::{
-    AppliedTipSource, ChainContextSource, CoordinatorState, GenerationKey, InFlight,
-    MempoolSequenceWake, MiningService,
+    AppliedTipSource, ChainContextSource, CoordinatorState, GenerationKey, MempoolSequenceWake,
+    MiningService, MempoolSnapshotSource,
 };
 pub use coordinator::{
     generation_race, is_generation_race, parse_long_poll_id, signet_info, snapshot_for_selection,

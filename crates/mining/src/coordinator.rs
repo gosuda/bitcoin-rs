@@ -9,13 +9,15 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
+use bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
@@ -28,6 +30,8 @@ use parking_lot::Condvar;
 use parking_lot::Mutex;
 
 use crate::control::AvailableMiningRule;
+use crate::control::MiningInfo;
+use crate::control::difficulty_for_bits;
 use crate::control::BlockTemplate;
 use crate::control::GenerateSelection;
 use crate::control::GenerateTx;
@@ -39,6 +43,8 @@ use crate::control::SignetMiningInfo;
 use crate::control::TemplateMutation;
 use crate::context::MiningChainContext;
 use crate::template::Candidate;
+use crate::template::CandidateContext;
+use crate::template::assemble_candidate;
 use crate::template::TemplateId;
 
 /// Default number of cached candidates retained by template id.
@@ -51,6 +57,10 @@ pub const GENERATION_RACE: &str = "generation key changed during candidate assem
 pub const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
 /// Upper bound for a single long-poll wait slice while rechecking predicates.
 pub const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
+/// Consensus maximum block weight.
+pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
+/// Consensus maximum serialized block size.
+pub const MAX_BLOCK_SIZE: u64 = 4_000_000;
 
 /// Applied-tip hash plus mempool sequence that identify one candidate generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -71,30 +81,30 @@ impl GenerationKey {
 
 /// Single in-flight assembly record.
 #[derive(Debug)]
-pub struct InFlight {
+struct InFlight {
     /// Generation key the flight assembles for.
-    pub key: GenerationKey,
+    key: GenerationKey,
     /// Monotonic identity assigned when the flight was installed.
-    pub id: u64,
+    id: u64,
     /// Result shared with same-key waiters once assembly finishes.
-    pub result: Option<Result<Arc<Candidate>, MiningControlError>>,
+    result: Option<Result<Arc<Candidate>, MiningControlError>>,
 }
 
 /// Bounded template cache, single-flight guard, and published generation.
 #[derive(Debug, Default)]
 pub struct CoordinatorState {
     /// Last generation published to long-poll waiters.
-    pub published: Option<GenerationKey>,
+    published: Option<GenerationKey>,
     /// Bounded LRU of assembled candidates keyed by template id.
     pub cache: HashMap<TemplateId, Arc<Candidate>>,
     /// Insertion order for deterministic eviction of the oldest entry.
-    pub cache_order: VecDeque<TemplateId>,
+    cache_order: VecDeque<TemplateId>,
     /// Single in-flight assembly, if any.
-    pub in_flight: Option<InFlight>,
+    in_flight: Option<InFlight>,
     /// Monotonically increasing identity for each installed flight.
-    pub next_flight_id: u64,
+    next_flight_id: u64,
     /// Facts from the most recently assembled candidate.
-    pub last_candidate: Option<LastCandidateInfo>,
+    last_candidate: Option<LastCandidateInfo>,
 }
 
 impl CoordinatorState {
@@ -112,7 +122,7 @@ impl CoordinatorState {
     }
 
     /// Returns the cached candidate for `id`, if one is retained.
-    pub fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
+    fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
         self.cache.get(id).cloned()
     }
 
@@ -133,7 +143,7 @@ impl CoordinatorState {
     }
 
     /// Drops the cached candidate and any matching in-flight assembly for `key`.
-    pub fn invalidate_key(&mut self, key: GenerationKey) {
+    fn invalidate_key(&mut self, key: GenerationKey) {
         let id = key.template_id();
         if self.cache.remove(&id).is_some() {
             self.cache_order.retain(|cached| cached != &id);
@@ -170,8 +180,12 @@ pub trait AppliedTipSource: Send + Sync {
 pub trait MempoolSnapshotSource: Send + Sync {
     /// Monotonic mutation sequence of the pool.
     fn current_sequence(&self) -> u64;
-    /// Mining view of the pool's current transactions.
-    fn mining_snapshot(&self) -> MempoolMiningSnapshot;
+    /// Captures the mining snapshot if the pool is still at `expected_sequence`.
+    ///
+    /// The comparison and the capture share one pool read lock: a snapshot is
+    /// only valid for the sequence it was taken at, so generation-key
+    /// coherence is checked and captured atomically.
+    fn mining_snapshot_at(&self, expected_sequence: u64) -> Option<MempoolMiningSnapshot>;
     /// Number of pooled transactions.
     fn pooled_transaction_count(&self) -> u64;
     /// Minimum relay fee in sat/kvB.
@@ -209,7 +223,6 @@ pub trait ChainContextSource: Send + Sync {
 /// publication state. The node facade constructs it with adapters over the
 /// applied tip, the mempool, and the block tree, and keeps proposal
 /// validation and solved-block submission on the authoritative apply path.
-#[expect(dead_code, reason = "stub; the lifecycle methods land with the candidate-lifecycle move")]
 pub struct MiningService {
     /// Network whose genesis anchors an empty applied chain.
     network: Network,
@@ -217,10 +230,6 @@ pub struct MiningService {
     coinbase_script: Vec<u8>,
     /// Shared shutdown flag checked by every unbounded wait.
     shutdown: Arc<AtomicBool>,
-    /// Wall clock used for long-poll cooldowns.
-    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
-    /// Controllable mempool-only long-poll cooldown (Core default: 10s).
-    mempool_update_wait: Duration,
     /// Applied-chain tip publisher.
     applied_tip: Arc<dyn AppliedTipSource>,
     /// Read-only mempool facts.
@@ -255,25 +264,417 @@ impl MiningService {
             chain,
             coinbase_script,
             shutdown,
-            clock: Arc::new(Instant::now),
-            mempool_update_wait: DEFAULT_MEMPOOL_UPDATE_WAIT,
             state: Mutex::new(CoordinatorState::new()),
             wake: Condvar::new(),
         }
     }
 
-    /// Overrides the wall clock. Intended for deterministic tests.
-    #[must_use]
-    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
-        self.clock = clock;
-        self
+    /// Publishes the live generation key and wakes every long-poll / single-flight waiter.
+    ///
+    /// Callers must invoke this after every authoritative applied-tip or mempool
+    /// mutation and before any dependent notification. The published key is
+    /// captured from live applied-tip / mempool state under the coordinator lock.
+    pub fn publish_generation(&self) {
+        let key = self.live_generation_key();
+        let mut state = self.state.lock();
+        if let Some(previous) = state.published
+            && previous != key
+        {
+            state.invalidate_key(previous);
+        }
+        state.published = Some(key);
+        self.wake.notify_all();
     }
 
-    /// Overrides the mempool-only long-poll cooldown. Tests may set this to zero.
-    #[must_use]
-    pub const fn with_mempool_update_wait(mut self, wait: Duration) -> Self {
-        self.mempool_update_wait = wait;
-        self
+    /// Publishes a generation key built from `applied_tip` and `sequence`
+    /// without taking the mempool read lock, then wakes all waiters.
+    ///
+    /// The mempool observer calls this with the sequence the mutation already
+    /// produced, avoiding a reentrant pool read that can deadlock under the
+    /// gateway's publish mutex. Tip-move callers should use
+    /// [`Self::publish_generation`] instead, which captures the live sequence
+    /// safely (no write lock is held on that path).
+    pub fn publish_generation_from(&self, sequence: u64) {
+        let tip_hash = self
+            .applied_tip
+            .applied_tip()
+            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash);
+        let key = GenerationKey {
+            tip_hash,
+            mempool_sequence: sequence,
+        };
+        let mut state = self.state.lock();
+        if let Some(previous) = state.published
+            && previous != key
+        {
+            state.invalidate_key(previous);
+        }
+        state.published = Some(key);
+        self.wake.notify_all();
+    }
+
+    /// Reduces shutdown latency after the caller sets the shared shutdown flag.
+    ///
+    /// Correctness does not depend on this notification: every wait is bounded
+    /// and rechecks the shutdown predicate.
+    pub fn notify_shutdown(&self) {
+        self.wake.notify_all();
+    }
+
+    fn live_generation_key(&self) -> GenerationKey {
+        let tip_hash = self
+            .applied_tip
+            .applied_tip()
+            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash);
+        let mempool_sequence = self.mempool.current_sequence();
+        GenerationKey {
+            tip_hash,
+            mempool_sequence,
+        }
+    }
+
+    fn ensure_published(&self, state: &mut CoordinatorState) -> GenerationKey {
+        let live = self.live_generation_key();
+        if state.published != Some(live) {
+            if let Some(previous) = state.published
+                && previous != live
+            {
+                state.invalidate_key(previous);
+            }
+            state.published = Some(live);
+        }
+        live
+    }
+
+    fn wait_for_generation_change(
+        &self,
+        waited: GenerationKey,
+    ) -> Result<GenerationKey, MiningControlError> {
+        let mut state = self.state.lock();
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let live = self.ensure_published(&mut state);
+            if live != waited {
+                return Ok(live);
+            }
+            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+        }
+    }
+
+    /// Assembles the BIP22/BIP23 template for the live (or long-polled) generation.
+    ///
+    /// Long-poll callers pass the `longpollid` they are still working; the call
+    /// blocks until the published generation changes or the node shuts down.
+    ///
+    /// # Errors
+    ///
+    /// [`MiningControlError::InvalidRequest`] for a malformed long-poll id;
+    /// [`MiningControlError::Unavailable`] while no tip is applied, on
+    /// shutdown, or when the generation raced during assembly.
+    pub fn get_block_template(
+        &self,
+        long_poll_id: Option<&str>,
+    ) -> Result<BlockTemplate, MiningControlError> {
+        let waited = if let Some(long_poll_id) = long_poll_id {
+            let waited = parse_long_poll_id(long_poll_id).ok_or_else(|| {
+                MiningControlError::InvalidRequest(CompactString::from(
+                    "longpollid is malformed",
+                ))
+            })?;
+            let live = {
+                let mut state = self.state.lock();
+                self.ensure_published(&mut state)
+            };
+            if live == waited {
+                self.wait_for_generation_change(waited)?;
+            }
+            Some(waited)
+        } else {
+            None
+        };
+        let tip = self.applied_tip.applied_tip().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from(
+                "applied tip is not available",
+            ))
+        })?;
+        let candidate = self.live_candidate()?;
+        let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
+        let (version_bits_available, version_bits_required) = self.version_bits_for(&candidate, &tip);
+        Ok(template_from_candidate(
+            self.network,
+            candidate,
+            submit_old,
+            version_bits_available,
+            version_bits_required,
+        ))
+    }
+
+    /// Captures one coherent mining-state report.
+    ///
+    /// `network_hashes_per_second` and `warnings` are node-owned facts
+    /// (the applied-tree hashrate walk and node metrics); everything else is
+    /// derived from the applied tip, the mempool, and the lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// [`MiningControlError::Failed`] when the applied tip cannot be resolved
+    /// in the tree.
+    pub fn mining_info(
+        &self,
+        network_hashes_per_second: f64,
+        warnings: Vec<CompactString>,
+    ) -> Result<MiningInfo, MiningControlError> {
+        let tip = self.applied_tip.applied_tip();
+        let blocks = tip.as_ref().map_or(0, |tip| tip.height);
+        let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
+            Some(tip) => {
+                let tip_bits = self
+                    .chain
+                    .tip_bits(tip)
+                    .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+                let current_time = current_unix_seconds().max(1);
+                let next = self
+                    .chain
+                    .resolve_mining_context(tip, current_time)
+                    .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+                (
+                    tip_bits,
+                    difficulty_for_bits(tip_bits),
+                    next.bits,
+                    difficulty_for_bits(next.bits),
+                )
+            }
+            None => (
+                CompactTarget::from_consensus(0),
+                0.0,
+                CompactTarget::from_consensus(0),
+                0.0,
+            ),
+        };
+        let pooled_transactions = self.mempool.pooled_transaction_count();
+        let minimum_fee_rate = self.mempool.min_relay_fee_sat_per_kvb();
+        let last_candidate = self.state.lock().last_candidate;
+        Ok(MiningInfo {
+            blocks,
+            last_candidate,
+            bits,
+            difficulty,
+            network_hashes_per_second,
+            pooled_transactions,
+            network: self.network,
+            next_bits,
+            next_difficulty,
+            minimum_fee_rate,
+            signet: signet_info(self.network),
+            warnings,
+        })
+    }
+
+    /// Returns the live candidate, retrying bounded generation-key races.
+    fn live_candidate(&self) -> Result<Arc<Candidate>, MiningControlError> {
+        let mut last_race = None;
+        for _attempt in 0..CANDIDATE_GENERATION_RETRIES {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let key = {
+                let mut state = self.state.lock();
+                self.ensure_published(&mut state)
+            };
+            match self.candidate_for_key(key) {
+                Ok(candidate) => {
+                    if self.live_generation_key() == key {
+                        return Ok(candidate);
+                    }
+                    last_race = Some(generation_race());
+                }
+                Err(error) if is_generation_race(&error) => last_race = Some(error),
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_race.unwrap_or_else(generation_race))
+    }
+
+    /// Cache lookup or single-flight assembly for one generation key.
+    fn candidate_for_key(
+        &self,
+        key: GenerationKey,
+    ) -> Result<Arc<Candidate>, MiningControlError> {
+        let template_id = key.template_id();
+        let mut state = self.state.lock();
+        if let Some(cached) = state.cache_get(&template_id) {
+            return Ok(cached);
+        }
+
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "node is shutting down",
+                )));
+            }
+            let Some(flight) = state.in_flight.as_ref() else {
+                break;
+            };
+            if flight.key != key {
+                break;
+            }
+            if let Some(result) = flight.result.clone() {
+                return result;
+            }
+            let _ = self.wake.wait_for(&mut state, LONG_POLL_SLICE);
+        }
+        if let Some(cached) = state.cache_get(&template_id) {
+            return Ok(cached);
+        }
+
+        state.next_flight_id = state.next_flight_id.wrapping_add(1);
+        let flight_id = state.next_flight_id;
+        state.in_flight = Some(InFlight {
+            key,
+            id: flight_id,
+            result: None,
+        });
+        drop(state);
+        let mut flight_guard = InFlightAssemblyGuard {
+            service: self,
+            key,
+            id: flight_id,
+            armed: true,
+        };
+
+        let assembled = self.assemble_for_key(key);
+        let mut state = self.state.lock();
+        let returned = match &assembled {
+            Ok(candidate) => {
+                let live = self.live_generation_key();
+                if live == key {
+                    state.cache_insert(template_id, Arc::clone(candidate));
+                    state.last_candidate = Some(LastCandidateInfo {
+                        weight: candidate.weight,
+                        transactions: u64::try_from(candidate.transactions.len())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(1),
+                    });
+                    state.published = Some(key);
+                    Ok(Arc::clone(candidate))
+                } else {
+                    Err(generation_race())
+                }
+            }
+            Err(error) => Err(error.clone()),
+        };
+        if let Some(flight) = state.in_flight.as_mut()
+            && flight.key == key
+            && flight.id == flight_id
+        {
+            flight.result = Some(returned.clone());
+        }
+        self.wake.notify_all();
+        if state.in_flight.as_ref().is_some_and(|flight| {
+            flight.key == key && flight.id == flight_id && flight.result.is_some()
+        }) {
+            state.in_flight = None;
+        }
+        flight_guard.armed = false;
+        returned
+    }
+
+    /// Assembles the candidate for `key`, refusing a raced tip or mempool.
+    fn assemble_for_key(
+        &self,
+        key: GenerationKey,
+    ) -> Result<Arc<Candidate>, MiningControlError> {
+        let tip = self.applied_tip.applied_tip().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        if tip.hash != key.tip_hash {
+            return Err(generation_race());
+        }
+        let Some(snapshot) = self.mempool.mining_snapshot_at(key.mempool_sequence) else {
+            return Err(generation_race());
+        };
+        let current_time = current_unix_seconds().max(1);
+        let chain = self
+            .chain
+            .resolve_mining_context(&tip, current_time)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        let context = CandidateContext {
+            previous_block_hash: chain.previous_block_hash,
+            height: chain.height,
+            version: chain.version,
+            bits: chain.bits,
+            min_time: chain.min_time,
+            current_time: current_time.max(chain.min_time),
+            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
+            network: self.network,
+            csv_active: chain.csv_active,
+            segwit_active: chain.segwit_active,
+            max_weight: MAX_BLOCK_WEIGHT,
+            max_size: MAX_BLOCK_SIZE,
+            max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
+        };
+        let candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        if candidate.template_id != key.template_id() {
+            return Err(MiningControlError::Failed(CompactString::from(
+                "assembled candidate template id does not match generation key",
+            )));
+        }
+        Ok(Arc::new(candidate))
+    }
+
+    fn version_bits_for(
+        &self,
+        candidate: &Candidate,
+        tip: &TipSnapshot,
+    ) -> (Vec<AvailableMiningRule>, u32) {
+        if tip.hash != candidate.previous_block_hash {
+            return (Vec::new(), 0);
+        }
+        // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
+        (self.chain.signalling_rules(tip, candidate.height), 0)
+    }
+}
+
+impl MempoolSequenceWake for MiningService {
+    fn publish_generation_from(&self, sequence: u64) {
+        Self::publish_generation_from(self, sequence);
+    }
+}
+
+/// Clears an abandoned single-flight slot if candidate assembly unwinds.
+///
+/// Release/quickstart builds abort on panic, but test, development, and other
+/// unwind-enabled profiles must not leave same-key callers blocked behind a
+/// permanently in-flight generation.
+struct InFlightAssemblyGuard<'a> {
+    service: &'a MiningService,
+    key: GenerationKey,
+    id: u64,
+    armed: bool,
+}
+
+impl Drop for InFlightAssemblyGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut state = self.service.state.lock();
+        if state
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.key == self.key && flight.id == self.id)
+        {
+            state.in_flight = None;
+            drop(state);
+            self.service.wake.notify_all();
+        }
     }
 }
 
