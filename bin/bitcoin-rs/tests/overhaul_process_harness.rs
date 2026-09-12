@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
+use bitcoin_rs_rpc::capabilities::CapabilityState;
 use serde_json::{Value, json};
 use support::process_node::{
     ClockControl, HarnessError, NodeBinary, ProcessNode, START_TIMEOUT, compare_reply, compare_rpc,
@@ -576,16 +577,7 @@ const MINING_ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 /// The readiness outcomes documented for the txindex capability. The gauge
 /// label and the `getcapabilities` row spell them identically; a state
 /// outside this vocabulary is a behavior failure, never a poll artifact.
-const READINESS_OUTCOMES: [&str; 8] = [
-    "Ready",
-    "CatchingUp",
-    "RollingBack",
-    "Rebuilding",
-    "Failed",
-    "Disabled",
-    "Opening",
-    "ShutdownAbandoned",
-];
+const READINESS_OUTCOMES: [&str; 8] = CapabilityState::WIRE_NAMES;
 
 fn readiness_deadline() -> Instant {
     Instant::now() + Duration::from_secs(120)

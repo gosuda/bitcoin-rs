@@ -49,6 +49,29 @@ pub enum CapabilityState {
     ShutdownAbandoned,
 }
 
+impl CapabilityState {
+    /// Stable wire labels for every capability lifecycle state.
+    pub const WIRE_NAMES: [&'static str; 8] = [
+        "Ready", "CatchingUp", "RollingBack", "Rebuilding",
+        "Failed", "Disabled", "Opening", "ShutdownAbandoned",
+    ];
+
+    /// Returns the stable wire spelling of this state.
+    #[must_use]
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::CatchingUp { .. } => "CatchingUp",
+            Self::RollingBack { .. } => "RollingBack",
+            Self::Rebuilding { .. } => "Rebuilding",
+            Self::Failed { .. } => "Failed",
+            Self::Disabled => "Disabled",
+            Self::Opening => "Opening",
+            Self::ShutdownAbandoned => "ShutdownAbandoned",
+        }
+    }
+}
+
 /// Status of one concrete node capability exposed through RPC.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityStatus {
