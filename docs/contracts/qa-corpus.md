@@ -16,6 +16,9 @@ end-state evidence roles.
 - **Scope**: seeds under `fuzz/corpus/` feeding fuzz targets
   `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`, `tx_validate.rs`, and
   `script_eval.rs`.
+- `scripts/fuzz-policy.sh` owns `FUZZ_MAX_SEED_BYTES`, the input-size bound
+  shared by QA import and scheduled corpus evolution. Provenance publishes the
+  current value; it does not own a second copy.
 - Provenance rows must be updated in the same commit as any corpus re-import via
   `scripts/import-qa-assets.sh`.
 

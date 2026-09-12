@@ -21,10 +21,11 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 readonly REPO_ROOT
+# shellcheck source=scripts/fuzz-policy.sh
+source "$(dirname "$0")/fuzz-policy.sh"
 readonly QA_ASSETS_URL="https://github.com/rust-bitcoin/qa-assets.git"
 readonly FOOTPRINT_ASSUME_MB=2048  # worst-case shallow-clone footprint
 readonly RESERVE_MB=1024           # free-space reserve on top of the footprint
-readonly MAX_SEED_BYTES=65536      # keep individual seeds bounded
 
 # cargo env hygiene for this repo (see repo AGENTS.md); fuzzing needs nightly
 # for -Zsanitizer, and an explicit host triple because cargo-fuzz 0.13
@@ -110,7 +111,7 @@ for arbitrary_dir in "${CORPORA}"/bitcoin_arbitrary_*; do
 done
 "${CARGO_ENV[@]}" python3 "${REPO_ROOT}/scripts/import_qa_assets.py" \
     --corpora "${CORPORA}" --repo-root "${REPO_ROOT}" \
-    --out-base "${OUT_BASE}" --max-seed-bytes "${MAX_SEED_BYTES}"
+    --out-base "${OUT_BASE}" --max-seed-bytes "${FUZZ_MAX_SEED_BYTES}"
 
 # --- 4. Minimize each target corpus with cargo fuzz cmin ---------------------
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
@@ -140,7 +141,7 @@ Seeds under fuzz/corpus/ were imported from
 | Import date | @@IMPORT_DATE@@ |
 | License | CC0-1.0 |
 | Import tool | scripts/import-qa-assets.sh (clone pinned to the commit above, then cargo fuzz cmin per target) |
-| Size policy | source files >= ${MAX_SEED_BYTES} bytes are skipped and counted in the import log (repo-size bound matching the targets' input caps) |
+| Size policy | source files >= ${FUZZ_MAX_SEED_BYTES} bytes are skipped and counted in the import log (repo-size bound matching the targets' input caps) |
 
 EOF
 

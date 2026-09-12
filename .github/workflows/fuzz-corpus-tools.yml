@@ -20,5 +20,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check importer syntax
         run: bash -n scripts/import-qa-assets.sh
+      - name: Check campaign script syntax
+        run: |
+          bash -n scripts/fuzz-policy.sh
+          bash -n scripts/run-fuzz-campaign.sh
       - name: Run offline corpus-import regressions
         run: python3 -m unittest discover -s scripts/tests -p 'test_import_qa_assets*.py' -v
