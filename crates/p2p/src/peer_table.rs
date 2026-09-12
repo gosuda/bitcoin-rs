@@ -679,8 +679,8 @@ mod tests {
         assert!(!table.note_announced_height(unpublished_source, 50));
     }
 
-    // Contract proof: BIP152 compact-fetch eligibility reads the published
-    // per-connection relay preference.
+    // CONTRACT: docs/policies/p2p-compatibility.md#4-handshake-contract (the
+    // published BIP152 relay preference feeds compact-fetch eligibility).
     #[test]
     fn note_compact_relay_credits_only_the_delivering_connection() {
         let table = PeerTable::new();

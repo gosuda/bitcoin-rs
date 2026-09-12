@@ -1839,6 +1839,8 @@ mod writer_shutdown_tests {
         assert!(table.is_current(replacement.source(addr)));
     }
 
+    // CONTRACT: docs/policies/p2p-compatibility.md#4-handshake-contract (a
+    // known-version sendcmpct raises the published relay preference).
     #[test]
     fn sendcmpct_raises_published_compact_relay_preference() {
         let sendcmpct = |send_compact: bool, version: u64| {

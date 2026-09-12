@@ -599,6 +599,9 @@ mod tests {
     /// More than [`MAX_REQUESTED_MISSING`] missing transactions skips the
     /// `getblocktxn` round trip in favor of the full-block fallback; the
     /// bound itself is still worth one request.
+    ///
+    /// CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (bounded
+    /// missing list gates the getblocktxn round trip).
     #[test]
     fn cmpctblock_missing_above_the_request_bound_falls_back() {
         let hints = SetHints { txs: Vec::new() };

@@ -135,6 +135,9 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
 /// Near-tip requests to a compact-relaying peer ride the compact flavor;
 /// deep IBD requests and non-relaying peers keep the witness flavor. The
 /// download window resolves either answer by hash, unchanged.
+///
+/// CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (compact
+/// flavor fetch eligibility).
 #[test]
 fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
 -> Result<(), Box<dyn std::error::Error>> {
