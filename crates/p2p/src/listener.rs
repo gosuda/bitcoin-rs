@@ -1159,12 +1159,15 @@ fn handle_compact_outcome(
     match outcome {
         crate::compact_blocks::Outcome::Complete(block) => {
             let serialized = bitcoin_rs_primitives::consensus_bytes(&block);
+            tracing::info!(peer_addr = %peer_addr, "p2p compact block reconstructed");
             inbound_sync_sinks.send_block(lease.source(peer_addr), block, serialized.into());
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
+            tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction missing");
             follow_up(crate::Message::GetBlockTxn(request));
         }
         crate::compact_blocks::Outcome::Fallback(hash) => {
+            tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction fallback");
             follow_up(crate::Message::GetData(vec![
                 bitcoin::p2p::message_blockdata::Inventory::WitnessBlock(
                     bitcoin::BlockHash::from_byte_array(*hash.as_bytes()),
