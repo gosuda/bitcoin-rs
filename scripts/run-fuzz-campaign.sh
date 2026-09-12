@@ -104,6 +104,26 @@ coverage_report() {
     mv "${COVERAGE_PATH}" "${saved_path}"
 }
 
+# Stream a command's output while returning its status through the named
+# caller variable. A logging failure remains fatal; a command failure is
+# recorded so the campaign can still preserve artifacts and coverage.
+run_with_tee() {
+    local log_path="$1"
+    local status_name="$2"
+    local -a pipeline_status
+    shift 2
+
+    if "$@" 2>&1 | tee "${log_path}"; then
+        printf -v "${status_name}" '%s' 0
+        return 0
+    fi
+    pipeline_status=("${PIPESTATUS[@]}")
+    if (( pipeline_status[1] != 0 )); then
+        return "${pipeline_status[1]}"
+    fi
+    printf -v "${status_name}" '%s' "${pipeline_status[0]}"
+}
+
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly STARTED_AT
 START_COUNT="$(count_inputs)"
@@ -114,39 +134,23 @@ readonly START_BYTES
 coverage_report before
 
 FUZZ_STATUS=0
-if env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
+run_with_tee "${REPORT_DIR}/fuzz.log" FUZZ_STATUS \
+    env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
     cargo +nightly fuzz run \
         --target "${HOST_TARGET}" \
         --target-dir "${REPO_ROOT}/fuzz/target" \
         "${TARGET}" "${CORPUS_DIR}" -- \
         -max_total_time="${DURATION_SECONDS}" \
         -max_len="${FUZZ_MAX_SEED_BYTES}" \
-        -timeout=10 \
-        2>&1 | tee "${REPORT_DIR}/fuzz.log"; then
-    :
-else
-    fuzz_pipeline_status=("${PIPESTATUS[@]}")
-    if (( fuzz_pipeline_status[1] != 0 )); then
-        exit "${fuzz_pipeline_status[1]}"
-    fi
-    FUZZ_STATUS="${fuzz_pipeline_status[0]}"
-fi
+        -timeout=10
 
 CMIN_STATUS=0
-if env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
+run_with_tee "${REPORT_DIR}/cmin.log" CMIN_STATUS \
+    env -u RUSTC_WRAPPER -u CARGO_BUILD_BUILD_DIR CARGO_INCREMENTAL=0 \
     cargo +nightly fuzz cmin \
         --target "${HOST_TARGET}" \
         --target-dir "${REPO_ROOT}/fuzz/target" \
-        "${TARGET}" "${CORPUS_DIR}" -- -timeout=10 \
-        2>&1 | tee "${REPORT_DIR}/cmin.log"; then
-    :
-else
-    cmin_pipeline_status=("${PIPESTATUS[@]}")
-    if (( cmin_pipeline_status[1] != 0 )); then
-        exit "${cmin_pipeline_status[1]}"
-    fi
-    CMIN_STATUS="${cmin_pipeline_status[0]}"
-fi
+        "${TARGET}" "${CORPUS_DIR}" -- -timeout=10
 if grep -Fq 'Failed to minimize corpus:' "${REPORT_DIR}/cmin.log"; then
     CMIN_STATUS=1
 fi
