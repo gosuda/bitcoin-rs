@@ -57,7 +57,7 @@ with Clippy's compatibility behavior mirrored in `clippy.toml`.
 
 ## 4. Workspace Versioning and Semver Commitment
 
-All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.5.0`).
+All crates in `bitcoin-rs` share a single workspace version managed by `[workspace.package] version` (currently `0.6.0`).
 
 | Workspace Crate | Path | Description |
 | :--- | :--- | :--- |
