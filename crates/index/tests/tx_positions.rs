@@ -11,7 +11,7 @@ mod common;
 
 use std::sync::Arc;
 
-use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
+use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue};
 use bitcoin_rs_index::{IndexWriter, ScriptHash};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
@@ -175,7 +175,7 @@ fn txid_positions_address_their_own_transaction() {
 fn a_partial_position_decodes_to_none() {
     let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
     for truncated in 1..value.len() {
-        if truncated % 6 == 0 {
+        if truncated % TX_POSITION_SIZE == 0 {
             // Whole positions are a well-formed shorter list.
             continue;
         }

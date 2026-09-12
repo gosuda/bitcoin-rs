@@ -16,7 +16,9 @@ use parking_lot::{Mutex, RwLock};
 
 #[cfg(feature = "redb")]
 use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
+use bitcoin_rs_index::types::{
+    HASH_PREFIX_ROW_SIZE, HEADER_ROW_SIZE, TX_POSITION_SIZE, TxPosition, TxPositionValue,
+};
 use bitcoin_rs_index::{
     ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexFormat, IndexReader, IndexRowCounts,
     IndexWatermark, IndexWatermarks, IndexWriter, Indexer, PreparedBatch, PreparedBatchLimits,
@@ -731,7 +733,11 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
     assert_eq!(block.hash, hash);
     assert_eq!(block.parent_hash, [0u8; 32]);
     assert_eq!(block.row_count, 3); // txid + funding + header
-    assert_eq!(block.encoded_bytes, 116); // format 5 compact rows save 4 bytes here
+    // Header row plus one positioned txid and one positioned funding row.
+    assert_eq!(
+        block.encoded_bytes,
+        HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
+    );
 
     let wrong_hash = [0x42u8; 32];
     assert!(matches!(
@@ -1877,7 +1883,11 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     assert!(batch.try_push(block0).is_ok());
     assert!(batch.try_push(block1).is_err());
     assert_eq!(batch.len(), 1);
-    assert_eq!(batch.encoded_bytes(), 116); // format 5 compact rows save 4 bytes here
+    // Header row plus one positioned txid and one positioned funding row.
+    assert_eq!(
+        batch.encoded_bytes(),
+        HEADER_ROW_SIZE + 2 * (HASH_PREFIX_ROW_SIZE + TX_POSITION_SIZE)
+    );
     assert!(batch.is_full());
     assert_eq!(
         batch.watermark(),
