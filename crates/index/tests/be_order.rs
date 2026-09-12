@@ -116,7 +116,7 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     assert_eq!(
         entries.iter().map(|e| e.height).collect::<Vec<_>>(),
         vec![1, 256],
-        "resolve_script_history must sort by numeric height, not LE byte order"
+        "resolve_script_history must sort by numeric height, matching BE iteration order"
     );
 
     // The first entry's txid must come from the height-1 block.

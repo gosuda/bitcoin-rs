@@ -339,8 +339,8 @@ The index tracks two independently versioned capabilities via
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
 
 **Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 3) is a single marker in `UtxoMeta`. It
-governs whether Funding, Spending, and TxConfirmed values carry `TxPosition`
+(`INDEX_FORMAT_VERSION`, currently 3) is the soft report marker in `UtxoMeta` (the
+hard open-gate marker is the durability key `[0x00, b'V']`, row-format 5). It
 arrays, and at which width (version 3: 6-byte u24 positions). The anticipated
 `TxPosition`-width bump is this version. Readers already handle
 `IndexFormat::Legacy` by falling back to full block scans, so an old-format
