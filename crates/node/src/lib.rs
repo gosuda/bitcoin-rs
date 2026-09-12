@@ -24,6 +24,9 @@ pub mod config;
 pub mod embed;
 /// Central synchronous event loop.
 pub mod event_loop;
+
+/// Owner-local fee-estimator history persistence (datadir file).
+mod fee_history;
 /// Block import pipeline.
 pub mod import;
 /// Owned startup, rollback, and ordered service shutdown.

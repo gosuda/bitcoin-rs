@@ -100,6 +100,12 @@ impl NodeServices {
         }
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
+        // Owner-local fee-estimator history: the event loop has drained, so
+        // no further mempool mutations run and this snapshot is final.
+        // docs/policies/db-migration.md — owner-local, degrade-not-fail.
+        if let Some(state) = state {
+            crate::fee_history::save(&state.data_dir(), &state.mempool());
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
