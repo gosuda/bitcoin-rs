@@ -311,7 +311,7 @@ status = "implemented_unverified"
 method = "estimatesmartfee"
 group = "util"
 status = "deviation"
-deviation = "The estimate comes from this node's mempool rather than Core's block-confirmation estimator, and the optional `errors` array Core returns when it cannot meet `conf_target` is never present -- so a caller cannot distinguish an estimate from a fallback."
+deviation = "The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split). Insufficient history returns an `errors` array so a caller can distinguish an estimate from a fallback."
 
 [[rpc]]
 method = "uptime"

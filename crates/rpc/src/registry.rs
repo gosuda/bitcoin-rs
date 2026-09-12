@@ -113,7 +113,7 @@ declare_rows! {
     "getrawmempool", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mempool::getrawmempool);
     "getmempoolancestors", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempoolancestors);
     "getmempooldescendants", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(mempool::getmempooldescendants);
-    "estimatesmartfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "See docs/contracts/external-api.md#API-26 for estimate_mode and conf_target validation. The estimate itself comes from this node's mempool horizon, not Core's confirmation estimator (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::estimatesmartfee);
+    "estimatesmartfee", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "See docs/contracts/external-api.md#API-26 for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::estimatesmartfee);
     "uptime", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(util::uptime);
     "getrpcinfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(util::getrpcinfo);
     "getmemoryinfo", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs).", "0.4.0", Some(util::getmemoryinfo);

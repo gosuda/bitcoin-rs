@@ -426,7 +426,11 @@ owned by [wallet-facing.md](wallet-facing.md).
   `CONSERVATIVE` (Core `FeeModeFromString`). Unknown strings are `-8`
   `Invalid estimate_mode parameter, must be UNSET, ECONOMICAL or
   CONSERVATIVE`. A non-string is `-3`. Accepted modes are parsed only;
-  this node's estimator has one horizon.
+  this node's estimator does not differentiate ECONOMICAL from CONSERVATIVE.
+- The estimator has a 25-block horizon (`MAX_CONF_TARGET = 25`), so a
+  `conf_target` above 25 is answered with the 25-block fee rate.
+- Insufficient data for the requested target omits `fee_rate` and returns an
+  `errors` array containing `Insufficient data or no feerate found`.
 - Trailing parameters are refused.
 
 
