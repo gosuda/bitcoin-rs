@@ -595,10 +595,16 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getblocktemplate_rejects_template_mandatory_rule_without_client_support`,
     `getblocktemplate_rejects_missing_segwit_rule`,
     `getblocktemplate_proposal_skips_client_rule_negotiation`
+  - `bin/bitcoin-rs/tests/overhaul_external_miner.rs` test
+    `external_miner_assembles_template_and_submits_block` (external consumer
+    negotiates `{"rules": ["segwit"]}` through the production handler)
 
 - `API-15`:
   - `crates/rpc/src/handlers/mining.rs` tests `submitblock_requires_mining_control_and_rejects_garbage_encoding`,
     `submitblock_ignores_bip22_dummy_and_trailing_bytes`
+  - `bin/bitcoin-rs/tests/overhaul_external_miner.rs` test
+    `external_miner_assembles_template_and_submits_block` (external consumer
+    submits the assembled block over production HTTP)
 - `API-16`:
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_rejects_invalid_mode`,
     `getblocktemplate_proposal_decode_matches_core`,

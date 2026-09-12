@@ -6,7 +6,10 @@
 
 use anyhow::{Result, bail};
 
-use bitcoin_rs_mempool::{MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome};
+use bitcoin_rs_mempool::{
+    AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
+    SubmitOutcome,
+};
 
 use bitcoin_rs_mining::MiningControl;
 
@@ -20,8 +23,8 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_rpc::{
     Handler,
     context::{
-        ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles, MiningHandles,
-        NetworkHandles,
+        ChainAdmissionView, ChainHandles, Context, ContextHandles, IndexHandles, MempoolHandles,
+        MiningHandles, NetworkHandles,
     },
 };
 
@@ -43,6 +46,7 @@ const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
 const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -50,18 +54,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
 
     // A spend of the height-1 seed coinbase matures exactly at height 101.
     let mempool_tx = seed_coinbase_spend();
-    {
-        let mempool = state.mempool();
-        let mut guard = mempool.write();
-        let vsize = u32::try_from(mempool_tx.vsize()).unwrap_or(u32::MAX);
-        guard.insert_entry(bitcoin_rs_mempool::MempoolEntry::new(
-            Arc::new(mempool_tx.clone()),
-            vsize,
-            MEMPOOL_TX_FEE_SATS,
-            1,
-            1,
-        ))?;
-    }
+    admit_to_mempool(&state, &mempool_tx)?;
 
     let handler = mining_handler(&state);
 
@@ -93,6 +86,131 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         template_txid,
         mempool_tx.txid().to_string(),
         "the selected template tx must be the mempool tx"
+    );
+
+    // --- rendered BIP22/BIP23 template fields -----------------------------
+    assert_eq!(
+        required_u64(&template, "coinbasevalue")?,
+        REGTEST_SUBSIDY_SATS + MEMPOOL_TX_FEE_SATS,
+        "coinbasevalue must be subsidy plus selected fees"
+    );
+    let entry = &template_txs[0];
+    assert_eq!(
+        required_u64(entry, "fee")?,
+        MEMPOOL_TX_FEE_SATS,
+        "rendered fee must match the mempool fee"
+    );
+    assert_eq!(
+        required_u64(entry, "weight")?,
+        mempool_tx.weight(),
+        "rendered weight must match the transaction weight"
+    );
+    assert_eq!(
+        required_u64(entry, "sigops")?,
+        0,
+        "p2sh-true spend has no legacy sigops"
+    );
+    let depends = entry
+        .get("depends")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        depends.is_empty(),
+        "single tx has no in-template dependencies"
+    );
+    assert_eq!(
+        required_str(entry, "hash")?,
+        mempool_tx.wtxid().to_string(),
+        "rendered hash is the wtxid"
+    );
+    assert_eq!(
+        native_deserialize::<Tx>(&hex_decode(&required_str(entry, "data")?)?)?,
+        mempool_tx,
+        "rendered data round-trips to the mempool tx"
+    );
+    assert_eq!(required_u64(&template, "sigoplimit")?, 80_000);
+    assert_eq!(required_u64(&template, "sizelimit")?, 4_000_000);
+    assert_eq!(required_u64(&template, "weightlimit")?, 4_000_000);
+    let long_poll_id = required_str(&template, "longpollid")?;
+    assert!(
+        long_poll_id.len() > 64,
+        "longpollid carries tip hash and sequence"
+    );
+    assert!(
+        long_poll_id.starts_with(&seed_tip_hash.to_string_be()),
+        "longpollid begins with the applied tip hash"
+    );
+    long_poll_id[64..]
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("longpollid suffix must be the mempool sequence"))?;
+    let mutable = template
+        .get("mutable")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let mutables: Vec<&str> = mutable.iter().filter_map(|value| value.as_str()).collect();
+    for expected in ["time", "transactions", "prevblock"] {
+        assert!(
+            mutables.contains(&expected),
+            "mutable must contain {expected}"
+        );
+    }
+    let capabilities = template
+        .get("capabilities")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let capability_set: Vec<&str> = capabilities
+        .iter()
+        .filter_map(|value| value.as_str())
+        .collect();
+    for expected in ["proposal", "longpoll"] {
+        assert!(
+            capability_set.contains(&expected),
+            "capabilities must contain {expected}"
+        );
+    }
+    let rules = template
+        .get("rules")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        rules
+            .iter()
+            .filter_map(|value| value.as_str())
+            .any(|x| x == "!segwit"),
+        "segwit is a mandatory rule on regtest"
+    );
+    assert_eq!(required_str(&template, "noncerange")?, "00000000ffffffff");
+    assert!(
+        required_u64(&template, "mintime")? <= required_u64(&template, "curtime")?,
+        "mintime must not exceed curtime"
+    );
+    let coinbase_aux = template
+        .get("coinbaseaux")
+        .ok_or_else(|| anyhow::anyhow!("coinbaseaux must be present"))?;
+    assert!(coinbase_aux.is_object(), "coinbaseaux must be an object");
+    let flags = coinbase_aux
+        .get("flags")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("coinbaseaux.flags missing"))?;
+    assert!(
+        flags.is_empty(),
+        "coinbaseaux.flags is the empty hex string"
+    );
+    let commitment = required_str(&template, "default_witness_commitment")?;
+    assert!(
+        commitment.starts_with("6a24aa21a9ed"),
+        "default witness commitment carries the BIP141 commitment prefix"
+    );
+    let expected_root = compute_witness_merkle_root(std::slice::from_ref(&mempool_tx))
+        .ok_or_else(|| anyhow::anyhow!("single-tx witness merkle root must exist"))?;
+    let mut commitment_input = [0_u8; 64];
+    commitment_input[..32].copy_from_slice(&expected_root.to_le_bytes());
+    commitment_input[32..].copy_from_slice(&WITNESS_RESERVED);
+    let expected_commitment = double_sha256(&commitment_input).to_le_bytes();
+    assert_eq!(
+        &commitment[12..],
+        hex_encode(&expected_commitment),
+        "rendered commitment must be SHA256D(witness merkle root || witness reserved value)"
     );
 
     // --- external-miner-style assembly from JSON fields only -----------------
@@ -139,6 +257,86 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         u64::from(SEED_BLOCKS + 2),
         "next template height must extend the new tip"
     );
+    Ok(())
+}
+
+#[test]
+fn template_orders_parent_then_child_with_dependency() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let _seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
+
+    let parent = seed_coinbase_spend();
+    let parent_txid = parent.txid();
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent_txid, 0),
+            script_sig: p2sh_true_spend_script_sig(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
+            script_pubkey: p2sh_true_output(),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let child_txid = child.txid();
+
+    admit_to_mempool(&state, &parent)?;
+    admit_to_mempool(&state, &child)?;
+
+    let handler = mining_handler(&state);
+    let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let template_txs = template
+        .get("transactions")
+        .and_then(|entry| entry.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert_eq!(template_txs.len(), 2, "both txs must be selected");
+    assert_eq!(
+        template_txs[0]
+            .get("txid")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("first template tx missing txid"))?,
+        parent_txid.to_string(),
+        "parent must precede child in topological template order"
+    );
+    assert_eq!(
+        template_txs[1]
+            .get("txid")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("second template tx missing txid"))?,
+        child_txid.to_string(),
+        "child must follow parent in topological template order"
+    );
+
+    let parent_depends = template_txs[0]
+        .get("depends")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        parent_depends.is_empty(),
+        "parent has no in-template dependencies"
+    );
+
+    let child_depends = template_txs[1]
+        .get("depends")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert_eq!(
+        child_depends.len(),
+        1,
+        "child depends on the one in-template parent"
+    );
+    assert_eq!(
+        child_depends[0]
+            .as_i64()
+            .and_then(|n| u64::try_from(n).ok()),
+        Some(1_u64),
+        "child depends index must be the one-based parent position"
+    );
+
     Ok(())
 }
 
@@ -334,10 +532,88 @@ fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - fee_sats),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     }
+}
+
+/// A P2SH output that commits to a one-byte `OP_1` redeem script.
+///
+/// The output is standard, the first spend uses an empty `scriptSig`, and
+/// later spends push the one-byte redeem script, so the whole chain is both
+/// policy-standard and consensus-valid without real signatures.
+fn p2sh_true_output() -> Script {
+    let redeem = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+    Script::from_bytes(redeem.to_p2sh().into_bytes())
+}
+
+/// `PUSHBYTES_1 <0x51>`: the `scriptSig` that satisfies a `p2sh_true_output`.
+fn p2sh_true_spend_script_sig() -> Script {
+    Script::from_bytes(vec![0x01, 0x51])
+}
+
+/// Builds a regtest block without applying it, so `submitblock` can exercise
+/// the external-producer path where the transactions were never in the mempool.
+fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Block> {
+    let coinbase = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: null_prevout(),
+            script_sig: Script::from_bytes(
+                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+            ),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+            script_pubkey: Script::from_bytes(vec![0x51]),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let mut block = Block {
+        header: bitcoin_rs_primitives::Header {
+            version: 0x2000_0000,
+            prev_blockhash: bitcoin_rs_primitives::BlockHash::from(prev),
+            merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
+            time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
+            bits: CompactTarget::from_consensus(REGTEST_BITS),
+            nonce: 0,
+        },
+        txs: std::iter::once(coinbase).chain(txs).collect(),
+    };
+    block.header.merkle_root = compute_merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("regtest block must have a merkle root"))?;
+    grind_pow(&mut block)?;
+    Ok(block)
+}
+/// Admits `tx` through the run-composed shared gateway exactly like
+/// `sendrawtransaction` does: full policy admission over the provisional
+#[allow(clippy::unnecessary_wraps)]
+fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
+    let utxo = state.utxo();
+    let applied_tip = state.applied_tip();
+    let block_tree = state.block_tree();
+    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree);
+    let outcome = state.mempool_gateway().submit_transaction(
+        Arc::new(tx.clone()),
+        AdmissionOrigin::Rpc,
+        None,
+        unix_time_secs(),
+        &view,
+    );
+    assert!(
+        matches!(outcome, Ok(SubmitOutcome::Committed(_))),
+        "gateway admission must commit the spend, got: {outcome:?}"
+    );
+    Ok(())
+}
+
+fn unix_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Mines and applies the regtest block at `height` over `prev`: the seed
@@ -538,6 +814,32 @@ fn compute_merkle_root(txs: &[Tx]) -> Option<Hash256> {
     Some(Hash256::from_le_bytes(&level[0]))
 }
 
+/// Native BIP141 witness merkle fold with the odd-leaf duplication rule.
+/// The coinbase wtxid is replaced by all-zeroes before folding.
+fn compute_witness_merkle_root(txs: &[Tx]) -> Option<Hash256> {
+    if txs.is_empty() {
+        return None;
+    }
+    let mut level: Vec<[u8; 32]> = Vec::with_capacity(txs.len().saturating_add(1));
+    level.push([0_u8; 32]);
+    for tx in txs {
+        level.push(*tx.wtxid().as_bytes());
+    }
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pos in 0..level.len().div_ceil(2) {
+            let left = level[2 * pos];
+            let right = level[(2 * pos + 1).min(level.len() - 1)];
+            let mut pair = [0_u8; 64];
+            pair[..32].copy_from_slice(&left);
+            pair[32..].copy_from_slice(&right);
+            next.push(*double_sha256(&pair).as_byte_array());
+        }
+        level = next;
+    }
+    Some(Hash256::from_le_bytes(&level[0]))
+}
+
 /// Encodes `bytes` as lowercase hexadecimal.
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -604,36 +906,21 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     };
     let child_txid = child.txid();
 
-    let sequence_before_reorg = {
-        let mempool = state.mempool();
-        let mut guard = mempool.write();
-        for (tx, fee) in [
-            (&parent, MEMPOOL_TX_FEE_SATS),
-            (&child, MEMPOOL_TX_FEE_SATS),
-        ] {
-            let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-            guard.insert_entry(bitcoin_rs_mempool::MempoolEntry::new(
-                Arc::new(tx.clone()),
-                vsize,
-                fee,
-                1,
-                1,
-            ))?;
-        }
-        guard.sequence_number()
-    };
+    admit_to_mempool(&state, &parent)?;
+    admit_to_mempool(&state, &child)?;
+    let sequence_before_reorg = state.mempool().read().sequence_number();
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     assert_eq!(
@@ -715,13 +1002,13 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     };
@@ -765,13 +1052,13 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
-            script_sig: Script::new(),
+            script_sig: p2sh_true_spend_script_sig(),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 1 - 5_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: p2sh_true_output(),
         }],
         lock_time: LockTime::from_consensus(0),
     };
@@ -794,5 +1081,180 @@ fn invalidateblock_keeps_a_below_floor_parent_and_its_child_out_of_the_mempool()
         "a refused parent and its withheld child must stay out"
     );
     assert!(!pool.contains_txid(&parent_txid));
+    Ok(())
+}
+
+#[test]
+fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
+
+    // A consensus-valid spend that never passes through the mempool gateway.
+    let tx = seed_coinbase_spend();
+    assert!(!state.mempool().read().contains_txid(&tx.txid()));
+
+    let block = assemble_regtest_block(seed_tip_hash, SEED_BLOCKS + 1, vec![tx])?;
+    let block_hex = hex_encode(&consensus_bytes(&block));
+
+    let handler = mining_handler(&state);
+    let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
+    assert!(
+        verdict.is_null(),
+        "submitblock must accept a valid block, got: {verdict}"
+    );
+
+    let tip = current_tip(&state)?;
+    assert_eq!(tip.height, SEED_BLOCKS + 1, "tip must advance by one");
+    assert_eq!(
+        tip.hash,
+        Hash256::from(block.block_hash()),
+        "tip hash must equal the submitted block hash"
+    );
+    Ok(())
+}
+
+#[test]
+fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let old_tip = seed_chain(&state, SEED_BLOCKS)?;
+
+    let tx = seed_coinbase_spend();
+    admit_to_mempool(&state, &tx)?;
+
+    let handler = mining_handler(&state);
+    let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let template_txs = template
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let accepted = assemble_from_template(&template, template_txs)?;
+    let accepted_hex = hex_encode(&consensus_bytes(&accepted));
+    let verdict = handler.dispatch("submitblock", &json!([accepted_hex]))?;
+    assert!(
+        verdict.is_null(),
+        "first block must be accepted, got: {verdict}"
+    );
+
+    // A competing block built on the superseded template still points at old_tip.
+    let stale_block = assemble_regtest_block(old_tip, SEED_BLOCKS + 1, Vec::new())?;
+    let stale_hex = hex_encode(&consensus_bytes(&stale_block));
+    let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;
+    let reason = reject
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("submitblock"))?;
+    assert!(
+        reason.contains("inconclusive-not-best-prevblk"),
+        "stale template must be rejected with PrevHashMismatch: {reason}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let _seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
+
+    let handler = mining_handler(&state);
+    let before = handler.dispatch("estimatesmartfee", &json!([1, "conservative"]))?;
+    assert!(
+        before.get("feerate").is_none(),
+        "empty estimator omits feerate"
+    );
+    let before_errors = before
+        .get("errors")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        before_errors.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|text| text.contains("Insufficient data"))
+        }),
+        "empty estimator reports insufficient data: {before}"
+    );
+
+    let parent = seed_coinbase_spend();
+    let parent_txid = parent.txid();
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent_txid, 0),
+            script_sig: p2sh_true_spend_script_sig(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
+            script_pubkey: p2sh_true_output(),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    admit_to_mempool(&state, &parent)?;
+    admit_to_mempool(&state, &child)?;
+
+    let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let template_txs = template
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let block = assemble_from_template(&template, template_txs)?;
+    let block_hex = hex_encode(&consensus_bytes(&block));
+    let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
+    assert!(
+        verdict.is_null(),
+        "submitblock must accept the block: {verdict}"
+    );
+
+    let next = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let next_txs = next
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        next_txs.is_empty(),
+        "next template must have no transactions after connect"
+    );
+    assert_eq!(
+        required_str(&next, "previousblockhash")?,
+        block.block_hash().to_string(),
+        "next template must build on the accepted block"
+    );
+
+    let mempool_info = handler.dispatch("getmempoolinfo", &json!([]))?;
+    assert_eq!(
+        required_u64(&mempool_info, "size")?,
+        0,
+        "mempool must be empty after block connect"
+    );
+
+    let raw_mempool = handler.dispatch("getrawmempool", &json!([]))?;
+    let raw_mempool_array = raw_mempool
+        .as_array()
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        raw_mempool_array.is_empty(),
+        "getrawmempool must return no txids"
+    );
+
+    let after = handler.dispatch("estimatesmartfee", &json!([1, "conservative"]))?;
+    assert!(
+        after.get("errors").is_none(),
+        "estimate with data has no errors: {after}"
+    );
+    let feerate = after
+        .get("feerate")
+        .and_then(sonic_rs::JsonValueTrait::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("estimatesmartfee must report feerate"))?;
+    assert!(feerate > 0.0, "confirmed fee rate must be positive");
+    assert_eq!(
+        required_u64(&after, "blocks")?,
+        1_u64,
+        "one-block conf target estimates within one block"
+    );
+
     Ok(())
 }
