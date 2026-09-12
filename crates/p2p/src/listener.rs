@@ -785,7 +785,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
             crate::handshake::send_handshake_message(peer, &response, lease, totals)?;
         }
     }
-
+    crate::handshake::send_post_verack_messages(peer, lease, totals)?;
     Ok(())
 }
 

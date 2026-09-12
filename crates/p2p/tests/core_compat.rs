@@ -1299,7 +1299,7 @@ fn drive_handshake_as_core(
                 assert_eq!(nonce, 0xfeed_face);
                 break;
             }
-            Message::Ping(_) => continue,
+            Message::Ping(_) | Message::SendCmpct(_) => continue,
             other => return Err(format!("unexpected post-handshake message {other:?}").into()),
         }
     }
