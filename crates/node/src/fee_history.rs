@@ -16,8 +16,10 @@ use parking_lot::RwLock;
 
 use bitcoin_rs_mempool::Mempool;
 
+use crate::FEE_ESTIMATOR_HISTORY_FILE;
+
 /// Name of the estimator's history file inside the datadir.
-const HISTORY_FILE: &str = "fee-estimator-history.dat";
+const HISTORY_FILE: &str = FEE_ESTIMATOR_HISTORY_FILE;
 /// Staging name for the atomic publish; same filesystem, renamed into place.
 const HISTORY_TEMP: &str = "fee-estimator-history.dat.tmp";
 /// Read-side bound: a history payload larger than this cannot be a genuine
@@ -32,12 +34,23 @@ const MAX_HISTORY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// insufficient-data estimator in place.
 pub(crate) fn load(data_dir: &Path, mempool: &Arc<RwLock<Mempool>>) {
     let path = data_dir.join(HISTORY_FILE);
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        tracing::debug!(
-            path = %path.display(),
-            "no fee-estimator history: starting with insufficient data"
-        );
-        return;
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                path = %path.display(),
+                "no fee-estimator history: starting with insufficient data"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "unable to inspect fee-estimator history; degrading to insufficient data"
+            );
+            return;
+        }
     };
     if metadata.len() > MAX_HISTORY_FILE_BYTES {
         tracing::warn!(

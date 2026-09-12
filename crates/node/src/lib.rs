@@ -25,6 +25,8 @@ pub mod embed;
 /// Central synchronous event loop.
 pub mod event_loop;
 
+/// Canonical owner-local fee-estimator history filename.
+pub const FEE_ESTIMATOR_HISTORY_FILE: &str = "fee-estimator-history.dat";
 /// Owner-local fee-estimator history persistence (datadir file).
 mod fee_history;
 /// Block import pipeline.

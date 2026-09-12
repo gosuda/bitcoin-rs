@@ -31,7 +31,7 @@ use anyhow::{Result, anyhow, bail};
 
 use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
-use bitcoin_rs_node::{Network, NodeConfig};
+use bitcoin_rs_node::{Network, NodeConfig, FEE_ESTIMATOR_FEE_ESTIMATOR_HISTORY_FILE};
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, encode::double_sha256,
@@ -57,8 +57,7 @@ const LOW_FEE_SATS: u64 = 500;
 const REPLACEMENT_FEE_SATS: u64 = 30_000;
 /// Eviction threshold between the two tiers (sat/kvB).
 const EVICT_THRESHOLD_SAT_PER_KVB: u64 = 10_000;
-/// The estimator's owner-local datadir file (`crates/node/src/fee_history.rs`).
-const HISTORY_FILE: &str = "fee-estimator-history.dat";
+
 
 // ---------------------------------------------------------------------------
 // Node and chain fixtures
@@ -666,7 +665,7 @@ fn restart_adopts_persisted_estimator_history() -> Result<()> {
     let decayed_before = pool.read().estimator_last_decayed_height();
 
     // Publish the owner-local history exactly as the owner would at shutdown.
-    let history_path = config.data_dir.join(HISTORY_FILE);
+    let history_path = config.data_dir.join(FEE_ESTIMATOR_HISTORY_FILE);
     std::fs::write(&history_path, &bytes_before)?;
 
     drop(state);
@@ -719,7 +718,7 @@ fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
     drop(state);
 
     // Corrupt the owner-local file out of the owner's hands.
-    let history_path = config.data_dir.join(HISTORY_FILE);
+    let history_path = config.data_dir.join(FEE_ESTIMATOR_HISTORY_FILE);
     let corrupt: Vec<u8> = std::iter::repeat_n(0xFF_u8, 128).collect();
     std::fs::write(&history_path, &corrupt)?;
 
