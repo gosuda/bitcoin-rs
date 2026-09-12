@@ -145,6 +145,12 @@ CI builds and runs all five targets: `p2p_message`, `block_validate`,
 `tx_validate`, `script_eval`, and `utxo_snapshot`. See [`fuzz/README.md`](fuzz/README.md) for
 local fuzzing and corpus guidance.
 
+The companion corpus repository is
+[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
+For local campaigns, see [shared corpus and local campaigns](fuzz/README.md#shared-corpus-and-local-campaigns)
+for a separate writable corpus and contribution guidance. The scheduled
+campaign is defined in [`.github/workflows/daily-fuzz.yml`](.github/workflows/daily-fuzz.yml).
+
 ### Dependency-range check
 
 Prove the declared ranges, not only the committed lockfile

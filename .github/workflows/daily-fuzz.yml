@@ -1,0 +1,225 @@
+name: daily-fuzz
+
+on:
+  schedule:
+    # Every day at 03:17 UTC / 12:17 KST.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: Fuzzing time per target
+        required: true
+        default: "60"
+        type: choice
+        options:
+          - "1"
+          - "10"
+          - "60"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-fuzz-corpus
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  FUZZ_DURATION_MINUTES: ${{ inputs.duration_minutes || '60' }}
+
+jobs:
+  fuzz-matrix:
+    name: Discover fuzz targets
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Read targets from the fuzz manifest
+        id: targets
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import tomllib
+
+          manifest = tomllib.loads(Path("fuzz/Cargo.toml").read_text())
+          targets = sorted(entry["name"] for entry in manifest.get("bin", []))
+          if not targets or len(targets) != len(set(targets)):
+              raise SystemExit("fuzz target inventory is empty or contains duplicates")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"targets={json.dumps(targets, separators=(',', ':'))}\n")
+          PY
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: fuzz-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.fuzz-matrix.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check out evolving corpus
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: gosuda/bitcoin-rs-fuzz-corpus
+          path: .fuzz-corpus
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          workspaces: fuzz -> target
+          shared-key: daily-fuzz-${{ matrix.target }}
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # cargo-fuzz
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: Run campaign
+        run: |
+          corpus_base_sha="$(git -C .fuzz-corpus rev-parse HEAD)"
+          export FUZZ_CORPUS_BASE_SHA="${corpus_base_sha}"
+          duration_seconds="$((FUZZ_DURATION_MINUTES * 60))"
+          scripts/run-fuzz-campaign.sh \
+            "${{ matrix.target }}" \
+            "${duration_seconds}" \
+            ".fuzz-corpus/corpus/${{ matrix.target }}" \
+            "campaign-output"
+      - name: Upload corpus and campaign evidence
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: daily-fuzz-${{ matrix.target }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            campaign-output/corpus
+            campaign-output/metadata
+            campaign-output/reports
+            campaign-output/artifacts
+
+  publish-corpus:
+    name: Publish corpus
+    needs: fuzz
+    if: ${{ always() && !cancelled() && needs.fuzz.result == 'success' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download campaign outputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: daily-fuzz-*
+          path: campaign-output
+          merge-multiple: true
+      - name: Check out corpus repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: gosuda/bitcoin-rs-fuzz-corpus
+          path: corpus-repository
+          fetch-depth: 0
+          token: ${{ secrets.FUZZ_CORPUS_TOKEN }}
+      - name: Apply minimized corpora
+        id: apply
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          publication_base="$(git -C corpus-repository rev-parse HEAD)"
+          echo "base_head=${publication_base}" >> "${GITHUB_OUTPUT}"
+          changed_targets=()
+          for source in campaign-output/corpus/*; do
+            target="$(basename "${source}")"
+            if ! find "${source}" -maxdepth 1 -type f -print -quit | grep -q .; then
+              echo "refusing to publish an empty corpus for ${target}" >&2
+              exit 1
+            fi
+            metadata="campaign-output/metadata/${target}.json"
+            [[ -f "${metadata}" ]] || {
+              echo "missing campaign metadata for ${target}" >&2
+              exit 1
+            }
+            metadata_target="$(jq -er '.target' "${metadata}")"
+            [[ "${metadata_target}" == "${target}" ]] || {
+              echo "metadata target mismatch for ${target}" >&2
+              exit 1
+            }
+            corpus_base="$(jq -er '.corpus_base_commit' "${metadata}")"
+            [[ "${corpus_base}" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "invalid corpus base for ${target}: ${corpus_base}" >&2
+              exit 1
+            }
+            git -C corpus-repository cat-file -e "${corpus_base}^{commit}"
+            git -C corpus-repository merge-base --is-ancestor "${corpus_base}" "${publication_base}"
+            if ! git -C corpus-repository diff --quiet \
+              "${corpus_base}" "${publication_base}" -- "corpus/${target}"; then
+              echo "corpus/${target} changed after campaign base ${corpus_base}" >&2
+              exit 1
+            fi
+            mkdir -p "corpus-repository/corpus/${target}"
+            rsync -a --delete "${source}/" "corpus-repository/corpus/${target}/"
+            if [[ -n "$(git -C corpus-repository status --porcelain -- "corpus/${target}")" ]]; then
+              changed_targets+=("${target}")
+            fi
+          done
+
+          if (( ${#changed_targets[@]} == 0 )); then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "No minimized corpus changes." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
+          mkdir -p corpus-repository/metadata
+          for target in "${changed_targets[@]}"; do
+            cp "campaign-output/metadata/${target}.json" corpus-repository/metadata/
+          done
+          git -C corpus-repository add corpus metadata
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+          echo "changed_targets=${changed_targets[*]}" >> "${GITHUB_OUTPUT}"
+          printf 'Updated targets: %s\n' "${changed_targets[*]}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Commit and push corpus
+        if: steps.apply.outputs.changed == 'true'
+        working-directory: corpus-repository
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update fuzz corpus from bitcoin-rs ${GITHUB_SHA:0:12}"
+          publication_base="${{ steps.apply.outputs.base_head }}"
+          publication_commit="$(git rev-parse HEAD)"
+          read -r -a changed_targets <<< "${{ steps.apply.outputs.changed_targets }}"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            if (( attempt == 3 )); then
+              break
+            fi
+            git fetch origin main
+            if git merge-base --is-ancestor "${publication_commit}" origin/main; then
+              exit 0
+            fi
+            git merge-base --is-ancestor "${publication_base}" origin/main || {
+              echo "corpus history no longer descends from ${publication_base}" >&2
+              exit 1
+            }
+            for target in "${changed_targets[@]}"; do
+              if ! git diff --quiet "${publication_base}" origin/main -- "corpus/${target}"; then
+                echo "concurrent update changed corpus/${target}; refusing to overwrite it" >&2
+                exit 1
+              fi
+            done
+            git rebase origin/main
+            publication_base="$(git rev-parse origin/main)"
+            publication_commit="$(git rev-parse HEAD)"
+          done
+          echo "failed to publish corpus after 3 push attempts" >&2
+          exit 1
