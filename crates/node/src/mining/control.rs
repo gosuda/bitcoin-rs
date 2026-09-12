@@ -18,9 +18,9 @@ use compact_str::CompactString;
 
 impl MiningCoordinator {
     pub(super) fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
+        let tip = self.applied_tip.load_full();
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
-            let tip = self.applied_tip.load_full();
             tip.as_ref().map_or(0.0, |tip| {
                 estimate_network_hashps(&tree, Some(tip.tip_id), 120, self.network)
             })
@@ -31,7 +31,7 @@ impl MiningCoordinator {
             .map(CompactString::from)
             .collect();
         self.service
-            .mining_info(network_hashes_per_second, warnings)
+            .mining_info(network_hashes_per_second, warnings, tip.as_deref().cloned())
     }
 }
 

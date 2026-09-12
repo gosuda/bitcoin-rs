@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::current_unix_seconds;
-use bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST;
+use bitcoin_rs_consensus::{MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT, MAX_BLOCK_SERIALIZED_SIZE};
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
@@ -58,10 +58,6 @@ const GENERATION_RACE: &str = "generation key changed during candidate assembly"
 pub const DEFAULT_MEMPOOL_UPDATE_WAIT: Duration = Duration::from_secs(10);
 /// Upper bound for a single long-poll wait slice while rechecking predicates.
 const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
-/// Consensus maximum block weight.
-const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
-/// Consensus maximum serialized block size.
-const MAX_BLOCK_SIZE: u64 = 4_000_000;
 
 /// Applied-tip hash plus mempool sequence that identify one candidate generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -449,8 +445,8 @@ impl MiningService {
         &self,
         network_hashes_per_second: f64,
         warnings: Vec<CompactString>,
+        tip: Option<TipSnapshot>,
     ) -> Result<MiningInfo, MiningControlError> {
-        let tip = self.applied_tip.applied_tip();
         let blocks = tip.as_ref().map_or(0, |tip| tip.height);
         let (bits, difficulty, next_bits, next_difficulty) = match tip.as_ref() {
             Some(tip) => {
@@ -569,10 +565,10 @@ impl MiningService {
         };
 
         let assembled = self.assemble_for_key(key);
-        // Capability reads can take the mempool lock; perform this before
-        // reacquiring the lifecycle mutex.
-        let live = self.live_generation_key();
         let mut state = self.state.lock();
+        // Recheck after acquiring the lifecycle mutex: a publication may
+        // have won while assembly was completing.
+        let live = self.live_generation_key();
         let returned = match &assembled {
             Ok(candidate) => {
                 if live == key {
@@ -648,7 +644,7 @@ impl MiningService {
             csv_active: chain.csv_active,
             segwit_active: chain.segwit_active,
             max_weight: MAX_BLOCK_WEIGHT,
-            max_size: MAX_BLOCK_SIZE,
+            max_size: MAX_BLOCK_SERIALIZED_SIZE,
             max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
         })
     }
