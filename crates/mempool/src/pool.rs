@@ -280,6 +280,14 @@ impl Mempool {
     /// cleared entry commits as one `Removed(Clear)` change — in entry-id
     /// order — each taking the next mempool sequence value. A clear of an
     /// already-empty pool commits nothing and moves no sequence.
+    ///
+    /// The fee-history reset is intentional and specific to this wholesale
+    /// action: the estimator returns to the empty, insufficient-data state
+    /// because every observation it held described transactions this pool no
+    /// longer tracks. A reorg never routes through `clear` — disconnected
+    /// transactions return through reconsideration (re-admission), which
+    /// keeps the recorded confirmations and re-arms only the re-admitted
+    /// entries — so chain recovery cannot silently discard fee history.
     pub fn clear(&mut self) -> MutationResult {
         let txids: Vec<Txid> = self.entries.iter().map(|(_id, entry)| entry.txid).collect();
         self.entries.clear();

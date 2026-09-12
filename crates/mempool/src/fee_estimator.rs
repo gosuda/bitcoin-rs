@@ -119,6 +119,23 @@ pub struct FeeEstimator {
     /// notification for it does not age the history a second time.
     last_decayed_height: Option<u32>,
     pending: HashMap<Txid, PendingEntry>,
+    /// Heights at which tracked txids were recorded as confirmed.
+    ///
+    /// A reorg disconnects a confirming block, the reconsideration walk
+    /// re-admits its transactions as fresh pending entries, and a later
+    /// switch back to that block confirms them again. One physical
+    /// confirmation must stay one recorded success, so a block that
+    /// re-confirms a txid at the height already recorded here only untracks
+    /// the entry. A confirmation at a different height — the transaction
+    /// missed its block, was re-admitted, and confirmed elsewhere — is a
+    /// genuine new observation and records exactly once.
+    ///
+    /// [`Self::advance_height`] drops entries once more than
+    /// `MAX_CONF_TARGET` heights passed: a re-admitted entry expires from
+    /// the pending set after outliving every target, so a record older than
+    /// that window can never again meet a pending txid of the same
+    /// transaction. Bounded window, bounded map.
+    confirmed_at: HashMap<Txid, u32>,
 }
 
 impl FeeEstimator {
@@ -129,6 +146,7 @@ impl FeeEstimator {
             buckets: build_buckets(),
             pending: HashMap::new(),
             last_decayed_height: None,
+            confirmed_at: HashMap::new(),
         }
     }
 
@@ -196,9 +214,17 @@ impl FeeEstimator {
                 self.advance_height(skipped_height);
             }
         }
-
         for txid in confirmed_txids {
+            // A re-connected block finds its transactions re-admitted as
+            // pending: the reconsideration walk re-entered them after the
+            // disconnect. The success was recorded when the block first
+            // connected, so the entry only leaves the pending set again.
+            if self.confirmed_at.get(txid) == Some(&block_height) {
+                self.pending.remove(txid);
+                continue;
+            }
             if let Some(entry) = self.pending.remove(txid) {
+                self.confirmed_at.insert(*txid, block_height);
                 let blocks_waited = block_height.saturating_sub(entry.entry_height).max(1);
                 self.record_confirmation(&entry, blocks_waited);
             }
@@ -214,6 +240,13 @@ impl FeeEstimator {
         self.expire_targets(block_height);
         self.last_decayed_height = Some(block_height);
         self.apply_decay();
+        // Confirmation records only matter while their transaction can still
+        // sit in the pending set: a re-admitted entry is dropped once it
+        // outlives every target, so past `MAX_CONF_TARGET` heights a record
+        // can never again meet a pending entry of the same transaction.
+        let prune_window = u32::try_from(MAX_CONF_TARGET).unwrap_or(u32::MAX);
+        self.confirmed_at
+            .retain(|_, confirmed_height| block_height.saturating_sub(*confirmed_height) <= prune_window);
     }
 
     /// Samples a failure for every target that expired on this block.
@@ -744,6 +777,82 @@ mod tests {
         assert!(
             est.estimate(1).is_none(),
             "estimate should be None after heavy decay"
+        );
+    }
+
+    /// Sums every recorded success across all buckets and targets.
+    fn total_confirmations(est: &FeeEstimator) -> f64 {
+        est.buckets
+            .iter()
+            .flat_map(|bucket| bucket.confirmed_within.iter())
+            .sum()
+    }
+
+    #[test]
+    fn reconnect_of_the_same_block_does_not_double_count_a_confirmation() {
+        let mut est = FeeEstimator::new();
+        est.tx_entered(test_txid(1), 2_000, 100);
+        est.block_connected(&[test_txid(1)], 105);
+        let after_first_connect = total_confirmations(&est);
+        assert!(after_first_connect > 0.0, "the confirmation must record");
+
+        // The reorg walk re-admits the transaction below the disconnected
+        // block, then the same block reconnects and confirms it again.
+        est.tx_entered(test_txid(1), 2_000, 104);
+        est.block_connected(&[test_txid(1)], 105);
+
+        assert_eq!(
+            total_confirmations(&est),
+            after_first_connect,
+            "a re-connected block must untrack its txids without a second success"
+        );
+        assert!(
+            !est.pending.contains_key(&test_txid(1)),
+            "the re-confirmed transaction must still leave the pending set"
+        );
+    }
+
+    #[test]
+    fn confirmation_at_a_new_height_after_a_disconnect_records_exactly_once() {
+        let mut est = FeeEstimator::new();
+        est.tx_entered(test_txid(1), 2_000, 100);
+        est.block_connected(&[test_txid(1)], 101);
+
+        // The block disconnected permanently; the transaction re-entered the
+        // mempool and confirmed in a different block. That is a genuine new
+        // observation: exactly one more success, not a suppressed one and
+        // not a double one.
+        est.tx_entered(test_txid(1), 2_000, 100);
+        est.block_connected(&[test_txid(1)], 103);
+
+        let mut twin = FeeEstimator::new();
+        twin.tx_entered(test_txid(1), 2_000, 100);
+        twin.block_connected(&[test_txid(1)], 101);
+        twin.tx_entered(test_txid(2), 2_000, 100);
+        twin.block_connected(&[test_txid(2)], 103);
+        assert_eq!(
+            total_confirmations(&est),
+            total_confirmations(&twin),
+            "the reorged re-confirmation must weigh exactly one fresh observation"
+        );
+    }
+
+    #[test]
+    fn confirmation_records_expire_with_the_target_window() {
+        let mut est = FeeEstimator::new();
+        est.tx_entered(test_txid(1), 2_000, 100);
+        est.block_connected(&[test_txid(1)], 105);
+        assert!(!est.confirmed_at.is_empty());
+
+        // Past the confirmation-target window the record can no longer meet
+        // a pending entry of the same transaction (re-admitted entries
+        // expire after outliving every target), so the dedup state drops.
+        for height in 106..=105 + 26 {
+            est.block_connected(&[], height);
+        }
+        assert!(
+            est.confirmed_at.is_empty(),
+            "stale confirmation records must prune as heights advance"
         );
     }
 }
