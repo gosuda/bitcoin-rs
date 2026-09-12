@@ -162,16 +162,8 @@ fi
 coverage_report after
 
 if (( CMIN_STATUS == 0 )); then
-    find "${CORPUS_DIR}" -maxdepth 1 -type f -exec chmod 0644 {} +
-    while IFS= read -r -d '' input; do
-        expected="$(basename "${input}")"
-        actual="$(sha1sum "${input}")"
-        actual="${actual%% *}"
-        if [[ "${expected}" != "${actual}" ]]; then
-            echo "corpus input is not content-addressed: ${input}" >&2
-            exit 1
-        fi
-    done < <(find "${CORPUS_DIR}" -maxdepth 1 -type f -print0)
+    "$(dirname -- "${BASH_SOURCE[0]}")/validate-corpus-seeds.sh" \
+        "${CORPUS_DIR}" "${TARGET}"
     cp -a "${CORPUS_DIR}/." "${OUTPUT_DIR}/corpus/${TARGET}/"
 fi
 

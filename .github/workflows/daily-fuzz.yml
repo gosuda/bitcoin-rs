@@ -120,6 +120,12 @@ jobs:
           pattern: daily-fuzz-*
           path: campaign-output
           merge-multiple: true
+      - name: Check out policy owner
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: policy-owner
+          fetch-depth: 1
+          persist-credentials: false
       - name: Check out corpus repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -164,8 +170,16 @@ jobs:
               echo "corpus/${target} changed after campaign base ${corpus_base}" >&2
               exit 1
             fi
+            # Content validation: worker bytes are untrusted at publish time.
+            # Single owner scripts/validate-corpus-seeds.sh (same rule the
+            # campaign worker enforces); dotfiles and nested paths fail
+            # closed, since rsync would copy them unchecked otherwise. The
+            # budget flags guard the corpus repo against floods; the worker
+            # path omits them so they never cap lifetime corpus growth.
+            policy-owner/scripts/validate-corpus-seeds.sh \
+              -n 65536 -b 268435456 "${source}" "${target}"
             mkdir -p "corpus-repository/corpus/${target}"
-            rsync -a --delete "${source}/" "corpus-repository/corpus/${target}/"
+            rsync -a --no-links --delete "${source}/" "corpus-repository/corpus/${target}/"
             if [[ -n "$(git -C corpus-repository status --porcelain -- "corpus/${target}")" ]]; then
               changed_targets+=("${target}")
             fi
