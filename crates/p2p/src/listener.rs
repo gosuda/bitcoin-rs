@@ -1030,6 +1030,7 @@ fn run_connected_session(
     loop_result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
@@ -1692,6 +1693,40 @@ mod writer_shutdown_tests {
 
     const FAILSAFE: Duration = Duration::from_secs(5);
 
+    // CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (a
+    // handshake failure on a live lease surfaces its protocol error; only an
+    // externally revoked lease is muted as a shutdown).
+    #[test]
+    fn inbound_handshake_failure_on_live_lease_returns_err() {
+        let peer_table = Arc::new(crate::PeerTable::new());
+        let banned = Arc::new(parking_lot::RwLock::new(Vec::new()));
+        let shared = ConnectionShared::from_parts(peer_table, banned, None);
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let sinks = InboundSyncSinks::new(headers_tx, crossbeam_channel::unbounded().0, None);
+        let (mut client, server, peer_addr) = loopback_pair();
+
+        // A validly framed message with a foreign magic fails the handshake
+        // while the lease is fully live: nothing external revoked it. The
+        // revocation mask (remove_current cancels) must not swallow this.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33]);
+        frame.extend_from_slice(b"version\0\0\0\0\0");
+        frame.extend_from_slice(&0_u32.to_le_bytes());
+        frame.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        io::Write::write_all(&mut client, &frame).expect("frame write");
+        drop(client);
+
+        let result =
+            crate::listener::run_handshake(server, peer_addr, Magic::BITCOIN, &shared, &sinks);
+        let Err(error) = result else {
+            panic!("handshake failure on a live lease must not be masked as revoked");
+        };
+        assert!(
+            error.to_string().contains("magic"),
+            "unexpected handshake error: {error}"
+        );
+    }
+
     fn loopback_pair() -> (TcpStream, TcpStream, SocketAddr) {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
         let addr = listener.local_addr().expect("local_addr");
@@ -1810,7 +1845,20 @@ mod writer_shutdown_tests {
             None,
         );
         let peer_table = crate::PeerTable::new();
-        assert!(run_message_loop(&mut peer, addr, &lease, &peer_table, &sinks, None, None, None, None).is_ok());
+        assert!(
+            run_message_loop(
+                &mut peer,
+                addr,
+                &lease,
+                &peer_table,
+                &sinks,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1841,7 +1889,12 @@ mod writer_shutdown_tests {
         );
         peer.state = PeerState::Ready;
 
-        assert!(run_message_loop(&mut peer, addr, &old, &table, &sinks, None, None, None, None).is_ok());
+        assert!(
+            run_message_loop(
+                &mut peer, addr, &old, &table, &sinks, None, None, None, None
+            )
+            .is_ok()
+        );
         assert!(headers_rx.try_recv().is_err());
         assert!(old.is_cancelled());
         assert!(table.is_current(replacement.source(addr)));
@@ -1849,103 +1902,69 @@ mod writer_shutdown_tests {
 
     // CONTRACT: docs/policies/p2p-compatibility.md#4-handshake-contract (a
     // known-version sendcmpct raises the published relay preference).
+    /// Drives one scripted `sendcmpct` through the message loop on a fresh
+    /// table and reports the published relay preference afterwards.
+    fn sendcmpct_scenario(send_compact: bool, version: u64, port: u16) -> bool {
+        let mut wire = Vec::new();
+        crate::wire::write_message(
+            &mut wire,
+            Magic::BITCOIN,
+            &crate::Message::SendCmpct(bitcoin::p2p::message_compact_blocks::SendCmpct {
+                send_compact,
+                version,
+            }),
+        )
+        .expect("sendcmpct encodes");
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let table = crate::PeerTable::new();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(tx);
+        table.register(addr, lease.clone());
+        assert!(table.publish_info(
+            addr,
+            &lease,
+            crate::PeerInfo {
+                addr,
+                version: 70_016,
+                wtxid_relay: false,
+                compact_block_relay: false,
+                services: 0,
+                user_agent: String::from("/test/"),
+                start_height: 0,
+                best_known_height: 0,
+                conn_time: 0,
+                inbound: false,
+                addr_bind: addr,
+                time_offset: 0,
+                counters: std::sync::Arc::new(crate::PeerCounters::default()),
+            },
+        ));
+        let mut peer = Peer::new(ScriptedEof(io::Cursor::new(wire)), Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+        let sinks = InboundSyncSinks::new(
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+            None,
+        );
+        // Script end ends the connection; the arm already ran.
+        assert!(
+            run_message_loop(
+                &mut peer, addr, &lease, &table, &sinks, None, None, None, None
+            )
+            .is_err()
+        );
+        table.compact_relay_of(addr)
+    }
+
     #[test]
     fn sendcmpct_raises_published_compact_relay_preference() {
-        let sendcmpct = |send_compact: bool, version: u64| {
-            let mut wire = Vec::new();
-            crate::wire::write_message(
-                &mut wire,
-                Magic::BITCOIN,
-                &crate::Message::SendCmpct(bitcoin::p2p::message_compact_blocks::SendCmpct {
-                    send_compact,
-                    version,
-                }),
-            )
-            .expect("sendcmpct encodes");
-            wire
-        };
-        let published = |addr: SocketAddr| crate::PeerInfo {
-            addr,
-            version: 70_016,
-            wtxid_relay: false,
-            compact_block_relay: false,
-            services: 0,
-            user_agent: String::from("/test/"),
-            start_height: 0,
-            best_known_height: 0,
-            conn_time: 0,
-            inbound: false,
-            addr_bind: addr,
-            time_offset: 0,
-            counters: std::sync::Arc::new(crate::PeerCounters::default()),
-        };
-        let sinks = || {
-            InboundSyncSinks::new(
-                crossbeam_channel::unbounded().0,
-                crossbeam_channel::unbounded().0,
-                None,
-            )
-        };
-
-        // A post-verack `sendcmpct(send_compact=true)` raises the live
-        // connection's published preference.
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
-        let table = crate::PeerTable::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = crate::PeerLease::new(tx);
-        table.register(addr, lease.clone());
-        assert!(table.publish_info(addr, &lease, published(addr)));
-        let mut peer = Peer::new(
-            ScriptedEof(io::Cursor::new(sendcmpct(true, 2))),
-            Magic::BITCOIN,
-        );
-        peer.state = PeerState::Ready;
-
-        // Script end ends the connection; the raise already happened.
-        assert!(
-            run_message_loop(&mut peer, addr, &lease, &table, &sinks(), None, None, None, None)
-                .is_err()
-        );
-        assert!(table.compact_relay_of(addr));
-        // `send_compact=false` still announces BIP152 relay: the high-bandwidth
-        // push preference is separate from compact-fetch eligibility, and an
-        // inbound peer is never selected for push announcements.
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_449));
-        let table = crate::PeerTable::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = crate::PeerLease::new(tx);
-        table.register(addr, lease.clone());
-        assert!(table.publish_info(addr, &lease, published(addr)));
-        let mut peer = Peer::new(
-            ScriptedEof(io::Cursor::new(sendcmpct(false, 2))),
-            Magic::BITCOIN,
-        );
-        peer.state = PeerState::Ready;
-
-        assert!(
-            run_message_loop(&mut peer, addr, &lease, &table, &sinks(), None, None, None, None)
-                .is_err()
-        );
-        assert!(table.compact_relay_of(addr));
-
+        // A post-verack sendcmpct announces BIP152 relay, with or without the
+        // high-bandwidth push preference: an inbound peer is never selected
+        // for push, and fetch eligibility must not depend on it.
+        assert!(sendcmpct_scenario(true, 2, 18_448));
+        assert!(sendcmpct_scenario(false, 2, 18_449));
         // An unknown BIP152 version is not a relay announcement.
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_450));
-        let table = crate::PeerTable::new();
-        let (tx, _rx) = crossbeam_channel::unbounded();
-        let lease = crate::PeerLease::new(tx);
-        table.register(addr, lease.clone());
-        assert!(table.publish_info(addr, &lease, published(addr)));
-        let mut peer = Peer::new(
-            ScriptedEof(io::Cursor::new(sendcmpct(false, 7))),
-            Magic::BITCOIN,
-        );
-        peer.state = PeerState::Ready;
-
-        assert!(
-            run_message_loop(&mut peer, addr, &lease, &table, &sinks(), None, None, None, None)
-                .is_err()
-        );
-        assert!(!table.compact_relay_of(addr));
+        assert!(!sendcmpct_scenario(false, 7, 18_450));
     }
 
     /// Serves the scripted bytes, then ends the connection with a clean
@@ -2008,7 +2027,20 @@ mod writer_shutdown_tests {
         );
 
         let peer_table = crate::PeerTable::new();
-        assert!(run_message_loop(&mut peer, addr, &lease, &peer_table, &sinks, None, None, None, None).is_err());
+        assert!(
+            run_message_loop(
+                &mut peer,
+                addr,
+                &lease,
+                &peer_table,
+                &sinks,
+                None,
+                None,
+                None,
+                None
+            )
+            .is_err()
+        );
         assert_eq!(reads.load(Ordering::Relaxed), 2);
     }
 
@@ -2425,7 +2457,17 @@ mod writer_shutdown_tests {
         // The Pong response cannot be admitted onto the zero budget, so the
         // saturation policy cancels the lease and ends the loop.
         let peer_table = crate::PeerTable::new();
-        let result = run_message_loop(&mut peer, addr, &lease, &peer_table, &sinks, None, None, None, None);
+        let result = run_message_loop(
+            &mut peer,
+            addr,
+            &lease,
+            &peer_table,
+            &sinks,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
     }
