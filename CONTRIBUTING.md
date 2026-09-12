@@ -10,9 +10,12 @@ workflow, coding standards, and verification commands used across the project.
   binary excludes `libbitcoinkernel`, but this does not make every dependency
   Rust-only.
 - Kernel-enabled checks additionally require CMake and Boost headers
-  (`cmake` and `libboost-dev` on Debian/Ubuntu). The consensus and node library
-  crates enable `kernel` by default; the binary does not. The exact defaults
-  are owned by the [validation-default contract](docs/contracts/validation-default.md).
+  (`cmake` and `libboost-dev` on Debian/Ubuntu). Checks that build the
+  `rocksdb` backend (notably the dependency-range minimal lane, which
+  checks `--all-features`) additionally require libclang (`libclang-dev`
+  on Debian/Ubuntu). The consensus and node library crates enable `kernel`
+  by default; the binary does not. The exact defaults are owned by the
+  [validation-default contract](docs/contracts/validation-default.md).
 - The PR comparator tests use Python 3.13. Fuzzing and dependency/feature
   matrix checks also need the tools described in the main workflow below.
 
