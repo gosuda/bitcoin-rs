@@ -322,6 +322,7 @@ fn mirror_admitted(shadow: &mut FeeEstimator, state: &NodeState, txid: Txid) {
 // ---------------------------------------------------------------------------
 
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-26
 fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -371,6 +372,7 @@ fn empty_or_thin_history_answers_insufficient_data() -> Result<()> {
 /// validation, with the short horizon demanding a higher rate than the long
 /// one — exactly the declared semantics, byte-for-byte.
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-26
 fn real_confirmations_qualify_the_estimate() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -467,6 +469,7 @@ fn real_confirmations_qualify_the_estimate() -> Result<()> {
 /// phantom failure) and the replacement's own confirmation is the only
 /// success ever recorded.
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-26
 fn replacement_untracks_victim_without_false_confirmation() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -514,6 +517,7 @@ fn replacement_untracks_victim_without_false_confirmation() -> Result<()> {
 /// A fee-policy eviction untracks the evicted transaction: it neither stays
 /// pending (which would record a miss) nor counts as confirmed.
 #[test]
+// CONTRACT: docs/contracts/external-api.md#API-26
 fn eviction_untracks_without_false_confirmation() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -560,6 +564,7 @@ fn eviction_untracks_without_false_confirmation() -> Result<()> {
 /// into the pool with the recorded confirmations preserved, and re-confirming
 /// them in a sibling block records exactly one observation — not two.
 #[test]
+// CONTRACT: docs/contracts/chain-events.md#EVT-02
 fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -630,6 +635,7 @@ fn reorg_reconfirm_records_exactly_one_observation() -> Result<()> {
 /// Restart adopts the owner-local history file: the reopened node answers
 /// with the exact persisted estimate and state bytes.
 #[test]
+// CONTRACT: docs/contracts/recovery.md#RCV-11
 fn restart_adopts_persisted_estimator_history() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
@@ -687,6 +693,7 @@ fn restart_adopts_persisted_estimator_history() -> Result<()> {
 /// A corrupt history file degrades to insufficient data: the node starts, the
 /// rejected file stays in place, and admission still works.
 #[test]
+// CONTRACT: docs/contracts/recovery.md#RCV-11
 fn corrupt_history_file_degrades_to_insufficient_data() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);
