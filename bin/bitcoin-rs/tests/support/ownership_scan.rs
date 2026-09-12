@@ -106,10 +106,7 @@ pub(crate) const PEER_MUTATION_METHODS: &[&str] = &[
 /// Receiver-qualified patterns for the peer mutators whose bare name is
 /// shared with another owner's API: `ChainTransition::disconnect` also
 /// reads `disconnect(`, so only a `peer_table` receiver counts here.
-pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[
-    ".peer_table.disconnect(",
-    "PeerTable::disconnect(",
-];
+pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[".peer_table.disconnect("];
 
 /// Audited non-owner peer mutation receivers. The receiver must be the
 /// complete audited expression — the sync worker's shared state handle —
@@ -170,7 +167,7 @@ pub(crate) fn scan_ownership_violations() -> OwnershipScanResult {
         collect_rust_files(member, &mut files);
     }
     files.sort();
-    let test_modules = cfg_test_module_stems(&files);
+    let test_modules = cfg_test_module_paths(&files);
     let mut result = empty_result();
     for path in &files {
         if is_test_module_file(path, &test_modules) {
@@ -185,13 +182,7 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         panic!("scan cannot read workspace member dir {}", dir.display());
     };
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!(
-                "scan cannot read an entry in workspace member dir {}: {error}",
-                dir.display()
-            )
-        });
+    for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
             let name = path
@@ -277,7 +268,10 @@ fn cfg_test_attribute(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("#[cfg(")?;
     let end = rest.rfind(")]")?;
     let payload = &rest[..end];
-    if !payload.contains("test") || payload.contains("not(test)") {
+    let compact: String = payload.chars().filter(|ch| !ch.is_whitespace()).collect();
+    // A module is excluded only when test is the sole enabling condition;
+    // feature-gated production modules must remain in the scan.
+    if compact != "test" && compact != "all(test)" {
         return None;
     }
     Some(&rest[end + ")]".len()..])
@@ -305,10 +299,57 @@ fn mod_stem(rest: &str) -> Option<String> {
     .then(|| name.to_owned())
 }
 
+fn cfg_test_module_paths(files: &[PathBuf]) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for parent in files {
+        let Ok(content) = std::fs::read_to_string(parent) else { continue };
+        let mut lex = LexState::default();
+        let active_lines: Vec<String> = content.lines().map(|line| code_line(line, &mut lex)).collect();
+        for line in active_lines {
+            let trimmed = line.trim();
+            let Some(rest) = cfg_test_attribute(trimmed) else { continue };
+            let Some(stem) = mod_stem(rest) else { continue };
+            let base = parent.parent().unwrap_or_else(|| Path::new("."));
+            for candidate in [base.join(format!("{stem}.rs")), base.join(&stem).join("mod.rs")] {
+                if candidate.exists() {
+                    if let Ok(normalized) = candidate.canonicalize() {
+                        paths.insert(normalized.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
 fn is_test_module_file(path: &Path, test_modules: &BTreeSet<String>) -> bool {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| test_modules.contains(stem))
+    path.canonicalize()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .is_some_and(|path| test_modules.contains(&path))
+}
+
+fn capability_type_names(lines: &[String]) -> BTreeSet<String> {
+    let mut names = BTreeSet::from(["IndexCapabilities".to_owned()]);
+    for line in lines {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("use ") {
+            if let Some((_, alias)) = rest.split_once(" as ") {
+                let alias = alias.trim_matches(|ch: char| ch == ';' || ch == '}' || ch.is_whitespace());
+                if rest.contains("IndexCapabilities") && !alias.is_empty() {
+                    names.insert(alias.to_owned());
+                }
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("type ") {
+            if let Some((name, target)) = rest.split_once('=') {
+                if target.contains("IndexCapabilities") {
+                    names.insert(name.trim().to_owned());
+                }
+            }
+        }
+    }
+    names
 }
 
 fn scan_file(path: &Path, result: &mut OwnershipScanResult) {
@@ -484,6 +525,10 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         .collect();
     let mut pending_test_item = false;
     let mut test_depth = 0_i64;
+    // Keep capability type aliases visible to the lexical gate.  This covers
+    // both imported aliases and local `type` aliases without pretending that
+    // the scanner has Rust name-resolution information.
+    let capability_names = capability_type_names(&code_lines);
 
     for (index, line) in code_lines.iter().enumerate() {
         let trimmed = line.trim();
@@ -552,7 +597,16 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         }
 
         for pattern in INDEX_CAPABILITY_PATTERNS {
-            if line.contains(pattern) {
+            let capability_match = if *pattern == "IndexCapabilities {" {
+                capability_names.iter().any(|name| line.contains(&format!("{name} {{")))
+                    // `let Type { .. } = value` is a pattern, not selection.
+                    && !line.contains("let ")
+            } else if *pattern == "IndexCapabilities::" {
+                capability_names.iter().any(|name| line.contains(&format!("{name}::")))
+            } else {
+                line.contains(pattern)
+            };
+            if capability_match {
                 result.index_capability_sites += 1;
                 if !is_index_capability_owner(path_str) {
                     result.index_capability_violations.push(format!(
@@ -581,8 +635,13 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
             }
         }
 
+        // Whitespace is insignificant in a method call, so inspect a compact
+        // spelling as well as the historical line-local pattern.  Also catch
+        // the public associated-function form.
+        let compact_peer_line: String = line.chars().filter(|ch| !ch.is_whitespace()).collect();
         for pattern in PEER_TABLE_PATTERNS {
-            if line.contains(pattern) {
+            if line.contains(pattern) || compact_peer_line.contains(pattern) {
+                let pattern = *pattern;
                 result.peer_mutations_found += 1;
                 let operator_audited = AUTHORIZED_PEER_TABLE_PATHS
                     .iter()
@@ -595,6 +654,17 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
                         raw_lines[index].trim()
                     ));
                 }
+            }
+        }
+        if compact_peer_line.contains("PeerTable::disconnect(") {
+            result.peer_mutations_found += 1;
+            if !is_p2p_owner(path_str)
+                && !AUTHORIZED_PEER_TABLE_PATHS.iter().any(|allowed| authorized_path(path_str, allowed))
+            {
+                result.peer_owner_violations.push(format!(
+                    "peer table mutation `PeerTable::disconnect(` at {}:{}: {}",
+                    path_str, index + 1, raw_lines[index].trim()
+                ));
             }
         }
     }
