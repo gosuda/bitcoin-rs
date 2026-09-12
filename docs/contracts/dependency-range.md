@@ -13,11 +13,13 @@ contract.
   `Cargo.toml` `[workspace.dependencies]` table.
 - `minimal` resolves each direct dependency at its oldest allowed version
   (`cargo +nightly update -Zdirect-minimal-versions`) and checks the
-  default workspace graph.
+  workspace graph with all features enabled (`--all-features`).
 - `maximum` resolves every crate to the newest version still inside its
   declared range (`cargo update`) and checks the default workspace graph.
-- Both lanes then run G20 against the mutated lockfile. Optional native
-  storage engines and the named feature matrix are owned by `FEAT-01`.
+- Both lanes then run G20 against the mutated lockfile. The `minimal`
+  lane enables every feature, so it compiles the optional native storage
+  engines at the oldest resolve. The named combinations themselves are
+  owned by `FEAT-01`.
 - Both lanes mutate `Cargo.lock`. They run on `main` only, never on a
   pull-request checkout.
 
