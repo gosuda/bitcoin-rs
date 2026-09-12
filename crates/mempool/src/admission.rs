@@ -530,9 +530,14 @@ impl MempoolGateway {
     /// their parents are still unknown, so their bodies cannot yet complete
     /// a connected block reconstruction.
     pub fn for_each_identity(&self, mut f: impl FnMut(Txid, Wtxid)) {
-        let pool = self.pool.read();
-        for entry in pool.iter_entries() {
-            f(entry.txid, entry.wtxid);
+        let identities: Vec<(Txid, Wtxid)> = {
+            let pool = self.pool.read();
+            pool.iter_entries()
+                .map(|entry| (entry.txid, entry.wtxid))
+                .collect()
+        };
+        for (txid, wtxid) in identities {
+            f(txid, wtxid);
         }
     }
 
