@@ -496,7 +496,7 @@ mod tests {
         let txid = Txid::from(Hash256::from_le_bytes(&txid_le));
         // Nonuniform u24 value: format 5 stores `vout` in 3 bytes, so the
         // fixture must fit `U24_MAX` (consensus vouts always do).
-        let outpoint = OutPoint::new(txid, 0x0a0b0c);
+        let outpoint = OutPoint::new(txid, 0x000a_0b0c);
         let row = ScriptLiveRow::new(scripthash, &outpoint);
 
         assert_eq!(&row.as_bytes()[..HASH_PREFIX_LEN], &[7_u8; 8]);

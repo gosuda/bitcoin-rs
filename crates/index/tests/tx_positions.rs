@@ -175,7 +175,7 @@ fn txid_positions_address_their_own_transaction() {
 fn a_partial_position_decodes_to_none() {
     let value = TxPositionValue::encode(&[TxPosition::new(100, 200), TxPosition::new(300, 400)]);
     for truncated in 1..value.len() {
-        if truncated % 8 == 0 {
+        if truncated % 6 == 0 {
             // Whole positions are a well-formed shorter list.
             continue;
         }

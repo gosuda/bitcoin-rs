@@ -36,17 +36,15 @@ fn iter_funding_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Proves that lexicographic key byte order does **not** match numeric
-/// height order within one prefix, because the height suffix is
-/// little-endian. Height 256 is `[0x00, 0x01, 0x00, 0x00]`, height 1 is
-/// `[0x01, 0x00, 0x00, 0x00]`, so byte order puts 256 before 1.
+/// Proves that lexicographic key byte order matches numeric height order
+/// within one prefix, because the height suffix is big-endian (format 5).
+/// Height 1 is `[0x00, 0x00, 0x00, 0x01]`, height 256 is
+/// `[0x00, 0x00, 0x01, 0x00]`, so byte order puts 1 before 256.
 ///
-/// This pins the corrected doc contract on `iter_funding_rows`: callers
-/// needing chronological order must sort by numeric height after
-/// exact-resolving rows, never rely on store iteration order.
+/// This pins the doc contract on `iter_funding_rows`: prefix-range scans
+/// arrive in chronological order without a numeric re-sort.
 #[test]
-fn iter_funding_rows_height_order_is_le_byte_order_not_numeric()
--> Result<(), Box<dyn std::error::Error>> {
+fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let dir = tempfile::tempdir()?;
@@ -58,25 +56,11 @@ fn iter_funding_rows_height_order_is_le_byte_order_not_numeric()
     let rows = indexer.iter_funding_rows(scripthash)?;
     assert_eq!(rows.len(), 2, "two heights funded the same script");
 
-    // Store iteration order is LE byte order, so 256 precedes 1.
+    // Store iteration order is BE byte order, so 1 precedes 256.
     assert_eq!(
-        rows[0].height(),
-        256,
-        "LE byte order puts height 256 before height 1, not numeric order"
-    );
-    assert_eq!(rows[1].height(), 1);
-
-    // The corollary: numeric sort produces the opposite order, so no
-    // caller may treat raw iteration order as chronological.
-    let mut numeric = rows.clone();
-    numeric.sort_by_key(|row| row.height());
-    assert_eq!(
-        numeric.iter().map(|row| row.height()).collect::<Vec<_>>(),
-        vec![1, 256]
-    );
-    assert_ne!(
-        rows, numeric,
-        "store iteration order must differ from numeric height order"
+        rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
+        vec![1, 256],
+        "BE byte order matches numeric height order"
     );
     Ok(())
 }
