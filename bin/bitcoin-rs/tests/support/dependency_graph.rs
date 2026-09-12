@@ -514,15 +514,15 @@ impl WorkspaceGraph {
         let activated = self.resolve_profile(profile);
         let mut violations = Vec::new();
 
-        // The backend must reach the storage crate as an activated optional
-        // dependency through the node forwarding chain: a backend feature
-        // name alone does not compose storage.
+        // The backend must reach the storage crate as an activated feature
+        // through the node forwarding chain: a backend feature name at node
+        // alone does not compose storage. Storage declares every backend by
+        // its plain name (`fjall`, `redb`, `rocksdb`), so the plain test
+        // covers every engine uniformly.
         let backend_reached = activated.get(STORAGE_CRATE).is_some_and(|features| {
-            features.iter().any(|feature| {
-                feature
-                    .strip_prefix("dep:")
-                    .is_some_and(|dependency| BACKEND_FEATURES.contains(&dependency))
-            })
+            features
+                .iter()
+                .any(|feature| BACKEND_FEATURES.contains(&feature.as_str()))
         });
         if !backend_reached {
             violations.push(format!(

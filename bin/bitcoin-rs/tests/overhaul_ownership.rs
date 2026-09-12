@@ -324,6 +324,24 @@ fn synthetic_kernel_leak_into_minimal_profile_fails() {
     );
 }
 
+/// Storage's rocksdb feature implies `dep:rust-rocksdb`, whose crate name
+/// is not one of the backend feature names: the backend rule must follow
+/// storage's own feature names, so a rocksdb-only lane composes too.
+#[test]
+fn synthetic_rocksdb_only_profile_reaches_its_backend() {
+    let graph = WorkspaceGraph::from_cargo_metadata();
+
+    let violations = graph.profile_ownership_violations(&FeatureProfile::new(
+        "rocksdb-only",
+        &["rocksdb"],
+        false,
+    ));
+    assert!(
+        violations.is_empty(),
+        "a rocksdb-only profile composes and must pass profile parity: {violations:?}"
+    );
+}
+
 const KNOWN_P2P_FORWARDING_WRAPPERS: &[&str] = &[
     "peer_table",
     "banned_subnets",
