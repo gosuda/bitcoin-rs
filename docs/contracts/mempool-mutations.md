@@ -71,6 +71,12 @@ state (`crates/mempool/src/orphan.rs`).
 - `Mempool::sequence_number` advances exactly once per emitted change while
   the write lock is held. A failed insert, a no-op removal, and a clear of
   an empty pool assign nothing.
+- Sequence assignment and in-batch lookup are modulo 2^64: assignment
+  wraps at `u64::MAX -> 0`, a non-empty batch reconstructs its
+  `sequence_base` from the advanced counter modulo 2^64, and
+  `MutationResult::sequence_of` returns the wrapped value for any
+  in-range index. A sequence of `0` is a valid committed value; only an
+  empty `MutationResult` carries no sequence.
 
 ### `MPL-03`: ZeroMQ sequence event payload mapping
 
