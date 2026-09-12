@@ -166,6 +166,10 @@ impl FeeEstimator {
         }
     }
 
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
     /// Records that a transaction entered the mempool.
     ///
     /// Call this when a transaction is accepted into the mempool.
@@ -605,6 +609,13 @@ mod history_codec {
             let fee_rate_sat_per_kvb = reader.u64_le()?;
             let confirmed_within = reader.counts::<MAX_CONF_TARGET>()?;
             let resolved_within = reader.counts::<MAX_CONF_TARGET>()?;
+            if confirmed_within
+                .iter()
+                .zip(resolved_within.iter())
+                .any(|(confirmed, resolved)| confirmed > resolved)
+            {
+                return Err(HistoryReject::Corrupt);
+            }
             buckets.push(Bucket {
                 fee_rate_sat_per_kvb,
                 confirmed_within,

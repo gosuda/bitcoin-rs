@@ -762,7 +762,11 @@ impl Mempool {
     /// rejected and the estimator stays exactly as it was, which for a pool
     /// that just opened is the empty, insufficient-data state.
     pub fn restore_estimator_history(&mut self, bytes: &[u8]) -> Result<(), HistoryReject> {
-        self.estimator = FeeEstimator::from_history_bytes(bytes)?;
+        let mut estimator = FeeEstimator::from_history_bytes(bytes)?;
+        // Transaction payloads are not persisted with estimator history, so
+        // pending entries would refer to transactions absent from this pool.
+        estimator.clear_pending();
+        self.estimator = estimator;
         Ok(())
     }
     /// Copies the pool's mining state into one immutable snapshot.
