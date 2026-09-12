@@ -148,19 +148,19 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "sendcmpct",
-        status: CommandStatus::Ignored,
+        status: CommandStatus::Negotiated,
     },
     Command {
         name: "cmpctblock",
-        status: CommandStatus::Ignored,
+        status: CommandStatus::Sink,
     },
     Command {
         name: "getblocktxn",
-        status: CommandStatus::Ignored,
+        status: CommandStatus::Served,
     },
     Command {
         name: "blocktxn",
-        status: CommandStatus::Ignored,
+        status: CommandStatus::Sink,
     },
     Command {
         name: "reject",
