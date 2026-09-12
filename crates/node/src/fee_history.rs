@@ -182,7 +182,7 @@ mod tests {
         // Two confirmations: a single one decays to 0.998 within its own
         // block, under the estimator's one-decayed-observation minimum.
         let txids: Vec<Txid> = txs.iter().map(|tx| tx.txid()).collect();
-        let refs: Vec<&Tx> = txs.iter().map(|tx| tx.as_ref()).collect();
+        let refs: Vec<&Tx> = txs.iter().map(AsRef::as_ref).collect();
         let _ = guard.remove_for_block(&refs, &txids, 101);
         drop(guard);
         mempool

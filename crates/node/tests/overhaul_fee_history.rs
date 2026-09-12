@@ -57,7 +57,7 @@ const LOW_FEE_SATS: u64 = 500;
 const REPLACEMENT_FEE_SATS: u64 = 30_000;
 /// Eviction threshold between the two tiers (sat/kvB).
 const EVICT_THRESHOLD_SAT_PER_KVB: u64 = 10_000;
-/// The estimator's owner-local datadir file (crates/node/src/fee_history.rs).
+/// The estimator's owner-local datadir file (`crates/node/src/fee_history.rs`).
 const HISTORY_FILE: &str = "fee-estimator-history.dat";
 
 // ---------------------------------------------------------------------------
