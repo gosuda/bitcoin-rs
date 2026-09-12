@@ -739,9 +739,13 @@ fn run_outbound_connection(
         shared.totals.as_ref(),
         handshake_deadline,
     ) {
+        // `remove_current` cancels as a side effect, so revocation must be
+        // read before it: a pre-cancelled lease means an external shutdown,
+        // while a live lease means this handshake failed on its own.
+        let revoked = lease.is_cancelled();
         shared.peer_table.remove_current(addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
-        if lease.is_cancelled() {
+        if revoked {
             tracing::debug!(peer_addr = %addr, "p2p outbound lease revoked during handshake");
             return Ok(());
         }
@@ -881,9 +885,13 @@ fn run_handshake(
         shared.totals.as_ref(),
         handshake_deadline,
     ) {
+        // `remove_current` cancels as a side effect, so revocation must be
+        // read before it: a pre-cancelled lease means an external shutdown,
+        // while a live lease means this handshake failed on its own.
+        let revoked = lease.is_cancelled();
         shared.peer_table.remove_current(peer_addr, &lease);
         let _ = peer.stream.shutdown(std::net::Shutdown::Both);
-        if lease.is_cancelled() {
+        if revoked {
             tracing::debug!(peer_addr = %peer_addr, "p2p inbound lease revoked during handshake");
             return Ok(());
         }
