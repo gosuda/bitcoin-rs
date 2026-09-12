@@ -28,12 +28,10 @@ impl<S: KvStore> Indexer<S> {
     /// `ScriptHistoryEntry::confirmed` for every transaction in that block that has
     /// at least one output matching `scripthash` exactly.
     ///
-    /// Entries are returned sorted by numeric height (ascending). The underlying
-    /// store iterates rows in lexicographic key-byte order, and because the
-    /// 4-byte height suffix is little-endian, that order does **not** match
-    /// numeric height order within one prefix (height 256 sorts before height
-    /// 1). This method sorts the final entry list by numeric height so callers
-    /// receive chronological order regardless of the on-disk key encoding.
+    /// Entries are returned sorted by numeric height (ascending), matching the
+    /// underlying store iteration order: the 4-byte height suffix is
+    /// big-endian (format 5), so lexicographic key-byte order already is
+    /// chronological within one prefix. The sort stays as a contract guarantee.
     /// Heights not resolvable by `source` are skipped.
     ///
     /// The lossy 8-byte prefix is exact-resolved here: only transactions whose
@@ -148,7 +146,7 @@ impl<S: KvStore> Indexer<S> {
     /// funding height (ascending). Use this when callers need the confirmation
     /// height (e.g. `ScriptIndex` `listunspent` emits the height for each
     /// unspent output). The sort mirrors [`Self::resolve_script_history`]:
-    /// store iteration order is LE byte order, not numeric height order.
+    /// store iteration order is BE byte order, hence numeric height order.
     pub fn resolve_unspent_outputs_with_height<B: BlockSource>(
         &self,
         scripthash: crate::ScriptHash,

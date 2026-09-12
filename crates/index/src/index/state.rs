@@ -567,9 +567,8 @@ fn acquire_capability_reset<S: KvStore>(
         }
         if capabilities.script_history {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY);
-            // Same durable batch as FORMAT_VERSION_VALUE so a format-3
-            // upgrade cannot publish version 4 while leaving the row-value
-            // marker at 1.
+            // Same durable batch as FORMAT_VERSION_VALUE so a reset can never
+            // publish the row-value marker without the format marker.
             batch.put(
                 ColumnFamily::UtxoMeta,
                 INDEX_FORMAT_VERSION_KEY,

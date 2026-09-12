@@ -63,7 +63,7 @@ pub type HashPrefix = [u8; HASH_PREFIX_LEN];
 pub struct HashPrefixRow {
     /// The first eight bytes of the indexed hash-derived key.
     pub prefix: HashPrefix,
-    /// The transaction-confirming block height, encoded little-endian.
+    /// The transaction-confirming block height, encoded big-endian.
     pub height: [u8; HEIGHT_SIZE],
 }
 

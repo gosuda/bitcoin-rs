@@ -70,11 +70,9 @@ impl<S: KvStore> Indexer<S> {
     /// scan prefix, decoded from `ColumnFamily::Funding`. Rows are returned in
     /// the iteration order of the underlying store (lexicographic by key bytes).
     ///
-    /// **Height ordering caveat:** the 4-byte height suffix is little-endian,
-    /// so lexicographic byte order does **not** match numeric height order
-    /// within one prefix. For example, height 256 (`00 01 00 00`) sorts before
-    /// height 1 (`01 00 00 00`). Callers that need chronological order must
-    /// sort the returned rows by numeric height after exact-resolving them.
+    /// **Height ordering:** the 4-byte height suffix is big-endian (format 5),
+    /// so lexicographic byte order matches numeric height order within one
+    /// prefix: prefix-range scans arrive in chronological order.
     ///
     /// The 8-byte prefix is lossy: callers MUST resolve heights back to full
     /// transactions via block storage to confirm scripthash identity.
@@ -151,11 +149,9 @@ impl<S: KvStore> Indexer<S> {
     /// spending scan prefix, decoded from `ColumnFamily::Spending`. The 8-byte
     /// prefix is lossy as above.
     ///
-    /// **Height ordering caveat:** same as [`Self::iter_funding_rows`]: the
-    /// 4-byte height suffix is little-endian, so lexicographic byte order does
-    /// **not** match numeric height order within one prefix. Callers needing
-    /// chronological order must sort by numeric height after exact-resolving
-    /// rows.
+    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
+    /// height suffix is big-endian (format 5), so prefix-range scans arrive
+    /// in chronological order.
     pub fn iter_spending_rows(
         &self,
         outpoint: &OutPoint,
@@ -171,11 +167,9 @@ impl<S: KvStore> Indexer<S> {
     /// prefix, decoded from `ColumnFamily::TxConfirmed`. The 8-byte prefix is
     /// lossy; multiple txids can share a prefix.
     ///
-    /// **Height ordering caveat:** same as [`Self::iter_funding_rows`]: the
-    /// 4-byte height suffix is little-endian, so lexicographic byte order does
-    /// **not** match numeric height order within one prefix. Callers needing
-    /// chronological order must sort by numeric height after exact-resolving
-    /// rows.
+    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
+    /// height suffix is big-endian (format 5), so prefix-range scans arrive
+    /// in chronological order.
     pub fn iter_txid_rows(&self, txid: &Txid) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = TxidRow::scan_prefix(txid);
         let iter = self.store.iter_prefix(ColumnFamily::TxConfirmed, &prefix)?;
