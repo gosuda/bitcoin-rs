@@ -409,10 +409,10 @@ fn getindexinfo_returns_available_indexes() -> Result<(), Box<dyn std::error::Er
 fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), Box<dyn std::error::Error>>
 {
     let mut ctx = Context::new();
-    ctx.tx_index = Some(Arc::new(FakeTxIndex {
+    ctx.derived_index = Some(Arc::new(FakeTxIndex {
         transactions: HashMap::new(),
         values: HashMap::new(),
-        info: bitcoin_rs_rpc::context::TxIndexInfo {
+        info: bitcoin_rs_rpc::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 7,
         },
@@ -436,10 +436,10 @@ fn getindexinfo_returns_txindex_when_indexer_is_available() -> Result<(), Box<dy
 #[test]
 fn getindexinfo_named_request_returns_only_that_index() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = Context::new();
-    ctx.tx_index = Some(Arc::new(FakeTxIndex {
+    ctx.derived_index = Some(Arc::new(FakeTxIndex {
         transactions: HashMap::new(),
         values: HashMap::new(),
-        info: bitcoin_rs_rpc::context::TxIndexInfo {
+        info: bitcoin_rs_rpc::context::DerivedIndexInfo {
             synced: true,
             best_block_height: 7,
         },
@@ -625,12 +625,12 @@ fn removed_wallet_methods_return_method_not_found() {
 }
 
 struct FakeTxIndex {
-    info: bitcoin_rs_rpc::context::TxIndexInfo,
+    info: bitcoin_rs_rpc::context::DerivedIndexInfo,
     transactions: HashMap<Txid, Tx>,
     values: HashMap<OutPoint, u64>,
 }
 
-impl bitcoin_rs_rpc::context::TxIndexQuery for FakeTxIndex {
+impl bitcoin_rs_rpc::context::DerivedIndexQuery for FakeTxIndex {
     fn transaction(
         &self,
         txid: &Txid,
@@ -647,7 +647,8 @@ impl bitcoin_rs_rpc::context::TxIndexQuery for FakeTxIndex {
 
     fn index_info(
         &self,
-    ) -> Result<bitcoin_rs_rpc::context::TxIndexInfo, bitcoin_rs_rpc::context::TxQueryError> {
+    ) -> Result<bitcoin_rs_rpc::context::DerivedIndexInfo, bitcoin_rs_rpc::context::TxQueryError>
+    {
         Ok(self.info)
     }
 }
@@ -674,10 +675,10 @@ fn fee_stats_context(values: Option<HashMap<OutPoint, u64>>) -> (Arc<Context>, T
                 },
             );
         }
-        ctx.tx_index = Some(Arc::new(FakeTxIndex {
+        ctx.derived_index = Some(Arc::new(FakeTxIndex {
             transactions,
             values,
-            info: bitcoin_rs_rpc::context::TxIndexInfo {
+            info: bitcoin_rs_rpc::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 7,
             },
@@ -855,10 +856,10 @@ impl Fixture {
         ctx.add_block(BlockRecord::from_block(7, &block));
         let mut values = HashMap::new();
         values.insert(outpoint(1), 6_000);
-        ctx.tx_index = Some(Arc::new(FakeTxIndex {
+        ctx.derived_index = Some(Arc::new(FakeTxIndex {
             transactions: HashMap::new(),
             values,
-            info: bitcoin_rs_rpc::context::TxIndexInfo {
+            info: bitcoin_rs_rpc::context::DerivedIndexInfo {
                 synced: true,
                 best_block_height: 7,
             },

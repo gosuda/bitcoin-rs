@@ -1,9 +1,9 @@
 //! Txindex lifecycle/progress projection for RPC capability reporting.
 
 use super::{
-    Arc, ArcSwap, CapabilityState, CapabilityStatus, IndexCapabilities, IndexProgress,
-    TxIndexCapabilitySource, TxIndexLifecycle, TxIndexQueryEngine, TxIndexRuntime, TxQueryError,
-    txindex_status,
+    Arc, ArcSwap, CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource,
+    DerivedIndexLifecycle, DerivedIndexQueryEngine, DerivedIndexRuntime, IndexCapabilities,
+    IndexProgress, TxQueryError, derived_index_status,
 };
 
 /// Progress reads that raced a tip or revision move before the status
@@ -11,16 +11,16 @@ use super::{
 const PROGRESS_READ_ATTEMPTS: usize = 4;
 
 /// Worker-owned txindex facts for the RPC capability projection.
-pub(crate) struct TxIndexCapability {
-    lifecycle: Option<Arc<ArcSwap<TxIndexLifecycle>>>,
-    runtime: Option<Arc<TxIndexRuntime>>,
+pub(crate) struct DerivedIndexCapability {
+    lifecycle: Option<Arc<ArcSwap<DerivedIndexLifecycle>>>,
+    runtime: Option<Arc<DerivedIndexRuntime>>,
     enabled: IndexCapabilities,
 }
 
-impl TxIndexCapability {
+impl DerivedIndexCapability {
     pub(crate) fn new(
-        lifecycle: Option<Arc<ArcSwap<TxIndexLifecycle>>>,
-        runtime: Option<Arc<TxIndexRuntime>>,
+        lifecycle: Option<Arc<ArcSwap<DerivedIndexLifecycle>>>,
+        runtime: Option<Arc<DerivedIndexRuntime>>,
         enabled: IndexCapabilities,
     ) -> Self {
         Self {
@@ -31,8 +31,8 @@ impl TxIndexCapability {
     }
 
     fn report(
-        lifecycle: &TxIndexLifecycle,
-        runtime: &TxIndexRuntime,
+        lifecycle: &DerivedIndexLifecycle,
+        runtime: &DerivedIndexRuntime,
         enabled: IndexCapabilities,
     ) -> CapabilityState {
         if let Some(message) = runtime.failure_message() {
@@ -41,14 +41,14 @@ impl TxIndexCapability {
             };
         }
         let engine = match lifecycle {
-            TxIndexLifecycle::Opening => return CapabilityState::Opening,
-            TxIndexLifecycle::ShutdownAbandoned => return CapabilityState::ShutdownAbandoned,
-            TxIndexLifecycle::Failed(reason) => {
+            DerivedIndexLifecycle::Opening => return CapabilityState::Opening,
+            DerivedIndexLifecycle::ShutdownAbandoned => return CapabilityState::ShutdownAbandoned,
+            DerivedIndexLifecycle::Failed(reason) => {
                 return CapabilityState::Failed {
                     reason: reason.to_string(),
                 };
             }
-            TxIndexLifecycle::Serving(engine) => engine,
+            DerivedIndexLifecycle::Serving(engine) => engine,
         };
         let phase = runtime.phase();
         if let Some((from_height, to_height)) = phase.rolling_back() {
@@ -82,7 +82,7 @@ impl TxIndexCapability {
     }
 
     fn progress(
-        engine: &TxIndexQueryEngine,
+        engine: &DerivedIndexQueryEngine,
         required: IndexCapabilities,
     ) -> Result<IndexProgress, TxQueryError> {
         let mut attempts = 0;
@@ -96,7 +96,7 @@ impl TxIndexCapability {
     }
 }
 
-impl TxIndexCapabilitySource for TxIndexCapability {
+impl DerivedIndexCapabilitySource for DerivedIndexCapability {
     fn capability(&self) -> CapabilityStatus {
         let enabled = !self.enabled.is_empty();
         let state = match (&self.lifecycle, &self.runtime) {
@@ -105,6 +105,6 @@ impl TxIndexCapabilitySource for TxIndexCapability {
             }
             _ => CapabilityState::Disabled,
         };
-        txindex_status(enabled, state)
+        derived_index_status(enabled, state)
     }
 }

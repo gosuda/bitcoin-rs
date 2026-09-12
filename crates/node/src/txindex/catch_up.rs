@@ -2,13 +2,13 @@
 
 use super::BlockIdentity;
 use super::ChunkAction;
+use super::DerivedIndexWorkerError;
 use super::IDENTITY_CHUNK_BLOCKS;
 use super::POSITION_PREFETCH_BLOCKS;
 use super::PREPARE_CHUNK_BLOCKS;
 use super::PREPARE_CHUNK_BYTES;
 use super::PendingForward;
 use super::ReconcileAction;
-use super::TxIndexWorkerError;
 use super::Worker;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::IndexCapabilities;
@@ -32,7 +32,7 @@ impl Worker {
         target: &TipSnapshot,
         start_height: u32,
         end_height: u32,
-    ) -> Result<Vec<BlockIdentity>, TxIndexWorkerError> {
+    ) -> Result<Vec<BlockIdentity>, DerivedIndexWorkerError> {
         let tree = self.block_tree.read();
         let capacity = usize::try_from(end_height.saturating_sub(start_height).saturating_add(1))
             .unwrap_or(usize::MAX);
@@ -40,20 +40,20 @@ impl Worker {
         for height in start_height..=end_height {
             let node_id = tree
                 .node_at_height_from(target.tip_id, height)
-                .ok_or(TxIndexWorkerError::MissingTargetChain { height })?;
+                .ok_or(DerivedIndexWorkerError::MissingTargetChain { height })?;
             let node = tree
                 .node(node_id)
-                .map_err(|_| TxIndexWorkerError::MissingTargetChain { height })?;
+                .map_err(|_| DerivedIndexWorkerError::MissingTargetChain { height })?;
             let parent_hash = if height == 0 {
                 [0_u8; 32]
             } else {
                 let parent_id = tree
                     .parent_id(node_id)
-                    .map_err(|_| TxIndexWorkerError::MissingTargetChain { height })?
-                    .ok_or(TxIndexWorkerError::MissingTargetChain { height })?;
+                    .map_err(|_| DerivedIndexWorkerError::MissingTargetChain { height })?
+                    .ok_or(DerivedIndexWorkerError::MissingTargetChain { height })?;
                 let parent = tree
                     .node(parent_id)
-                    .map_err(|_| TxIndexWorkerError::MissingTargetChain { height })?;
+                    .map_err(|_| DerivedIndexWorkerError::MissingTargetChain { height })?;
                 *parent.hash.as_byte_array()
             };
             identities.push(BlockIdentity {
@@ -73,7 +73,7 @@ impl Worker {
         watermark: Option<IndexWatermark>,
         capabilities: IndexCapabilities,
         pending: &mut Option<PendingForward>,
-    ) -> Result<ReconcileAction, TxIndexWorkerError> {
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
             return Ok(ReconcileAction::Stalled);
         }
@@ -87,7 +87,7 @@ impl Worker {
             deadline: Instant::now() + self.batch_delay,
         });
         if state.durable != watermark || state.capabilities != capabilities {
-            return Err(TxIndexWorkerError::PendingDurableChanged);
+            return Err(DerivedIndexWorkerError::PendingDurableChanged);
         }
         let start_height = state.batch.watermark().map_or_else(
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
@@ -109,9 +109,11 @@ impl Worker {
             return Ok(ReconcileAction::Stalled);
         }
         let Some(body_store) = self.body_store.as_ref() else {
-            return Err(TxIndexWorkerError::NoBodyStore);
+            return Err(DerivedIndexWorkerError::NoBodyStore);
         };
-        let mut body_reader = body_store.reader().map_err(TxIndexWorkerError::Storage)?;
+        let mut body_reader = body_store
+            .reader()
+            .map_err(DerivedIndexWorkerError::Storage)?;
         let mut requests = Vec::with_capacity(POSITION_PREFETCH_BLOCKS);
         for identities in identities.chunks(POSITION_PREFETCH_BLOCKS) {
             if self.runtime.should_stop() {
@@ -125,7 +127,7 @@ impl Worker {
             );
             body_reader
                 .prefetch_positions(&requests)
-                .map_err(TxIndexWorkerError::Storage)?;
+                .map_err(DerivedIndexWorkerError::Storage)?;
 
             // Sub-chunk: load bodies serially until the count or byte cap
             // (preserving the reader's prefetch state), prepare blocks in
@@ -166,7 +168,7 @@ impl Worker {
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
         pending: &mut Option<PendingForward>,
-    ) -> Result<ChunkAction, TxIndexWorkerError> {
+    ) -> Result<ChunkAction, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
         }
@@ -197,7 +199,7 @@ impl Worker {
                     }
                     return Ok(ChunkAction::Stalled);
                 }
-                Err(e) => return Err(TxIndexWorkerError::Storage(e)),
+                Err(e) => return Err(DerivedIndexWorkerError::Storage(e)),
             }
             if bodies.len() >= PREPARE_CHUNK_BLOCKS {
                 break;
@@ -211,11 +213,11 @@ impl Worker {
             for identity in sub_chunk {
                 match self.live_anchor(identity.height, identity.hash) {
                     Ok(anchor) => anchors.push(anchor),
-                    Err(error @ TxIndexWorkerError::UndoUnavailable { .. }) => {
+                    Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                         *pending = None;
                         self.writer
                             .reset_capabilities(IndexCapabilities::SCRIPT_LIVE)
-                            .map_err(TxIndexWorkerError::Index)?;
+                            .map_err(DerivedIndexWorkerError::Index)?;
                         tracing::warn!(error = %error, "rebuilding ScriptLive after pruned undo");
                         return Ok(ChunkAction::Stalled);
                     }
@@ -257,9 +259,9 @@ impl Worker {
         // Push prepared blocks into the batch in height order on the single
         // writer thread.
         for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
-            let prepared = result.map_err(TxIndexWorkerError::Index)?;
+            let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
             if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
-                return Err(TxIndexWorkerError::MissingTargetChain {
+                return Err(DerivedIndexWorkerError::MissingTargetChain {
                     height: identity.height,
                 });
             }
@@ -294,7 +296,7 @@ impl Worker {
         chunk_end: u32,
         target: &TipSnapshot,
         pending: &mut Option<PendingForward>,
-    ) -> Result<ReconcileAction, TxIndexWorkerError> {
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         if chunk_end < target.height {
             *pending = Some(state);
             return Ok(ReconcileAction::Progressed);

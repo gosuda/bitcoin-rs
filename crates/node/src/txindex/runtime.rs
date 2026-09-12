@@ -15,7 +15,7 @@ use std::sync::{
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
 /// `Chainstate`, the worker thread, and the query engine.
 #[derive(Debug)]
-pub struct TxIndexRuntime {
+pub struct DerivedIndexRuntime {
     revision: AtomicU64,
     pub(super) shutdown: AtomicBool,
     pub(super) failed: AtomicBool,
@@ -23,7 +23,7 @@ pub struct TxIndexRuntime {
     failure_message: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
-impl TxIndexRuntime {
+impl DerivedIndexRuntime {
     /// Creates a runtime attached to `wake_tx`.
     #[must_use]
     pub fn new(wake_tx: Sender<()>) -> Self {

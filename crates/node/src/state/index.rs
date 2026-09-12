@@ -10,12 +10,14 @@ use crossbeam_channel::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) fn tx_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
+pub(super) fn derived_index_capabilities(
+    config: &NodeConfig,
+) -> bitcoin_rs_index::IndexCapabilities {
     bitcoin_rs_index::IndexCapabilities {
         // Full ScriptIndex-backed Esplora responses need exact historical
         // transactions to render prevouts and calculate fees. `utxo` owns
         // only the compact live-output view and must not pay for TxLookup.
-        // `tx_index_query` still exposes TxLookup to Core RPCs only for an
+        // `derived_index_query` still exposes TxLookup to Core RPCs only for an
         // explicit --txindex configuration.
         tx_lookup: config.indexes.txindex || config.indexes.script_index.keeps_history(),
         script_history: config.indexes.script_index.keeps_history(),
@@ -23,12 +25,12 @@ pub(super) fn tx_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::In
     }
 }
 
-pub(super) fn build_tx_index_open_spec(
+pub(super) fn build_derived_index_open_spec(
     config: &NodeConfig,
     txindex_cache_bytes: u64,
     epoch: u64,
-) -> Result<Option<crate::txindex::TxIndexOpenSpec>> {
-    let enabled = tx_index_capabilities(config);
+) -> Result<Option<crate::txindex::DerivedIndexOpenSpec>> {
+    let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
         return Ok(None);
     }
@@ -39,7 +41,7 @@ pub(super) fn build_tx_index_open_spec(
         .data_dir
         .canonicalize()
         .unwrap_or_else(|_| config.data_dir.clone());
-    Ok(Some(crate::txindex::TxIndexOpenSpec {
+    Ok(Some(crate::txindex::DerivedIndexOpenSpec {
         data_dir: config.data_dir.clone(),
         namespace: "txindex",
         storage_backend: config.storage.backend,
@@ -54,7 +56,7 @@ pub(super) fn build_tx_index_open_spec(
 }
 
 pub(super) struct TxIndexSpawn {
-    pub(super) spec: crate::txindex::TxIndexOpenSpec,
+    pub(super) spec: crate::txindex::DerivedIndexOpenSpec,
     pub(super) generation: crate::txindex::Generation,
     pub(super) block_source: crate::txindex::IndexBlockSource,
     pub(super) body_source: Arc<dyn BlockBodySource>,
@@ -65,12 +67,14 @@ pub(super) struct TxIndexSpawn {
 impl NodeState {
     /// Returns the node-owned complete transaction-index query adapter.
     #[must_use]
-    pub fn tx_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery>> {
+    pub fn derived_index_query(
+        &self,
+    ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
         if !self.config.indexes.txindex {
             return None;
         }
-        self.tx_index_adapter.as_ref().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery> = adapter.clone();
+        self.derived_index_adapter.as_ref().map(|adapter| {
+            let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
             q
         })
     }
@@ -80,9 +84,11 @@ impl NodeState {
     /// `--scriptindex` builds this dependency as well, but that does not
     /// enable or advertise the Core `--txindex` contract.
     #[must_use]
-    pub fn esplora_tx_index_query(&self) -> Option<Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery>> {
-        self.tx_index_adapter.as_ref().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::TxIndexQuery> = adapter.clone();
+    pub fn esplora_derived_index_query(
+        &self,
+    ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
+        self.derived_index_adapter.as_ref().map(|adapter| {
+            let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
             q
         })
     }
@@ -93,7 +99,7 @@ impl NodeState {
         if !self.config.indexes.script_index.is_enabled() {
             return None;
         }
-        self.tx_index_adapter.as_ref().map(|adapter| {
+        self.derived_index_adapter.as_ref().map(|adapter| {
             let q: Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery> = adapter.clone();
             q
         })
@@ -103,18 +109,18 @@ impl NodeState {
     /// authoritative — after crash recovery — so the index reconciles against
     /// the real chainstate and never mistakes a recovered gap for a stale branch.
     pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
-        let Some(spawn) = self.tx_index_spawn.take() else {
+        let Some(spawn) = self.derived_index_spawn.take() else {
             return Ok(());
         };
         let runtime = self
-            .tx_index_runtime
+            .derived_index_runtime
             .as_ref()
             .context("txindex runtime missing for a pending worker spawn")?;
         let lifecycle = self
-            .tx_index_lifecycle
+            .derived_index_lifecycle
             .as_ref()
             .context("txindex lifecycle missing for a pending worker spawn")?;
-        let worker = crate::txindex::TxIndexWorker::spawn_with_open(
+        let worker = crate::txindex::DerivedIndexWorker::spawn_with_open(
             Arc::clone(runtime),
             spawn.spec,
             Arc::clone(lifecycle),
@@ -130,14 +136,16 @@ impl NodeState {
             spawn.wake_rx,
         )
         .context("spawn txindex worker")?;
-        self.tx_index_worker = Some(worker);
+        self.derived_index_worker = Some(worker);
         Ok(())
     }
 
     /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
-    pub fn txindex_status(&self) -> Arc<dyn bitcoin_rs_rpc::capabilities::TxIndexCapabilitySource> {
-        self.txindex_status.clone()
+    pub fn derived_index_status(
+        &self,
+    ) -> Arc<dyn bitcoin_rs_rpc::capabilities::DerivedIndexCapabilitySource> {
+        self.derived_index_status.clone()
     }
 
     /// Bounded txindex-worker shutdown: requests the worker shutdown, waits up
@@ -147,14 +155,14 @@ impl NodeState {
     /// hitting a torn reader.
     pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) {
         let start = std::time::Instant::now();
-        if let Some(runtime) = &self.tx_index_runtime {
+        if let Some(runtime) = &self.derived_index_runtime {
             runtime.request_shutdown();
         }
         // Take the worker out of self so we can join it without holding self
         // mutably across the wait.
-        let tx_index_worker = self.tx_index_worker.take();
+        let derived_index_worker = self.derived_index_worker.take();
         let tx_deadline = start + deadline;
-        if let Some(mut worker) = tx_index_worker {
+        if let Some(mut worker) = derived_index_worker {
             while std::time::Instant::now() < tx_deadline {
                 if worker.is_finished() {
                     break;
@@ -169,9 +177,9 @@ impl NodeState {
                 if let Some(generation_token) = &worker.generation {
                     generation_token.revoke();
                 }
-                if let Some(lifecycle) = &self.tx_index_lifecycle {
+                if let Some(lifecycle) = &self.derived_index_lifecycle {
                     lifecycle.store(Arc::new(
-                        crate::txindex::TxIndexLifecycle::ShutdownAbandoned,
+                        crate::txindex::DerivedIndexLifecycle::ShutdownAbandoned,
                     ));
                 }
                 // Poison the namespace so it cannot be reclaimed in this process.

@@ -10,11 +10,11 @@ This version adds the scheduling requirements in `IDX-08`; changes to those
 requirements must update this clause and its executable proof together.
 
 Owners:
-- `TxIndexRuntime` in `crates/node/src/txindex/runtime.rs` and worker state in
+- `DerivedIndexRuntime` in `crates/node/src/txindex/runtime.rs` and worker state in
   `crates/node/src/txindex.rs`;
   reconciliation, cursor commits, bounded preparation, and rollback in its
   `reconciliation.rs`, `cursor.rs`, `catch_up.rs`, and `rollback.rs` modules.
-- `TxIndexQueryEngine` in `crates/node/src/txindex/query.rs` owns the shared
+- `DerivedIndexQueryEngine` in `crates/node/src/txindex/query.rs` owns the shared
   snapshot gate and public query entrypoints. Its `query/transactions.rs`,
   `query/scripts.rs`, `query/block_source.rs`, and `query/budget.rs` modules own
   exact transaction resolution, script traversal, block identity, and aggregate
@@ -22,8 +22,8 @@ Owners:
 - Worker supervision and backend opening in `txindex/lifecycle.rs` and
   `txindex/startup.rs`; startup owns generation-checked publication.
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
-- Capability status: worker-owned `TxIndexLifecycle` in
-  `crates/node/src/txindex.rs` mapped by `TxIndexCapability` onto the
+- Capability status: worker-owned `DerivedIndexLifecycle` in
+  `crates/node/src/txindex.rs` mapped by `DerivedIndexCapability` onto the
   RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
   status enum.
 
@@ -59,7 +59,7 @@ only scheduling mechanics.
   The historical boolean spellings (`true`, `1`, `yes`) continue to mean
   `full`, and (`false`, `0`, `no`) mean disabled. There is no history-only mode.
 - Enabling either `--txindex` or `--scriptindex` spawns exactly one node-owned
-  `TxIndexRuntime` worker thread. Enabling both permits both capability row
+  `DerivedIndexRuntime` worker thread. Enabling both permits both capability row
   families to share a single block-body parse and atomic forward commit batch
   when their watermarks are aligned.
 
@@ -76,7 +76,7 @@ only scheduling mechanics.
   capability watermark matches the height and block hash of the active chain tip.
 - `getcapabilities` reports one compiled txindex row. A missing worker is
   `enabled: false` / `Disabled`; an attached worker supplies the row through
-  `TxIndexCapabilitySource`. Proof: `crates/rpc/src/capabilities.rs` tests
+  `DerivedIndexCapabilitySource`. Proof: `crates/rpc/src/capabilities.rs` tests
   `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`.
 
 `ScriptLive` is not a duplicate coin table. Its empty-valued key is
@@ -88,12 +88,12 @@ remove another script's output.
 ### `IDX-03`: Query gating and snapshot consistency
 
 - **Ready invariant**: `ready ⇔ cursor == applied_tip on active chain`.
-- `TxIndexQueryEngine::with_snapshot` and `index_info` gate every read:
+- `DerivedIndexQueryEngine::with_snapshot` and `index_info` gate every read:
   1. The worker runtime must be healthy (neither `failed` nor `shutdown`).
   2. The applied tip loaded before snapshot creation must match the durable
      capability watermark (`IndexWatermark { height, hash }`) for every consumed
      capability.
-  3. The runtime revision (`TxIndexRuntime::revision`) and the applied tip
+  3. The runtime revision (`DerivedIndexRuntime::revision`) and the applied tip
      identity must remain identical before and after snapshot acquisition.
 - If an index capability lags behind the tip, is rebuilding, is rolling back
   across a reorg, or experiences a concurrent tip advance during read assembly,
@@ -176,7 +176,7 @@ remove another script's output.
 
 - Reorganizations reconcile asynchronously across the chain-event seam
   (`docs/contracts/chain-events.md`). `ChainFollowers` dispatch
-  `ChainEffects`, which invokes `TxIndexRuntime::wake()` after each
+  `ChainEffects`, which invokes `DerivedIndexRuntime::wake()` after each
   committed connect or disconnect.
 - **Disconnect walk**:
   - Height-keyed rows (transaction position rows) are removed using per-block
@@ -247,7 +247,7 @@ remove another script's output.
   `txindex_worker_failure_makes_queries_unavailable_without_blocking_apply`.
 - `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
   `attached_source_is_the_worker_row`: `getcapabilities` advertises one
-  txindex row from `txindex_status` (`IDX-02`).
+  txindex row from `derived_index_status` (`IDX-02`).
 
 ### Query-budget regression evidence
 

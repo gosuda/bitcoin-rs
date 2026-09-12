@@ -1,9 +1,9 @@
 //! Index reconciliation state machine and supplied chain-position decisions.
 
 use super::CursorCommit;
+use super::DerivedIndexWorkerError;
 use super::PendingForward;
 use super::ReconcileAction;
-use super::TxIndexWorkerError;
 use super::Worker;
 use super::scheduling::BatchWait;
 use super::scheduling::wait_for_batch_deadline;
@@ -24,7 +24,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 impl Worker {
-    pub(super) fn run(self) -> Result<(), TxIndexWorkerError> {
+    pub(super) fn run(self) -> Result<(), DerivedIndexWorkerError> {
         let mut quiet_armed = false;
         let mut pending = None;
         loop {
@@ -48,8 +48,8 @@ impl Worker {
             let revision_before = self.runtime.revision();
             let action = match self.reconcile_once(&mut pending) {
                 Ok(action) => action,
-                Err(TxIndexWorkerError::Stopped) => break,
-                Err(TxIndexWorkerError::Index(
+                Err(DerivedIndexWorkerError::Stopped) => break,
+                Err(DerivedIndexWorkerError::Index(
                     IndexError::ResetInProgress | IndexError::StaleIndexState,
                 )) => {
                     pending = None;
@@ -122,7 +122,7 @@ impl Worker {
     pub(super) fn reconcile_once(
         &self,
         pending: &mut Option<PendingForward>,
-    ) -> Result<ReconcileAction, TxIndexWorkerError> {
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         let action = self.reconcile_pass(pending)?;
         if !matches!(action, ReconcileAction::CaughtUp) {
             return Ok(action);
@@ -149,7 +149,7 @@ impl Worker {
     pub(super) fn reconcile_pass(
         &self,
         pending: &mut Option<PendingForward>,
-    ) -> Result<ReconcileAction, TxIndexWorkerError> {
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         let (target, fence, watermarks) = self.capture_target_watermarks()?;
         let leftover = self.enabled.leftover(watermarks);
         if !leftover.is_empty() {
@@ -158,7 +158,7 @@ impl Worker {
             // longer configured. Live stays queryable through that demotion.
             self.writer
                 .reset_capabilities(leftover)
-                .map_err(TxIndexWorkerError::Index)?;
+                .map_err(DerivedIndexWorkerError::Index)?;
             return Ok(ReconcileAction::Progressed);
         }
 
@@ -206,11 +206,11 @@ impl Worker {
                     let (next_fence, next_watermarks) = self
                         .writer
                         .fenced_watermarks()
-                        .map_err(TxIndexWorkerError::Index)?;
+                        .map_err(DerivedIndexWorkerError::Index)?;
                     fence = next_fence;
                     watermarks = next_watermarks;
                 }
-                Err(error @ TxIndexWorkerError::UndoUnavailable { .. }) => {
+                Err(error @ DerivedIndexWorkerError::UndoUnavailable { .. }) => {
                     // Undo is the ScriptLive spend-script authority. TxLookup
                     // and ScriptHistory roll back from the block body alone,
                     // so a pruned undo must not force those families through
@@ -233,7 +233,7 @@ impl Worker {
                     (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
                     continue;
                 }
-                Err(TxIndexWorkerError::Index(
+                Err(DerivedIndexWorkerError::Index(
                     IndexError::ResetInProgress | IndexError::StaleIndexState,
                 )) => {
                     return Ok(ReconcileAction::Stalled);
@@ -268,9 +268,9 @@ impl Worker {
         fence: IndexWriteFence,
         watermarks: IndexWatermarks,
         target: Option<&TipSnapshot>,
-    ) -> Result<ReconcileAction, TxIndexWorkerError> {
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         let Some(state) = pending.as_ref() else {
-            return Err(TxIndexWorkerError::PendingDurableChanged);
+            return Err(DerivedIndexWorkerError::PendingDurableChanged);
         };
         // Any fence change invalidates the retained rows. Discard them and
         // re-derive from the new reset, revision, and watermark state.
@@ -283,7 +283,7 @@ impl Worker {
         if selected_watermark(watermarks, state.capabilities)
             != SelectedWatermark::Valid(state.durable)
         {
-            return Err(TxIndexWorkerError::PendingDurableChanged);
+            return Err(DerivedIndexWorkerError::PendingDurableChanged);
         }
         let endpoint = state.endpoint();
         let Some(target) = target else {
@@ -331,12 +331,12 @@ impl Worker {
 
     pub(super) fn capture_target_watermarks(
         &self,
-    ) -> Result<(Option<Arc<TipSnapshot>>, IndexWriteFence, IndexWatermarks), TxIndexWorkerError>
+    ) -> Result<(Option<Arc<TipSnapshot>>, IndexWriteFence, IndexWatermarks), DerivedIndexWorkerError>
     {
         let (fence, watermarks) = self
             .writer
             .fenced_watermarks()
-            .map_err(TxIndexWorkerError::Index)?;
+            .map_err(DerivedIndexWorkerError::Index)?;
         let target = self.applied_tip.load_full();
         Ok((target, fence, watermarks))
     }
