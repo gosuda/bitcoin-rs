@@ -125,24 +125,24 @@ fn filler_tx(seed: u64) -> Tx {
     fill_bytes(seed, &mut txid_bytes);
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: 0.into(),
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
                 vout: u32::try_from(seed & 0x3).unwrap_or(0),
             },
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Vec::new().into(),
+            sequence: u32::MAX.into(),
+            witness: Vec::new().into(),
         }],
         outputs: vec![
             TxOut {
-                value: 5_000,
-                script_pubkey: witness_script(seed ^ 0xa5a5_a5a5),
+                value: 5_000.into(),
+                script_pubkey: witness_script(seed ^ 0xa5a5_a5a5).into(),
             },
             TxOut {
-                value: 7_000,
-                script_pubkey: witness_script(seed ^ 0x5a5a_5a5a),
+                value: 7_000.into(),
+                script_pubkey: witness_script(seed ^ 0x5a5a_5a5a).into(),
             },
         ],
     }
@@ -158,19 +158,19 @@ fn target_tx(height: u32, target_script: &[u8]) -> Tx {
     );
     Tx {
         version: 2,
-        lock_time: 0,
+        lock_time: 0.into(),
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
                 vout: 0,
             },
-            script_sig: Vec::new(),
-            sequence: u32::MAX,
-            witness: Vec::new(),
+            script_sig: Vec::new().into(),
+            sequence: u32::MAX.into(),
+            witness: Vec::new().into(),
         }],
         outputs: vec![TxOut {
-            value: 11_000,
-            script_pubkey: target_script.to_vec(),
+            value: 11_000.into(),
+            script_pubkey: target_script.to_vec().into(),
         }],
     }
 }
@@ -218,7 +218,7 @@ fn build_fixture(heights: u32, txs_per_block: usize) -> Fixture {
                 prev_blockhash,
                 merkle_root: Hash256::default(),
                 time: 0,
-                bits: 0,
+                bits: 0.into(),
                 nonce: 0,
             },
             txs: txdata,

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Resolve the workspace against the declared dependency range, not the
-# Resolve the workspace against the declared dependency range, not the
 # committed lockfile, and prove it still compiles.
 #
 #   scripts/check-dep-range.sh minimal
@@ -20,6 +19,9 @@
 # are also checked with every optional feature enabled. The maximum endpoint
 # uses the default feature set; the named feature matrix is owned by
 # FEAT-01 / scripts/check-feature-matrix.sh.
+# The minimal endpoint uses --all-features, so the rocksdb backend builds
+# bindgen; bindgen's clang-sys dependency needs a visible libclang at build
+# time. See CONTRIBUTING.md, Prerequisites.
 #
 # Owner: docs/contracts/dependency-range.md (DEP-01, DEP-02).
 

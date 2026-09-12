@@ -227,6 +227,11 @@ jobs:
       # `cargo check --workspace --all-targets` compiles the C++ kernel
       # engine; install its prerequisites.
       - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # The minimal lane checks `--all-features`, which enables the `rocksdb`
+      # backend; its bindgen build scripts probe libclang. The maximum lane
+      # uses default features and never builds bindgen, so this stays gated.
+      - run: sudo apt-get install -y libclang-dev
+        if: matrix.range == 'minimal'
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
         if: matrix.range == 'minimal'

@@ -2,7 +2,8 @@ use super::block::is_op_return_script;
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, WriteBatch};
 
@@ -510,6 +511,10 @@ impl bitcoin_rs_storage::KvStore for FailingWriteStore {
 
     fn flush(&self) -> Result<(), bitcoin_rs_storage::StorageError> {
         self.0.flush()
+    }
+
+    fn arm_persist_fault(&self, fault: bitcoin_rs_storage::PersistFault) {
+        self.0.arm_persist_fault(fault);
     }
 
     fn snapshot(
