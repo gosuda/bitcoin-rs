@@ -411,6 +411,7 @@ mod tests {
             addr,
             version: 70016,
             wtxid_relay: false,
+            compact_block_relay: false,
             services: 0,
             user_agent: String::new(),
             start_height,

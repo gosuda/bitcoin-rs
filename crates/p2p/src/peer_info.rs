@@ -17,6 +17,11 @@ pub struct PeerInfo {
     /// Whether this connection requested BIP339 witness-id announcements.
     /// Published with the completed handshake; never inherited by a replacement.
     pub wtxid_relay: bool,
+    /// Whether this connection requested BIP152 compact-block relay (sent
+    /// `sendcmpct` with `send_compact=true`). Published `false` at handshake
+    /// and raised by the listener when the peer's post-verack preference
+    /// arrives; compact-fetch eligibility reads this, never a stale guess.
+    pub compact_block_relay: bool,
     /// Service flags advertised by the remote (`ServiceFlags::to_u64`).
     pub services: u64,
     /// User-agent string advertised by the remote.
@@ -71,6 +76,7 @@ impl PeerInfo {
             addr,
             version: version.version,
             wtxid_relay: false,
+            compact_block_relay: false,
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,
@@ -101,6 +107,7 @@ impl PeerInfo {
             addr,
             version: version.version,
             wtxid_relay: false,
+            compact_block_relay: false,
             services: version.services.to_u64(),
             user_agent: version.user_agent.clone(),
             start_height: version.start_height,
@@ -184,6 +191,7 @@ mod tests {
             addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333),
             version: 70_016,
             wtxid_relay: false,
+            compact_block_relay: false,
             services,
             user_agent: String::new(),
             start_height: 0,
