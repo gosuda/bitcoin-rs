@@ -666,6 +666,12 @@ owned by [wallet-facing.md](wallet-facing.md).
     `estimatesmartfee_rejects_conf_target_outside_core_range`,
     `estimatesmartfee_rejects_unknown_estimate_mode`,
     `estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing`
+  - `crates/node/tests/overhaul_fee_history.rs` tests
+    `empty_or_thin_history_answers_insufficient_data`,
+    `real_confirmations_qualify_the_estimate`,
+    `replacement_untracks_victim_without_false_confirmation`,
+    `eviction_untracks_without_false_confirmation`,
+    `reorg_reconfirm_records_exactly_one_observation`,
 
 - `API-27`:
   - `crates/rpc/src/handlers/mining.rs` tests

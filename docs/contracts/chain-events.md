@@ -116,6 +116,9 @@ checkpoint or replay a journal as an authority.
   - `stable_generation_is_even_before_and_after_connect`;
   - `stable_generation_is_even_after_disconnect`.
 
+- `crates/node/tests/overhaul_fee_history.rs` (existing):
+  - `reorg_reconfirm_records_exactly_one_observation` (`EVT-02` step 6).
+
 ## Vocabulary
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):

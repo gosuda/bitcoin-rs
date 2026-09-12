@@ -304,6 +304,10 @@ count advances and rewinds by the exact transaction delta.
   - `missing_disconnected_body_routes_rewind_to_rebuild` (`RCV-07`);
   - `selective_rebuild_leg_survives_sibling_rollback` (`RCV-05`).
 
+- `crates/node/tests/overhaul_fee_history.rs` (existing):
+  - `restart_adopts_persisted_estimator_history`,
+    `corrupt_history_file_degrades_to_insufficient_data` (`RCV-11`);
+
 ## Vocabulary
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):

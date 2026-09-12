@@ -45,6 +45,7 @@ The overhaul suites map to current contracts, not task numbers:
 - `crates/consensus/tests/overhaul_parse_parity.rs` → `VAL-02`
 - `crates/consensus/tests/overhaul_prepared_inputs.rs` → `POL-03`, `VAL-02`
 - `crates/node/tests/overhaul_config_status.rs` → `ARCH-05`, `IDX-02`
+- `crates/node/tests/overhaul_fee_history.rs` → `API-26`, `EVT-02`, `RCV-11`
 - `crates/primitives/tests/overhaul_layout.rs` → `ARCH-01`
 - `crates/utxo/tests/overhaul_persistent_coins.rs` → `RCV-02`, `RCV-03`
 
