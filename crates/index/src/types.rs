@@ -271,7 +271,10 @@ pub struct ScriptLiveRow {
 impl ScriptLiveRow {
     /// Builds the row for `outpoint` held by a script hashing to `scripthash`.
     pub fn new(scripthash: ScriptHash, outpoint: &OutPoint) -> Self {
-        debug_assert!(outpoint.vout <= U24_MAX);
+        // Consensus transaction output counts cannot reach 2^24 under the
+        // serialized-block size cap, so this drops no identity bits; enforce
+        // in all builds, not just debug.
+        assert!(outpoint.vout <= U24_MAX, "vout does not fit in u24");
         let mut key = [0_u8; SCRIPT_LIVE_ROW_SIZE];
         key[..HASH_PREFIX_LEN].copy_from_slice(&ScriptHashRow::scan_prefix(scripthash));
         key[HASH_PREFIX_LEN..HASH_PREFIX_LEN + 32].copy_from_slice(outpoint.txid.as_bytes());
