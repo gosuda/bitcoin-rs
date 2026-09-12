@@ -33,11 +33,47 @@ Replace `p2p_message` with any of:
 | `script_eval`    | Production interpreter entry point (`Interpreter::execute` with fuzz-selected `VerifyFlags`) |
 | `utxo_snapshot`  | UTXO snapshot deserializer (`read_snapshot_strict_v4`)                  |
 
-To limit the number of iterations:
+To limit the run to 60 seconds:
 
 ```sh
 cargo +nightly fuzz run p2p_message -- -max_total_time=60
 ```
+
+## Shared corpus and local campaigns
+
+The companion corpus repository is
+[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus).
+It is the destination for the evolving exploration corpus; fuzz targets and
+local execution instructions live here in `bitcoin-rs`. A weekly campaign runs
+each target for one hour, minimizes its corpus, and commits through
+`github-actions[bot]` only when the minimized set changes. Reports and crash
+inputs are retained with the workflow run.
+
+For a longer local run, clone the companion repository next to bitcoin-rs and
+use its target directory as the writable corpus. For example, from the
+bitcoin-rs repository root on Linux x86_64:
+
+```sh
+git clone https://github.com/gosuda/bitcoin-rs-fuzz-corpus.git \
+  ../bitcoin-rs-fuzz-corpus
+cargo +nightly fuzz run script_eval \
+  ../bitcoin-rs-fuzz-corpus/corpus/script_eval \
+  --target x86_64-unknown-linux-gnu -- -max_total_time=3600
+cargo +nightly fuzz cmin script_eval \
+  ../bitcoin-rs-fuzz-corpus/corpus/script_eval \
+  --target x86_64-unknown-linux-gnu
+```
+
+On other platforms, use the host triple reported by `rustc +nightly -vV`.
+Reading a public corpus does not require the automation's write token.
+Keep the corpus clone on the same filesystem as bitcoin-rs because
+`cargo fuzz cmin` atomically replaces the minimized directory.
+
+Submit minimized exploration inputs to the companion repository, with the
+bitcoin-rs commit, starting corpus revision, command, and coverage evidence.
+Inputs promoted into this repository should protect a named current contract
+or reproduce a fixed bug; update their provenance and any applicable verdict
+manifest together (see [the QA corpus contract](../docs/contracts/qa-corpus.md)).
 
 ## Adding a corpus
 
