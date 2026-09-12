@@ -106,7 +106,10 @@ pub(crate) const PEER_MUTATION_METHODS: &[&str] = &[
 /// Receiver-qualified patterns for the peer mutators whose bare name is
 /// shared with another owner's API: `ChainTransition::disconnect` also
 /// reads `disconnect(`, so only a `peer_table` receiver counts here.
-pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[".peer_table.disconnect("];
+pub(crate) const PEER_TABLE_PATTERNS: &[&str] = &[
+    ".peer_table.disconnect(",
+    "PeerTable::disconnect(",
+];
 
 /// Audited non-owner peer mutation receivers. The receiver must be the
 /// complete audited expression — the sync worker's shared state handle —
@@ -182,7 +185,13 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         panic!("scan cannot read workspace member dir {}", dir.display());
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!(
+                "scan cannot read an entry in workspace member dir {}: {error}",
+                dir.display()
+            )
+        });
         let path = entry.path();
         if path.is_dir() {
             let name = path
