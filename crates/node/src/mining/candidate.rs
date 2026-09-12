@@ -1,22 +1,13 @@
 //! Candidate construction, single-flight assembly, and bounded template caching.
 
-use super::MAX_BLOCK_SIZE;
-use super::MAX_BLOCK_WEIGHT;
 use super::MiningCoordinator;
 use super::hex_encode;
-use super::snapshot_for_selection;
 use super::submission::test_block_validity_error;
-use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_mining::BlockValidationResult;
-use bitcoin_rs_mining::Candidate;
-use bitcoin_rs_mining::CandidateContext;
 use bitcoin_rs_mining::GenerateRequest;
 use bitcoin_rs_mining::GenerateSelection;
 use bitcoin_rs_mining::GeneratedBlock;
-use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_mining::MiningControlError;
-use bitcoin_rs_mining::assemble_candidate;
-use bitcoin_rs_mining::assemble_ordered_candidate;
 use bitcoin_rs_mining::solve_block;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::consensus_bytes;
@@ -24,49 +15,6 @@ use compact_str::CompactString;
 use std::sync::atomic::Ordering;
 
 impl MiningCoordinator {
-    pub(super) fn assemble_fresh(
-        &self,
-        payout: &[u8],
-        selection: &GenerateSelection,
-    ) -> Result<Candidate, MiningControlError> {
-        let tip = self.applied_tip.load_full().ok_or_else(|| {
-            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
-        })?;
-        let snapshot = {
-            let mempool = self.mempool.read();
-            snapshot_for_selection(&mempool, selection)?
-        };
-        let current_time = current_unix_seconds().max(1);
-        let chain = {
-            let tree = self.block_tree.read();
-            MiningChainContext::resolve(&tree, self.network, tip.tip_id, current_time).map_err(
-                |error| MiningControlError::Failed(CompactString::from(error.to_string())),
-            )?
-        };
-        let context = CandidateContext {
-            previous_block_hash: chain.previous_block_hash,
-            height: chain.height,
-            version: chain.version,
-            bits: chain.bits,
-            min_time: chain.min_time,
-            current_time: current_time.max(chain.min_time),
-            locktime_cutoff: chain.locktime_cutoff(current_time.max(chain.min_time)),
-            network: self.network,
-            csv_active: chain.csv_active,
-            segwit_active: chain.segwit_active,
-            max_weight: MAX_BLOCK_WEIGHT,
-            max_size: MAX_BLOCK_SIZE,
-            max_sigops: u64::from(bitcoin_rs_consensus::MAX_BLOCK_SIGOPS_COST),
-        };
-        match selection {
-            GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
-            GenerateSelection::Ordered(_) => {
-                assemble_ordered_candidate(&context, &snapshot, payout)
-            }
-        }
-        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
-    }
-
     /// Assemble, solve, and optionally persist `request.count` blocks (`API-05`).
     ///
     /// `generateblock` (`GenerateSelection::Ordered`) runs Core's
@@ -99,7 +47,7 @@ impl MiningCoordinator {
                     "node is shutting down",
                 )));
             }
-            let candidate = self.assemble_fresh(&request.payout, &request.selection)?;
+            let candidate = self.service.assemble_fresh(&request.payout, &request.selection)?;
             let mut block = candidate.into_unsolved_block();
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
                 // CONTRACT: docs/contracts/external-api.md#API-30

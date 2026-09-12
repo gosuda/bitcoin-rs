@@ -45,6 +45,7 @@ use crate::context::MiningChainContext;
 use crate::template::Candidate;
 use crate::template::CandidateContext;
 use crate::template::assemble_candidate;
+use crate::template::assemble_ordered_candidate;
 use crate::template::TemplateId;
 
 /// Default number of cached candidates retained by template id.
@@ -186,6 +187,20 @@ pub trait MempoolSnapshotSource: Send + Sync {
     /// only valid for the sequence it was taken at, so generation-key
     /// coherence is checked and captured atomically.
     fn mining_snapshot_at(&self, expected_sequence: u64) -> Option<MempoolMiningSnapshot>;
+    /// Captures the mining snapshot an explicit generate selection assembles from.
+    ///
+    /// `Ordered` selections re-index the pool snapshot to the caller's
+    /// transaction order under one pool read lock; unknown mempool txids are
+    /// a request error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MiningControlError::InvalidRequest`] when an `Ordered`
+    /// selection names a transaction that is not in the mempool.
+    fn selection_snapshot(
+        &self,
+        selection: &GenerateSelection,
+    ) -> Result<MempoolMiningSnapshot, MiningControlError>;
     /// Number of pooled transactions.
     fn pooled_transaction_count(&self) -> u64;
     /// Minimum relay fee in sat/kvB.
@@ -599,12 +614,25 @@ impl MiningService {
         let Some(snapshot) = self.mempool.mining_snapshot_at(key.mempool_sequence) else {
             return Err(generation_race());
         };
+        let context = self.candidate_context(&tip)?;
+        let candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
+            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
+        if candidate.template_id != key.template_id() {
+            return Err(MiningControlError::Failed(CompactString::from(
+                "assembled candidate template id does not match generation key",
+            )));
+        }
+        Ok(Arc::new(candidate))
+    }
+
+    /// Resolves the candidate context for a block extending `tip`.
+    fn candidate_context(&self, tip: &TipSnapshot) -> Result<CandidateContext, MiningControlError> {
         let current_time = current_unix_seconds().max(1);
         let chain = self
             .chain
-            .resolve_mining_context(&tip, current_time)
+            .resolve_mining_context(tip, current_time)
             .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
-        let context = CandidateContext {
+        Ok(CandidateContext {
             previous_block_hash: chain.previous_block_hash,
             height: chain.height,
             version: chain.version,
@@ -618,15 +646,37 @@ impl MiningService {
             max_weight: MAX_BLOCK_WEIGHT,
             max_size: MAX_BLOCK_SIZE,
             max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
-        };
-        let candidate = assemble_candidate(&context, &snapshot, &self.coinbase_script)
-            .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))?;
-        if candidate.template_id != key.template_id() {
-            return Err(MiningControlError::Failed(CompactString::from(
-                "assembled candidate template id does not match generation key",
-            )));
+        })
+    }
+
+    /// Assembles a fresh candidate for an explicit generate request.
+    ///
+    /// Unlike [`Self::get_block_template`] this does not consult the cache or
+    /// the published generation: `generate` assembles, solves, and submits
+    /// one block at a time against the live tip.
+    ///
+    /// # Errors
+    ///
+    /// [`MiningControlError::Unavailable`] when no tip is applied;
+    /// [`MiningControlError::InvalidRequest`] for selections the pool cannot
+    /// resolve; [`MiningControlError::Failed`] on assembly refusal.
+    pub fn assemble_fresh(
+        &self,
+        payout: &[u8],
+        selection: &GenerateSelection,
+    ) -> Result<Candidate, MiningControlError> {
+        let tip = self.applied_tip.applied_tip().ok_or_else(|| {
+            MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
+        })?;
+        let snapshot = self.mempool.selection_snapshot(selection)?;
+        let context = self.candidate_context(&tip)?;
+        match selection {
+            GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
+            GenerateSelection::Ordered(_) => {
+                assemble_ordered_candidate(&context, &snapshot, payout)
+            }
         }
-        Ok(Arc::new(candidate))
+        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
     }
 
     fn version_bits_for(

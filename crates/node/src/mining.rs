@@ -32,13 +32,14 @@ use bitcoin_rs_mining::AppliedTipSource;
 use bitcoin_rs_mining::ChainContextSource;
 use bitcoin_rs_mining::DEFAULT_MEMPOOL_UPDATE_WAIT;
 use bitcoin_rs_mining::MempoolSequenceWake;
+use bitcoin_rs_mining::GenerateSelection;
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::MiningRule;
 use bitcoin_rs_mining::MiningService;
+use bitcoin_rs_mining::snapshot_for_selection;
 use bitcoin_rs_mining::MempoolSnapshotSource;
 use bitcoin_rs_mining::AvailableMiningRule;
-use bitcoin_rs_mining::snapshot_for_selection;
 use bitcoin_rs_mining::MiningChainContext;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
@@ -52,9 +53,6 @@ use std::time::Instant;
 #[cfg(test)]
 use submission::map_apply_error;
 
-/// Consensus maximum block weight / serialized size.
-const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
-const MAX_BLOCK_SIZE: u64 = 4_000_000;
 
 
 /// Wake seam between authoritative mutations and the template coordinator.
@@ -153,7 +151,6 @@ pub struct MiningCoordinator {
     network: Network,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
-    mempool: Arc<RwLock<Mempool>>,
     apply_handles: Chainstate,
     followers: ChainFollowers,
     shutdown: Arc<AtomicBool>,
@@ -201,7 +198,6 @@ impl MiningCoordinator {
             network,
             applied_tip,
             block_tree,
-            mempool,
             apply_handles,
             followers,
             shutdown,
@@ -320,6 +316,14 @@ impl MempoolSnapshotSource for MempoolAdapter {
 
     fn pooled_transaction_count(&self) -> u64 {
         u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX)
+    }
+
+    fn selection_snapshot(
+        &self,
+        selection: &GenerateSelection,
+    ) -> Result<MempoolMiningSnapshot, MiningControlError> {
+        let mempool = self.mempool.read();
+        snapshot_for_selection(&mempool, selection)
     }
 
     fn min_relay_fee_sat_per_kvb(&self) -> u64 {
