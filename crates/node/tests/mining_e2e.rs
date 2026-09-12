@@ -1121,3 +1121,95 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
 
     Ok(())
 }
+
+#[test]
+fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
+    let (state, _guard) = open_regtest()?;
+    apply_genesis(&state)?;
+    let _seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
+
+    let handler = mining_handler(&state);
+    let before = handler.dispatch("estimatesmartfee", &json!([1, "conservative"]))?;
+    assert!(before.get("feerate").is_none(), "empty estimator omits feerate");
+    let before_errors = before
+        .get("errors")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(
+        before_errors.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|text| text.contains("Insufficient data"))
+        }),
+        "empty estimator reports insufficient data: {before}"
+    );
+
+    let parent = seed_coinbase_spend();
+    let parent_txid = parent.txid();
+    let child = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(parent_txid, 0),
+            script_sig: p2sh_true_spend_script_sig(),
+            sequence: Sequence::from_consensus(0xffff_ffff),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
+            script_pubkey: p2sh_true_output(),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    admit_to_mempool(&state, &parent)?;
+    admit_to_mempool(&state, &child)?;
+
+    let template = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let template_txs = template
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    let block = assemble_from_template(&template, template_txs)?;
+    let block_hex = hex_encode(&consensus_bytes(&block));
+    let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
+    assert!(verdict.is_null(), "submitblock must accept the block: {verdict}");
+
+    let next = handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
+    let next_txs = next
+        .get("transactions")
+        .and_then(|value| value.as_array())
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(next_txs.is_empty(), "next template must have no transactions after connect");
+    assert_eq!(
+        required_str(&next, "previousblockhash")?,
+        block.block_hash().to_string(),
+        "next template must build on the accepted block"
+    );
+
+    let mempool_info = handler.dispatch("getmempoolinfo", &json!([]))?;
+    assert_eq!(
+        required_u64(&mempool_info, "size")?,
+        0,
+        "mempool must be empty after block connect"
+    );
+
+    let raw_mempool = handler.dispatch("getrawmempool", &json!([]))?;
+    let raw_mempool_array = raw_mempool
+        .as_array()
+        .map_or(&[][..], |entries| entries.as_slice());
+    assert!(raw_mempool_array.is_empty(), "getrawmempool must return no txids");
+
+    let after = handler.dispatch("estimatesmartfee", &json!([1, "conservative"]))?;
+    assert!(after.get("errors").is_none(), "estimate with data has no errors: {after}");
+    let feerate = after
+        .get("feerate")
+        .and_then(sonic_rs::JsonValueTrait::as_f64)
+        .ok_or_else(|| anyhow::anyhow!("estimatesmartfee must report feerate"))?;
+    assert!(feerate > 0.0, "confirmed fee rate must be positive");
+    assert_eq!(
+        required_u64(&after, "blocks")?,
+        1_u64,
+        "one-block conf target estimates within one block"
+    );
+
+    Ok(())
+}
