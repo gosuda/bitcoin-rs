@@ -18,6 +18,14 @@ use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+/// Requested blocks within this distance of the header tip ride the
+/// compact-block flavor: reconstruction costs a fraction of the full-body
+/// transfer exactly where blocks are freshest. Deeper requests keep the
+/// witness flavor, where full-body availability dominates; the download
+/// window stays hash-keyed, so either answer resolves the same pending
+/// request.
+const COMPACT_RELAY_NEAR_TIP_BLOCKS: u32 = 5;
+
 impl BlockSync {
     /// Sends one estimated-2MiB common-prefix probe to each idle alternate.
     ///
@@ -100,15 +108,26 @@ impl BlockSync {
         };
         drop(window);
 
+        let near_tip = match request.entries().next() {
+            Some((first_height, _)) => {
+                chain_tip.height.saturating_sub(first_height) < COMPACT_RELAY_NEAR_TIP_BLOCKS
+            }
+            None => false,
+        };
+        let compact_fetch = near_tip && self.peer_table.compact_relay_of(request.peer_addr());
+
         let count = request.len();
         let mut inventory = Vec::with_capacity(count);
         let mut expected_hashes = ExpectedBlockHashes::with_capacity(count);
         let mut expected_height = applied_tip.height.saturating_add(1);
         let mut is_contiguous = true;
         for (height, hash) in request.entries() {
-            inventory.push(Inventory::WitnessBlock(
-                bitcoin::BlockHash::from_byte_array(*hash.as_byte_array()),
-            ));
+            let block_hash = bitcoin::BlockHash::from_byte_array(*hash.as_byte_array());
+            inventory.push(if compact_fetch {
+                Inventory::CompactBlock(block_hash)
+            } else {
+                Inventory::WitnessBlock(block_hash)
+            });
             if is_contiguous && height == expected_height {
                 expected_hashes.push(hash);
                 expected_height = if let Some(next) = expected_height.checked_add(1) {
@@ -160,9 +179,17 @@ impl BlockSync {
             });
         }
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
+        if compact_fetch {
+            tracing::info!(
+                peer_addr = %request.peer_addr(),
+                count,
+                "block sync: requested compact blocks near tip"
+            );
+        }
         tracing::debug!(
             peer_addr = %request.peer_addr(),
             count,
+            compact = compact_fetch,
             applied_height = applied_tip.height,
             chain_height = chain_tip.height,
             "block sync: sent getdata batch"

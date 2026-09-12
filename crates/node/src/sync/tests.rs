@@ -132,6 +132,71 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
     Ok(())
 }
 
+/// Near-tip requests to a compact-relaying peer ride the compact flavor;
+/// deep IBD requests and non-relaying peers keep the witness flavor. The
+/// download window resolves either answer by hash, unchanged.
+#[test]
+fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let assert_flavor = |inventory: &[Inventory], compact: bool| {
+        assert!(!inventory.is_empty());
+        for item in inventory {
+            if compact {
+                assert!(matches!(item, Inventory::CompactBlock(_)), "got {item:?}");
+            } else {
+                assert!(matches!(item, Inventory::WitnessBlock(_)), "got {item:?}");
+            }
+        }
+    };
+    let first_getdata = |rx: &crossbeam_channel::Receiver<Message>| -> Vec<Inventory> {
+        loop {
+            match rx.try_recv() {
+                Ok(Message::GetData(inventory)) => return inventory,
+                Ok(_) => continue,
+                Err(_) => panic!("expected a getdata batch"),
+            }
+        }
+    };
+
+    // Relaying peer, whole four-block chain within the near-tip window:
+    // every entry asks for the compact flavor.
+    let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
+    install_budget(&sync, super::default_sync_budget());
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_101);
+    let mut relaying = synthetic_peer(addr, 100);
+    relaying.compact_block_relay = true;
+    let rx = connect_peer(&peers, relaying);
+    sync.tick();
+    assert_flavor(&first_getdata(&rx), true);
+
+    // Same proximity without the published relay preference: witness flavor.
+    let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
+    install_budget(&sync, super::default_sync_budget());
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_102);
+    let rx = connect_peer(&peers, synthetic_peer(addr, 100));
+    sync.tick();
+    assert_flavor(&first_getdata(&rx), false);
+
+    // Relaying peer deep behind the tip (IBD): witness flavor dominates.
+    let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(9)?;
+    install_budget(
+        &sync,
+        super::SyncBudget {
+            max_pending_blocks: 9,
+            max_peer_inflight: 9,
+            getdata_batch_limit: 9,
+            ..super::default_sync_budget()
+        },
+    );
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_103);
+    let mut relaying = synthetic_peer(addr, 100);
+    relaying.compact_block_relay = true;
+    let rx = connect_peer(&peers, relaying);
+    sync.tick();
+    assert_flavor(&first_getdata(&rx), false);
+    Ok(())
+}
+
 #[test]
 fn unsolicited_stale_block_retries_from_resolved_header_height()
 -> Result<(), Box<dyn std::error::Error>> {
