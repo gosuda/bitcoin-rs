@@ -10,7 +10,10 @@
 //! strings, raw strings, and character literals from changing item boundaries
 //! or producing false matches. Production code outside `crates/mempool/src/`
 //! fails the scan if it directly calls a mutating `Mempool` method or
-//! acquires the pool write lock through a bypass pattern.
+//! acquires the pool write lock through a bypass pattern. Derived-index
+//! capability selection fails the scan outside its three owners: the
+//! `crates/index` crate, the `crates/node` txindex runtime, and the
+//! `crates/node/src/state` config projection.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -62,30 +65,54 @@ pub(crate) const MUTATING_METHODS: &[&str] = &[
 /// covers `MempoolGateway::pool()`.
 pub(crate) const POOL_WRITE_PATTERNS: &[&str] = &[".mempool().write(", ".pool().write("];
 
+/// Capability-forcing and config-projection expressions for the derived
+/// transaction/script index.
+///
+/// `txindex` and `scriptindex` are config-optional: a node composes and
+/// validates without them. They become a required dependency of a compose
+/// path exactly when code outside the owners constructs `IndexCapabilities`
+/// or calls the config projection, so every such expression must sit in an
+/// owner file. A bare type mention (a field, a parameter, an import) forces
+/// nothing and is not matched.
+pub(crate) const INDEX_CAPABILITY_PATTERNS: &[&str] = &[
+    "IndexCapabilities {",
+    "IndexCapabilities::",
+    "derived_index_capabilities(",
+    "build_derived_index_open_spec(",
+];
+
 /// Result of the source scan.
 #[derive(Debug)]
-pub(crate) struct WriterScanResult {
-    /// Human-readable violations, one per call site.
-    pub violations: Vec<String>,
+pub(crate) struct OwnershipScanResult {
+    /// Mempool mutations outside the mempool owner, one per call site.
+    pub mempool_writer_violations: Vec<String>,
+    /// Derived-index capability selection outside the index owners.
+    pub index_capability_violations: Vec<String>,
     /// Number of production source files examined.
     pub files_scanned: usize,
     /// Number of raw pool write sites found.
     pub pool_writes_found: usize,
-    /// Number of mutating method calls found (including gateway calls).
-    pub mutating_calls_found: usize,
+    /// Number of mutating mempool method calls found (including gateway
+    /// calls).
+    pub mempool_mutations_found: usize,
+    /// Number of derived-index capability expressions found (including
+    /// owner files).
+    pub index_capability_sites: usize,
 }
 
-fn empty_result() -> WriterScanResult {
-    WriterScanResult {
-        violations: Vec::new(),
+fn empty_result() -> OwnershipScanResult {
+    OwnershipScanResult {
+        mempool_writer_violations: Vec::new(),
+        index_capability_violations: Vec::new(),
         files_scanned: 0,
         pool_writes_found: 0,
-        mutating_calls_found: 0,
+        mempool_mutations_found: 0,
+        index_capability_sites: 0,
     }
 }
 
-/// Walks the workspace and returns any mempool-writer violations.
-pub(crate) fn scan_mempool_writer_violations() -> WriterScanResult {
+/// Walks the workspace and returns every single-owner boundary violation.
+pub(crate) fn scan_ownership_violations() -> OwnershipScanResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
     collect_rust_files(&root, &mut files);
@@ -208,7 +235,7 @@ fn is_test_module_file(path: &Path, test_modules: &BTreeSet<String>) -> bool {
         .is_some_and(|stem| test_modules.contains(stem))
 }
 
-fn scan_file(path: &Path, result: &mut WriterScanResult) {
+fn scan_file(path: &Path, result: &mut OwnershipScanResult) {
     let path_str = path.to_string_lossy();
     let content = std::fs::read_to_string(path).unwrap_or_default();
     scan_source(&path_str, &content, result);
@@ -366,7 +393,7 @@ fn is_test_attribute(trimmed: &str) -> bool {
         || trimmed.starts_with("#[test(")
 }
 
-fn scan_source(path_str: &str, content: &str, result: &mut WriterScanResult) {
+fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) {
     let is_mempool_owner = path_str.replace('\\', "/").contains("/crates/mempool/src/");
     let raw_lines: Vec<&str> = content.lines().collect();
     let mut lex = LexState::default();
@@ -417,7 +444,7 @@ fn scan_source(path_str: &str, content: &str, result: &mut WriterScanResult) {
             if line.contains(pattern) {
                 result.pool_writes_found += 1;
                 if !is_mempool_owner {
-                    result.violations.push(format!(
+                    result.mempool_writer_violations.push(format!(
                         "raw pool write `{pattern}` at {}:{}: {}",
                         path_str,
                         index + 1,
@@ -429,12 +456,26 @@ fn scan_source(path_str: &str, content: &str, result: &mut WriterScanResult) {
 
         for method in MUTATING_METHODS {
             if let Some(pos) = line.find(method) {
-                result.mutating_calls_found += 1;
+                result.mempool_mutations_found += 1;
                 if !is_mempool_owner
                     && !is_authorized_gateway_call(path_str, line, pos, &code_lines, index)
                 {
-                    result.violations.push(format!(
+                    result.mempool_writer_violations.push(format!(
                         "raw mempool mutation `{method}` at {}:{}: {}",
+                        path_str,
+                        index + 1,
+                        raw_lines[index].trim()
+                    ));
+                }
+            }
+        }
+
+        for pattern in INDEX_CAPABILITY_PATTERNS {
+            if line.contains(pattern) {
+                result.index_capability_sites += 1;
+                if !is_index_capability_owner(path_str) {
+                    result.index_capability_violations.push(format!(
+                        "derived-index capability `{pattern}` at {}:{}: {}",
                         path_str,
                         index + 1,
                         raw_lines[index].trim()
@@ -490,6 +531,19 @@ fn is_authorized_gateway_call(
         })
 }
 
+/// Returns true when `path` belongs to one of the three derived-index
+/// capability owners: the `crates/index` crate that owns the type and its
+/// durable writer, the node txindex runtime that drives the worker and query
+/// engine, and the node state module whose `index.rs` is the only config
+/// projection.
+fn is_index_capability_owner(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.contains("/crates/index/src/")
+        || normalized.contains("/crates/node/src/state/")
+        || normalized.contains("/crates/node/src/txindex.rs")
+        || normalized.contains("/crates/node/src/txindex/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -517,7 +571,7 @@ mod tests {
     fn violations(source: &str) -> Vec<String> {
         let mut result = empty_result();
         scan_source(NON_OWNER, source, &mut result);
-        result.violations
+        result.mempool_writer_violations
     }
 
     #[test]
@@ -560,6 +614,84 @@ mod tests {
             Path::new("/workspace/crates/node/src/lib.rs"),
             &stems
         ));
+    }
+
+    #[test]
+    fn only_derived_index_owners_select_capabilities() {
+        for (path, source) in [
+            (
+                "/workspace/crates/node/src/state/index.rs",
+                "bitcoin_rs_index::IndexCapabilities {\n    tx_lookup: config.indexes.txindex,\n}",
+            ),
+            (
+                "/workspace/crates/node/src/state/open.rs",
+                "let indexed = !derived_index_capabilities(&config).is_empty();",
+            ),
+            (
+                "/workspace/crates/node/src/txindex/query.rs",
+                "self.with_snapshot(IndexCapabilities::TX_LOOKUP, |snapshot, tip, budget| {})",
+            ),
+            (
+                "/workspace/crates/index/src/write.rs",
+                "writer.reset_capabilities(IndexCapabilities::SCRIPT_LIVE)?;",
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(path, source, &mut result);
+            assert!(
+                result.index_capability_violations.is_empty(),
+                "{path}: {:?}",
+                result.index_capability_violations
+            );
+            assert_eq!(result.index_capability_sites, 1, "{path}");
+        }
+    }
+
+    /// Forcing capability selection in a compose or apply path is exactly
+    /// the config-optional index becoming required.
+    #[test]
+    fn capability_forcing_outside_the_owners_is_flagged() {
+        for (path, source) in [
+            (
+                "/workspace/crates/node/src/apply/connect.rs",
+                "let caps = IndexCapabilities::ALL;",
+            ),
+            (
+                "/workspace/crates/node/src/startup.rs",
+                "let spec = build_derived_index_open_spec(&config, 0, 1)?.unwrap();",
+            ),
+            (
+                "/workspace/crates/rpc/src/handlers/chain.rs",
+                "IndexCapabilities::TX_LOOKUP",
+            ),
+        ] {
+            let mut result = empty_result();
+            scan_source(path, source, &mut result);
+            assert_eq!(
+                result.index_capability_violations.len(),
+                1,
+                "{path}: {:?}",
+                result.index_capability_violations
+            );
+        }
+    }
+
+    #[test]
+    fn capability_type_mentions_and_text_do_not_force_anything() {
+        for source in [
+            "fn f(capabilities: IndexCapabilities) {}",
+            "use bitcoin_rs_index::IndexCapabilities;",
+            "const T: &str = \"IndexCapabilities::ALL\";",
+            "// IndexCapabilities::ALL in a comment",
+        ] {
+            let mut result = empty_result();
+            scan_source(NON_OWNER, source, &mut result);
+            assert!(
+                result.index_capability_violations.is_empty(),
+                "{source}"
+            );
+            assert_eq!(result.index_capability_sites, 0, "{source}");
+        }
     }
 
     #[test]
@@ -666,11 +798,11 @@ mod tests {
             let mut result = empty_result();
             scan_source(path, call, &mut result);
             assert_eq!(
-                result.violations.len(),
+                result.mempool_writer_violations.len(),
                 expected_violations,
                 "{path}: {call}"
             );
-            assert_eq!(result.mutating_calls_found, 1);
+            assert_eq!(result.mempool_mutations_found, 1);
         }
     }
 
@@ -705,7 +837,7 @@ mod tests {
                 &mut result,
             );
             assert_eq!(
-                result.violations.is_empty(),
+                result.mempool_writer_violations.is_empty(),
                 permitted,
                 "{path}: {receiver}"
             );
@@ -735,11 +867,11 @@ mod tests {
             let mut result = empty_result();
             scan_source(path, call, &mut result);
             assert_eq!(
-                result.violations.len(),
+                result.mempool_writer_violations.len(),
                 expected_violations,
                 "{path}: {call}"
             );
-            assert_eq!(result.mutating_calls_found, 1);
+            assert_eq!(result.mempool_mutations_found, 1);
         }
     }
 

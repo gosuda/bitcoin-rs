@@ -15,7 +15,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use support::dependency_graph::{BIN_CRATE, Validation, WorkspaceGraph};
-use support::ownership_scan::{WriterScanResult, scan_mempool_writer_violations};
+use support::ownership_scan::{OwnershipScanResult, scan_ownership_violations};
 
 #[test]
 fn real_metadata_validates() {
@@ -164,25 +164,54 @@ fn real_adapters_forward_their_backend_features() {
 
 #[test]
 fn mempool_writer_source_scan_passes() {
-    let WriterScanResult {
-        violations,
+    let OwnershipScanResult {
+        mempool_writer_violations,
         files_scanned,
         pool_writes_found,
-        mutating_calls_found,
-    } = scan_mempool_writer_violations();
+        mempool_mutations_found,
+        ..
+    } = scan_ownership_violations();
 
     let _ = writeln!(
         std::io::stderr(),
         "mempool writer scan: files={files_scanned}, \
          .pool().write()/.mempool().write()={pool_writes_found}, \
-         mutating_calls={mutating_calls_found}, \
+         mutating_calls={mempool_mutations_found}, \
          violations={}",
-        violations.len()
+        mempool_writer_violations.len()
     );
     assert!(
-        violations.is_empty(),
+        mempool_writer_violations.is_empty(),
         "non-owner production code must not call mutating mempool methods or \
-         .pool().write(): {violations:?}"
+         .pool().write(): {mempool_writer_violations:?}"
+    );
+}
+
+#[test]
+fn index_capability_scan_passes() {
+    let OwnershipScanResult {
+        index_capability_violations,
+        index_capability_sites,
+        files_scanned,
+        ..
+    } = scan_ownership_violations();
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "index capability scan: files={files_scanned}, \
+         capability sites={index_capability_sites}, \
+         violations={}",
+        index_capability_violations.len()
+    );
+    assert!(
+        index_capability_violations.is_empty(),
+        "config-optional derived-index capability selection must stay with its \
+         owners (crates/index, the node txindex runtime, and the node state \
+         config projection): {index_capability_violations:?}"
+    );
+    assert!(
+        index_capability_sites > 0,
+        "the index capability scan matched no production capability selection"
     );
 }
 
