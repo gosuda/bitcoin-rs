@@ -261,8 +261,9 @@ impl FeeEstimator {
         // outlives every target, so past `MAX_CONF_TARGET` heights a record
         // can never again meet a pending entry of the same transaction.
         let prune_window = u32::try_from(MAX_CONF_TARGET).unwrap_or(u32::MAX);
-        self.confirmed_at
-            .retain(|_, confirmed_height| block_height.saturating_sub(*confirmed_height) <= prune_window);
+        self.confirmed_at.retain(|_, confirmed_height| {
+            block_height.saturating_sub(*confirmed_height) <= prune_window
+        });
     }
 
     /// Samples a failure for every target that expired on this block.
@@ -493,10 +494,13 @@ mod history_codec {
 
         fn counts<const N: usize>(&mut self) -> Result<[f64; N], HistoryReject> {
             let raw = self.take(N * 8)?;
+            let (chunks, remainder) = raw.as_chunks::<8>();
+            if !remainder.is_empty() {
+                return Err(HistoryReject::Corrupt);
+            }
             let mut out = [0.0_f64; N];
-            for (slot, chunk) in out.iter_mut().zip(raw.chunks_exact(8)) {
-                let bytes: [u8; 8] = chunk.try_into().map_err(|_| HistoryReject::Corrupt)?;
-                let value = f64::from_le_bytes(bytes);
+            for (slot, chunk) in out.iter_mut().zip(chunks) {
+                let value = f64::from_le_bytes(*chunk);
                 if !value.is_finite() || value < 0.0 {
                     return Err(HistoryReject::Corrupt);
                 }
@@ -556,10 +560,7 @@ mod history_codec {
         }
         let mut pending: Vec<_> = est.pending.iter().collect();
         pending.sort_unstable_by_key(|(txid, _)| **txid);
-        push_u32(
-            &mut out,
-            u32::try_from(pending.len()).unwrap_or(u32::MAX),
-        );
+        push_u32(&mut out, u32::try_from(pending.len()).unwrap_or(u32::MAX));
         for (txid, entry) in pending {
             out.extend_from_slice(txid.as_bytes());
             push_u32(
@@ -574,10 +575,7 @@ mod history_codec {
         }
         let mut confirmed: Vec<_> = est.confirmed_at.iter().collect();
         confirmed.sort_unstable_by_key(|(txid, _)| **txid);
-        push_u32(
-            &mut out,
-            u32::try_from(confirmed.len()).unwrap_or(u32::MAX),
-        );
+        push_u32(&mut out, u32::try_from(confirmed.len()).unwrap_or(u32::MAX));
         for (txid, height) in confirmed {
             out.extend_from_slice(txid.as_bytes());
             out.extend_from_slice(&height.to_le_bytes());
@@ -1138,8 +1136,8 @@ mod tests {
         est.block_connected(&confirmed, 110);
 
         let bytes = est.to_history_bytes();
-        let restored = FeeEstimator::from_history_bytes(&bytes)
-            .expect("the encoder's own bytes must decode");
+        let restored =
+            FeeEstimator::from_history_bytes(&bytes).expect("the encoder's own bytes must decode");
         assert_estimator_state_eq(&est, &restored);
         assert_eq!(est.confirmed_at, restored.confirmed_at);
         for target in 1..=u32::try_from(MAX_CONF_TARGET).unwrap_or(u32::MAX) {

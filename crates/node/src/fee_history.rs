@@ -60,7 +60,8 @@ pub(crate) fn load(data_dir: &Path, mempool: &Arc<RwLock<Mempool>>) {
             return;
         }
     };
-    match mempool.write().restore_estimator_history(&bytes) {
+    let value = mempool.write().restore_estimator_history(&bytes);
+    match value {
         Ok(()) => tracing::info!(
             path = %path.display(),
             bytes = bytes.len(),
@@ -141,7 +142,9 @@ fn warn_rejected(path: &Path, reject: HistoryReject) {
 mod tests {
     use super::*;
     use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
-    use bitcoin_rs_primitives::{Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness};
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
     use std::sync::Arc;
 
     fn open_pool() -> Arc<RwLock<Mempool>> {

@@ -104,7 +104,7 @@ impl NodeServices {
         // no further mempool mutations run and this snapshot is final.
         // docs/policies/db-migration.md — owner-local, degrade-not-fail.
         if let Some(state) = state {
-            crate::fee_history::save(&state.data_dir(), &state.mempool());
+            crate::fee_history::save(state.data_dir(), &state.mempool());
         }
         if let Some(error) = first_error {
             return Err(error);

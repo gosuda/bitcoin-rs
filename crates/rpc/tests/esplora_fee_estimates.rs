@@ -125,13 +125,14 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
     // RPC surface's own answer projected to sat/vB (BTC/kvB * 100 000), so a
     // wallet sees one rate everywhere; an omitted target would strand it and
     // a fabricated 1.0 would undersell the honest estimate.
-    let estimate = ctx.mempool.read().estimate_fee_rate(1).expect(
-        "two confirmations against two sampled misses must qualify target 1",
-    );
+    let estimate = ctx
+        .mempool
+        .read()
+        .estimate_fee_rate(1)
+        .expect("two confirmations against two sampled misses must qualify target 1");
     let sat_per_kvb = estimate.as_sat_per_kvb();
-    let projected = f64::from(u32::try_from(sat_per_kvb).unwrap_or(u32::MAX))
-        / 100_000_000.0
-        * 100_000.0;
+    let projected =
+        f64::from(u32::try_from(sat_per_kvb).unwrap_or(u32::MAX)) / 100_000_000.0 * 100_000.0;
     assert!(
         projected > 1.0,
         "the seeded history must estimate above the old 1 sat/vB floor"
