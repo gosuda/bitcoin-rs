@@ -5,22 +5,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use parking_lot::Mutex;
-
 use super::super::prometheus::PROMETHEUS_HANDLE;
 use super::super::{EvidenceIdentity, MetricsServer, Sha256Hex, start_metrics};
-
-// MetricsServer::bind installs a process-global recorder. Serialize only
-// these server tests so another test cannot change the recorder between
-// the occupied-bind precondition and its assertion. Production is unchanged.
-static SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+use super::SERVER_TEST_LOCK;
 
 fn unused_ephemeral() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
 
 /// Identity every test process serves; one recorder, one identity.
-fn identity() -> EvidenceIdentity {
+pub(super) fn identity() -> EvidenceIdentity {
     EvidenceIdentity {
         binary_sha256: Sha256Hex([1; 32]),
         version: "test".into(),

@@ -14,16 +14,16 @@
 mod support;
 
 use std::io::{Read as _, Write as _};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::process_node::{
-    ClockControl, HarnessError, NodeBinary, ProcessNode, compare_reply, compare_rpc, exchange,
-    mine_common_chain, verify_reference_binary,
+    ClockControl, HarnessError, NodeBinary, ProcessNode, START_TIMEOUT, compare_reply, compare_rpc,
+    exchange, mine_common_chain, verify_reference_binary,
 };
 use support::reference_set::reference_set;
 
@@ -560,4 +560,553 @@ fn stalled_response_respects_the_request_deadline() {
         elapsed < Duration::from_secs(1),
         "request exceeded its deadline: {elapsed:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #653 readiness scenarios: the txindex capability's readiness facts must be
+// one fact everywhere they render — the `getcapabilities` row, the
+// `getindexinfo` report Core parity checks, the Esplora tip, and the
+// Prometheus readiness gauge all read the same node-owned status snapshot.
+// ---------------------------------------------------------------------------
+
+/// Regtest payout for single-node block production. No readiness scenario
+/// spends from these coinbases.
+const MINING_ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+
+/// The readiness outcomes documented for the txindex capability. The gauge
+/// label and the `getcapabilities` row spell them identically; a state
+/// outside this vocabulary is a behavior failure, never a poll artifact.
+const READINESS_OUTCOMES: [&str; 8] = [
+    "Ready",
+    "CatchingUp",
+    "RollingBack",
+    "Rebuilding",
+    "Failed",
+    "Disabled",
+    "Opening",
+    "ShutdownAbandoned",
+];
+
+fn readiness_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(120)
+}
+
+/// Starts the node with its derived index enabled.
+fn start_txindex_node() -> ProcessNode {
+    ProcessNode::start_with_options(NodeBinary::BitcoinRs, &["--txindex=true"], START_TIMEOUT)
+        .expect("txindex node must start")
+}
+
+/// Extracts the txindex readiness outcome from a `getcapabilities` row.
+///
+/// Unit outcomes render as strings; payload outcomes render as one-key
+/// objects. Either way the token must be documented vocabulary.
+fn readiness_outcome(row: &Value) -> String {
+    let state = row
+        .pointer("/capabilities/0/state")
+        .unwrap_or_else(|| panic!("getcapabilities has no txindex row: {row}"));
+    let tag = if let Some(spelled) = state.as_str() {
+        spelled.to_owned()
+    } else {
+        state
+            .as_object()
+            .and_then(|object| object.keys().next())
+            .unwrap_or_else(|| panic!("untagged readiness state: {state}"))
+            .to_owned()
+    };
+    assert!(
+        READINESS_OUTCOMES.contains(&tag.as_str()),
+        "readiness outcome outside the documented vocabulary: {tag}"
+    );
+    tag
+}
+
+/// Polls until the txindex row reports Ready, returning the distinct
+/// outcomes observed on the way.
+fn wait_until_ready(
+    node: &mut ProcessNode,
+    deadline: Instant,
+) -> Result<Vec<String>, HarnessError> {
+    let mut observed = Vec::new();
+    loop {
+        let row = node.rpc("getcapabilities", &json!([]))?;
+        let outcome = readiness_outcome(&row);
+        if observed.last() != Some(&outcome) {
+            observed.push(outcome.clone());
+        }
+        let enabled = row
+            .pointer("/capabilities/0/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if outcome == "Ready" && enabled {
+            return Ok(observed);
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::Deadline {
+                pid: node.pid(),
+                operation: "readiness",
+                evidence: node.evidence.clone(),
+                detail: format!("observed outcomes: {observed:?}"),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Polls until `getindexinfo` reports the txindex watermark synced.
+fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), HarnessError> {
+    loop {
+        let info = node.rpc("getindexinfo", &json!(["txindex"]))?;
+        if info.pointer("/txindex/synced") == Some(&json!(true)) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(HarnessError::Deadline {
+                pid: node.pid(),
+                operation: "txindex sync",
+                evidence: node.evidence.clone(),
+                detail: format!("getindexinfo: {info}"),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Mines `blocks` on a lone node through its public mining RPC.
+///
+/// Startup anchors the tip at genesis but applies that block on the first
+/// one-second sync tick, so an immediate mine races the applied tip. The
+/// retry is bounded and only tolerates that one startup message.
+fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, HarnessError> {
+    let deadline = readiness_deadline();
+    let mined = loop {
+        match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
+            Ok(mined) => break mined,
+            Err(HarnessError::Rpc { message, .. })
+                if message.contains("applied tip is not available") =>
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "the applied tip never became available"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let hashes = mined
+        .as_array()
+        .ok_or_else(|| HarnessError::Protocol("mining result is not an array".into()))?;
+    hashes
+        .iter()
+        .map(|hash| {
+            hash.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| HarnessError::Protocol("mining result hash is not a string".into()))
+        })
+        .collect()
+}
+
+/// Reserves an ephemeral loopback address for `--metrics-bind`.
+fn reserved_metrics_addr() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve metrics port");
+    listener.local_addr().expect("reserved metrics address")
+}
+
+/// Scrapes the readiness gauge series from a node's metrics listener.
+fn scrape_readiness(addr: SocketAddr) -> Vec<(String, f64)> {
+    let prefix = "node_capability_txindex_readiness{";
+    let mut last = None;
+    for _ in 0..50 {
+        if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(100)) {
+            stream
+                .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .expect("write metrics scrape");
+            let mut body = String::new();
+            stream
+                .read_to_string(&mut body)
+                .expect("read metrics scrape");
+            return body
+                .lines()
+                .filter_map(|line| {
+                    let rest = line.strip_prefix(prefix)?;
+                    let (labels, value) = rest.split_once('}')?;
+                    let state = labels
+                        .split(',')
+                        .find_map(|pair| {
+                            pair.trim()
+                                .strip_prefix("state=\"")
+                                .and_then(|spelled| spelled.strip_suffix('"'))
+                        })?
+                        .to_owned();
+                    let value = value.trim().parse::<f64>().ok()?;
+                    Some((state, value))
+                })
+                .collect();
+        }
+        last = Some(());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("metrics scrape failed after retries: {last:?}");
+}
+
+/// Exact one/zero gauge values: outcomes are set from `bool`, so exact bit
+/// comparison is the honest check.
+fn is_one(value: f64) -> bool {
+    value.to_bits() == 1.0f64.to_bits()
+}
+
+fn is_zero(value: f64) -> bool {
+    value.to_bits() == 0.0f64.to_bits()
+}
+
+/// The scraped series must show exactly one active outcome and it must be
+/// the one the RPC row reported: metrics and RPC are one fact.
+fn assert_one_active(samples: &[(String, f64)], expected: &str) {
+    assert_eq!(
+        samples.len(),
+        READINESS_OUTCOMES.len(),
+        "every documented outcome must render: {samples:?}"
+    );
+    let active: Vec<_> = samples.iter().filter(|(_, value)| is_one(*value)).collect();
+    assert_eq!(
+        active.len(),
+        1,
+        "exactly one readiness outcome must be active: {samples:?}"
+    );
+    assert_eq!(
+        active.first().map(|(state, _)| state.as_str()),
+        Some(expected),
+        "the active gauge label must equal the RPC outcome"
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|(_, value)| is_one(*value) || is_zero(*value)),
+        "outcome values are flags: {samples:?}"
+    );
+}
+
+/// First confirmed transaction of a block, through the public surface.
+fn first_block_txid(process: &mut ProcessNode, height: u32) -> String {
+    let hash = process
+        .rpc("getblockhash", &json!([height]))
+        .expect("block hash");
+    let block = process.rpc("getblock", &json!([hash, 2])).expect("block");
+    block
+        .pointer("/tx/0/txid")
+        .and_then(Value::as_str)
+        .expect("coinbase txid")
+        .to_owned()
+}
+
+/// Polls the scrape until exactly one outcome is active and it is
+/// `expected`: the sampled gauge converging on the RPC row.
+fn wait_gauge_active(addr: SocketAddr, expected: &str, deadline: Instant) -> Vec<(String, f64)> {
+    loop {
+        let samples = scrape_readiness(addr);
+        let active: Vec<_> = samples.iter().filter(|(_, value)| is_one(*value)).collect();
+        if active.len() == 1 && active.first().map(|(state, _)| state.as_str()) == Some(expected) {
+            return samples;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the gauge never reported {expected} active: {samples:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// #653 startup: at one captured tip, the capability row, the Core-parity
+/// index report, the Esplora tip, and the Prometheus gauge all agree.
+#[test]
+fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
+    let metrics_addr = reserved_metrics_addr();
+    let metrics_flag = format!("--metrics-bind={metrics_addr}");
+    let mut core =
+        ProcessNode::start_with_options(NodeBinary::ReferenceCore, &["-txindex=1"], START_TIMEOUT)
+            .expect("core with txindex must start");
+    let mut node = ProcessNode::start_with_options(
+        NodeBinary::BitcoinRs,
+        &["--txindex=true", metrics_flag.as_str()],
+        START_TIMEOUT,
+    )
+    .expect("node with txindex must start");
+    let (core_pid, node_pid) = (core.pid(), node.pid());
+    let deadline = readiness_deadline();
+
+    mine_common_chain(&mut core, &mut node, COMMON_BLOCKS).expect("common chain");
+    wait_until_ready(&mut node, deadline).expect("node readiness");
+    wait_txindex_synced(&mut core, deadline).expect("core txindex synced");
+    wait_txindex_synced(&mut node, deadline).expect("node txindex synced");
+
+    // The capability row: enabled and Ready at the captured tip.
+    let row = node
+        .rpc("getcapabilities", &json!([]))
+        .expect("capabilities");
+    assert_eq!(row.pointer("/capabilities/0/id"), Some(&json!("txindex")));
+    assert_eq!(row.pointer("/capabilities/0/compiled"), Some(&json!(true)));
+    assert_eq!(row.pointer("/capabilities/0/enabled"), Some(&json!(true)));
+    assert_eq!(readiness_outcome(&row), "Ready");
+
+    // Core parity: both binaries render the same synced index report.
+    let synced = compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
+        .expect("index report parity");
+    assert_eq!(
+        synced.pointer("/txindex/synced"),
+        Some(&json!(true)),
+        "parity reply: {synced}"
+    );
+
+    // Esplora renders the same tip the RPC reports.
+    let tip = node.rpc("getblockcount", &json!([])).expect("tip height");
+    let esplora = node
+        .http_get_json("/api/blocks/tip/height")
+        .expect("esplora tip height");
+    assert_eq!(tip, esplora, "RPC and Esplora must agree on the tip");
+
+    // The readiness gauge is that same fact in Prometheus form. The gauge
+    // is a sampled view, so require convergence with the RPC outcome within
+    // the deadline, then assert the full one-active rendering.
+    let samples = wait_gauge_active(metrics_addr, "Ready", deadline);
+    assert_one_active(&samples, "Ready");
+
+    core.stop().expect("core stop");
+    node.stop().expect("node stop");
+    assert_reaped(core_pid);
+    assert_reaped(node_pid);
+}
+
+/// #653 disabled index: the disabled capability has its own documented row,
+/// not silence, and the absence is identical to Core's.
+#[test]
+fn disabled_index_reports_its_documented_disabled_row() {
+    let mut core = start(NodeBinary::ReferenceCore);
+    let mut node = start(NodeBinary::BitcoinRs);
+    let (core_pid, node_pid) = (core.pid(), node.pid());
+
+    mine_common_chain(&mut core, &mut node, COMMON_BLOCKS).expect("common chain");
+
+    let row = node
+        .rpc("getcapabilities", &json!([]))
+        .expect("capabilities");
+    assert_eq!(row.pointer("/capabilities/0/id"), Some(&json!("txindex")));
+    assert_eq!(row.pointer("/capabilities/0/compiled"), Some(&json!(true)));
+    assert_eq!(row.pointer("/capabilities/0/enabled"), Some(&json!(false)));
+    assert_eq!(readiness_outcome(&row), "Disabled");
+
+    // Both binaries report the absent index identically.
+    assert_eq!(
+        compare_rpc(&mut core, &mut node, "getindexinfo", &json!(["txindex"]))
+            .expect("disabled parity"),
+        json!({}),
+    );
+
+    // Chain data still serves without an index; verbose history does not.
+    let esplora = node
+        .http_get_json("/api/blocks/tip/height")
+        .expect("esplora tip height");
+    assert_eq!(esplora, json!(COMMON_BLOCKS));
+    let txid = first_block_txid(&mut node, 1);
+    for process in [&mut core, &mut node] {
+        let error = process
+            .rpc("getrawtransaction", &json!([txid, true]))
+            .expect_err("verbose history needs an index");
+        assert!(
+            matches!(error, HarnessError::Rpc { .. }),
+            "verbose lookup without an index is a typed RPC failure: {error}"
+        );
+    }
+
+    core.stop().expect("core stop");
+    node.stop().expect("node stop");
+    assert_reaped(core_pid);
+    assert_reaped(node_pid);
+}
+
+/// #653 catch-up: blocks applied ahead of the derived worker must surface
+/// only documented intermediate outcomes, and the poll ends Ready.
+#[test]
+fn catch_up_poll_stays_inside_the_documented_outcomes() {
+    let mut node = start_txindex_node();
+    let pid = node.pid();
+    let deadline = readiness_deadline();
+
+    mine_on_node(&mut node, 20).expect("initial chain");
+    wait_until_ready(&mut node, deadline).expect("initial readiness");
+
+    mine_on_node(&mut node, 40).expect("catch-up chain");
+    let observed = wait_until_ready(&mut node, deadline).expect("catch-up readiness");
+    for outcome in &observed {
+        assert!(
+            READINESS_OUTCOMES.contains(&outcome.as_str()),
+            "undocumented catch-up outcome: {outcome}"
+        );
+    }
+    wait_txindex_synced(&mut node, deadline).expect("synced after catch-up");
+    assert_eq!(
+        node.rpc("getblockcount", &json!([])).expect("tip height"),
+        json!(60)
+    );
+
+    node.stop().expect("node stop");
+    assert_reaped(pid);
+}
+
+/// #653 index failure: a destroyed derived store recovers by rebuilding from
+/// retained canonical chainstate, and the historical row comes back.
+#[test]
+fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
+    let mut node = start_txindex_node();
+    let deadline = readiness_deadline();
+
+    mine_on_node(&mut node, COMMON_BLOCKS).expect("chain");
+    wait_until_ready(&mut node, deadline).expect("initial readiness");
+    wait_txindex_synced(&mut node, deadline).expect("initial sync");
+
+    // A confirmed historical row the index owns, captured before the loss.
+    let txid = first_block_txid(&mut node, 5);
+    let raw = node
+        .rpc("getrawtransaction", &json!([txid]))
+        .expect("indexed raw transaction");
+
+    let datadir = node.take_datadir().expect("datadir custody");
+    node.stop().expect("stop before recovery");
+    // The resolved data dir is `<datadir>/node`; the derived store lives
+    // beside the chainstate inside it. Destroy it only when it is really
+    // there: a silent no-op would make the rebuild vacuous.
+    let derived_store = datadir.path().join("node").join("txindex");
+    assert!(
+        derived_store.is_dir(),
+        "the derived index store must exist at {}: {:?}",
+        derived_store.display(),
+        std::fs::read_dir(datadir.path())
+            .map(|entries| entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    std::fs::remove_dir_all(&derived_store).expect("destroy the disposable derived store");
+
+    let mut rebuilt = ProcessNode::start_with_datadir(
+        NodeBinary::BitcoinRs,
+        &["--txindex=true"],
+        START_TIMEOUT,
+        datadir,
+    )
+    .expect("restart over the retained chainstate");
+    let observed = wait_until_ready(&mut rebuilt, deadline).expect("rebuilt readiness");
+    for outcome in &observed {
+        assert!(
+            READINESS_OUTCOMES.contains(&outcome.as_str()),
+            "undocumented rebuild outcome: {outcome}"
+        );
+    }
+    wait_txindex_synced(&mut rebuilt, deadline).expect("rebuilt sync");
+    // Backfill may trail the watermark report; poll the row, and on failure
+    // keep the chain-side evidence in the panic.
+    let mut restored = None;
+    let row_deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < row_deadline {
+        if let Ok(back) = rebuilt.rpc("getrawtransaction", &json!([txid])) {
+            restored = Some(back);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let restored = restored.unwrap_or_else(|| {
+        let block5 = rebuilt.rpc("getblockhash", &json!([5])).expect("block 5");
+        let via_chain = rebuilt.rpc("getrawtransaction", &json!([txid, false, block5]));
+        panic!(
+            "the rebuilt index never restored the historical row; index info: {:?}; chain-side lookup: {:?}",
+            rebuilt.rpc("getindexinfo", &json!(["txindex"])),
+            via_chain
+        );
+    });
+    assert_eq!(
+        restored, raw,
+        "the rebuilt index must restore the row verbatim"
+    );
+
+    let pid = rebuilt.pid();
+    rebuilt.stop().expect("stop rebuilt node");
+    assert_reaped(pid);
+}
+
+/// #653 restart: a clean stop and restart over the same datadir restores
+/// Ready readiness at the pinned tip with the index intact.
+#[test]
+fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
+    let mut node = start_txindex_node();
+    let deadline = readiness_deadline();
+
+    mine_on_node(&mut node, COMMON_BLOCKS).expect("chain");
+    wait_until_ready(&mut node, deadline).expect("initial readiness");
+    wait_txindex_synced(&mut node, deadline).expect("initial sync");
+    let tip = node
+        .rpc("getbestblockhash", &json!([]))
+        .expect("pinned tip hash");
+
+    let datadir = node.take_datadir().expect("datadir custody");
+    node.stop().expect("clean stop");
+    let mut restarted = ProcessNode::start_with_datadir(
+        NodeBinary::BitcoinRs,
+        &["--txindex=true"],
+        START_TIMEOUT,
+        datadir,
+    )
+    .expect("restart over the same datadir");
+    wait_until_ready(&mut restarted, deadline).expect("readiness after restart");
+    assert_eq!(
+        restarted
+            .rpc("getbestblockhash", &json!([]))
+            .expect("tip after restart"),
+        tip,
+        "the restarted node must resume the pinned tip"
+    );
+    wait_txindex_synced(&mut restarted, deadline).expect("index after restart");
+
+    let pid = restarted.pid();
+    restarted.stop().expect("stop restarted node");
+    assert_reaped(pid);
+}
+
+/// #653 reorg: invalidating a mid-chain block and mining a fork rewinds the
+/// derived watermark and returns readiness to Ready on the forked tip.
+#[test]
+fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
+    let mut node = start_txindex_node();
+    let deadline = readiness_deadline();
+
+    mine_on_node(&mut node, COMMON_BLOCKS).expect("chain");
+    wait_until_ready(&mut node, deadline).expect("initial readiness");
+    wait_txindex_synced(&mut node, deadline).expect("initial sync");
+
+    // Abandon the last two blocks and re-mine from height 99 on a fork.
+    let fork_base = node
+        .rpc("getblockhash", &json!([COMMON_BLOCKS - 2]))
+        .expect("fork base hash");
+    node.rpc("invalidateblock", &json!([fork_base]))
+        .expect("invalidate the fork base");
+    let fork = mine_on_node(&mut node, 3).expect("fork blocks");
+    assert_eq!(fork.len(), 3);
+
+    wait_until_ready(&mut node, deadline).expect("readiness after reorg");
+    wait_txindex_synced(&mut node, deadline).expect("index synced after reorg");
+    assert_eq!(
+        node.rpc("getblockcount", &json!([]))
+            .expect("count after reorg"),
+        json!(COMMON_BLOCKS)
+    );
+    assert_eq!(
+        node.rpc("getbestblockhash", &json!([]))
+            .expect("tip after reorg"),
+        json!(fork.last().expect("fork tip")),
+        "the active tip must be the fork tip"
+    );
+
+    let pid = node.pid();
+    node.stop().expect("node stop");
+    assert_reaped(pid);
 }

@@ -93,3 +93,74 @@ The `Cold` path is for a datadir with the current marker and no committed durabl
 | --- | --- | --- |
 | `0` | Initial baseline format. An unmarked non-empty datadir adopts it while it is current. | current |
 | `1` | T14 moves authoritative chainstate bytes to the chainstate owner's durable store. The checkpoint commit point is replaced by the durable head. Open refuses with `incompatible_schema`; explicit operator resync is required. | planned |
+
+## Removed settings and changed input syntax
+
+The sections above govern persistent bytes. Process inputs change separately,
+under the same no-compatibility-layer rule: a removed setting gets no alias,
+and a changed value grammar pins the meaning of the old spellings instead of
+guessing. These are configuration-only changes. No `CURRENT_SCHEMA` epoch
+moves, no datadir is touched, and a restart with updated inputs is the whole
+migration.
+
+How each input layer treats an entry it no longer knows:
+
+- TOML (`--config`): unknown keys fail startup (`deny_unknown_fields`), so a
+  removed key must be deleted from the file before the new binary starts.
+- CLI: an unknown flag is rejected at argument parsing, before any state
+  opens.
+- `BITCOIN_RS_*` environment: unknown variables are skipped, not rejected. A
+  stale variable left in a service unit stays silently inert; the operator
+  removes it.
+- `bitcoin.conf` (`--bitcoin-conf`): only the mapped Core keys are read
+  (`prune`, `rpcuser`, `rpcpassword`, `rpccookiefile`, `rest`, `listen`,
+  `txindex`, `dbcache`); every other line is ignored. Removed bitcoin-rs
+  settings never had Core-key spellings.
+
+### Removed without an alias
+
+`--index-rollback-rebuild-cutover` (CLI), `BITCOIN_RS_INDEX_ROLLBACK_REBUILD_CUTOVER`
+(environment), and `index_rollback_rebuild_cutover` (TOML) are removed with
+no replacement. The rollback-versus-rebuild cutover is a measured threshold,
+not operator configuration: the single semantic owner is the derived index
+runtime's internal constant (`DEFAULT_ROLLBACK_REBUILD_CUTOVER`, currently
+`100_000`), and the measurement that owns the value lives in
+`docs/benchmarks/index-rollback-rebuild-cutover.md`. An operator carrying any
+of these entries must delete them; the TOML entry fails startup, the CLI flag
+fails parsing, and the environment variable is ignored.
+
+The per-topic ZMQ publication flags (`--zmqpubhashblock`, `--zmqpubhashtx`,
+`--zmqpubrawblock`, `--zmqpubrawtx`, `--zmqpubsequence`, and their `...hwm`
+variants) and the matching flat TOML keys were removed with the endpoint
+grouping change. ZMQ publication is now declared only in TOML, grouped by
+endpoint:
+
+```toml
+[[notifications.zmq]]
+endpoint = "tcp://127.0.0.1:28332"
+topics = ["hashblock", "rawblock", "sequence"]
+hwm = 1000
+```
+
+Legacy flat `zmqpub*` keys are hard-rejected, never translated; one grouped
+endpoint table replaces each set of per-topic entries plus its HWM override.
+
+### Changed value grammar: `scriptindex`
+
+`script_index` inputs (the `--scriptindex` flag, `BITCOIN_RS_SCRIPTINDEX`,
+and the TOML `script_index` key) accepted only boolean spellings. They now
+accept the mode words `utxo` and `full`:
+
+- Boolean spellings keep their meaning: the bare flag and `true` select
+  `full`, `false` selects disabled. Existing files and units stay valid.
+- `utxo` maintains only the live-output view; `full` adds historical
+  funding and spending rows. There is no history-only mode.
+- Any other value is a hard error, so a typo cannot silently disable a
+  configured index.
+- The hyphenated flag spelling `--script-index` remains supported; no other
+  compatibility alias exists.
+
+The capability semantics of the modes, and the distinct disabled, catching
+up, rebuilding, and failed outcomes an index can report, are owned by the
+indexing contract (`docs/contracts/indexing.md`, `IDX-02`) and are not
+redefined here.
