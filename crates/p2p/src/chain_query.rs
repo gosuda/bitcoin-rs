@@ -6,14 +6,17 @@
 
 use std::sync::Arc;
 
+use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds};
+use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin::p2p::message_compact_blocks::CmpctBlock;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
 use parking_lot::RwLock;
 
 use crate::dispatch::{ChainQuery, InventoryServing};
-use crate::wire::PeerError;
+use crate::wire::{Message, PeerError};
 
 /// Read-only active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
@@ -122,19 +125,20 @@ impl ChainQuery for ActiveChainQuery {
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
+        compact_version: Option<u64>,
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError> {
         let mut outcome = InventoryServing::default();
         for item in items {
-            let Some(hash) = inventory_block_hash(item) else {
+            let Some(request) = inventory_block_request(item) else {
                 outcome.not_found.push(*item);
                 continue;
             };
             let current_height = {
                 let tree = self.block_tree.read();
                 tree.tip()
-                    .and_then(|tip| tree.active_height_of(tip.tip_id, hash.into()))
+                    .and_then(|tip| tree.active_height_of(tip.tip_id, request.hash().into()))
             };
             let Some(current_height) = current_height else {
                 outcome.not_found.push(*item);
@@ -144,14 +148,112 @@ impl ChainQuery for ActiveChainQuery {
                 outcome.halted = true;
                 return Ok(outcome);
             }
-            if let Some(payload) = self.load_active_block_bytes(current_height, hash) {
-                serve(payload)?;
-            } else {
-                outcome.not_found.push(*item);
+            let response = match request {
+                BlockRequest::Full(hash) => self
+                    .load_active_block_bytes(current_height, hash)
+                    .map(Message::BlockPayload),
+                BlockRequest::Compact(hash) => {
+                    self.compact_block_for(current_height, hash, compact_version)
+                }
+            };
+            match response {
+                Some(message) => serve(message)?,
+                None => outcome.not_found.push(*item),
             }
         }
         Ok(outcome)
     }
+
+    fn block_transactions(
+        &self,
+        request: &BlockTransactionsRequest,
+    ) -> Result<Option<BlockTransactions>, PeerError> {
+        let hash = native_block_hash(request.block_hash);
+        let current_height = {
+            let tree = self.block_tree.read();
+            tree.tip()
+                .and_then(|tip| tree.active_height_of(tip.tip_id, hash.into()))
+        };
+        let Some(current_height) = current_height else {
+            return Ok(None);
+        };
+        let Some(payload) = self.load_active_block_bytes(current_height, hash) else {
+            return Ok(None);
+        };
+        let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
+        else {
+            return Ok(None);
+        };
+        BlockTransactions::from_request(request, &block)
+            .map(Some)
+            .map_err(|_| PeerError::Protocol("getblocktxn index out of range"))
+    }
+}
+
+impl ActiveChainQuery {
+    /// Builds one `cmpctblock` for an active-chain body at the requesting
+    /// peer's negotiated BIP152 version. `None` (no negotiation, unknown
+    /// version, undecodable body) leaves the item in `not_found`.
+    fn compact_block_for(
+        &self,
+        current_height: u32,
+        hash: BlockHash,
+        compact_version: Option<u64>,
+    ) -> Option<Message> {
+        let version = u32::try_from(compact_version?).ok()?;
+        if version != 1 && version != 2 {
+            return None;
+        }
+        let payload = self.load_active_block_bytes(current_height, hash)?;
+        let block =
+            bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref()).ok()?;
+        let cmpct = HeaderAndShortIds::from_block(&block, fresh_nonce(), version, &[]).ok()?;
+        Some(Message::CmpctBlock(CmpctBlock {
+            compact_block: cmpct,
+        }))
+    }
+}
+
+/// Which active-chain body one block-typed inventory item asks for.
+#[derive(Clone, Copy, Debug)]
+enum BlockRequest {
+    Full(BlockHash),
+    Compact(BlockHash),
+}
+
+impl BlockRequest {
+    const fn hash(self) -> BlockHash {
+        match self {
+            Self::Full(hash) | Self::Compact(hash) => hash,
+        }
+    }
+}
+
+fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
+    BlockHash::from(Hash256::from_le_bytes(hash.as_byte_array()))
+}
+
+fn inventory_block_request(item: &Inventory) -> Option<BlockRequest> {
+    match *item {
+        Inventory::Block(hash) | Inventory::WitnessBlock(hash) => {
+            Some(BlockRequest::Full(native_block_hash(hash)))
+        }
+        Inventory::CompactBlock(hash) => Some(BlockRequest::Compact(native_block_hash(hash))),
+        Inventory::Error
+        | Inventory::Transaction(_)
+        | Inventory::WTx(_)
+        | Inventory::WitnessTransaction(_)
+        | Inventory::Unknown { .. } => None,
+    }
+}
+
+/// Fresh BIP152 serving nonce. `RandomState` draws fresh keys per call, so
+/// two responses never share one (BIP152: SHOULD NOT reuse across blocks).
+fn fresh_nonce() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
 }
 
 fn header_for_active_stop(
@@ -167,27 +269,13 @@ fn header_for_active_stop(
     Some(tree.node(node_id).ok()?.header)
 }
 
-fn inventory_block_hash(item: &Inventory) -> Option<BlockHash> {
-    match *item {
-        Inventory::Block(hash) | Inventory::WitnessBlock(hash) => Some(BlockHash::from(
-            Hash256::from_le_bytes(hash.as_byte_array()),
-        )),
-        Inventory::Error
-        | Inventory::Transaction(_)
-        | Inventory::CompactBlock(_)
-        | Inventory::WTx(_)
-        | Inventory::WitnessTransaction(_)
-        | Inventory::Unknown { .. } => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bitcoin::{BlockHash as WireBlockHash, Txid as WireTxid};
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::consensus_bytes;
-    use bitcoin_rs_primitives::{Block, CompactTarget};
+    use bitcoin_rs_primitives::{Block, CompactTarget, Tx};
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -232,7 +320,10 @@ mod tests {
         items: &[Inventory],
     ) -> Result<(InventoryServing, Vec<Block>), PeerError> {
         let blocks = RefCell::new(Vec::new());
-        let outcome = query.serve_inventory_blocks(items, &|| true, &mut |payload| {
+        let outcome = query.serve_inventory_blocks(items, None, &|| true, &mut |message| {
+            let Message::BlockPayload(payload) = message else {
+                return Ok(());
+            };
             blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
             Ok(())
         })?;
@@ -463,12 +554,13 @@ mod tests {
 
         let outcome = query.serve_inventory_blocks(
             &[unknown],
+            None,
             &|| {
                 headroom_calls.fetch_add(1, Ordering::Relaxed);
                 false
             },
-            &mut |block| {
-                served.borrow_mut().push(block);
+            &mut |message| {
+                served.borrow_mut().push(message);
                 Ok(())
             },
         )?;
@@ -510,12 +602,13 @@ mod tests {
 
         let outcome = query.serve_inventory_blocks(
             &items,
+            None,
             &|| {
                 let calls = headroom_calls.fetch_add(1, Ordering::Relaxed);
                 calls < 2
             },
-            &mut |block| {
-                served.borrow_mut().push(block);
+            &mut |message| {
+                served.borrow_mut().push(message);
                 Ok(())
             },
         )?;
@@ -525,6 +618,111 @@ mod tests {
         assert_eq!(body_source.loads.load(Ordering::Relaxed), 2);
         assert_eq!(headroom_calls.load(Ordering::Relaxed), 3);
         Ok(())
+    }
+
+    #[test]
+    fn getdata_msg_cmpct_block_serves_negotiated_profile_and_notfound_without()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let block = Block {
+            header: headers[1],
+            txs: vec![test_tx(1), test_tx(2)],
+        };
+        let body_source = Arc::new(SingleBlockSource {
+            height: 1,
+            hash: block.block_hash(),
+            body: consensus_bytes(&block),
+        });
+        let query = query_with(headers)?.with_block_body_source(body_source);
+        let item = Inventory::CompactBlock(wire_hash(block.block_hash()));
+
+        let mut served = Vec::new();
+        let outcome = query.serve_inventory_blocks(&[item], None, &|| true, &mut |message| {
+            served.push(message);
+            Ok(())
+        })?;
+        assert_eq!(outcome.not_found, vec![item]);
+        assert!(served.is_empty());
+
+        let mut served = Vec::new();
+        let outcome = query.serve_inventory_blocks(&[item], Some(2), &|| true, &mut |message| {
+            served.push(message);
+            Ok(())
+        })?;
+        assert!(outcome.not_found.is_empty() && !outcome.halted);
+        let [Message::CmpctBlock(cmpct)] = served.as_slice() else {
+            panic!("expected exactly one cmpctblock response");
+        };
+        assert_eq!(
+            native_block_hash(cmpct.compact_block.header.block_hash()),
+            block.block_hash()
+        );
+        assert_eq!(cmpct.compact_block.prefilled_txs.len(), 1);
+        assert_eq!(cmpct.compact_block.short_ids.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn getblocktxn_serves_active_body_and_disconnects_on_out_of_range_index()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let block = Block {
+            header: headers[1],
+            txs: vec![test_tx(1), test_tx(2)],
+        };
+        let body_source = Arc::new(SingleBlockSource {
+            height: 1,
+            hash: block.block_hash(),
+            body: consensus_bytes(&block),
+        });
+        let query = query_with(headers)?.with_block_body_source(body_source);
+        let wire_hash = wire_hash(block.block_hash());
+
+        let request = bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire_hash,
+            indexes: vec![1],
+        };
+        let transactions = query
+            .block_transactions(&request)?
+            .unwrap_or_else(|| panic!("active body serves blocktxn"));
+        assert_eq!(transactions.block_hash, wire_hash);
+        assert_eq!(transactions.transactions.len(), 1);
+
+        let out_of_range = bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire_hash,
+            indexes: vec![7],
+        };
+        assert!(query.block_transactions(&out_of_range).is_err());
+
+        let unknown = bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: WireBlockHash::from_byte_array([9; 32]),
+            indexes: vec![0],
+        };
+        assert!(query.block_transactions(&unknown)?.is_none());
+        Ok(())
+    }
+
+    fn test_tx(byte: u8) -> Tx {
+        use bitcoin_rs_primitives::{
+            Amount, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        };
+        Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from(Hash256::from_le_bytes(&[byte; 32])),
+                    vout: 0,
+                },
+                script_sig: vec![byte].into(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x6A].into(),
+            }],
+            lock_time: LockTime::ZERO,
+        }
     }
 
     fn query_with(headers: Vec<Header>) -> Result<ActiveChainQuery, bitcoin_rs_chain::ChainError> {

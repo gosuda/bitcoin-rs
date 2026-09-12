@@ -83,6 +83,18 @@ impl CompactBlockNegotiation {
             _ => 1,
         }
     }
+
+    /// The version to serve this peer's `MSG_CMPCT_BLOCK` requests at, or
+    /// `None` while the peer never announced BIP152 support. The identity
+    /// profile is the peer's recorded `sendcmpct` version; short IDs are
+    /// hints, so an unknown recorded version degrades to the v1 profile.
+    #[must_use]
+    pub const fn servable_version(&self) -> Option<u64> {
+        match self.remote_send_compact {
+            Some(_) => Some(self.negotiated_version()),
+            None => None,
+        }
+    }
 }
 
 /// One peer connection and its negotiated protocol state.

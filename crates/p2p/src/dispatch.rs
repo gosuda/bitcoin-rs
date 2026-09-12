@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 
+use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
+use bitcoin::p2p::message_compact_blocks::BlockTxn;
 use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
@@ -41,19 +43,34 @@ pub trait ChainQuery: Send + Sync {
         limit: usize,
     ) -> Vec<Header>;
 
-    /// Serves block inventory one body at a time, in `items` order. For each
-    /// block-typed item `headroom` is consulted EXACTLY ONCE, immediately
-    /// BEFORE its body load; `false` halts production and sets `halted`
-    /// (I7, I9). Each loaded body is the stored consensus payload, delivered
-    /// through `serve` without a decode/re-encode round trip. A `serve`
+    /// Serves block inventory one response at a time, in `items` order. For
+    /// each block-typed item `headroom` is consulted EXACTLY ONCE,
+    /// immediately BEFORE its body load; `false` halts production and sets
+    /// `halted` (I7, I9). Full-block items are served as
+    /// [`Message::BlockPayload`]; `MSG_CMPCT_BLOCK` items as
+    /// [`Message::CmpctBlock`] built at the given BIP152 version — `None`
+    /// (peer never negotiated) leaves compact items in `not_found`. Each
+    /// loaded body is the stored consensus payload, delivered through
+    /// `serve` without a full-block decode/re-encode round trip. A `serve`
     /// error aborts production and propagates. Non-block / unservable items
     /// are collected into `not_found` and never loaded.
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
+        compact_version: Option<u64>,
         headroom: &dyn Fn() -> bool,
-        serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
+        serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
+
+    /// Answers one `getblocktxn` from the active chain under the same
+    /// body-availability rules as full blocks. `Ok(None)` leaves the request
+    /// unanswered (unknown, stale, pruned, or headless block); `Err`
+    /// reports an out-of-range transaction index — a protocol disconnect
+    /// per BIP152 (Core scores misbehavior).
+    fn block_transactions(
+        &self,
+        request: &BlockTransactionsRequest,
+    ) -> Result<Option<BlockTransactions>, PeerError>;
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the
@@ -198,7 +215,16 @@ pub fn dispatch_inbound_full<S>(
         Message::GetData(items) => {
             ensure_inventory_request_within_bounds(items)?;
             step(peer, message)?;
-            serve_getdata(chain, tx_inventory, items, headroom, send)?;
+            let compact_version = peer.compact_blocks.servable_version();
+            serve_getdata(chain, tx_inventory, compact_version, items, headroom, send)?;
+        }
+        Message::GetBlockTxn(request) => {
+            step(peer, message)?;
+            if let Some(chain) = chain {
+                if let Some(transactions) = chain.block_transactions(&request.txs_request)? {
+                    send(Message::BlockTxn(BlockTxn { transactions }))?;
+                }
+            }
         }
         _ => step(peer, message)?,
     }
@@ -242,6 +268,7 @@ fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage)
 fn serve_getdata(
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    compact_version: Option<u64>,
     items: &[Inventory],
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -254,7 +281,7 @@ fn serve_getdata(
     // keeps every existing call site (listener, chainless dispatch, tests)
     // byte-identical until a TxInventory handle is wired in.
     let Some(inv) = tx_inventory else {
-        return serve_getdata_blocks(chain, items, headroom, send);
+        return serve_getdata_blocks(chain, compact_version, items, headroom, send);
     };
 
     // Item-by-item: tx-typed items resolve through the tx inventory; block
@@ -292,8 +319,9 @@ fn serve_getdata(
                 if let Some(chain) = chain {
                     let outcome = chain.serve_inventory_blocks(
                         std::slice::from_ref(block_item),
+                        compact_version,
                         headroom,
-                        &mut |payload| send(Message::BlockPayload(payload)),
+                        send,
                     )?;
                     if outcome.halted {
                         return Err(PeerError::Protocol(
@@ -311,12 +339,14 @@ fn serve_getdata(
     if !not_found.is_empty() {
         send(Message::NotFound(not_found))?;
     }
+
     Ok(())
 }
 
 /// Block-only `getdata` serving: the original pre-tx-inventory path.
 fn serve_getdata_blocks(
     chain: Option<&dyn ChainQuery>,
+    compact_version: Option<u64>,
     items: &[Inventory],
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
@@ -324,9 +354,7 @@ fn serve_getdata_blocks(
     match chain {
         None => send(Message::NotFound(items.to_vec()))?,
         Some(chain) => {
-            let outcome = chain.serve_inventory_blocks(items, headroom, &mut |payload| {
-                send(Message::BlockPayload(payload))
-            })?;
+            let outcome = chain.serve_inventory_blocks(items, compact_version, headroom, send)?;
             if outcome.halted {
                 return Err(PeerError::Protocol(
                     "getdata serving halted: outbound production gate",
@@ -339,7 +367,6 @@ fn serve_getdata_blocks(
     }
     Ok(())
 }
-
 fn ensure_block_locator_within_bounds(
     locator_hashes: &[bitcoin::BlockHash],
     error: &'static str,
@@ -363,6 +390,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
@@ -428,8 +456,9 @@ mod tests {
         fn serve_inventory_blocks(
             &self,
             items: &[Inventory],
+            _compact_version: Option<u64>,
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -445,9 +474,16 @@ mod tests {
                     outcome.halted = true;
                     return Ok(outcome);
                 }
-                serve(block_payload_bytes(found))?;
+                serve(Message::BlockPayload(block_payload_bytes(found)))?;
             }
             Ok(outcome)
+        }
+
+        fn block_transactions(
+            &self,
+            _request: &BlockTransactionsRequest,
+        ) -> Result<Option<BlockTransactions>, PeerError> {
+            Ok(None)
         }
     }
 
@@ -482,10 +518,18 @@ mod tests {
         fn serve_inventory_blocks(
             &self,
             _items: &[Inventory],
+            _compact_version: Option<u64>,
             _headroom: &dyn Fn() -> bool,
-            _serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
+            _serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             Ok(InventoryServing::default())
+        }
+
+        fn block_transactions(
+            &self,
+            _request: &BlockTransactionsRequest,
+        ) -> Result<Option<BlockTransactions>, PeerError> {
+            Ok(None)
         }
     }
 
@@ -642,6 +686,56 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn getblocktxn_is_answered_with_blocktxn_from_the_chain() -> Result<(), PeerError> {
+        struct ServingChain;
+        impl ChainQuery for ServingChain {
+            fn headers_after(
+                &self,
+                _locator_hashes: &[BlockHash],
+                _stop_hash: BlockHash,
+                _limit: usize,
+            ) -> Vec<Header> {
+                Vec::new()
+            }
+
+            fn serve_inventory_blocks(
+                &self,
+                _items: &[Inventory],
+                _compact_version: Option<u64>,
+                _headroom: &dyn Fn() -> bool,
+                _serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+            ) -> Result<InventoryServing, PeerError> {
+                Ok(InventoryServing::default())
+            }
+
+            fn block_transactions(
+                &self,
+                request: &BlockTransactionsRequest,
+            ) -> Result<Option<BlockTransactions>, PeerError> {
+                Ok(Some(BlockTransactions {
+                    block_hash: request.block_hash,
+                    transactions: Vec::new(),
+                }))
+            }
+        }
+
+        let mut peer = ready_peer();
+        let responses = dispatch_collect(
+            &mut peer,
+            &Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
+                txs_request: BlockTransactionsRequest {
+                    block_hash: bitcoin::BlockHash::from_byte_array([7; 32]),
+                    indexes: vec![0],
+                },
+            }),
+            Some(&ServingChain),
+        )?;
+
+        assert!(matches!(responses.as_slice(), [Message::BlockTxn(_)]));
+        Ok(())
+    }
+
     /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
     /// that resolve to a stored body are served behind `headroom`; all other
     /// items land in `not_found` without a load. Counters and the tripwire
@@ -653,7 +747,6 @@ mod tests {
         /// Panics when a load would reach this count (mutation-gate tripwire).
         load_tripwire: Option<usize>,
     }
-
     impl ChainQuery for StreamingChain {
         fn headers_after(
             &self,
@@ -667,8 +760,9 @@ mod tests {
         fn serve_inventory_blocks(
             &self,
             items: &[Inventory],
+            _compact_version: Option<u64>,
             headroom: &dyn Fn() -> bool,
-            serve: &mut dyn FnMut(bytes::Bytes) -> Result<(), PeerError>,
+            serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
         ) -> Result<InventoryServing, PeerError> {
             let mut outcome = InventoryServing::default();
             for item in items {
@@ -692,9 +786,16 @@ mod tests {
                     );
                 }
                 self.loads.fetch_add(1, Ordering::Relaxed);
-                serve(block_payload_bytes(found))?;
+                serve(Message::BlockPayload(block_payload_bytes(found)))?;
             }
             Ok(outcome)
+        }
+
+        fn block_transactions(
+            &self,
+            _request: &BlockTransactionsRequest,
+        ) -> Result<Option<BlockTransactions>, PeerError> {
+            Ok(None)
         }
     }
 
