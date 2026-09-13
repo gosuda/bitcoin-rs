@@ -36,7 +36,7 @@ pub mod standardness;
 
 pub use accept::MempoolUtxoView;
 pub use admission::{
-    AdmissionChain, ChainAdmissionSnapshot, OrphanRetry, SubmitError, SubmitOutcome,
+    AdmissionChain, ChainAdmissionSnapshot, OrphanRetry, PrevoutMeta, SubmitError, SubmitOutcome,
 };
 pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;

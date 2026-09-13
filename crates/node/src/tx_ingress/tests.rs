@@ -6,7 +6,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
 use bitcoin_rs_primitives::{
-    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    Amount, Block, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -165,6 +165,7 @@ fn make_consumer_with_utxo(
         relay,
         applied_tip: Arc::new(ArcSwapOption::empty()),
         block_tree: Arc::new(RwLock::new(BlockTree::new())),
+        network: Network::Regtest,
     }
 }
 
@@ -188,6 +189,7 @@ fn make_consumer(gateway: &Arc<MempoolGateway>, mining: Arc<RecordingMining>) ->
         relay,
         applied_tip: Arc::new(ArcSwapOption::empty()),
         block_tree: Arc::new(RwLock::new(BlockTree::new())),
+        network: Network::Regtest,
     }
 }
 

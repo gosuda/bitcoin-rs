@@ -1,10 +1,10 @@
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockBodySource, TipSnapshot};
+use bitcoin_rs_chain::{BlockBodySource, TipSnapshot, softfork_state};
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::{
     AdmissionChain, ChainAdmissionSnapshot, Mempool, MempoolGateway, MempoolLimits,
-    MempoolObserver, MutationResult,
+    MempoolObserver, MutationResult, PrevoutMeta,
 };
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
@@ -699,6 +699,7 @@ pub struct ChainAdmissionView<'a> {
     utxo: &'a bitcoin_rs_utxo::UtxoSet,
     applied_tip: &'a ArcSwapOption<TipSnapshot>,
     block_tree: &'a RwLock<bitcoin_rs_chain::BlockTree>,
+    network: Network,
 }
 
 impl<'a> ChainAdmissionView<'a> {
@@ -708,11 +709,13 @@ impl<'a> ChainAdmissionView<'a> {
         utxo: &'a bitcoin_rs_utxo::UtxoSet,
         applied_tip: &'a ArcSwapOption<TipSnapshot>,
         block_tree: &'a RwLock<bitcoin_rs_chain::BlockTree>,
+        network: Network,
     ) -> Self {
         Self {
             utxo,
             applied_tip,
             block_tree,
+            network,
         }
     }
 }
@@ -721,22 +724,46 @@ impl AdmissionChain for ChainAdmissionView<'_> {
     fn snapshot(&self, tx: &Tx) -> Option<ChainAdmissionSnapshot> {
         let tip = self.applied_tip.load_full();
         let height = tip.as_ref().map_or(0, |tip| tip.height);
-        let locktime_cutoff = tip.as_ref().map_or(0, |tip| {
-            let tree = self.block_tree.read();
-            tree.lookup(tip.hash)
-                .and_then(|node| tree.median_time_past_at(node, 11))
-                .unwrap_or(0)
+        let tree = self.block_tree.read();
+        let tip_node = tip.as_ref().and_then(|tip| tree.lookup(tip.hash));
+        let locktime_cutoff = tip_node
+            .and_then(|node| tree.median_time_past_at(node, 11))
+            .unwrap_or(0);
+        // CSV activation at the next block gates BIP68 relative locks,
+        // matching the block-connect and mining evaluation contexts.
+        let csv_active = tip_node.is_some_and(|node| {
+            softfork_state(&tree, self.network, Some(node), height + 1).csv_active
         });
-        let prevouts = tx
-            .inputs
-            .iter()
-            .filter_map(|input| {
-                let outpoint = input.previous_output;
-                self.utxo
-                    .get_entry(&outpoint)
-                    .map(|coin| (outpoint, coin.txout))
-            })
-            .collect();
+        // Confirmed coin metadata for BIP68 and coinbase maturity. Height `h`
+        // uses the MTP of the block before `h`, the same derivation the
+        // block-connect path applies. MTP lookups are cached per height.
+        let mut mtp_cache: HashMap<u32, u32> = HashMap::new();
+        let mut prevout_meta: HashMap<OutPoint, PrevoutMeta> = HashMap::new();
+        let mut prevouts = Vec::new();
+        for input in &tx.inputs {
+            let Some(coin) = self.utxo.get_entry(&input.previous_output) else {
+                continue;
+            };
+            let mtp = *mtp_cache.entry(coin.height).or_insert_with(|| {
+                tip_node
+                    .and_then(|tip| {
+                        coin.height
+                            .checked_sub(1)
+                            .and_then(|prior| tree.node_at_height_from(tip, prior))
+                    })
+                    .and_then(|prior| tree.median_time_past_at(prior, 11))
+                    .unwrap_or(0)
+            });
+            prevout_meta.insert(
+                input.previous_output,
+                PrevoutMeta {
+                    height: coin.height,
+                    mtp,
+                    coinbase: coin.coinbase,
+                },
+            );
+            prevouts.push((input.previous_output, coin.txout));
+        }
         // Live confirmed coins are positive chain evidence. The RPC lookup
         // cache may contain unconfirmed bodies and cannot supply this fact.
         // No live outputs means unknown, not proof that the tx is unconfirmed.
@@ -745,8 +772,10 @@ impl AdmissionChain for ChainAdmissionView<'_> {
             .has_live_outputs_for_txid(&Hash256::from(tx.txid()));
         Some(ChainAdmissionSnapshot {
             prevouts,
+            prevout_meta,
             height,
             locktime_cutoff,
+            csv_active,
             confirmed,
         })
     }
@@ -1196,7 +1225,12 @@ impl Context {
     /// Borrows the provisional chain capability shared with P2P admission.
     #[must_use]
     pub fn admission_chain(&self) -> ChainAdmissionView<'_> {
-        ChainAdmissionView::new(&self.utxo, &self.applied_tip, &self.block_tree)
+        ChainAdmissionView::new(
+            &self.utxo,
+            &self.applied_tip,
+            &self.block_tree,
+            self.chain_network,
+        )
     }
 
     /// Admits one transaction through the full policy stack, then mutates
