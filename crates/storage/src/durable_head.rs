@@ -218,6 +218,9 @@ pub trait DurableHeadStore: Send + Sync + 'static {
         next: &DurableHead,
         records: &CommitRecords<'_>,
     ) -> Result<(), StorageError>;
+
+    /// Clears a committed head during authenticated full revalidation.
+    fn reset(&self, expected: &DurableHead) -> Result<(), StorageError>;
 }
 
 /// Durable-head storage backed by a [`KvStore`].
@@ -294,6 +297,22 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
         }
         Ok(())
     }
+
+    fn reset(&self, expected: &DurableHead) -> Result<(), StorageError> {
+        let mut batch = self.store.new_batch();
+        batch.delete(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY);
+        let condition = WriteCondition::Equals {
+            cf: ColumnFamily::UtxoMeta,
+            key: DURABLE_HEAD_KEY,
+            expected: &expected.encode(),
+        };
+        if !self.store.write_durable_if(&[condition], batch)? {
+            return Err(StorageError::InvalidOperation(
+                "durable head moved since it was read",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Process-local durable-head storage.
@@ -334,6 +353,17 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
             ));
         }
         *head = Some(*next);
+        Ok(())
+    }
+
+    fn reset(&self, expected: &DurableHead) -> Result<(), StorageError> {
+        let mut head = self.head.write();
+        if head.as_ref() != Some(expected) {
+            return Err(StorageError::InvalidOperation(
+                "durable head moved since it was read",
+            ));
+        }
+        *head = None;
         Ok(())
     }
 }

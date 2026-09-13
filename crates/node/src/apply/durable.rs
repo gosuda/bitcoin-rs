@@ -183,25 +183,35 @@ pub(crate) fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> 
         .load()
         .map_err(ApplyError::DurableHeadCommit)?;
     let Some(head) = stored else {
+        // Bootstrap the commit point for datadirs created before durable heads.
+        if let Some(tip) = handles.applied_tip.load_full() {
+            let next = DurableHead {
+                commit_id: 1,
+                height: tip.height,
+                tip: tip.hash,
+                chain_tx_count: handles.chain_tx_count,
+                body_extent: handles
+                    .block_body_store
+                    .as_ref()
+                    .and_then(|store| store.append_cursor()),
+                undo_extent: None,
+            };
+            handles.durable_head.commit(None, &next, &CommitRecords::default())
+                .map_err(ApplyError::DurableHeadCommit)?;
+        }
         return Ok(());
     };
     let Some(tip) = handles.applied_tip.load_full() else {
-        tracing::warn!(
-            head_height = head.height,
-            head_tip = %head.tip.to_string_be(),
-            "durable head exists but no chainstate was restored"
-        );
+        // An authenticated full revalidation starts a new durable epoch.
+        handles.durable_head.reset(&head).map_err(ApplyError::DurableHeadCommit)?;
         return Ok(());
     };
     if tip.hash != head.tip {
         metrics::counter!("node.durable_head.recovery_gaps").increment(1);
-        tracing::warn!(
-            head_height = head.height,
-            head_tip = %head.tip.to_string_be(),
-            restored_height = tip.height,
-            restored_tip = %tip.hash.to_string_be(),
-            "restored tip is behind the durable head; the gap is committed and awaits replay"
-        );
+        return Err(ApplyError::DurableHeadLineage {
+            head: head.tip,
+            prev: tip.hash,
+        });
     }
     Ok(())
 }
