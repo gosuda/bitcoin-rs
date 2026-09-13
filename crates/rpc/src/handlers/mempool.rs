@@ -22,19 +22,14 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let stats = pool.stats();
     let maxmempool = pool.limits.max_total_bytes;
     let live_min_relay_sat_per_kvb = pool.min_relay_fee_sat_per_kvb();
-    // `mempoolminfee` rises above `minrelaytxfee` when the pool approaches its
-    // `maxmempool` byte limit. Bitcoin Core uses the eviction-floor heuristic:
-    // once the pool exceeds 50% of `maxmempool`, new txs must pay strictly
-    // more than the cheapest currently-evictable tx by `incrementalrelayfee`.
-    let mempool_min_fee_sat_per_kvb = if maxmempool > 0
-        && stats.bytes.saturating_mul(2) >= maxmempool
-        && let Some(lowest) = pool.lowest_fee_rate()
-    {
-        live_min_relay_sat_per_kvb
-            .max(lowest.saturating_add(policy.incremental_relay_fee_sat_per_kvb))
-    } else {
-        live_min_relay_sat_per_kvb
-    };
+    // `mempoolminfee` rises above `minrelaytxfee` under size pressure. The
+    // eviction crate owns that heuristic; this handler only reports it, so
+    // the quoted floor cannot drift from the one the admission preview
+    // enforces.
+    let mempool_min_fee_sat_per_kvb = bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb(
+        &pool,
+        policy.incremental_relay_fee_sat_per_kvb,
+    );
     typed_to_sonic(&v31::GetMempoolInfo {
         loaded: true,
         size: i64_saturated(stats.txs),
