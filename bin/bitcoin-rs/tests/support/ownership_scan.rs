@@ -615,7 +615,7 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         }
 
         for constructor in TRANSITION_PROMOTION_PATTERNS {
-            if line.contains(constructor) {
+            if transition_call(raw_lines, index, constructor) {
                 result.transition_sites += 1;
                 if !is_node_owner(path_str) {
                     result.transition_owner_violations.push(format!(
@@ -629,11 +629,31 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         }
     }
 }
+fn transition_call(lines: &[String], index: usize, pattern: &str) -> bool {
+    let name = pattern.trim_end_matches('(');
+    let mut text = lines[index..].iter().take(8).cloned().collect::<Vec<_>>().join("\n");
+    while let Some(start) = text.find("/*") {
+        if let Some(end) = text[start + 2..].find("*/") {
+            text.replace_range(start..start + end + 4, " ");
+        } else { break; }
+    }
+    let Some(pos) = text.find(name) else { return false };
+    let rest = &text[pos + name.len()..];
+    rest.trim_start().starts_with('(')
+}
+
 /// Returns true when `path` is inside the node crate: `Chainstate` and its
 /// transition promotion path are the single owner of applied-tip mutation
 /// (ARCH-07).
 fn is_node_owner(path: &str) -> bool {
-    path.replace('\\', "/").contains("/crates/node/src/")
+    let normalized = path.replace('\\', "/");
+    let node_src = workspace_member_dirs()
+        .into_iter()
+        .find(|dir| dir.ends_with("node"))
+        .map(|dir| dir.join("src"));
+    node_src
+        .map(|root| normalized == root.to_string_lossy() || normalized.starts_with(&format!("{}/", root.to_string_lossy())))
+        .unwrap_or(false)
 }
 
 /// Returns true only when the call is on a receiver expression explicitly
