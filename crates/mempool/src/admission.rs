@@ -21,16 +21,36 @@ const MAX_ADMISSION_RETRIES: usize = 4;
 /// Height and median time past refer to one sampled applied tip. Coin reads
 /// may overlap a chain transition; the gateway must validate the generation
 /// captured before these reads before using any fact for admission or holding.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ChainAdmissionSnapshot {
     /// Confirmed input outputs; unavailable inputs are absent.
     pub prevouts: Vec<(OutPoint, TxOut)>,
+    /// Per-confirmed-output chain metadata needed for BIP68 and coinbase
+    /// maturity checks. Pool parents are not included here.
+    pub prevout_meta: HashMap<OutPoint, PrevoutMeta>,
     /// Applied tip height; finality is checked at the next height.
     pub height: u32,
     /// Applied tip's median time past (zero before genesis).
     pub locktime_cutoff: u32,
+    /// Whether CSV (BIP68/112/113) is active for the next block.
+    pub csv_active: bool,
     /// Peer duplicate suppression only. RPC cache membership is not admission.
     pub confirmed: bool,
+}
+
+/// Chain-origin metadata for one confirmed input.
+///
+/// Used to evaluate BIP68 relative locks and coinbase maturity at admission.
+/// The `MTP` value is the median-time-past of the block *before* the one that
+/// created the output, matching `bip68_prevout_mtp` in the block-connect path.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PrevoutMeta {
+    /// Height the spent output was created at.
+    pub height: u32,
+    /// Median-time-past of the block before the one at `height`.
+    pub mtp: u32,
+    /// Whether the spent output came from a coinbase transaction.
+    pub coinbase: bool,
 }
 
 /// Narrow chain read capability.
@@ -213,12 +233,7 @@ impl MempoolGateway {
                     };
                     snapshot
                 } else {
-                    ChainAdmissionSnapshot {
-                        prevouts: Vec::new(),
-                        height: 0,
-                        locktime_cutoff: 0,
-                        confirmed: false,
-                    }
+                    ChainAdmissionSnapshot::default()
                 };
                 let mut available = snapshot.prevouts.into_iter().collect::<HashMap<_, _>>();
                 available.extend(mempool_inputs.unwrap_or_default());
@@ -237,6 +252,8 @@ impl MempoolGateway {
                     tx: Arc::new(tx.clone()),
                     context,
                     prevouts,
+                    prevout_meta: snapshot.prevout_meta,
+                    csv_active: snapshot.csv_active,
                     locktime_cutoff: snapshot.locktime_cutoff,
                     max_feerate_sat_per_kvb,
                     time: 0,
@@ -361,16 +378,19 @@ impl MempoolGateway {
             // generation/sequence first, then rejects the still-known invalid
             // outpoint before policy or finality. Changed tokens rebuild a
             // normal attempt, including chain lookup if the parent disappeared.
-            let (confirmed, height, locktime_cutoff) = snapshot.map_or_else(
-                || (HashMap::new(), 0, 0),
-                |snapshot| {
-                    (
-                        snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
-                        snapshot.height,
-                        snapshot.locktime_cutoff,
-                    )
-                },
-            );
+            let (confirmed, height, locktime_cutoff, prevout_meta, csv_active) = snapshot
+                .map_or_else(
+                    || (HashMap::new(), 0, 0, HashMap::new(), false),
+                    |snapshot| {
+                        (
+                            snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
+                            snapshot.height,
+                            snapshot.locktime_cutoff,
+                            snapshot.prevout_meta,
+                            snapshot.csv_active,
+                        )
+                    },
+                );
             let mempool_prevouts = mempool_prevouts.unwrap_or_default();
             let (prevouts, missing_parents) =
                 combine_input_facts(&tx, &mempool_prevouts, &confirmed);
@@ -380,6 +400,8 @@ impl MempoolGateway {
                 tx,
                 context,
                 prevouts,
+                prevout_meta,
+                csv_active,
                 locktime_cutoff,
                 max_feerate_sat_per_kvb,
                 time,
@@ -571,6 +593,8 @@ mod tests {
                 prevouts: self.0.clone(),
                 height: 1,
                 locktime_cutoff: 0,
+                prevout_meta: HashMap::new(),
+                csv_active: false,
                 confirmed: false,
             })
         }
@@ -1212,6 +1236,8 @@ mod tests {
                 prevouts: vec![coin],
                 height: 1,
                 locktime_cutoff: 0,
+                prevout_meta: HashMap::new(),
+                csv_active: false,
                 confirmed: false,
             })
         }
@@ -1328,6 +1354,8 @@ mod tests {
                 prevouts: self.available.iter().cloned().collect(),
                 height: 1,
                 locktime_cutoff: 0,
+                prevout_meta: HashMap::new(),
+                csv_active: false,
                 confirmed: false,
             })
         }

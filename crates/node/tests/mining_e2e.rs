@@ -595,7 +595,7 @@ fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
     let utxo = state.utxo();
     let applied_tip = state.applied_tip();
     let block_tree = state.block_tree();
-    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree);
+    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree, Network::Regtest);
     let outcome = state.mempool_gateway().submit_transaction(
         Arc::new(tx.clone()),
         AdmissionOrigin::Rpc,

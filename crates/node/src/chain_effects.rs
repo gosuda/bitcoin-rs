@@ -396,6 +396,8 @@ mod tests {
                 prevouts: self.prevouts.read().clone(),
                 height: 100,
                 locktime_cutoff: 0,
+                prevout_meta: hashbrown::HashMap::new(),
+                csv_active: false,
                 confirmed: false,
             })
         }

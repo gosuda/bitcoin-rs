@@ -13,7 +13,7 @@ use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
-use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
+use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
 use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
@@ -44,6 +44,7 @@ pub fn spawn_tx_ingress_consumer(
         relay,
         applied_tip: state.applied_tip(),
         block_tree: state.block_tree(),
+        network: state.config().network,
     };
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
@@ -79,11 +80,17 @@ struct TxIngressConsumer {
     relay: TxRelayQueue,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
+    network: Network,
 }
 
 impl TxIngressConsumer {
     fn chain_view(&self) -> ChainAdmissionView<'_> {
-        ChainAdmissionView::new(&self.utxo, &self.applied_tip, &self.block_tree)
+        ChainAdmissionView::new(
+            &self.utxo,
+            &self.applied_tip,
+            &self.block_tree,
+            self.network,
+        )
     }
 
     fn process_one(&self, inbound: bitcoin_rs_p2p::InboundTx) {

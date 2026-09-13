@@ -22,7 +22,8 @@ use bitcoin_rs_mempool::standardness::{
 };
 use bitcoin_rs_mempool::{
     AdmissionChain, ChainAdmissionSnapshot, Mempool, MempoolEntry, MempoolError, MempoolGateway,
-    MempoolLimits, MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
+    MempoolLimits, MutationOutcome, PolicyError, PrevoutMeta, RbfError, RemovalReason,
+    ReplacementCandidate,
 };
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
@@ -49,12 +50,7 @@ struct EmptyChain;
 
 impl AdmissionChain for EmptyChain {
     fn snapshot(&self, _tx: &Tx) -> Option<ChainAdmissionSnapshot> {
-        Some(ChainAdmissionSnapshot {
-            prevouts: Vec::new(),
-            height: 0,
-            locktime_cutoff: 0,
-            confirmed: false,
-        })
+        Some(ChainAdmissionSnapshot::default())
     }
 }
 

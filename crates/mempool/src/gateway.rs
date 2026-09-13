@@ -85,9 +85,16 @@ pub struct AdmissionRequest {
         bitcoin_rs_primitives::OutPoint,
         bitcoin_rs_primitives::TxOut,
     )>,
+    /// Confirmed-chain metadata for each resolved prevout. Unconfirmed
+    /// mempool/package parents are derived by the gateway; confirmed entries
+    /// come from the chain snapshot. Absent entries carry no lock or maturity
+    /// constraint.
+    pub prevout_meta: hashbrown::HashMap<OutPoint, crate::PrevoutMeta>,
     /// Median-time-past of the applied chain tip for BIP113 finality checks.
     /// Zero disables the locktime cutoff (pre-genesis).
     pub locktime_cutoff: u32,
+    /// Whether CSV (BIP68/112/113) is active for the next block.
+    pub csv_active: bool,
     /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
     /// Wall-clock seconds for the mempool entry timestamp.
@@ -853,6 +860,19 @@ impl MempoolGateway {
             pool,
             policy.incremental_relay_fee_sat_per_kvb,
         );
+        // BIP68 is evaluated at the next block. A resolved input that is not
+        // present in the confirmed metadata is an unconfirmed (mempool/package)
+        // parent and is encoded as the next block.
+        let next_height = request.height.saturating_add(1);
+        let resolved_prevouts: HashSet<OutPoint> =
+            request.prevouts.iter().map(|(op, _)| *op).collect();
+        let finality = crate::standardness::Bip68Admission {
+            csv_active: request.csv_active,
+            next_height,
+            next_mtp: request.locktime_cutoff,
+            prevout_meta: Some(&request.prevout_meta),
+            resolved_prevouts: Some(&resolved_prevouts),
+        };
         let fact = crate::standardness::evaluate_one(
             pool,
             &policy.standardness,
@@ -861,6 +881,7 @@ impl MempoolGateway {
             None,
             floor,
             policy.incremental_relay_fee_sat_per_kvb,
+            &finality,
         );
         let rejection = fact
             .reject_reason
@@ -1374,6 +1395,8 @@ mod tests {
                     script_pubkey: vec![0x51].into(),
                 },
             )],
+            prevout_meta: hashbrown::HashMap::new(),
+            csv_active: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -2670,6 +2693,8 @@ mod tests {
                     script_pubkey: vec![0x51].into(),
                 },
             )],
+            prevout_meta: hashbrown::HashMap::new(),
+            csv_active: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -3040,6 +3065,8 @@ mod tests {
                 missing_inputs: false,
             },
             prevouts: Vec::new(),
+            prevout_meta: hashbrown::HashMap::new(),
+            csv_active: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -3089,6 +3116,8 @@ mod tests {
                     script_pubkey: Script::new(),
                 },
             )],
+            prevout_meta: hashbrown::HashMap::new(),
+            csv_active: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,

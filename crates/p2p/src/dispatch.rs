@@ -1216,6 +1216,8 @@ mod tests {
                     prevouts: Vec::new(),
                     height: 0,
                     locktime_cutoff: 0,
+                    prevout_meta: hashbrown::HashMap::new(),
+                    csv_active: false,
                     confirmed: false,
                 })
             }

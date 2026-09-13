@@ -112,6 +112,8 @@ fn admission_request(
         tx: Arc::new(tx.clone()),
         context,
         prevouts,
+        prevout_meta: hashbrown::HashMap::new(),
+        csv_active: false,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,

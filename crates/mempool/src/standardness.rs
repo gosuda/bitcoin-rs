@@ -7,9 +7,10 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 
-use bitcoin_rs_primitives::{Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_consensus::bip68;
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -19,7 +20,7 @@ use bitcoin_rs_script::{
 };
 use thiserror::Error;
 
-use crate::{EntryId, Mempool, PolicyError, RbfError, ReplacementCandidate};
+use crate::{EntryId, Mempool, PolicyError, PrevoutMeta, RbfError, ReplacementCandidate};
 
 /// Maximum weight of a standard transaction (400 000 weight units).
 const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
@@ -174,6 +175,28 @@ pub struct PackageAcceptanceFacts {
     /// One row per submitted transaction, in input order.
     pub results: Vec<TxAcceptanceFact>,
 }
+/// Next-block BIP68 sequence-lock context for one admission evaluation.
+///
+/// Confirmed inputs carry their origin height and the median-time-past of the
+/// block before the one that created them. Mempool and package parents are
+/// encoded as `next_height` and `next_mtp`, matching the consensus helper's
+/// unconfirmed-prevout convention.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bip68Admission<'a> {
+    /// Whether CSV (BIP68/112/113) is active for the next block.
+    pub csv_active: bool,
+    /// Height of the block that would include `tx` (applied tip + 1).
+    pub next_height: u32,
+    /// Median-time-past of the applied tip; also the assumed time context
+    /// of any unconfirmed (mempool/package) parent input.
+    pub next_mtp: u32,
+    /// Confirmed-chain metadata per resolved input. Mempool/package parents
+    /// are derived at `next_height` / `next_mtp` when not present here.
+    pub prevout_meta: Option<&'a HashMap<OutPoint, PrevoutMeta>>,
+    /// Set of inputs this evaluation actually resolved, including mempool and
+    /// package parents. Used to treat unconfirmed parents consistently.
+    pub resolved_prevouts: Option<&'a HashSet<OutPoint>>,
+}
 
 /// Per-transaction relay sigop limit: one fifth of the block limit,
 /// matching Core v31.1's `MAX_STANDARD_TX_SIGOPS_COST`.
@@ -223,6 +246,48 @@ pub enum AcceptanceRejectReason {
 pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) -> bool {
     maximum.is_some_and(|max| crate::entry::fee_rate(fee, u64::from(vsize)) > max)
 }
+/// Returns true when `tx`'s BIP68 sequence locks are satisfied at the next block.
+///
+/// Confirmed inputs use the chain metadata from `finality.prevout_meta`. Any
+/// resolved input not present there (mempool/package parents) is encoded as the
+/// next block, so any positive relative lock fails. Missing inputs are not
+/// checked here; callers must reject those first.
+fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>) -> bool {
+    if !finality.csv_active || tx.version < 2 {
+        return true;
+    }
+    let empty_meta = HashMap::new();
+    let empty_set = HashSet::new();
+    let prevout_meta = finality.prevout_meta.unwrap_or(&empty_meta);
+    let resolved = finality.resolved_prevouts.unwrap_or(&empty_set);
+    for input in &tx.inputs {
+        let sequence = input.sequence.to_consensus();
+        if sequence & bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+            continue;
+        }
+        let (prevout_height, prevout_mtp) =
+            if let Some(meta) = prevout_meta.get(&input.previous_output) {
+                (meta.height, meta.mtp)
+            } else if resolved.contains(&input.previous_output)
+                || pool.contains_txid(&input.previous_output.txid)
+            {
+                (finality.next_height, finality.next_mtp)
+            } else {
+                continue;
+            };
+        if !bip68::sequence_lock_satisfied(
+            tx.version,
+            sequence,
+            prevout_height,
+            prevout_mtp,
+            finality.next_height,
+            finality.next_mtp,
+        ) {
+            return false;
+        }
+    }
+    true
+}
 
 pub(crate) fn evaluate_one(
     pool: &Mempool,
@@ -232,6 +297,7 @@ pub(crate) fn evaluate_one(
     max_feerate_sat_per_kvb: Option<u64>,
     mempool_min_fee_sat_per_kvb: u64,
     incremental_relay_fee_sat_per_kvb: u64,
+    finality: &Bip68Admission<'_>,
 ) -> TxAcceptanceFact {
     let txid = tx.txid();
     let wtxid = tx.wtxid();
@@ -249,6 +315,8 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::MinRelayFeeNotMet)
     } else if exceeds_max_feerate(context.fee, vsize, max_feerate_sat_per_kvb) {
         Some(AcceptanceRejectReason::MaxFeeExceeded)
+    } else if !bip68_final(pool, tx, finality) {
+        Some(AcceptanceRejectReason::NonBip68Final)
     } else {
         let candidate = ReplacementCandidate::new(
             Arc::new(tx.clone()),

@@ -138,7 +138,7 @@ fn admit(state: &NodeState, tx: Tx, time: u64) -> Result<SubmitOutcome> {
     let utxo = state.utxo();
     let applied_tip = state.applied_tip();
     let block_tree = state.block_tree();
-    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree);
+    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree, Network::Regtest);
     state
         .mempool_gateway()
         .submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, time, &view)
