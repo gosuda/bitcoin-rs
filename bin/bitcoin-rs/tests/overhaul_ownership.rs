@@ -359,6 +359,38 @@ fn chainstate_transition_scan_passes() {
         "the chainstate transition scan matched no production transition promotion"
     );
 }
+/// The mempool pressure floor (`mempoolminfee`) has one owner:
+/// `eviction::mempool_min_fee_sat_per_kvb` (POL-06). The owner derives and
+/// enforces the floor, the `getmempoolinfo` handler is the audited quoting
+/// outlet, and no production code re-derives it from the pool's lowest rate
+/// outside the mempool crate.
+#[test]
+fn mempool_pressure_floor_scan_passes() {
+    let OwnershipScanResult {
+        pressure_floor_owner_violations,
+        pressure_floor_sites,
+        files_scanned,
+        ..
+    } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk          collapsed"
+    );
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "mempool pressure floor scan: files={files_scanned},          sites={pressure_floor_sites},          violations={}",
+        pressure_floor_owner_violations.len()
+    );
+    assert!(
+        pressure_floor_owner_violations.is_empty(),
+        "mempool pressure-floor single-owner boundary (POL-06) violated:          {pressure_floor_owner_violations:?}"
+    );
+    assert!(
+        pressure_floor_sites > 0,
+        "the pressure floor scan matched no production floor site"
+    );
+}
 
 #[test]
 fn feature_profiles_preserve_ownership_rules() {

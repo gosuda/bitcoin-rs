@@ -17,6 +17,9 @@
 //! `crates/node/src/state` config projection. Peer registration and
 //! cancellation fail the scan outside `crates/p2p/src/` apart from
 //! explicitly audited receiver expressions.
+//! The mempool pressure-floor owner is enforced: `mempool_min_fee_sat_per_kvb(`
+//! only inside the mempool owner and the audited `getmempoolinfo` handler, and
+//! `.lowest_fee_rate(` only inside `crates/mempool/src/` (POL-06).
 
 use super::dependency_graph::workspace_member_dirs;
 use std::collections::BTreeSet;
@@ -135,6 +138,24 @@ pub(crate) const TRANSITION_PROMOTION_PATTERNS: &[&str] =
 /// caller.
 pub(crate) const AUTHORIZED_PEER_TABLE_PATHS: &[&str] = &["crates/rpc/src/handlers/network.rs"];
 
+/// Pressure-floor quotation sites: `eviction::mempool_min_fee_sat_per_kvb`
+/// is the one owner of the dynamic `mempoolminfee` heuristic (POL-06), and
+/// the `getmempoolinfo` handler is the only audited outlet permitted to call
+/// it from production code. A new outlet belongs on this list only together
+/// with a policy-doc row naming it, so every new quoting surface is forced
+/// through review instead of silently re-deriving the floor.
+pub(crate) const FLOOR_QUOTER_PATHS: &[&str] = &["crates/rpc/src/handlers/mempool.rs"];
+
+/// Pressure-floor derivation inputs. Under size pressure the dynamic floor
+/// is the cheapest evictable pool rate plus the incremental relay fee; any
+/// production code outside `crates/mempool/src/` that reads the pool's
+/// lowest fee rate is re-deriving the single-owner heuristic (POL-06) and
+/// can drift from the floor the admission preview enforces. The bare
+/// `lowest_fee_rate(` name is the lexical hook: today only the mempool pool
+/// defines it, and a same-name method on another crate's type would need its
+/// own receiver qualification before this list can stay honest.
+pub(crate) const FLOOR_PRESSURE_PATTERNS: &[&str] = &[".lowest_fee_rate("];
+
 /// Result of the source scan.
 #[derive(Debug)]
 pub(crate) struct OwnershipScanResult {
@@ -146,6 +167,9 @@ pub(crate) struct OwnershipScanResult {
     pub peer_owner_violations: Vec<String>,
     /// Chainstate transition promotion/lock construction outside node.
     pub transition_owner_violations: Vec<String>,
+    /// Pressure-floor quoting or re-derivation outside the mempool owner
+    /// and its audited RPC outlet.
+    pub pressure_floor_owner_violations: Vec<String>,
     /// Number of production source files examined.
     pub files_scanned: usize,
     /// Number of raw pool write sites found.
@@ -161,6 +185,9 @@ pub(crate) struct OwnershipScanResult {
     /// Number of chainstate transition promotion sites found (including owner
     /// files).
     pub transition_sites: usize,
+    /// Number of pressure-floor quotation and derivation sites found
+    /// (including owner files).
+    pub pressure_floor_sites: usize,
 }
 
 fn empty_result() -> OwnershipScanResult {
@@ -169,12 +196,14 @@ fn empty_result() -> OwnershipScanResult {
         index_capability_violations: Vec::new(),
         peer_owner_violations: Vec::new(),
         transition_owner_violations: Vec::new(),
+        pressure_floor_owner_violations: Vec::new(),
         files_scanned: 0,
         pool_writes_found: 0,
         mempool_mutations_found: 0,
         index_capability_sites: 0,
         peer_mutations_found: 0,
         transition_sites: 0,
+        pressure_floor_sites: 0,
     }
 }
 
@@ -627,6 +656,32 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
                 }
             }
         }
+
+        if line.contains(".lowest_fee_rate(") {
+            result.pressure_floor_sites += 1;
+            if !is_mempool_owner {
+                result.pressure_floor_owner_violations.push(format!(
+                    "pressure-floor re-derivation `.lowest_fee_rate(` at {}:{}: {}",
+                    path_str,
+                    index + 1,
+                    raw_lines[index].trim()
+                ));
+            }
+        }
+        if line.contains("mempool_min_fee_sat_per_kvb(") {
+            result.pressure_floor_sites += 1;
+            let audited = FLOOR_QUOTER_PATHS
+                .iter()
+                .any(|allowed| authorized_path(path_str, allowed));
+            if !is_mempool_owner && !audited {
+                result.pressure_floor_owner_violations.push(format!(
+                    "pressure-floor quotation `mempool_min_fee_sat_per_kvb(` at {}:{}: {}",
+                    path_str,
+                    index + 1,
+                    raw_lines[index].trim()
+                ));
+            }
+        }
     }
 }
 /// Returns true when `path` is inside the node crate: `Chainstate` and its
@@ -1047,6 +1102,83 @@ mod tests {
         );
         assert_eq!(result.transition_owner_violations.len(), 1);
         assert_eq!(result.transition_sites, 1);
+    }
+
+    /// POL-06: the dynamic `mempoolminfee` heuristic has one owner. The
+    /// audited RPC outlet may call it; the mempool owner legitimately
+    /// derives and enforces it; any other quoting surface is flagged, and
+    /// any non-owner reading the pool's lowest fee rate is re-deriving the
+    /// heuristic and flagged even without calling the owner function.
+    #[test]
+    fn pressure_floor_quotation_and_derivation_stay_with_the_owner() {
+        const MEMPOOL_OWNER: &str = "/workspace/crates/mempool/src/gateway.rs";
+        const RPC_OUTLET: &str = "/workspace/crates/rpc/src/handlers/mempool.rs";
+        const NON_OWNER: &str = "/workspace/crates/rpc/src/handlers/network.rs";
+
+        let mut result = empty_result();
+        scan_source(
+            MEMPOOL_OWNER,
+            "let floor = crate::eviction::mempool_min_fee_sat_per_kvb(pool, 1_000);",
+            &mut result,
+        );
+        assert!(result.pressure_floor_owner_violations.is_empty());
+        assert_eq!(result.pressure_floor_sites, 1);
+
+        let mut result = empty_result();
+        scan_source(
+            RPC_OUTLET,
+            "let floor = eviction::mempool_min_fee_sat_per_kvb(&pool, 1_000);",
+            &mut result,
+        );
+        assert!(result.pressure_floor_owner_violations.is_empty());
+        assert_eq!(result.pressure_floor_sites, 1);
+
+        let mut result = empty_result();
+        scan_source(
+            NON_OWNER,
+            "let floor = mempool::eviction::mempool_min_fee_sat_per_kvb(&pool, 1_000);",
+            &mut result,
+        );
+        assert_eq!(result.pressure_floor_owner_violations.len(), 1);
+
+        let mut result = empty_result();
+        scan_source(
+            NON_OWNER,
+            "let lowest = pool.lowest_fee_rate();",
+            &mut result,
+        );
+        assert_eq!(result.pressure_floor_owner_violations.len(), 1);
+        assert_eq!(result.pressure_floor_sites, 1);
+
+        let mut result = empty_result();
+        scan_source(
+            MEMPOOL_OWNER,
+            "let lowest = pool.lowest_fee_rate();",
+            &mut result,
+        );
+        assert!(result.pressure_floor_owner_violations.is_empty());
+        assert_eq!(result.pressure_floor_sites, 1);
+    }
+
+    /// The audited outlet is path-pinned, so a lookalike path or a new
+    /// outlet without an audit is a violation, not a silent pass.
+    #[test]
+    fn floor_outlet_audit_covers_only_the_audited_handler_path() {
+        let mut result = empty_result();
+        scan_source(
+            "/workspace/crates/rpc/src/handlers/mempoolish.rs",
+            "let floor = mempool_min_fee_sat_per_kvb(&pool, 1_000);",
+            &mut result,
+        );
+        assert_eq!(result.pressure_floor_owner_violations.len(), 1);
+
+        let mut result = empty_result();
+        scan_source(
+            "/workspace/crates/rpc/src/handlers/chain.rs",
+            "let floor = mempool_min_fee_sat_per_kvb(&pool, 1_000);",
+            &mut result,
+        );
+        assert_eq!(result.pressure_floor_owner_violations.len(), 1);
     }
 
     #[test]

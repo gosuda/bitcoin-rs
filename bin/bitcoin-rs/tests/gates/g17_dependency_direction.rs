@@ -7,7 +7,8 @@
 //! (`rust-rocksdb`, `fjall`, `redb`), the RPC crate names no storage backend at
 //! all, and the static source scan confirms single-writer mutation boundaries:
 //! mempool pool mutations through the gateway, derived-index capability selection,
-//! peer registration/cancellation, and chainstate transition promotion.
+//! peer registration/cancellation, chainstate transition promotion, and the mempool
+//! pressure-floor owner (POL-06).
 //!
 //! Approved layer direction (a crate may depend only on crates in the same or
 //! a strictly lower layer):
@@ -47,7 +48,8 @@
 //! acyclic layer edges and mempool consumer direction), `ARCH-02` (engine-crate
 //! exclusivity), `ARCH-03` (backend feature-forwarding confinement), and
 //! `ARCH-04` (RPC storage independence); `workspace_single_writer_boundaries_are_respected`
-//! pins `ARCH-07` (chainstate transition owner).
+//! pins `ARCH-07` (chainstate transition owner) and `POL-06` (mempool pressure-floor
+//! single owner).
 //!
 //! The layer table, metadata parser, validation rules, and source-scan rules
 //! live in exactly one place — `tests/support/dependency_graph.rs` and
@@ -98,6 +100,7 @@ fn workspace_single_writer_boundaries_are_respected() {
         index_capability_violations,
         peer_owner_violations,
         transition_owner_violations,
+        pressure_floor_owner_violations,
         files_scanned,
         ..
     } = scan_ownership_violations();
@@ -121,5 +124,9 @@ fn workspace_single_writer_boundaries_are_respected() {
     assert!(
         transition_owner_violations.is_empty(),
         "chainstate transition owner boundary violations: {transition_owner_violations:?}"
+    );
+    assert!(
+        pressure_floor_owner_violations.is_empty(),
+        "mempool pressure-floor owner boundary violations: {pressure_floor_owner_violations:?}"
     );
 }
