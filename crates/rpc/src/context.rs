@@ -732,7 +732,9 @@ impl AdmissionChain for ChainAdmissionView<'_> {
         // CSV activation at the next block gates BIP68 relative locks,
         // matching the block-connect and mining evaluation contexts.
         let csv_active = tip_node.is_some_and(|node| {
-            softfork_state(&tree, self.network, Some(node), height + 1).csv_active
+            softfork_state(&tree, self.network, Some(node), height.checked_add(1).map_or(false, |next_height| {
+                  softfork_state(&tree, self.network, Some(node), next_height).csv_active
+              })
         });
         // Confirmed coin metadata for BIP68 and coinbase maturity. Height `h`
         // uses the MTP of the block before `h`, the same derivation the
