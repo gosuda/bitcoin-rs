@@ -97,10 +97,10 @@ pub enum DisconnectPhase {
 /// One key, not one per block: only one disconnect runs at a time, and a
 /// per-block key would leave the reader scanning to find out whether any are
 /// set.
-const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
+pub(crate) const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
 
 impl DisconnectMarker {
-    fn encode(&self) -> [u8; 37] {
+    pub(crate) fn encode(&self) -> [u8; 37] {
         let mut encoded = [0_u8; 37];
         encoded[..32].copy_from_slice(&self.hash.to_le_bytes());
         encoded[32..36].copy_from_slice(&self.height.to_be_bytes());
@@ -140,6 +140,15 @@ impl DisconnectMarker {
             phase,
         })
     }
+}
+
+/// Serializes a disconnect marker for a caller outside this module.
+///
+/// The durable-head commit writes the marker row in the same atomic batch as
+/// the head advance, so the marker codec is shared crate-internally while
+/// decoding stays behind [`UndoStore::load_disconnect_marker`].
+pub(crate) fn encode_disconnect_marker(marker: &DisconnectMarker) -> [u8; 37] {
+    marker.encode()
 }
 
 /// Process-local undo storage.

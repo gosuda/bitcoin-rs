@@ -1,5 +1,6 @@
 //! Indexed authoritative block bodies, read sessions, and durability.
 
+use crate::durable_head::BodyExtent;
 use bitcoin_rs_primitives::{Hash256, varint};
 
 use crate::{
@@ -141,6 +142,16 @@ pub trait BlockBodyStore: Send + Sync {
             body_size: body.len(),
             tx_count,
         }))
+    }
+
+    /// The append cursor of the backing block files, when the store is
+    /// file-backed: block files up to `file_no` hold every frame written so
+    /// far, and `offset` is the first byte not yet written in that file.
+    ///
+    /// A durable head names this cursor as its `body_extent`; `None` means
+    /// the store cannot address ranges, so the head names no extent.
+    fn append_cursor(&self) -> Option<BodyExtent> {
+        None
     }
 
     /// Bytes this store's block files occupy on disk, when it keeps files.
@@ -407,6 +418,13 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
             body_size,
             tx_count,
         }))
+    }
+
+    fn append_cursor(&self) -> Option<BodyExtent> {
+        Some(BodyExtent {
+            file_no: self.files.current_file_number(),
+            offset: self.files.append_offset(),
+        })
     }
 
     fn sync(&self) -> Result<(), StorageError> {
