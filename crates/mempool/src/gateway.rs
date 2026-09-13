@@ -18,7 +18,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
+use bitcoin_rs_consensus::{COINBASE_MATURITY, ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{is_p2sh, is_witness_program};
@@ -26,8 +26,6 @@ use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-const COINBASE_MATURITY: u32 = 100;
 
 /// Adapter that lets the consensus verifier look up prevouts from a
 /// resolved `(OutPoint, TxOut)` slice, layered under the mempool by

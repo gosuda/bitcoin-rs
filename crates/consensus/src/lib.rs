@@ -16,6 +16,9 @@
 /// Maximum consensus script size in bytes.
 pub const MAX_SCRIPT_SIZE: usize = 10_000;
 
+/// Number of blocks after a coinbase that its outputs become spendable.
+pub const COINBASE_MATURITY: u32 = 100;
+
 /// BIP112 sequence-lock checks.
 pub mod bip112;
 /// BIP113 median-time-past checks.

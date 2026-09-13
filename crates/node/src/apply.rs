@@ -120,9 +120,8 @@ mod scratch;
 
 pub(crate) use bitcoin_rs_storage::{DisconnectPhase, KvUndoStore, UndoStore};
 
-/// Number of blocks after a coinbase that its outputs become spendable.
-/// Consensus rule since Bitcoin v0.3.1; universal across networks.
-const COINBASE_MATURITY: u32 = 100;
+use bitcoin_rs_consensus::COINBASE_MATURITY;
+
 /// BIP68 sequence-bit masks.
 const BIP68_DISABLE_FLAG: u32 = 0x8000_0000;
 const BIP68_TYPE_FLAG: u32 = 0x0040_0000;
