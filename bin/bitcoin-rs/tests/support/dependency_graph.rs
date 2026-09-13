@@ -75,6 +75,8 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
 pub(crate) struct WorkspaceGraph {
     /// Normal `bitcoin-rs-*` dependencies per crate.
     pub normal_deps: BTreeMap<String, Vec<String>>,
+    /// All internal workspace dependencies, including development edges.
+    pub all_deps: BTreeMap<String, Vec<String>>,
     /// Storage engine dependencies per crate.
     pub engine_deps: BTreeMap<String, Vec<String>>,
     /// External ZMQ implementation dependencies per crate.
@@ -198,6 +200,7 @@ impl WorkspaceGraph {
     /// spawning a subprocess.
     pub(crate) fn from_json(metadata: &serde_json::Value) -> Self {
         let mut normal_deps = BTreeMap::new();
+        let mut all_deps = BTreeMap::new();
         let mut engine_deps = BTreeMap::new();
         let mut zmq_deps = BTreeMap::new();
         let mut features = BTreeMap::new();
@@ -209,6 +212,7 @@ impl WorkspaceGraph {
             classified += 1;
 
             let mut edges = Vec::new();
+            let mut all_edges = Vec::new();
             let mut engines = Vec::new();
             let mut zmq = Vec::new();
             for dependency in package["dependencies"].as_array().expect("deps array") {
@@ -223,7 +227,8 @@ impl WorkspaceGraph {
                 if !dep_name.starts_with("bitcoin-rs") {
                     continue;
                 }
-                // Normal and build edges both count: a build dependency is
+                all_edges.push(dep_name.clone());
+                  // Normal and build edges both count: a build dependency is
                 // still a dependency edge, and the RPC storage-independence
                 // rule admits no per-kind backdoor. Dev-dependencies stay
                 // excluded (the bench-only fixture exception the RPC manifest
@@ -236,6 +241,7 @@ impl WorkspaceGraph {
                 }
             }
             normal_deps.insert(name.clone(), edges);
+              all_deps.insert(name.clone(), all_edges);
             engine_deps.insert(name.clone(), engines);
             zmq_deps.insert(name.clone(), zmq);
 
@@ -254,6 +260,7 @@ impl WorkspaceGraph {
 
         Self {
             normal_deps,
+            all_deps,
             engine_deps,
             zmq_deps,
             features,
@@ -267,6 +274,11 @@ impl WorkspaceGraph {
             .entry(from.to_owned())
             .or_default()
             .push(to.to_owned());
+    }
+
+    /// Adds a synthetic development dependency for cycle negative tests.
+    pub(crate) fn add_dev_dep(&mut self, from: &str, to: &str) {
+        self.all_deps.entry(from.to_owned()).or_default().push(to.to_owned());
     }
 
     /// Adds a synthetic storage-engine dependency for use in negative tests.
@@ -516,7 +528,7 @@ impl WorkspaceGraph {
         ) {
             color.insert(node, 1);
             stack.push(node.to_owned());
-            for next in graph.normal_deps.get(node).into_iter().flatten() {
+            for next in graph.all_deps.get(node).into_iter().flatten() {
                 match color.get(next.as_str()).copied().unwrap_or(0) {
                     0 => visit(graph, color, stack, violations, next),
                     1 => {
@@ -539,7 +551,7 @@ impl WorkspaceGraph {
             color.insert(node, 2);
         }
 
-        for node in self.normal_deps.keys() {
+        for node in self.all_deps.keys() {
             if color.get(node.as_str()).copied().unwrap_or(0) == 0 {
                 visit(self, &mut color, &mut stack, violations, node);
             }
