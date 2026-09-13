@@ -421,15 +421,14 @@ impl EntryArena {
     }
 }
 
-/// Membership bitset over entry ids that remembers insertion order.
+/// Sparse membership set over entry ids that remembers insertion order.
 ///
-/// The words grow to whatever the largest inserted id needs, so a walk's
-/// visited set is bounded by the ids it actually touches -- configured
-/// cluster limits decide the bound, never a fixed single word of sixty-four
-/// members. The member list gives walks a deterministic id order for free.
+/// Membership storage grows with the number of entries visited rather than
+/// with the largest (possibly sparse) arena slot. The member list gives walks
+/// a deterministic id order for free.
 #[derive(Debug, Default)]
 struct VisitSet {
-    words: Vec<u64>,
+    ids: HashSet<EntryId>,
     members: Vec<EntryId>,
 }
 
@@ -439,28 +438,14 @@ impl VisitSet {
     }
 
     fn test(&self, id: EntryId) -> bool {
-        let Some(index) = slot_index(id) else {
-            return false;
-        };
-        let Some(&word) = self.words.get(index / 64) else {
-            return false;
-        };
-        word & (1_u64 << (index % 64)) != 0
+        self.ids.contains(&id)
     }
 
     /// Returns whether the set did not already hold `id`.
     fn insert(&mut self, id: EntryId) -> bool {
-        let Some(index) = slot_index(id) else {
-            return false;
-        };
-        if index / 64 >= self.words.len() {
-            self.words.resize(index / 64 + 1, 0);
-        }
-        let bit = 1_u64 << (index % 64);
-        if self.words[index / 64] & bit != 0 {
+        if !self.ids.insert(id) {
             return false;
         }
-        self.words[index / 64] |= bit;
         self.members.push(id);
         true
     }
