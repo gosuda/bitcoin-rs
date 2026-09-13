@@ -81,10 +81,12 @@ pub fn invalidate_block(
         let (disconnect_nodes, connect, _retention) = match plan.as_ref() {
             Some(plan) => {
                 let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
+                let connect_nodes = branch_nodes(handles, &plan.connect)?;
                 // The lease must exist before the bodies are first read, so
                 // a concurrent prune can never delete what the walk is
                 // about to re-read.
-                let retention = retention_lease_for(handles, &disconnect_nodes)?;
+                let retention =
+                    retention_lease_for(handles, &disconnect_nodes, &connect_nodes)?;
                 let connect = load_branch_bodies(handles, &plan.connect, &mut no_staged_body)?;
                 (disconnect_nodes, connect, Some(retention))
             }
@@ -360,8 +362,14 @@ impl ReorgError {
 fn retention_lease_for(
     handles: &Chainstate,
     disconnect_nodes: &[(Hash256, u32)],
+    connect_nodes: &[(Hash256, u32)],
 ) -> core::result::Result<Option<bitcoin_rs_storage::RetentionLease>, ReorgError> {
-    let Some(&(_, floor)) = disconnect_nodes.iter().min_by_key(|&(_, height)| height) else {
+    let floor = disconnect_nodes
+        .iter()
+        .chain(connect_nodes.iter())
+        .map(|&(_, height)| height)
+        .min();
+    let Some(floor) = floor else {
         return Ok(None);
     };
     handles
@@ -399,6 +407,11 @@ where
             return Ok(());
         };
 
+        let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
+        let connect_nodes = branch_nodes(handles, &plan.connect)?;
+        // Pin both branches before any durable body read. This also covers
+        // forward-only plans, whose disconnect set is empty.
+        let _retention = retention_lease_for(handles, &disconnect_nodes, &connect_nodes)?;
         // A staged prefix can be committed without waiting for the entire
         // winning branch to fit in the bounded stager.
         let (connect, missing_connect) =
@@ -408,14 +421,12 @@ where
         {
             return Err(ReorgError::MissingBody { hash, height });
         }
-        let disconnect_nodes = branch_nodes(handles, &plan.disconnect)?;
         // Pin the old-branch bodies against pruning for this iteration. The
         // guard outlives every exit path of the loop body — completed,
         // refused, failed, and replanned attempts each hand the retention
         // authority back exactly once — and it exists before the bodies are
         // first read, so a concurrent prune can never delete what the walk
         // is about to re-read.
-        let _retention = retention_lease_for(handles, &disconnect_nodes)?;
         preflight_disconnect_bodies(handles, &disconnect_nodes, &mut staged_body)?;
 
         let lock = handles
