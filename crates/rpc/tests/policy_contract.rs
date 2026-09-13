@@ -18,6 +18,8 @@ use bitcoin_rs_mempool::{
     eviction::mempool_min_fee_sat_per_kvb,
 };
 
+use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+
 use bitcoin_rs_node::{
     Network, NodeConfig,
     reorg::{ReorgError, invalidate_block},
@@ -2186,5 +2188,119 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
     );
     assert_eq!(committed.len(), 1, "one admitted candidate: the spend");
     assert!(gateway.read().contains_txid(&spend_txid));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// BIP68 sequence locks and coinbase maturity at admission (policy §3)
+// ---------------------------------------------------------------------------
+
+/// Commits one funded coinbase UTXO created at `height` and returns the
+/// RPC-side outpoint that spends it.
+fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutPoint {
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
+        TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: Script::from_bytes(op_true_script()),
+        },
+        true,
+        height,
+    ));
+    ctx.utxo
+        .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
+        .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
+    OutPoint {
+        txid: Txid(Hash256::from_le_bytes(&[label; 32])),
+        vout: 0,
+    }
+}
+
+#[test]
+fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity() -> Result<(), Box<dyn Error>>
+{
+    let ctx = Arc::new(Context::new());
+    let coinbase = fund_coinbase_utxo(&ctx, 0x70, 10_000, 20);
+    let spend = tx(coinbase, 9_000, 0xffff_ffff);
+    let handler = Handler::new(Arc::clone(&ctx));
+
+    // Depth 99: `sendrawtransaction` refuses with the consensus class and
+    // the pool stays empty.
+    let message = reject_message(
+        &handler
+            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&spend)]))
+            .err()
+            .ok_or("expected immature coinbase rejection")?,
+    );
+    assert!(
+        message.contains("consensus-verification-failed"),
+        "unexpected rejection message: {message}"
+    );
+    assert!(
+        !ctx.mempool.read().contains_txid(&rpc_txid(&spend)),
+        "rejected spend must not enter the pool"
+    );
+
+    // `testmempoolaccept` quotes the shared consensus class for the row.
+    let rows = handler
+        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&spend)]]))?
+        .as_array()
+        .ok_or("expected an array of results")?
+        .clone();
+    assert_eq!(rows.len(), 1, "one row per submitted tx");
+    assert_eq!(
+        rows[0].get("allowed").and_then(JsonValueTrait::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        rows[0]
+            .get("reject-reason")
+            .and_then(JsonValueTrait::as_str),
+        Some("script-verify-flag-failed")
+    );
+
+    // At depth 100 the same spend admits through the same outlet.
+    ctx.set_applied_tip(TipSnapshot {
+        tip_id: NodeId::new(0),
+        height: 119,
+        chainwork: ChainWork::ZERO,
+        hash: Hash256::from_le_bytes(&[0x71; 32]),
+    });
+    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&spend)]))?;
+    assert!(
+        ctx.mempool.read().contains_txid(&rpc_txid(&spend)),
+        "mature spend must commit to the pool"
+    );
+    Ok(())
+}
+
+#[test]
+fn bip68_locked_tx_admits_while_csv_is_inactive_on_the_rpc_surface() -> Result<(), Box<dyn Error>> {
+    let ctx = Arc::new(Context::new());
+    let prevout = fund_utxo(&ctx, 0x72, 10_000);
+    // The coin is one confirmation old with a relative lock of 5: under an
+    // active CSV this transaction is non-BIP68-final. This context has no
+    // CSV deployment state, so the admission producer reports csv_active
+    // false and the gate stays inert — the mempool-surface fixtures pin the
+    // enforced side of the same gate.
+    let locked = tx(prevout, 9_000, 5);
+    let handler = Handler::new(Arc::clone(&ctx));
+    let rows = handler
+        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&locked)]]))?
+        .as_array()
+        .ok_or("expected an array of results")?
+        .clone();
+    assert_eq!(rows.len(), 1, "one row per submitted tx");
+    assert_eq!(
+        rows[0].get("allowed").and_then(JsonValueTrait::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        rows[0]
+            .get("reject-reason")
+            .and_then(JsonValueTrait::as_str),
+        None
+    );
     Ok(())
 }

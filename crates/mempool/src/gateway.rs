@@ -27,6 +27,8 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+const COINBASE_MATURITY: u32 = 100;
+
 /// Adapter that lets the consensus verifier look up prevouts from a
 /// resolved `(OutPoint, TxOut)` slice, layered under the mempool by
 /// `MempoolUtxoView`.
@@ -183,6 +185,18 @@ impl PreparedAdmission {
         if request.prevouts.is_empty() {
             self.reject(AdmitError::Consensus, default_scope);
             return;
+        }
+        // Coinbase outputs cannot be spent before `COINBASE_MATURITY` blocks.
+        for input in &request.tx.inputs {
+            if let Some(meta) = request.prevout_meta.get(&input.previous_output) {
+                if meta.coinbase {
+                    let depth = height.saturating_sub(meta.height);
+                    if depth < COINBASE_MATURITY {
+                        self.reject(AdmitError::Consensus, default_scope);
+                        return;
+                    }
+                }
+            }
         }
         if let Err(error) = verify_transaction(
             &request.tx,

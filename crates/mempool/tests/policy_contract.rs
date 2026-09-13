@@ -552,6 +552,248 @@ fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>
 }
 
 // ---------------------------------------------------------------------------
+// BIP68 sequence locks and coinbase maturity at admission (policy §3, §5)
+// ---------------------------------------------------------------------------
+
+/// Confirmed chain facts for finality fixtures: one snapshot height, tip
+/// median-time-past, CSV activation, and per-prevout metadata rows, mirroring
+/// what the RPC producer derives from the live UTXO set and the block tree.
+struct MetaChain {
+    height: u32,
+    locktime_cutoff: u32,
+    csv_active: bool,
+    prevouts: Vec<(OutPoint, TxOut)>,
+    meta: hashbrown::HashMap<OutPoint, PrevoutMeta>,
+}
+
+impl AdmissionChain for MetaChain {
+    fn snapshot(&self, _tx: &Tx) -> Option<ChainAdmissionSnapshot> {
+        Some(ChainAdmissionSnapshot {
+            prevouts: self.prevouts.clone(),
+            prevout_meta: self.meta.clone(),
+            height: self.height,
+            locktime_cutoff: self.locktime_cutoff,
+            csv_active: self.csv_active,
+            confirmed: false,
+        })
+    }
+}
+
+/// Builds a chain whose only confirmed coin is `(outpoint, output, meta)`.
+fn meta_chain(
+    height: u32,
+    locktime_cutoff: u32,
+    csv_active: bool,
+    outpoint: OutPoint,
+    output: TxOut,
+    meta: PrevoutMeta,
+) -> MetaChain {
+    MetaChain {
+        height,
+        locktime_cutoff,
+        csv_active,
+        prevouts: vec![(outpoint, output)],
+        meta: hashbrown::HashMap::from([(outpoint, meta)]),
+    }
+}
+
+#[test]
+fn bip68_height_lock_boundary_enforces_at_admission() -> Result<(), Box<dyn Error>> {
+    let pool = Mempool::new(MempoolLimits::default());
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    // The coin was created at height 10; the next block is 13. A relative
+    // lock of 5 needs height 15 (non-final); a lock of 2 is satisfied.
+    let spendable = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(op_true_script()),
+    };
+    let meta = PrevoutMeta {
+        height: 10,
+        mtp: 0,
+        coinbase: false,
+    };
+    let locked = tx(outpoint(41, 0), 9_000, 5);
+    let chain = meta_chain(12, 0, true, outpoint(41, 0), spendable, meta);
+    let facts = gateway.preview_transactions(&[locked], None, &chain)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        Some(AcceptanceRejectReason::NonBip68Final)
+    );
+
+    let unlocked = tx(outpoint(41, 0), 9_000, 2);
+    let facts = gateway.preview_transactions(&[unlocked], None, &chain)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn Error>> {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    // A pool parent whose output anyone can spend, so only the sequence
+    // lock is under test.
+    let parent = tx_multi(
+        &[(outpoint(48, 0), 0xFF_FF_FF_FF)],
+        10_000,
+        op_true_script(),
+    );
+    let parent_outpoint = OutPoint::new(parent.txid(), 0);
+    pool.insert_entry(entry(parent, 250, 3_000))?;
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    // The parent sits in the pool: the gateway layers it under the chain
+    // facts, and any positive relative lock against an unconfirmed prevout
+    // fails because it is encoded as the next block.
+    let child = tx_multi(
+        &[(parent_outpoint, 1), (outpoint(47, 0), 0xFF_FF_FF_FF)],
+        9_000,
+        p2wpkh_script(),
+    );
+    let coin = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(op_true_script()),
+    };
+    let chain = meta_chain(
+        12,
+        0,
+        true,
+        outpoint(47, 0),
+        coin,
+        PrevoutMeta {
+            height: 10,
+            mtp: 0,
+            coinbase: false,
+        },
+    );
+    let facts = gateway.preview_transactions(&[child], None, &chain)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        Some(AcceptanceRejectReason::NonBip68Final)
+    );
+    Ok(())
+}
+
+#[test]
+fn bip68_time_lock_uses_the_confirmed_median_time_past() -> Result<(), Box<dyn Error>> {
+    let pool = Mempool::new(MempoolLimits::default());
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let spendable = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(op_true_script()),
+    };
+    let meta = PrevoutMeta {
+        height: 10,
+        mtp: 1_000,
+        coinbase: false,
+    };
+    let locked = tx(outpoint(44, 0), 9_000, 0x0040_0001);
+    // One 512-second interval after MTP 1 000 needs MTP >= 1 512; the tip
+    // MTP 1 400 falls short and 1 600 clears it.
+    let short = meta_chain(12, 1_400, true, outpoint(44, 0), spendable.clone(), meta);
+    let facts = gateway.preview_transactions(std::slice::from_ref(&locked), None, &short)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        Some(AcceptanceRejectReason::NonBip68Final)
+    );
+    let cleared = meta_chain(12, 1_600, true, outpoint(44, 0), spendable, meta);
+    let facts = gateway.preview_transactions(&[locked], None, &cleared)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn bip68_check_is_inert_before_csv_activation() -> Result<(), Box<dyn Error>> {
+    let pool = Mempool::new(MempoolLimits::default());
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let spendable = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(op_true_script()),
+    };
+    let meta = PrevoutMeta {
+        height: 10,
+        mtp: 0,
+        coinbase: false,
+    };
+    // The exact transaction the height-lock fixture rejects passes once CSV
+    // is inactive: the gate itself is under test, not one sequence value.
+    let locked = tx(outpoint(45, 0), 9_000, 5);
+    let chain = meta_chain(12, 0, false, outpoint(45, 0), spendable, meta);
+    let facts = gateway.preview_transactions(&[locked], None, &chain)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn immature_coinbase_spend_rejects_before_100_confirmations() -> Result<(), Box<dyn Error>> {
+    let pool = Mempool::new(MempoolLimits::default());
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let spendable = TxOut {
+        value: Amount::from_sat(10_000),
+        script_pubkey: Script::from_bytes(op_true_script()),
+    };
+    let meta = PrevoutMeta {
+        height: 20,
+        mtp: 0,
+        coinbase: true,
+    };
+    let spend = tx(outpoint(46, 0), 9_000, 0xFF_FF_FF_FF);
+    // Depth 99 (119 - 20): Core's `bad-txns-premature-spend-of-coinbase`.
+    let immature = meta_chain(118, 0, true, outpoint(46, 0), spendable.clone(), meta);
+    let facts = gateway.preview_transactions(std::slice::from_ref(&spend), None, &immature)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        Some(AcceptanceRejectReason::ScriptVerify)
+    );
+    // Depth 100 admits.
+    let mature = meta_chain(119, 0, true, outpoint(46, 0), spendable, meta);
+    let facts = gateway.preview_transactions(&[spend], None, &mature)?;
+    assert_eq!(
+        facts
+            .results
+            .first()
+            .ok_or("expected one fact row")?
+            .reject_reason,
+        None
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Size-limit eviction and the pressure mempool-min fee
 // ---------------------------------------------------------------------------
 
