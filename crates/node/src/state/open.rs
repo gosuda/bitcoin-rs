@@ -434,6 +434,7 @@ impl NodeState {
             Some(Arc::new(crate::checkpoint::worker::CheckpointPublisher {
                 admission: Arc::clone(&apply_handles.admission),
                 undo_store: Arc::clone(&apply_handles.undo_store),
+                durable_head: Arc::clone(&apply_handles.durable_head),
                 block_body_store: Arc::clone(&block_body_store),
                 applied_tip: Arc::clone(&applied_tip),
                 checkpoint_data_dir: crate::checkpoint::fs::open_data_dir(&config.data_dir)

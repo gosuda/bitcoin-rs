@@ -206,6 +206,15 @@ pub(crate) enum CheckpointError {
     Storage(#[from] bitcoin_rs_storage::StorageError),
     #[error("checkpoint refused while disconnect of block {hash} at height {height} is in flight")]
     DisconnectInFlight { hash: Hash256, height: u32 },
+    #[error(
+        "checkpoint of tip {tip} at height {tip_height} is ahead of the durable head {head} at height {head_height}"
+    )]
+    AheadOfDurableHead {
+        tip: Hash256,
+        tip_height: u32,
+        head: Hash256,
+        head_height: u32,
+    },
     /// The replacement checkpoint's `CURRENT` is already durable; retiring the
     /// sticky full-revalidation marker failed. Retryable I/O owned by the
     /// checkpoint worker, not checkpoint corruption.

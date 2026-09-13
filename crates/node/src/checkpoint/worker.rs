@@ -102,6 +102,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) struct CheckpointPublisher {
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
+    pub(crate) durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     pub(crate) block_body_store: Arc<dyn BlockBodyStore>,
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) checkpoint_data_dir: cap_std::fs::Dir,
@@ -231,6 +232,36 @@ impl CheckpointPublisher {
                 hash: marker.hash,
                 height: marker.height,
             });
+        }
+        // The durable head is the chain's commit point and publication
+        // follows it, so a checkpoint — which freezes the published state —
+        // can never legitimately name a tip the head has not certified. The
+        // two authorities must not disagree about the durable tip.
+        // No applied tip is the legitimate pre-genesis state (`SkippedNoAppliedTip`
+        // below); the guard has nothing to compare there.
+        if let (Some(head), Some(tip)) = (
+            self.durable_head.load().map_err(|error| {
+                CheckpointError::Invalid(format!("durable head unreadable: {error}"))
+            })?,
+            applied_tip,
+        ) {
+            // A tip below the head is the committed-but-unpublished gap a
+            // crash can leave; checkpointing the older state is harmless. A
+            // tip at or above the head that the head does not certify is
+            // genuine divergence between the two authorities.
+            // `head.tip` and `tip.hash` name the same fact — the 32-byte
+            // block hash of the certified/applied tip — under two field
+            // names.
+            let same_tip = head.tip == tip.hash;
+            let diverged = head.height < tip.height || (head.height == tip.height && !same_tip);
+            if diverged {
+                return Err(CheckpointError::AheadOfDurableHead {
+                    tip: tip.hash,
+                    tip_height: tip.height,
+                    head: head.tip,
+                    head_height: head.height,
+                });
+            }
         }
         // A checkpoint may name this tip only after body files then index rows sync.
         self.block_body_store.sync()?;
