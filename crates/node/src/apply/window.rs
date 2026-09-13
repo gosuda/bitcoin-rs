@@ -12,6 +12,7 @@ use super::ResolvedUtxoView;
 use super::WindowApplyDisposition;
 use super::WindowApplyError;
 use super::connect::apply_committed_block_admitted;
+use super::connect::emit_journal_record;
 use super::contextual::compute_verify_flags;
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
@@ -67,6 +68,9 @@ pub(super) struct PendingBlockCommit {
     /// This block's parent; the group's first entry anchors the lineage
     /// fence.
     pub prev_hash: Hash256,
+    /// The derived journal record, emitted at flush — after the batch, so
+    /// the journal never leads the durable head.
+    pub journal_record: super::connect::BuiltJournalRecord,
 }
 
 /// A bounded verified prefix staged for one durable group commit.
@@ -180,6 +184,16 @@ impl WindowGroup {
         metrics::histogram!("node.durable_head.group_blocks").record(f64::from(staged));
         for pending in &mut self.pending {
             pending.outcome.commit_id = commit_id;
+        }
+        // The journal follows the receipt, block by block, before the
+        // prefix publishes — the same derived-after-durable order as the
+        // single-block path.
+        for pending in &mut self.pending {
+            emit_journal_record(
+                handles,
+                pending.journal_record.take(),
+                pending.outcome.height,
+            );
         }
         // The batch is the receipt; now publish the prefix in order. The
         // values are the ones the batch certified, so this tail is as

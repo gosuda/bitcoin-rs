@@ -73,13 +73,17 @@ pub(super) fn commit_connect_head(
         .durable_head
         .load()
         .map_err(ApplyError::DurableHeadCommit)?;
-    if let Some(head) = prior.as_ref()
-        && head.tip != facts.prev_hash
-    {
-        return Err(ApplyError::DurableHeadLineage {
-            head: head.tip,
-            prev: facts.prev_hash,
-        });
+    if let Some(head) = prior.as_ref() {
+        // Genesis has no parent, so its lineage is self-referential: full
+        // revalidation re-derives the chain from the same genesis the head
+        // already names. Anything else must extend the head exactly.
+        let rederiving_genesis = facts.height == 0 && head.tip == facts.tip;
+        if head.tip != facts.prev_hash && !rederiving_genesis {
+            return Err(ApplyError::DurableHeadLineage {
+                head: head.tip,
+                prev: facts.prev_hash,
+            });
+        }
     }
     let next = DurableHead {
         commit_id: prior.as_ref().map_or(1, |head| head.commit_id + 1),

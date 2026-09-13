@@ -221,6 +221,33 @@ pub(super) fn disconnect_block_admitted(
                 source: Box::new(ApplyError::UndoPersistence(error)),
             })
         })?;
+    // The journal follows the durable head, never leads it: rewind the
+    // derived journal onto the parent first, then advance the head, so a
+    // kill between the two leaves the head as the high-water mark.
+    let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
+        let rewind_result = {
+            let mut journal = journal.lock();
+            journal.rewind_to(
+                parent_tip.height,
+                parent_tip.hash.to_le_bytes(),
+                parent_prev_hash.to_le_bytes(),
+                parent_chain_tx_count,
+            )
+        };
+        match rewind_result {
+            Ok(()) => true,
+            Err(error) => {
+                metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
+                tracing::warn!(
+                    height = parent_tip.height,
+                    hash = %parent_tip.hash,
+                    %error,
+                    "chainstate journal fork-head rewrite failed; retaining disconnect marker"
+                );
+                false
+            }
+        }
+    });
     let parent = parent_tip.clone();
     commit_disconnect_head(
         handles,
@@ -248,31 +275,6 @@ pub(super) fn disconnect_block_admitted(
         );
         rewind_chain_tx_count(handles, tx_count_delta);
     }
-    let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
-        let rewind_result = {
-            let mut journal = journal.lock();
-            journal.rewind_to(
-                parent_tip.height,
-                parent_tip.hash.to_le_bytes(),
-                parent_prev_hash.to_le_bytes(),
-                parent_chain_tx_count,
-            )
-        };
-        match rewind_result {
-            Ok(()) => true,
-            Err(error) => {
-                metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
-                tracing::warn!(
-                    height = parent_tip.height,
-                    hash = %parent_tip.hash,
-                    %error,
-                    "chainstate journal fork-head rewrite failed; retaining disconnect marker"
-                );
-                false
-            }
-        }
-    });
-
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {

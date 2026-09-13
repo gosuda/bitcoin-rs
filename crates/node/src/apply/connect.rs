@@ -462,78 +462,10 @@ pub(super) fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.utxo_commit_seconds")
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
-
-    // §2.3 linearization point for the chainstate journal (issue #230): the
-    // in-memory UTXO commit above is the commit of record; everything the
-    // journal needs to reconstruct this block's semantic delta is still
-    // available here. Emit BEFORE `applied_tip.store` so any emission failure
-    // records the append gap before the new tip becomes visible; the next apply
-    // then stops in `prepare_for_apply` before mutating state. Successful
-    // emissions advance the pending frontier, while `flush_to` advances the
-    // durable head on the configured batch cadence. Emission remains
-    // best-effort for the current block: a transient journal I/O failure is
-    // §2.3 degraded-mode policy owns persistent failure) and must never fail
-    // the block — the journal is a recovery accelerator, not a consensus
-    // dependency. No fsync on this path; `flush_to` performs the §2.3
-    // durability boundary on the batch cadence.
-    if height > 0
-        && let Some(journal) = &handles.journal
-    {
-        let mut journal = journal.lock();
-        let undo_coins = undo
-            .restores()
-            .iter()
-            .map(|add| crate::chainstate_journal::Coin {
-                outpoint: add.outpoint,
-                txout: add.txout.clone(),
-                height: add.height,
-                coinbase: add.coinbase,
-            });
-        let record = crate::chainstate_journal::journal_record_for_block(
-            crate::chainstate_journal::BlockDeltaInputs {
-                height,
-                block_hash: block_hash.to_le_bytes(),
-                prev_hash: prev_hash.to_le_bytes(),
-                block_tx_count: tx_count_delta_for(block),
-                // `finish_block` runs later in the publication tail, so the
-                // listener still carries the parent height here: the delta of
-                // this block is exactly (height - parent_height) — normally 1,
-                // 0 for genesis (which never reaches this code path).
-                coin_stats_height_delta: i64::from(height)
-                    - i64::from(handles.coin_stats.snapshot().height),
-                raw_header: {
-                    let mut header_bytes = [0u8; 80];
-                    let encoded = bitcoin_rs_primitives::consensus_bytes(&block.header);
-                    debug_assert_eq!(encoded.len(), 80, "header consensus encoding is 80 bytes");
-                    header_bytes.copy_from_slice(&encoded);
-                    header_bytes
-                },
-            },
-            &changes,
-            undo_coins,
-        );
-        match record {
-            Ok(record) => {
-                if let Err(error) = journal.append(&record) {
-                    metrics::counter!("node.chainstate_journal.append_failures").increment(1);
-                    tracing::warn!(
-                        height,
-                        %error,
-                        "chainstate journal append failed; recovery may fall back to full re-validation"
-                    );
-                }
-            }
-            Err(error) => {
-                journal.mark_append_gap(height);
-                metrics::counter!("node.chainstate_journal.append_failures").increment(1);
-                tracing::warn!(
-                    height,
-                    %error,
-                    "chainstate journal delta extraction failed; recovery may fall back to full re-validation"
-                );
-            }
-        }
-    }
+    // Capture before `finish_block` advances the listener's height: the
+    // journal delta of this block is exactly (height - parent_height).
+    let coin_stats_height_delta =
+        i64::from(height) - i64::from(handles.coin_stats.snapshot().height);
 
     // Everything past the UTXO commit publishes values prepared above and
     // cannot fail: the tip snapshot was resolved from the tree before the
@@ -637,6 +569,22 @@ pub(super) fn apply_block_admitted<'b>(
             )?;
             metrics::histogram!("node.apply_block.durable_commit_seconds")
                 .record(durable_commit_started.elapsed().as_secs_f64());
+            // The journal is derived from the durable head: it may lag the
+            // batch, never lead it, so a kill between the two leaves the
+            // head as the high-water mark of committed state.
+            emit_journal_record(
+                handles,
+                build_journal_record(
+                    block,
+                    height,
+                    block_hash,
+                    prev_hash,
+                    &undo,
+                    &changes,
+                    coin_stats_height_delta,
+                ),
+                height,
+            );
             publish_connect(handles, &tip, tx_count_delta);
             outcome.commit_id = commit_id;
         }
@@ -647,12 +595,22 @@ pub(super) fn apply_block_admitted<'b>(
             let known = group
                 .chain_tx_count_base()
                 .unwrap_or_else(|| handles.chain_tx_count.load(Ordering::Relaxed));
+            let journal_record = build_journal_record(
+                block,
+                height,
+                block_hash,
+                prev_hash,
+                &undo,
+                &changes,
+                coin_stats_height_delta,
+            );
             group.stage(PendingBlockCommit {
                 outcome: outcome.clone(),
                 undo_record,
                 tx_count_delta,
                 chain_tx_count_after: advanced_chain_tx_count_from(known, height, tx_count_delta),
                 prev_hash,
+                journal_record,
             });
         }
     }
@@ -731,5 +689,94 @@ pub(super) fn map_block_change_error(error: &BlockChangeError) -> ApplyError {
             txid: *txid,
             vout: *vout,
         },
+    }
+}
+
+/// The derived journal record for one connected block, or `None` when there
+/// is nothing to derive (genesis never reaches this path; a disabled journal
+/// derives nothing).
+///
+/// Pure: the caller decides when the record may reach the writer, which is
+/// after the durable head batch — the journal may lag the head, never lead
+/// it.
+pub(super) type BuiltJournalRecord =
+    Option<core::result::Result<crate::chainstate_journal::JournalRecord, String>>;
+
+fn build_journal_record(
+    block: &Block,
+    height: u32,
+    block_hash: Hash256,
+    prev_hash: Hash256,
+    undo: &bitcoin_rs_utxo::UndoBatch,
+    changes: &bitcoin_rs_utxo::BorrowedBlockChanges<'_>,
+    coin_stats_height_delta: i64,
+) -> BuiltJournalRecord {
+    if height == 0 {
+        return None;
+    }
+    let undo_coins = undo
+        .restores()
+        .iter()
+        .map(|add| crate::chainstate_journal::Coin {
+            outpoint: add.outpoint,
+            txout: add.txout.clone(),
+            height: add.height,
+            coinbase: add.coinbase,
+        });
+    let record = crate::chainstate_journal::journal_record_for_block(
+        crate::chainstate_journal::BlockDeltaInputs {
+            height,
+            block_hash: block_hash.to_le_bytes(),
+            prev_hash: prev_hash.to_le_bytes(),
+            block_tx_count: tx_count_delta_for(block),
+            coin_stats_height_delta,
+            raw_header: {
+                let mut header_bytes = [0u8; 80];
+                let encoded = bitcoin_rs_primitives::consensus_bytes(&block.header);
+                debug_assert_eq!(encoded.len(), 80, "header consensus encoding is 80 bytes");
+                header_bytes.copy_from_slice(&encoded);
+                header_bytes
+            },
+        },
+        changes,
+        undo_coins,
+    );
+    Some(record.map_err(|error| error.to_string()))
+}
+
+/// Emits one built journal record, best-effort.
+///
+/// The journal is a recovery accelerator, not a consensus dependency: an
+/// extraction failure records the append gap and an append failure warns,
+/// and neither fails the block. Both run after the durable head batch, so a
+/// failure here can only make the journal lag, never lead.
+pub(super) fn emit_journal_record(handles: &Chainstate, built: BuiltJournalRecord, height: u32) {
+    let Some(journal) = handles.journal.as_ref() else {
+        return;
+    };
+    let Some(record) = built else {
+        return;
+    };
+    let mut journal = journal.lock();
+    match record {
+        Ok(record) => {
+            if let Err(error) = journal.append(&record) {
+                metrics::counter!("node.chainstate_journal.append_failures").increment(1);
+                tracing::warn!(
+                    height,
+                    %error,
+                    "chainstate journal append failed; recovery may fall back to full re-validation"
+                );
+            }
+        }
+        Err(error) => {
+            journal.mark_append_gap(height);
+            metrics::counter!("node.chainstate_journal.append_failures").increment(1);
+            tracing::warn!(
+                height,
+                %error,
+                "chainstate journal delta extraction failed; recovery may fall back to full re-validation"
+            );
+        }
     }
 }
