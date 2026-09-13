@@ -360,7 +360,8 @@ fn chainstate_transition_scan_passes() {
     );
 }
 /// The mempool pressure floor (`mempoolminfee`) has one owner:
-/// `eviction::mempool_min_fee_sat_per_kvb` (POL-06). The owner derives and
+/// `eviction::mempool_min_fee_sat_per_kvb` (see the `Mempool-min fee under
+/// pressure` row in `docs/policies/mempool-policy.md`). The owner derives and
 /// enforces the floor, the `getmempoolinfo` handler is the audited quoting
 /// outlet, and no production code re-derives it from the pool's lowest rate
 /// outside the mempool crate.
@@ -384,7 +385,7 @@ fn mempool_pressure_floor_scan_passes() {
     );
     assert!(
         pressure_floor_owner_violations.is_empty(),
-        "mempool pressure-floor single-owner boundary (POL-06) violated:          {pressure_floor_owner_violations:?}"
+        "mempool pressure-floor single-owner boundary (the `Mempool-min fee under pressure` row in docs/policies/mempool-policy.md) violated:          {pressure_floor_owner_violations:?}"
     );
     assert!(
         pressure_floor_sites > 0,
