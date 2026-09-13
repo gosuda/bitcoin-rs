@@ -133,9 +133,11 @@ holds a second admission evaluator.
   `verify_transaction` (deviation ledger entries 1-2).
 - Absolute locktime evaluates at tip height + 1 from retained coin
   metadata and MTP context. Relative (BIP68) sequence locks are
-  unchecked at admission and typed `NonBip68Final` has no producer;
-  BIP68 admission is T19 work (deviation ledger entry 3). A disabled
-  sequence contributes no lock once that work lands.
+  enforced at the next block from confirmed `PrevoutMeta` rows, with
+  pool and package parents encoded as the next block and the gate
+  closed while `csv_active` is false; a disabled sequence contributes
+  no lock. Coinbase spends under `COINBASE_MATURITY` (100) reject
+  before mutation on the same seam.
 - `testmempoolaccept` returns preview rows in the frozen Core 31.1
   `TestMempoolAccept` / `MempoolAcceptance` shape with frozen
   reject-reason strings.
@@ -148,6 +150,17 @@ holds a second admission evaluator.
   `p2wsh_sigop_cost_exceeds_standard_limit`), and owner-computed cost
   overriding a caller-supplied count
   (`caller_sigop_cost_is_ignored_in_stored_entry`).
+- `crates/mempool/tests/policy_contract.rs`: next-block BIP68 height
+  (`bip68_height_lock_boundary_enforces_at_admission`), unconfirmed
+  parent (`bip68_unconfirmed_parent_positive_relative_lock_fails`),
+  time lock (`bip68_time_lock_uses_the_confirmed_median_time_past`),
+  csv-inactive control (`bip68_check_is_inert_before_csv_activation`),
+  and coinbase maturity boundary
+  (`immature_coinbase_spend_rejects_before_100_confirmations`);
+  `crates/rpc/tests/policy_contract.rs` quotes the same classes
+  through both outlets
+  (`immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity`,
+  `bip68_locked_tx_admits_while_csv_is_inactive_on_the_rpc_surface`).
 - `crates/mempool/tests/overhaul_finality_policy.rs` (planned): policy
   pins, epoch invalidation, CSV boundaries at `tip+1`, fee precedence,
   pressure floor rise, and decay behavior.
