@@ -145,6 +145,7 @@ pub(crate) const AUTHORIZED_PEER_TABLE_PATHS: &[&str] = &["crates/rpc/src/handle
 /// with a policy-doc row naming it, so every new quoting surface is forced
 /// through review instead of silently re-deriving the floor.
 pub(crate) const FLOOR_QUOTER_PATHS: &[&str] = &["crates/rpc/src/handlers/mempool.rs"];
+pub(crate) const FLOOR_QUOTER_FUNCTION: &str = "getmempoolinfo";
 
 /// Pressure-floor derivation inputs. Under size pressure the dynamic floor
 /// is the cheapest evictable pool rate plus the incremental relay fee; any
@@ -529,9 +530,18 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         .collect();
     let mut pending_test_item = false;
     let mut test_depth = 0_i64;
+      let mut function_depth = 0_i64;
+      let mut in_floor_quoter = false;
 
     for (index, line) in code_lines.iter().enumerate() {
         let trimmed = line.trim();
+          if let Some(fn_pos) = trimmed.find("fn ") {
+              let name = trimmed[fn_pos + 3..]
+                  .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                  .next()
+                  .unwrap_or("");
+              in_floor_quoter = name == FLOOR_QUOTER_FUNCTION;
+          }
 
         if test_depth > 0 {
             let (opens, closes) = brace_delta(line);
@@ -657,7 +667,9 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
             }
         }
 
-        if line.contains(".lowest_fee_rate(") {
+        if FLOOR_PRESSURE_PATTERNS.iter().any(|pattern| {
+              line.chars().filter(|c| !c.is_whitespace()).collect::<String>().contains(pattern)
+          }) {
             result.pressure_floor_sites += 1;
             if !is_mempool_owner {
                 result.pressure_floor_owner_violations.push(format!(
@@ -670,7 +682,7 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
         }
         if line.contains("mempool_min_fee_sat_per_kvb(") {
             result.pressure_floor_sites += 1;
-            let audited = FLOOR_QUOTER_PATHS
+            let audited = in_floor_quoter && FLOOR_QUOTER_PATHS
                 .iter()
                 .any(|allowed| authorized_path(path_str, allowed));
             if !is_mempool_owner && !audited {
