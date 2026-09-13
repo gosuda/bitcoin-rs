@@ -123,6 +123,27 @@ pub enum ApplyError {
         /// Block whose body was rejected.
         hash: bitcoin_rs_primitives::Hash256,
     },
+    /// Advancing the durable head failed.
+    ///
+    /// Fatal for the attempt, like a `UtxoCommit` refusal: the atomic batch
+    /// may have applied before its durability receipt failed or was lost,
+    /// and [`StorageError`] does not classify that phase. The caller must
+    /// reconcile through recovery instead of retrying the block.
+    #[error("durable head commit: {0}")]
+    DurableHeadCommit(#[source] bitcoin_rs_storage::StorageError),
+    /// The stored durable head names a tip other than this block's parent.
+    ///
+    /// The durable chain and the in-memory chain have diverged, typically
+    /// because a crash landed the head batch but not the publication and
+    /// recovery has not replayed the gap yet. Refusing keeps the head's
+    /// lineage intact; only recovery can close the gap.
+    #[error("durable head names tip {head}, not this block's parent {prev}")]
+    DurableHeadLineage {
+        /// Tip the stored head certifies.
+        head: bitcoin_rs_primitives::Hash256,
+        /// Parent the connecting block names.
+        prev: bitcoin_rs_primitives::Hash256,
+    },
     /// Rewinding the block-level coinstats failed.
     ///
     /// The per-coin fields ride the UTXO change listener and are already

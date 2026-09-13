@@ -16,7 +16,6 @@
 use bitcoin_rs_primitives::Hash256;
 
 use crate::pruning::{BLOCK_DATA_CF, block_body_key, block_undo_key};
-use crate::undo::{DISCONNECT_MARKER_KEY, encode_disconnect_marker};
 use crate::{ColumnFamily, KvStore, StorageError, WriteBatch as _, WriteCondition};
 
 /// Key of the durable-head row in the `UtxoMeta` family.
@@ -189,9 +188,6 @@ pub struct CommitRecords<'a> {
     pub undo_rows: Vec<(u32, Hash256, &'a [u8])>,
     /// Body locator rows (`BlockBodies`): `(height, hash, position)`.
     pub body_rows: Vec<(u32, Hash256, crate::block_file::BlockFilePosition)>,
-    /// Disconnect marker row to write in the same receipt, moving an armed
-    /// `InFlight` marker to `RolledBack` atomically with the head advance.
-    pub marker: Option<crate::DisconnectMarker>,
 }
 
 /// Owner of the durable-head row and its atomic commit boundary.
@@ -277,13 +273,6 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
                 BLOCK_DATA_CF,
                 &block_body_key(*height, *hash),
                 &position.encode(),
-            );
-        }
-        if let Some(marker) = &records.marker {
-            batch.put(
-                ColumnFamily::UtxoMeta,
-                DISCONNECT_MARKER_KEY,
-                &encode_disconnect_marker(marker),
             );
         }
         let condition = match expected {

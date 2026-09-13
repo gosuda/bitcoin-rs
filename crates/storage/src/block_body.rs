@@ -154,6 +154,17 @@ pub trait BlockBodyStore: Send + Sync {
         None
     }
 
+    /// Resolves the stored flat-file position of one block body: the locator
+    /// row a durable head lands atomically with its advance. `None` when the
+    /// store does not address positions.
+    fn block_position(
+        &self,
+        _height: u32,
+        _hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<crate::block_file::BlockFilePosition>, StorageError> {
+        Ok(None)
+    }
+
     /// Bytes this store's block files occupy on disk, when it keeps files.
     ///
     /// `None` from a store with nothing on disk to measure; the caller then
@@ -425,6 +436,14 @@ impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
             file_no: self.files.current_file_number(),
             offset: self.files.append_offset(),
         })
+    }
+
+    fn block_position(
+        &self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Option<crate::block_file::BlockFilePosition>, StorageError> {
+        self.body_position(height, hash)
     }
 
     fn sync(&self) -> Result<(), StorageError> {

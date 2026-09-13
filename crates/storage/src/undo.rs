@@ -97,10 +97,10 @@ pub enum DisconnectPhase {
 /// One key, not one per block: only one disconnect runs at a time, and a
 /// per-block key would leave the reader scanning to find out whether any are
 /// set.
-pub(crate) const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
+const DISCONNECT_MARKER_KEY: &[u8] = b"node:disconnect-in-flight";
 
 impl DisconnectMarker {
-    pub(crate) fn encode(&self) -> [u8; 37] {
+    fn encode(&self) -> [u8; 37] {
         let mut encoded = [0_u8; 37];
         encoded[..32].copy_from_slice(&self.hash.to_le_bytes());
         encoded[32..36].copy_from_slice(&self.height.to_be_bytes());
@@ -140,15 +140,6 @@ impl DisconnectMarker {
             phase,
         })
     }
-}
-
-/// Serializes a disconnect marker for a caller outside this module.
-///
-/// The durable-head commit writes the marker row in the same atomic batch as
-/// the head advance, so the marker codec is shared crate-internally while
-/// decoding stays behind [`UndoStore::load_disconnect_marker`].
-pub(crate) fn encode_disconnect_marker(marker: &DisconnectMarker) -> [u8; 37] {
-    marker.encode()
 }
 
 /// Process-local undo storage.
@@ -231,14 +222,12 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
     /// visible to later reads in this process and lets the checkpoint flush
     /// make it durable, which is what `disconnect_block` needs and all it needs.
     ///
-    /// This is not crash-safe, and neither is the UTXO commit beside it: no
-    /// part of block connection fsyncs. An fsync on this write alone would cost
-    /// one per connected block and still leave the commit it describes
-    /// unrecoverable, so it would buy a slower node and no guarantee.
-    ///
-    /// Closing the gap needs a crash-recovery path that re-applies the blocks
-    /// between the last durable state and the tip. The node has no such path
-    /// today, so do not cite one here.
+    /// Deferred is correct because the durable-head commit is the receipt
+    /// that makes this row authoritative: the apply path flushes it together
+    /// with the head row in one atomic batch (`RCV-02`), and the head's
+    /// `undo_extent` names it only from that receipt on. Writing it earlier
+    /// keeps it readable for planning; it is an orphan tail, safely
+    /// discarded, until the head names it.
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         let mut batch = self.store.new_batch();
         batch.put(

@@ -85,6 +85,7 @@ impl NodeState {
             Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
         let storage = NodeStorage::open(&config, chainstate_cache_bytes, Arc::clone(&block_files))?;
         let undo_store = storage.undo_store();
+        let durable_head = storage.durable_head();
         // Before anything reads the chainstate, let alone serves or syncs it.
         // A node that starts on a torn chainstate builds on it, and every block
         // it adds makes the damage harder to find.
@@ -404,6 +405,7 @@ impl NodeState {
             chain_events: Arc::clone(&chain_events),
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
+            durable_head,
             admission: Arc::new(crate::apply::ApplyAdmission::new()),
             shutdown: Arc::clone(&shutdown),
             chain_transition,
@@ -418,6 +420,11 @@ impl NodeState {
             capture_block_bytes,
         };
         apply_handles.assume_valid_gate.evaluate(&block_tree.read());
+        // The durable head is the chain's commit point: an unreadable row
+        // fails startup, and a committed-but-unpublished gap (crash between
+        // the head batch and publication) is surfaced here, counted, and
+        // left for recovery replay rather than silently adopted.
+        crate::apply::reconcile_at_boot(&apply_handles).map_err(anyhow::Error::new)?;
         // A restored checkpoint is durable at its own height by definition, so
         // start there rather than at zero, which would refuse all undo pruning.
         let durable_tip_height = Arc::new(AtomicU32::new(

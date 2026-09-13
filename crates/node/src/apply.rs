@@ -10,6 +10,7 @@ use rayon::prelude::*;
 mod connect;
 mod contextual;
 mod disconnect;
+mod durable;
 mod entrypoints;
 pub(crate) mod prepare;
 mod publication;
@@ -48,6 +49,7 @@ use bitcoin_rs_primitives::Witness;
 use bitcoin_rs_primitives::consensus_bytes;
 #[cfg(test)]
 use bitcoin_rs_storage::DisconnectMarker;
+use bitcoin_rs_storage::DurableHeadStore;
 use bitcoin_rs_storage::InMemoryUndoStore;
 #[cfg(test)]
 use bitcoin_rs_storage::StorageError;
@@ -119,6 +121,7 @@ pub mod error;
 mod scratch;
 
 pub(crate) use bitcoin_rs_storage::{DisconnectPhase, KvUndoStore, UndoStore};
+pub(crate) use durable::reconcile_at_boot;
 
 /// Number of blocks after a coinbase that its outputs become spendable.
 /// Consensus rule since Bitcoin v0.3.1; universal across networks.
@@ -427,6 +430,9 @@ pub enum BlockProvenance {
 pub struct ConnectOutcome {
     /// New applied tip.
     pub tip: TipSnapshot,
+    /// The durable-head commit id that certified this block before it
+    /// published. Windows share one id across a committed group prefix.
+    pub commit_id: u64,
     /// Height of the connected block.
     pub height: u32,
     /// Hash of the connected block.
@@ -526,6 +532,10 @@ pub struct Chainstate {
     pub(crate) chain_events: Arc<crate::state::ChainEventPublisher>,
     pub(crate) block_body_store: Option<Arc<dyn BlockBodyStore>>,
     pub(crate) undo_store: Arc<dyn UndoStore>,
+    /// Owner of the durable-head row: the chain's durable commit point,
+    /// advanced by one atomic batch per committed connect or disconnect
+    /// before the tip publishes (`RCV-02`).
+    pub(crate) durable_head: Arc<dyn DurableHeadStore>,
     pub(crate) admission: Arc<ApplyAdmission>,
     pub(crate) shutdown: Arc<AtomicBool>,
     /// Serializes whole chain transitions against each other.
@@ -563,27 +573,27 @@ pub struct Chainstate {
 ///
 /// # Persistence
 ///
-/// Connect and replay write the block body and commit the UTXO set before
-/// publishing `applied_tip`. A successful return means the new tip is visible
-/// in memory. Store durability follows the journal batch cadence and the next
-/// clean checkpoint (`docs/chainstate-recovery.md`). A crash before that
-/// checkpoint recovers from the last authenticated checkpoint plus any
-/// committed journal suffix. Permanent consensus failures must not be retried
-/// with the same block; operational failures (storage, UTXO commit, shutdown)
-/// stay with the caller to retry.
+/// Every connect follows the ordered durable protocol (`RCV-02` in
+/// `docs/contracts/recovery.md`): reserve, append, sync, one atomic durable
+/// batch, publish. The durable batch — head row, undo record, and body
+/// locator under one `write_durable_if` receipt — is the commit point; the
+/// tip publishes strictly after it, so a follower-visible block is already
+/// durable (`INV-04`), and a crash recovers the old or the new committed
+/// head, never a mix. The chainstate journal is derived from the durable
+/// head, not a second authority, and the next clean checkpoint is a
+/// maintenance export.
 ///
-/// Disconnect arms a durable `DisconnectMarker` before the UTXO undo. The
-/// commit point is the `applied_tip` rollback after a successful undo
-/// (`EVT-05` in `docs/contracts/chain-events.md`). `DisconnectError::Refused`
-/// means nothing was mutated. `DisconnectError::Fatal` means a partial undo:
-/// do not retry, poison admission, and shut down. A crash during rollback is
-/// recovered from the marker, not by retrying the disconnect. The
-/// `RolledBack` marker stays until the checkpoint that publishes the
-/// rolled-back state.
+/// Disconnect arms a durable `DisconnectMarker` before the UTXO undo and
+/// advances the same durable head atomically with the `RolledBack` marker.
+/// `DisconnectError::Refused` means nothing was mutated.
+/// `DisconnectError::Fatal` means a partial undo: do not retry, poison
+/// admission, and shut down. A crash during rollback is recovered from the
+/// marker, not by retrying the disconnect.
 ///
-/// Window apply commits one block at a time. A failure leaves the committed
-/// prefix in place. Permanent failures invalidate the failed subtree;
-/// operational failures leave that block retryable.
+/// Window apply commits a bounded verified prefix per durable batch. A
+/// failure leaves the committed prefix in place; the failing block stays
+/// retryable unless the failure was fatal (`UtxoCommit`, durable-head
+/// commit), in which case recovery owns reconciliation.
 ///
 /// [`Self::finish`] stores the reserved even mempool generation. It does not
 /// persist chainstate. Call it once the window attempt concludes on a
@@ -791,6 +801,7 @@ impl Chainstate {
             chain_events,
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
+            durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_transition: Arc::new(parking_lot::Mutex::new(())),

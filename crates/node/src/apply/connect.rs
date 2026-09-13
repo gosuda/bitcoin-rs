@@ -17,9 +17,11 @@ use super::contextual::check_pow_limit_and_continuity;
 use super::contextual::check_unseen_header_timestamp;
 use super::contextual::compact_is_met_by;
 use super::contextual::compute_verify_flags;
+use super::durable::{ConnectCommitFacts, commit_connect_head, sync_appended_blocks};
 use super::prepare::prepare_apply;
 use super::prepare::verify_block_transactions;
 use super::publication::advance_chain_tx_count;
+use super::publication::advanced_chain_tx_count;
 use super::publication::begin_applied_publication;
 use super::publication::tx_count_delta_for;
 use super::scratch::ApplyScratch;
@@ -445,6 +447,36 @@ pub(super) fn apply_block_admitted<'b>(
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
 
+    // RCV-02 steps 3–4: certify, then commit. `sync` makes the appended
+    // body bytes, the blocks directory, and every deferred index row
+    // durable; the durable-head batch then names them with one
+    // `write_durable_if` receipt — head, undo record, and locator row
+    // together. `Ok` is the receipt for the whole prefix (`INV-06`: the
+    // head never names bytes that are not already durable). An `Err` is
+    // not a rollback receipt: like a `UtxoCommit` refusal it leaves the
+    // caller to reconcile through recovery.
+    let durable_sync_started = quanta::Instant::now();
+    sync_appended_blocks(handles)?;
+    metrics::histogram!("node.apply_block.durable_sync_seconds")
+        .record(durable_sync_started.elapsed().as_secs_f64());
+    let durable_commit_started = quanta::Instant::now();
+    let commit_id = commit_connect_head(
+        handles,
+        &ConnectCommitFacts {
+            prev_hash,
+            tip: block_hash,
+            height,
+            undo_record: &undo_record,
+            chain_tx_count_after: advanced_chain_tx_count(
+                handles,
+                height,
+                tx_count_delta_for(block),
+            ),
+        },
+    )?;
+    metrics::histogram!("node.apply_block.durable_commit_seconds")
+        .record(durable_commit_started.elapsed().as_secs_f64());
+
     // §2.3 linearization point for the chainstate journal (issue #230): the
     // in-memory UTXO commit above is the commit of record; everything the
     // journal needs to reconstruct this block's semantic delta is still
@@ -584,6 +616,7 @@ pub(super) fn apply_block_admitted<'b>(
     let (txids, raw_txs) = scratch.into_payloads();
     Ok(ApplyFinish::Committed(ConnectOutcome {
         tip,
+        commit_id,
         height,
         hash: block_hash,
         txids,

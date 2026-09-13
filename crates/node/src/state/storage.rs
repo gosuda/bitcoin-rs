@@ -25,6 +25,7 @@ use std::time::Duration;
 pub(super) struct NodeStorage {
     backend: StorageBackend,
     undo_store: Arc<dyn crate::apply::UndoStore>,
+    durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     deferred: Arc<dyn DeferredChainstateServices>,
     #[cfg(test)]
@@ -53,6 +54,9 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
         Ok(NodeStorage {
             backend: self.backend,
             undo_store: Arc::new(crate::apply::KvUndoStore::new(Arc::clone(&store))),
+            durable_head: Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
+                &store,
+            ))),
             block_body_store: Arc::new(bitcoin_rs_storage::block_body::IndexedBlockBodyStore::new(
                 Arc::clone(&store),
                 self.block_files,
@@ -125,6 +129,10 @@ impl NodeStorage {
     /// unable to leave.
     pub(super) fn undo_store(&self) -> Arc<dyn crate::apply::UndoStore> {
         Arc::clone(&self.undo_store)
+    }
+
+    pub(super) fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
+        Arc::clone(&self.durable_head)
     }
 
     pub(super) fn journal_writer(

@@ -33,19 +33,32 @@ pub(super) fn tx_count_delta_for(block: &Block) -> u64 {
 /// Genesis is the one block that can establish the count from nothing: there is
 /// no chain below it.
 pub(super) fn advance_chain_tx_count(handles: &Chainstate, height: u32, tx_count_delta: u64) {
+    let advanced = advanced_chain_tx_count(handles, height, tx_count_delta);
+    handles.chain_tx_count.store(advanced, Ordering::Relaxed);
+}
+
+/// The cumulative count a connected block will publish, without storing it.
+///
+/// The durable-head commit names this value one step before publication
+/// does, and the two must agree byte for byte. Zero means *unknown*, per
+/// the convention on `advance_chain_tx_count`.
+pub(super) fn advanced_chain_tx_count(
+    handles: &Chainstate,
+    height: u32,
+    tx_count_delta: u64,
+) -> u64 {
     let known = handles.chain_tx_count.load(Ordering::Relaxed);
     if known == 0 && height != 0 {
-        return;
+        return 0;
     }
-    let advanced = known.checked_add(tx_count_delta).unwrap_or_else(|| {
+    known.checked_add(tx_count_delta).unwrap_or_else(|| {
         tracing::warn!(
             known,
             tx_count_delta,
             "cumulative chain transaction count overflowed; marking it unknown"
         );
         0
-    });
-    handles.chain_tx_count.store(advanced, Ordering::Relaxed);
+    })
 }
 
 /// Takes a disconnected block's transactions back out of the cumulative count.
@@ -54,17 +67,25 @@ pub(super) fn advance_chain_tx_count(handles: &Chainstate, height: u32, tx_count
 /// the count and the chain have diverged, and a silently clamped total is worse
 /// than an admitted absence, so that case resets to unknown.
 pub(super) fn rewind_chain_tx_count(handles: &Chainstate, tx_count_delta: u64) {
+    let rewound = rewound_chain_tx_count(handles, tx_count_delta);
+    handles.chain_tx_count.store(rewound, Ordering::Relaxed);
+}
+
+/// The cumulative count a disconnect will publish, without storing it.
+///
+/// The durable-head commit names this value one step before publication
+/// does, and the two must agree byte for byte.
+pub(super) fn rewound_chain_tx_count(handles: &Chainstate, tx_count_delta: u64) -> u64 {
     let known = handles.chain_tx_count.load(Ordering::Relaxed);
     if known == 0 {
-        return;
+        return 0;
     }
-    let rewound = known.checked_sub(tx_count_delta).unwrap_or_else(|| {
+    known.checked_sub(tx_count_delta).unwrap_or_else(|| {
         tracing::warn!(
             known,
             tx_count_delta,
             "cumulative chain transaction count fell below zero; marking it unknown"
         );
         0
-    });
-    handles.chain_tx_count.store(rewound, Ordering::Relaxed);
+    })
 }

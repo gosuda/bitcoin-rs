@@ -56,7 +56,12 @@ pub(super) fn apply_window_admitted(
         ) {
             Ok(outcome) => committed.push(outcome),
             Err(source) => {
-                let disposition = if matches!(source, ApplyError::UtxoCommit(_)) {
+                let disposition = if matches!(
+                    source,
+                    ApplyError::UtxoCommit(_)
+                        | ApplyError::DurableHeadCommit(_)
+                        | ApplyError::DurableHeadLineage { .. }
+                ) {
                     WindowApplyDisposition::Fatal
                 } else if is_permanent_apply_error(&source) {
                     WindowApplyDisposition::Permanent

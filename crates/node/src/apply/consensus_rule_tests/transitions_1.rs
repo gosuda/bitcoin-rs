@@ -141,7 +141,8 @@ fn a_window_stops_at_whichever_cap_binds_first() {
 /// already moved. Derived consumers are not dispatched on that error: the
 /// caller got `MarkerStuck`, not a committed outcome.
 #[test]
-fn disconnect_marker_stuck_leaves_the_tip_rolled_back() -> Result<(), Box<dyn std::error::Error>> {
+fn a_failed_marker_completion_is_fatal_before_the_tip_rolls_back()
+-> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
     let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::new(UtxoSet::new()));
     handles.undo_store = Arc::new(CompleteRejectingUndoStore::default());
@@ -155,10 +156,13 @@ fn disconnect_marker_stuck_leaves_the_tip_rolled_back() -> Result<(), Box<dyn st
     )?;
     handles.apply_block(&block)?;
 
+    // The marker cannot move to `RolledBack`, so the durable commit point is
+    // never reached: the failure is fatal, and the rollback has not been
+    // published anywhere — the tip still names the disconnected block.
     let outcome = handles.disconnect_block(&block);
     assert!(
-        matches!(outcome, Err(crate::DisconnectError::MarkerStuck { .. })),
-        "marker completion failure must report MarkerStuck, got {outcome:?}"
+        matches!(outcome, Err(crate::DisconnectError::Fatal { .. })),
+        "marker completion failure must report Fatal, got {outcome:?}"
     );
     assert_eq!(
         handles
@@ -166,8 +170,8 @@ fn disconnect_marker_stuck_leaves_the_tip_rolled_back() -> Result<(), Box<dyn st
             .load_full()
             .as_deref()
             .map(|tip| tip.height),
-        Some(0),
-        "the applied tip must already be rolled back on MarkerStuck"
+        Some(1),
+        "the applied tip must stay on the block whose marker completion failed"
     );
     Ok(())
 }
