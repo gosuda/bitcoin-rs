@@ -170,13 +170,6 @@ pub(super) fn commit_disconnect_head(
     Ok(next.commit_id)
 }
 
-/// Bound on how many blocks one crash can leave committed-but-unpublished.
-///
-/// The apply path publishes every durable batch before the next begins
-/// (`RCV-02`), so a crash can strand at most one group: the crash-redo
-/// bound the contract states, not an emergent number.
-const REPLAY_GAP_BLOCK_LIMIT: usize = super::window::DURABLE_HEAD_GROUP_BLOCKS;
-
 /// Boot-time reconciliation of the stored head against the restored tip.
 ///
 /// An unreadable head fails startup (`P5`: corruption inside the commit
@@ -237,9 +230,6 @@ fn replay_committed_gap(
             "the restored tip is not below the stored head; the state is not a publication lag",
         ));
     }
-    if gap_width > REPLAY_GAP_BLOCK_LIMIT {
-        return Err(unrecoverable("the gap is wider than one commit group"));
-    }
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
     };
@@ -262,7 +252,7 @@ fn replay_committed_gap(
             ));
         }
         let parent = block.header.prev_blockhash.0;
-        chain.push((cursor.0, cursor.1, block, bytes));
+        chain.push((cursor.0, cursor.1, parent));
         if cursor.0 == restored.height + 1 {
             if parent != restored.hash {
                 return Err(unrecoverable(
@@ -284,7 +274,13 @@ fn replay_committed_gap(
     let mut commit_id = 0_u64;
     // A length always fits u64; the metrics counter counts in u64.
     let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
-    for (height, hash, block, bytes) in chain {
+    for (height, hash, _) in chain {
+        let bytes = store
+            .load_block_body(height, hash)
+            .map_err(ApplyError::BlockBodyPersistence)?
+            .ok_or_else(|| unrecoverable("a committed gap body is missing from storage"))?;
+        let block: Block = bitcoin_rs_primitives::deserialize(&bytes)
+            .map_err(|_| unrecoverable("a committed gap body does not decode"))?;
         let outcome = super::connect::apply_committed_block_admitted(
             handles,
             &block,
@@ -304,7 +300,7 @@ fn replay_committed_gap(
         (tip.hash, tip.height, commit_id) == (head.tip, head.height, head.commit_id)
     });
     if !landed {
-        transition.finish().ok();
+        transition.finish()?;
         return Err(unrecoverable("replay finished short of the stored head"));
     }
     transition.finish()?;
