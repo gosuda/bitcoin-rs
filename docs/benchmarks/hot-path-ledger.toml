@@ -13,8 +13,25 @@ backends = ["fjall", "rocksdb", "redb"]
 [cell_defaults]
 custody = "none"
 residual = "unmeasured"
-residual_blocker = "product-cell comparator and corpus custody (#34, #41, #42)"
+residual_blocker = "comparator in-tree, custody staged; live product arms blocked by absent bitcoin-rs offline state construction (#34, #41) and live-IBD product lane (#35) — see docs/benchmarks/data/comparator-lanes-20260913.md"
 noise_floor = "unobserved"
+# Wave-2 observation, 650-comparators, 2026-09-13. Three worktree
+# repetitions of tools/benchmark-campaign/comp_lanes.py on c97d1094,
+# bound to NUMA node0 cores 0-7 with `numactl --physcpubind=0-7
+# --membind=0`, powersave governor, raw per-arm result JSONs preserved
+# under /home/alpha/.omp/wt/i650c-comparators-runs-wt/pin{1,2,3}/.
+# All offline/p2p correctness gates passed; #41 muhash-rpc reachable on
+# the staged Core 31.1 bitcoind. Within-run fixture-arm spread frequently
+# exceeds the 5% product-stability band because arms are ~0.1-0.13s
+# fixture process spawns on a shared 80-CPU host; this is not the HPA-03
+# noise floor. Live #34/#41 arms are blocked by absent bitcoin-rs offline
+# archive ingest / stop-at-height; #35 by no shipped live-IBD product
+# lane (comp_lanes.py is fixture-only). Staged custody (unmeasured
+# against): C150/Cmodern archives and Core 31.1 bitcoind under
+# .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/.
+# Full method note, digests, and remaining residual statement:
+# docs/benchmarks/data/comparator-lanes-20260913.md. Per-cell histories
+# stay empty; noise floor stays unobserved (HPA-03, CL-23).
 
 # ---------------------------------------------------------------------------
 # Interval tree. Exclusive leaves hang off these; they are not addends.
