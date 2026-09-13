@@ -394,6 +394,9 @@ impl NodeState {
         // One retention registry per node: transitions pin old-branch bodies
         // into it and the pruning pass folds the live floors into its line.
         let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
+        if let Some(pruned_below) = super::prune::load_pruneheight(&*store)? {
+            retention.record_pruned_below(pruned_below);
+        }
         let mut apply_handles = crate::apply::Chainstate {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
