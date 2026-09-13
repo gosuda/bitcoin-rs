@@ -38,6 +38,7 @@ fn real_metadata_validates() {
         checked_engine_edges,
         checked_features,
         classified,
+        cycle_checked_crates,
         summary,
     } = graph
         .validate()
@@ -57,6 +58,10 @@ fn real_metadata_validates() {
         checked_features > 0,
         "no feature forwarding assertions were checked"
     );
+    assert!(
+        cycle_checked_crates >= 12,
+        "cycle check did not run over the workspace: {summary}"
+    );
 }
 
 #[test]
@@ -72,6 +77,54 @@ fn synthetic_upward_dependency_fails() {
                 && line.contains("bitcoin-rs-mempool")
         }),
         "expected upward-dependency violation, got: {err:?}"
+    );
+}
+#[test]
+fn transaction_consumers_can_depend_on_mempool() {
+    let graph = WorkspaceGraph::from_cargo_metadata();
+    // Real consumer → mempool edges (p2p, rpc, node, binary) all point
+    // the approved direction and must pass the layer model.
+    assert!(
+        graph.validate().is_ok(),
+        "transaction consumers depending on mempool must be allowed"
+    );
+}
+
+#[test]
+fn mempool_cannot_depend_on_transaction_consumers() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    graph.add_normal_dep("bitcoin-rs-mempool", "bitcoin-rs-p2p");
+    graph.add_normal_dep("bitcoin-rs-mempool", "bitcoin-rs-rpc");
+    graph.add_normal_dep("bitcoin-rs-mempool", "bitcoin-rs-node");
+    graph.add_normal_dep("bitcoin-rs-mempool", "bitcoin-rs");
+
+    let err = graph
+        .validate()
+        .expect_err("mempool depending on its consumers must fail");
+    assert!(
+        err.iter().any(|line| {
+            line.contains("bitcoin-rs-mempool")
+                && line.contains("transaction consumer")
+                && line.contains("bitcoin-rs-p2p")
+        }),
+        "expected mempool consumer-direction violation, got: {err:?}"
+    );
+}
+
+#[test]
+fn synthetic_same_layer_cycle_fails() {
+    let mut graph = WorkspaceGraph::from_cargo_metadata();
+    // Construct a pure same-layer cycle: mempool → p2p → mining → mempool.
+    // All three are Layer 2, so the layer check alone accepts it.
+    graph.add_normal_dep("bitcoin-rs-mempool", "bitcoin-rs-p2p");
+    graph.add_normal_dep("bitcoin-rs-p2p", "bitcoin-rs-mining");
+    graph.add_normal_dep("bitcoin-rs-mining", "bitcoin-rs-mempool");
+
+    let err = graph.validate().expect_err("same-layer cycle must fail");
+    assert!(
+        err.iter()
+            .any(|line| line.contains("workspace dependency cycle")),
+        "expected an acyclicity violation, got: {err:?}"
     );
 }
 
@@ -272,6 +325,38 @@ fn p2p_peer_owner_scan_passes() {
     assert!(
         peer_mutations_found > 0,
         "the p2p peer owner scan matched no production peer mutation"
+    );
+}
+#[test]
+fn chainstate_transition_scan_passes() {
+    let OwnershipScanResult {
+        transition_owner_violations,
+        transition_sites,
+        files_scanned,
+        ..
+    } = scan_ownership_violations();
+    assert!(
+        files_scanned >= MIN_SCANNED_FILES,
+        "the ownership scan saw only {files_scanned} files; the workspace walk \
+         collapsed"
+    );
+
+    let _ = writeln!(
+        std::io::stderr(),
+        "chainstate transition scan: files={files_scanned}, \
+         transition sites={transition_sites}, \
+         violations={}",
+        transition_owner_violations.len()
+    );
+    assert!(
+        transition_owner_violations.is_empty(),
+        "chainstate transition promotion (`lock_transition`, \
+         `begin_transition_locked`) must stay inside the node crate \
+         (ARCH-07): {transition_owner_violations:?}"
+    );
+    assert!(
+        transition_sites > 0,
+        "the chainstate transition scan matched no production transition promotion"
     );
 }
 

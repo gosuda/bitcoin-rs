@@ -119,6 +119,17 @@ pub(crate) const AUTHORIZED_PEER_TABLE_CALLS: &[(&str, &str)] = &[
     ("crates/node/src/sync/peers.rs", "self.peer_table"),
 ];
 
+/// Chainstate transition promotion/lock constructors (ARCH-07).
+///
+/// `Chainstate::begin_transition` is the public constructor, but the
+/// promotion path (`lock_transition`, `begin_transition_locked`) is
+/// `pub(crate)` and must stay inside the node crate that owns applied-tip
+/// mutation. The pattern list deliberately omits plain `begin_transition(`:
+/// `PersistentUtxoSet` in `crates/utxo` legitimately defines its own private
+/// method with that name, so the scan cannot disambiguate lexically.
+pub(crate) const TRANSITION_PROMOTION_PATTERNS: &[&str] =
+    &["lock_transition(", "begin_transition_locked("];
+
 /// Paths allowed to call the receiver-qualified peer mutators from non-owner
 /// code: the RPC operator surface (`disconnectnode`) is the one permitted
 /// caller.
@@ -133,6 +144,8 @@ pub(crate) struct OwnershipScanResult {
     pub index_capability_violations: Vec<String>,
     /// Peer registration/cancellation outside the P2P owner and its audits.
     pub peer_owner_violations: Vec<String>,
+    /// Chainstate transition promotion/lock construction outside node.
+    pub transition_owner_violations: Vec<String>,
     /// Number of production source files examined.
     pub files_scanned: usize,
     /// Number of raw pool write sites found.
@@ -145,6 +158,9 @@ pub(crate) struct OwnershipScanResult {
     pub index_capability_sites: usize,
     /// Number of peer mutation call sites found (including owner files).
     pub peer_mutations_found: usize,
+    /// Number of chainstate transition promotion sites found (including owner
+    /// files).
+    pub transition_sites: usize,
 }
 
 fn empty_result() -> OwnershipScanResult {
@@ -152,11 +168,13 @@ fn empty_result() -> OwnershipScanResult {
         mempool_writer_violations: Vec::new(),
         index_capability_violations: Vec::new(),
         peer_owner_violations: Vec::new(),
+        transition_owner_violations: Vec::new(),
         files_scanned: 0,
         pool_writes_found: 0,
         mempool_mutations_found: 0,
         index_capability_sites: 0,
         peer_mutations_found: 0,
+        transition_sites: 0,
     }
 }
 
@@ -595,7 +613,27 @@ fn scan_source(path_str: &str, content: &str, result: &mut OwnershipScanResult) 
                 }
             }
         }
+
+        for constructor in TRANSITION_PROMOTION_PATTERNS {
+            if line.contains(constructor) {
+                result.transition_sites += 1;
+                if !is_node_owner(path_str) {
+                    result.transition_owner_violations.push(format!(
+                        "chainstate transition promotion `{constructor}` at {}:{}: {}",
+                        path_str,
+                        index + 1,
+                        raw_lines[index].trim()
+                    ));
+                }
+            }
+        }
     }
+}
+/// Returns true when `path` is inside the node crate: `Chainstate` and its
+/// transition promotion path are the single owner of applied-tip mutation
+/// (ARCH-07).
+fn is_node_owner(path: &str) -> bool {
+    path.replace('\\', "/").contains("/crates/node/src/")
 }
 
 /// Returns true only when the call is on a receiver expression explicitly
@@ -968,6 +1006,47 @@ mod tests {
         );
         assert!(result.peer_owner_violations.is_empty());
         assert_eq!(result.peer_mutations_found, 0);
+    }
+    #[test]
+    fn chainstate_transition_promotion_stays_in_node() {
+        const NODE_APPLY: &str = "/workspace/crates/node/src/apply.rs";
+        const RPC_HANDLER: &str = "/workspace/crates/rpc/src/handlers/network.rs";
+
+        let mut result = empty_result();
+        scan_source(
+            NODE_APPLY,
+            "let lock = self.lock_transition()?;",
+            &mut result,
+        );
+        assert!(result.transition_owner_violations.is_empty());
+        assert_eq!(result.transition_sites, 1);
+
+        let mut result = empty_result();
+        scan_source(
+            NODE_APPLY,
+            "let transition = self.begin_transition_locked(lock)?;",
+            &mut result,
+        );
+        assert!(result.transition_owner_violations.is_empty());
+        assert_eq!(result.transition_sites, 1);
+
+        let mut result = empty_result();
+        scan_source(
+            RPC_HANDLER,
+            "let lock = handles.lock_transition()?;",
+            &mut result,
+        );
+        assert_eq!(result.transition_owner_violations.len(), 1);
+        assert_eq!(result.transition_sites, 1);
+
+        let mut result = empty_result();
+        scan_source(
+            RPC_HANDLER,
+            "let transition = handles.begin_transition_locked(lock)?;",
+            &mut result,
+        );
+        assert_eq!(result.transition_owner_violations.len(), 1);
+        assert_eq!(result.transition_sites, 1);
     }
 
     #[test]
