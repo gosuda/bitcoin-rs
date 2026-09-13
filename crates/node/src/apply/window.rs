@@ -12,16 +12,215 @@ use super::ResolvedUtxoView;
 use super::WindowApplyDisposition;
 use super::WindowApplyError;
 use super::connect::apply_committed_block_admitted;
+use super::connect::emit_journal_record;
 use super::contextual::compute_verify_flags;
+use super::durable::{
+    ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
+};
 use super::prepare::parse_block_for_apply;
 use super::prepare::plan_block_transactions;
 use super::prepare::resolve_block_prevouts;
+use super::publication::publish_connect;
 use crate::apply::error::ApplyError;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
+
+/// Blocks per durable group commit on the windowed IBD path.
+///
+/// Stated, not emergent (`RCV-02`): at the 30–75 blocks/s an IBD stream
+/// sustains, 64 blocks is one durable batch every one to two seconds, and
+/// the crash-redo bound is at most 64 body re-applies — the same order as
+/// the journal's own batch cadence. [`DURABLE_HEAD_GROUP_MAX_BYTES`] bounds
+/// the group from the memory side, because staged undo records and outcomes
+/// ride in the group until it commits.
+pub const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
+
+/// Serialized block bytes one group may hold before it must commit.
+///
+/// Whichever cap hits first ends the group, so early-chain windows commit
+/// every 64 blocks and tip-size windows commit on bytes well before that.
+pub const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
+
+/// How a committed block reaches its durable head and the published tip.
+///
+/// [`PublishMode::Now`] commits and publishes inside the per-block path.
+/// [`PublishMode::Grouped`] buffers the commit facts in a [`WindowGroup`]:
+/// the window syncs once per group, lands one head batch per verified
+/// prefix, and publishes the prefix in order after the batch — one
+/// `commit_id` per committed prefix, never beyond it (`RCV-02`).
+pub(super) enum PublishMode<'a> {
+    Now,
+    Grouped(&'a mut WindowGroup),
+}
+
+/// One staged block awaiting its group's durable commit.
+pub(super) struct PendingBlockCommit {
+    /// Commit id 0 until the group's batch assigns the prefix id.
+    pub outcome: ConnectOutcome,
+    /// The block's encoded undo record, landed in the group's receipt.
+    pub undo_record: Vec<u8>,
+    pub tx_count_delta: u64,
+    pub chain_tx_count_after: u64,
+    /// This block's parent; the group's first entry anchors the lineage
+    /// fence.
+    pub prev_hash: Hash256,
+    /// The derived journal record, emitted at flush — after the batch, so
+    /// the journal never leads the durable head.
+    pub journal_record: super::connect::BuiltJournalRecord,
+}
+
+/// A bounded verified prefix staged for one durable group commit.
+///
+/// Staging is infallible and in-memory; [`WindowGroup::flush`] does the
+/// ordered durable work: sync the appended bytes once, land one head batch
+/// naming every undo and locator row of the prefix, then publish the
+/// prefix's tips in order. `Ok` from the batch is the receipt for the whole
+/// prefix, so publication — which follows the flush — never outruns
+/// durability (`INV-04`).
+#[derive(Default)]
+pub(super) struct WindowGroup {
+    pending: Vec<PendingBlockCommit>,
+    staged_bytes: usize,
+    first_prev: Option<Hash256>,
+}
+
+impl WindowGroup {
+    /// The chain view the next staged block builds on: the group's last
+    /// staged tip, or `None` when the caller must read the published tip.
+    ///
+    /// Grouped blocks cannot read `applied_tip` for their predecessor — the
+    /// prefix publishes only after its batch (`INV-04`) — so the staged
+    /// outcome is the in-memory chain state the next block extends.
+    pub(super) fn predecessor(
+        &self,
+        prev_hash: Hash256,
+    ) -> core::result::Result<Option<(Arc<bitcoin_rs_chain::TipSnapshot>, u32)>, ApplyError> {
+        let Some(last) = self.pending.last() else {
+            return Ok(None);
+        };
+        if last.outcome.hash != prev_hash {
+            return Err(ApplyError::PrevHashMismatch {
+                tip: last.outcome.hash,
+                prev: prev_hash,
+            });
+        }
+        let height = last
+            .outcome
+            .height
+            .checked_add(1)
+            .ok_or(ApplyError::HeightOverflow(last.outcome.height))?;
+        Ok(Some((Arc::new(last.outcome.tip.clone()), height)))
+    }
+
+    /// The cumulative chain tx count the next staged block advances, when a
+    /// prefix is staged: publication has not stored the staged deltas yet.
+    pub(super) fn chain_tx_count_base(&self) -> Option<u64> {
+        self.pending.last().map(|last| last.chain_tx_count_after)
+    }
+
+    pub(super) fn stage(&mut self, pending: PendingBlockCommit) {
+        self.staged_bytes += pending.outcome.block_bytes.len();
+        if self.pending.is_empty() {
+            self.first_prev = Some(pending.prev_hash);
+        }
+        self.pending.push(pending);
+    }
+
+    /// Whether the staged prefix has hit a group cap.
+    fn should_flush(&self) -> bool {
+        self.pending.len() >= DURABLE_HEAD_GROUP_BLOCKS
+            || self.staged_bytes >= DURABLE_HEAD_GROUP_MAX_BYTES
+    }
+
+    /// Commits and publishes the staged prefix, returning its outcomes with
+    /// the group's `commit_id`. On error nothing is drained: the prefix
+    /// stays staged for the caller to retry or report.
+    pub(super) fn flush(
+        &mut self,
+        handles: &Chainstate,
+    ) -> core::result::Result<Vec<ConnectOutcome>, ApplyError> {
+        let (last, first_prev) = match (self.pending.last(), self.first_prev) {
+            (Some(last), Some(first_prev)) => (last, first_prev),
+            _ => return Ok(Vec::new()),
+        };
+        let started = quanta::Instant::now();
+        sync_appended_blocks(handles)?;
+        metrics::histogram!("node.durable_head.group_sync_seconds")
+            .record(started.elapsed().as_secs_f64());
+        let mut undo_rows = Vec::with_capacity(self.pending.len());
+        let mut body_rows = Vec::with_capacity(self.pending.len());
+        for pending in &self.pending {
+            undo_rows.push((
+                pending.outcome.height,
+                pending.outcome.hash,
+                pending.undo_record.as_slice(),
+            ));
+            if let Some(row) =
+                stored_body_row(handles, pending.outcome.height, pending.outcome.hash)?
+            {
+                body_rows.push(row);
+            }
+        }
+        let facts = ConnectCommitFacts {
+            prev_hash: first_prev,
+            tip: last.outcome.hash,
+            height: last.outcome.height,
+            chain_tx_count_after: last.chain_tx_count_after,
+            undo_extent: Some((last.outcome.height, last.outcome.hash)),
+        };
+        let started = quanta::Instant::now();
+        let records = CommitRecords {
+            undo_rows,
+            body_rows,
+        };
+        let commit_id = commit_connect_head(handles, &facts, &records)?;
+        metrics::histogram!("node.durable_head.group_commit_seconds")
+            .record(started.elapsed().as_secs_f64());
+        let staged = u32::try_from(self.pending.len()).unwrap_or(u32::MAX);
+        metrics::histogram!("node.durable_head.group_blocks").record(f64::from(staged));
+        for pending in &mut self.pending {
+            pending.outcome.commit_id = commit_id;
+        }
+        // The journal follows the receipt, block by block, before the
+        // prefix publishes — the same derived-after-durable order as the
+        // single-block path.
+        for pending in &mut self.pending {
+            emit_journal_record(
+                handles,
+                pending.journal_record.take(),
+                pending.outcome.height,
+            );
+        }
+        // The batch is the receipt; now publish the prefix in order. The
+        // values are the ones the batch certified, so this tail is as
+        // infallible as the single-block publication.
+        self.staged_bytes = 0;
+        self.first_prev = None;
+        let published = self
+            .pending
+            .drain(..)
+            .map(|pending| {
+                publish_connect(handles, &pending.outcome.tip, pending.tx_count_delta);
+                pending.outcome
+            })
+            .collect::<Vec<_>>();
+        metrics::counter!("node.durable_head.group_flushes").increment(1);
+        Ok(published)
+    }
+
+    /// Drops the staged prefix without committing it. Only for fatal
+    /// dispositions, where the state is torn and recovery owns the
+    /// reconciliation; the prefix was never published.
+    pub(super) fn abandon(&mut self) {
+        self.pending.clear();
+        self.staged_bytes = 0;
+        self.first_prev = None;
+    }
+}
 
 #[allow(clippy::result_large_err)]
 pub(super) fn apply_window_admitted(
@@ -44,7 +243,8 @@ pub(super) fn apply_window_admitted(
         });
     }
     let mut proven = prove_window(handles, blocks, serialized).into_iter();
-    let mut committed = Vec::with_capacity(blocks.len());
+    let mut group = WindowGroup::default();
+    let mut committed: Vec<ConnectOutcome> = Vec::with_capacity(blocks.len());
     for (block, raw) in blocks.iter().zip(serialized) {
         match apply_committed_block_admitted(
             handles,
@@ -53,17 +253,51 @@ pub(super) fn apply_window_admitted(
             proven.next(),
             BlockProvenance::Network,
             proof,
+            PublishMode::Grouped(&mut group),
         ) {
-            Ok(outcome) => committed.push(outcome),
+            // The staged outcome sits in the group with commit id 0; the
+            // flushed copy published below carries the group's id.
+            Ok(_) => {}
             Err(source) => {
-                let disposition = if matches!(source, ApplyError::UtxoCommit(_)) {
-                    WindowApplyDisposition::Fatal
-                } else if is_permanent_apply_error(&source) {
+                if matches!(
+                    source,
+                    ApplyError::UtxoCommit(_)
+                        | ApplyError::DurableHeadCommit(_)
+                        | ApplyError::DurableHeadLineage { .. }
+                ) {
+                    // Torn or unreconcilable: the staged prefix was never
+                    // published, and retrying it here would build on state
+                    // recovery has to rebuild first.
+                    group.abandon();
+                    return Err(WindowApplyError {
+                        applied: committed.len(),
+                        committed,
+                        source,
+                        disposition: WindowApplyDisposition::Fatal,
+                        invalidated: Box::default(),
+                    });
+                }
+                let invalidated = invalidate_failed_subtree(handles, block, &source);
+                let disposition = if is_permanent_apply_error(&source) {
                     WindowApplyDisposition::Permanent
                 } else {
                     WindowApplyDisposition::Operational
                 };
-                let invalidated = invalidate_failed_subtree(handles, block, &source);
+                // The prefix that committed in memory stays committed: flush
+                // its durable group before reporting, so the durable head
+                // and the published tip keep moving together. A flush
+                // failure is the ambiguous-batch case: fatal, never retried.
+                let flushed = group.flush(handles).map_err(|flush_error| {
+                    group.abandon();
+                    WindowApplyError {
+                        applied: committed.len(),
+                        committed: std::mem::take(&mut committed),
+                        source: flush_error,
+                        disposition: WindowApplyDisposition::Fatal,
+                        invalidated: Box::default(),
+                    }
+                })?;
+                committed.extend(flushed);
                 return Err(WindowApplyError {
                     applied: committed.len(),
                     committed,
@@ -73,7 +307,30 @@ pub(super) fn apply_window_admitted(
                 });
             }
         }
+        if group.should_flush() {
+            let flushed = group.flush(handles).map_err(|flush_error| {
+                group.abandon();
+                WindowApplyError {
+                    applied: committed.len(),
+                    committed: std::mem::take(&mut committed),
+                    source: flush_error,
+                    disposition: WindowApplyDisposition::Fatal,
+                    invalidated: Box::default(),
+                }
+            })?;
+            committed.extend(flushed);
+        }
     }
+    let flushed = group
+        .flush(handles)
+        .map_err(|flush_error| WindowApplyError {
+            applied: committed.len(),
+            committed: std::mem::take(&mut committed),
+            source: flush_error,
+            disposition: WindowApplyDisposition::Fatal,
+            invalidated: Box::default(),
+        })?;
+    committed.extend(flushed);
     Ok(committed)
 }
 

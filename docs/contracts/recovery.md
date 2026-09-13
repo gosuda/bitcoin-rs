@@ -38,22 +38,36 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
   the durable byte range in the corresponding segment file. Undo and body
   references include the block hash, not only the height.
 
-`DurableHead` is the persisted form:
+`DurableHead` is the persisted form, landed in
+`crates/storage/src/durable_head.rs` as one versioned, CRC32C-framed row in
+the `UtxoMeta` family of the chainstate key-value store:
 
 ```rust
 struct DurableHead {
-    tip: BlockHash,
-    height: u32,
     commit_id: u64,
-    coins_version: u64,
-    body_extent: u64,
-    undo_extent: u64,
-    refs: Vec<FrameRef>,
+    height: u32,
+    tip: Hash256,
+    chain_tx_count: u64,
+    body_extent: Option<BodyExtent { file_no: u32, offset: u64 }>,
+    undo_extent: Option<(u32, Hash256)>,
 }
 ```
 
-The durable head, coins, and `refs` are committed in one atomic named-family
-batch. `commit_id` is monotonic on disconnect as well as on connect.
+The row carries a format version byte and a checksum over its payload; any
+malformed row fails closed at load instead of decoding to absence. The owner
+decision for this slice: the head record lives in the chainstate key-value
+store and the protocol lives in `crates/node/src/apply` — the planned
+`crates/chainstate` extraction is not forced by it.
+
+One connect or disconnect commits one atomic named-family batch whose
+`write_durable_if` receipt covers the head row, the block's undo row, and its
+body locator row; the appended body bytes and the blocks directory are synced
+before the batch may name them. The coins themselves commit in memory and
+become durable through the checkpoint export; the undo and body records in
+the batch are what make a committed tip recoverable. The chainstate journal
+is derived from this batch and may lag it, never lead it. `commit_id` is
+strictly monotonic on disconnect as well as on connect: a reorg lowers
+`height`, never `commit_id`.
 
 ## Clauses
 
@@ -92,10 +106,16 @@ For one block, or a bounded fully verified prefix during IBD:
 
 A failure before stable publication leaves the fence closed until explicit
 recovery. A guard destructor must never quietly reopen the fence after an
-error. A live `submitblock` success waits for durable body, undo, coins, and
-head completion. IBD may group a bounded verified prefix; only committed
-prefixes are published. This is the ordered commit protocol. It is also called
-the durable root recovery contract.
+error. A live `submitblock` success waits for durable body, undo, and head
+completion: `apply_block` returns only after the batch receipt, and the
+returned `ConnectOutcome.commit_id` is the receipt's id. IBD may group a
+bounded verified prefix; only committed prefixes are published. The group
+caps are stated constants, not emergent cadence:
+`DURABLE_HEAD_GROUP_BLOCKS` = 64 blocks or `DURABLE_HEAD_GROUP_MAX_BYTES` =
+8 MiB of block data, whichever first — one durable batch every one to two
+seconds at IBD rates, and a crash-redo bound of at most 64 body re-applies.
+This is the ordered commit protocol. It is also called the durable root
+recovery contract.
 
 ### `RCV-03`: Prior-or-whole-proposed and orphan tails
 
@@ -280,10 +300,35 @@ would underflow, and additions that would overflow must preserve or restore
 zero; they must never clamp or wrap into a plausible known total. A known
 count advances and rewinds by the exact transaction delta.
 
+### `RCV-14`: Checkpoint reconcile against the durable head
+
+The checkpoint publisher freezes the published state, which always trails or
+meets the durable head: publication follows the batch. Before writing, the
+publisher loads the head and refuses a checkpoint whose tip is at or above
+the head without being certified by it. A tip below the head is the
+committed-but-unpublished gap a crash can leave; checkpointing the older
+state is harmless and keeps the node operating until replay closes the gap.
+
 ## Proven by
 
-- `crates/chainstate/src/transition.rs` (planned): owns the durable root, the
-  ordered commit protocol, and the publication fence.
+- `crates/node/src/apply/durable.rs` (existing): owns the durable-head
+  advance for connect, group, and disconnect commits, the lineage fence, and
+  the boot reconciliation of the stored head.
+- `crates/node/src/apply/connect.rs` and
+  `crates/node/src/apply/disconnect.rs` (existing): run the `RCV-02` tail —
+  sync, one atomic batch, derived journal emission, then publication — and
+  retire the planned `crates/chainstate/src/transition.rs` row; the durable
+  root is owned where the mutation authority lives (`ARCH-07`).
+- `crates/storage/src/durable_head.rs` (existing): owns the head record
+  codec, the encoded-head fence, and the atomic batch contents.
+- `crates/node/tests/overhaul_durable_head.rs` (existing): the `RCV-04`
+  fault matrix for the durable head — every `PersistFault` at the
+  connect-shaped and disconnect-shaped batch boundaries, fail-closed
+  startup on a corrupted head row, durability before publication,
+  commit-id monotonicity across restarts, and body reachability through
+  the real block files.
+- `crates/storage/tests/durable_head_store.rs` (existing): backend-level
+  reopen, fence, and fault laws for the head store.
 - `crates/chainstate/src/recovery.rs` (planned): owns schema admission,
   `incompatible_schema` refusal, and `CURRENT_SCHEMA` increment logic.
 - `crates/node/tests/overhaul_crash_matrix.rs` (planned): exercises the
@@ -295,7 +340,7 @@ count advances and rewinds by the exact transaction delta.
   `RCV-05`, `RCV-08`, and bounded disconnect and reorg memory.
 - `crates/node/tests/overhaul_checkpoint_independence.rs` (planned):
   validates fresh replay, schema refusal, and checkpoint authority removal.
-- `crates/storage/tests/overhaul_atomic_durability.rs` (planned): tests the
+- `crates/storage/tests/overhaul_atomic_durability.rs` (existing): tests the
   storage-level prior-or-whole-proposed rule and durable batch completion.
 - `crates/node/src/txindex/recovery_tests.rs` (existing):
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`

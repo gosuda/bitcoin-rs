@@ -4,8 +4,10 @@ use super::ChainChangeProof;
 use super::Chainstate;
 use super::DisconnectOutcome;
 use super::DisconnectPlan;
+use super::durable::commit_disconnect_head;
 use super::publication::begin_applied_publication;
 use super::publication::rewind_chain_tx_count;
+use super::publication::rewound_chain_tx_count;
 use super::publication::tx_count_delta_for;
 use crate::apply::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -202,18 +204,26 @@ pub(super) fn disconnect_block_admitted(
             })
         })?;
 
-    {
-        let _publication = begin_applied_publication(handles);
-        handles
-            .applied_tip
-            .store(Some(Arc::new(parent_tip.clone())));
-        handles.chain_events.record(
-            crate::state::HintKind::Disconnected,
-            parent_tip.height,
-            parent_tip.hash,
-        );
-        rewind_chain_tx_count(handles, tx_count_delta);
-    }
+    // The rollback finished in memory; make it durably authoritative before
+    // anything publishes it. The marker moves to `RolledBack` first — its
+    // own durable write, unchanged in ownership, still owed a checkpoint —
+    // then the durable head advances its commit id onto the parent tip: a
+    // reorg may lower the height, never the commit id. An `Err` from the
+    // head batch is not a rollback receipt, so like every failure past the
+    // undo it is fatal and recovery owns the reconciliation.
+    handles
+        .undo_store
+        .complete_disconnect(height, block_hash)
+        .map_err(|error| {
+            poison(crate::DisconnectError::Fatal {
+                hash: block_hash,
+                height,
+                source: Box::new(ApplyError::UndoPersistence(error)),
+            })
+        })?;
+    // The journal follows the durable head, never leads it: rewind the
+    // derived journal onto the parent first, then advance the head, so a
+    // kill between the two leaves the head as the high-water mark.
     let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
         let rewind_result = {
             let mut journal = journal.lock();
@@ -238,20 +248,33 @@ pub(super) fn disconnect_block_admitted(
             }
         }
     });
+    let parent = parent_tip.clone();
+    commit_disconnect_head(
+        handles,
+        &parent,
+        block_hash,
+        rewound_chain_tx_count(handles, tx_count_delta),
+    )
+    .map_err(|error| {
+        poison(crate::DisconnectError::Fatal {
+            hash: block_hash,
+            height,
+            source: Box::new(error),
+        })
+    })?;
 
-    // The rollback finished in memory, so the marker moves to `RolledBack`.
-    // It stays set: a checkpoint has not captured this yet.
-    handles
-        .undo_store
-        .complete_disconnect(height, block_hash)
-        .map_err(|error| {
-            poison(crate::DisconnectError::MarkerStuck {
-                hash: block_hash,
-                height,
-                source: Box::new(ApplyError::UndoPersistence(error)),
-            })
-        })?;
-
+    {
+        let _publication = begin_applied_publication(handles);
+        handles
+            .applied_tip
+            .store(Some(Arc::new(parent_tip.clone())));
+        handles.chain_events.record(
+            crate::state::HintKind::Disconnected,
+            parent_tip.height,
+            parent_tip.hash,
+        );
+        rewind_chain_tx_count(handles, tx_count_delta);
+    }
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {

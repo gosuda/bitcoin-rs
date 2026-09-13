@@ -30,6 +30,11 @@ pub use trait_::{
 
 pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
 
+pub use durable_head::{
+    BodyExtent, CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
+    KvDurableHeadStore,
+};
+
 #[cfg(feature = "fjall")]
 pub use fjall_impl::FjallStore;
 
@@ -99,6 +104,8 @@ pub mod block_file;
 pub mod cache_budget;
 /// Logical column-family names shared by all storage backends.
 pub mod column_families;
+/// Durable chain head record and its atomic commit boundary.
+pub mod durable_head;
 /// Storage error type.
 pub mod error;
 /// Custody-grade logical and physical storage-footprint ledgers.

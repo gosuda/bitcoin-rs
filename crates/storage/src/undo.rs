@@ -222,14 +222,12 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
     /// visible to later reads in this process and lets the checkpoint flush
     /// make it durable, which is what `disconnect_block` needs and all it needs.
     ///
-    /// This is not crash-safe, and neither is the UTXO commit beside it: no
-    /// part of block connection fsyncs. An fsync on this write alone would cost
-    /// one per connected block and still leave the commit it describes
-    /// unrecoverable, so it would buy a slower node and no guarantee.
-    ///
-    /// Closing the gap needs a crash-recovery path that re-applies the blocks
-    /// between the last durable state and the tip. The node has no such path
-    /// today, so do not cite one here.
+    /// Deferred is correct because the durable-head commit is the receipt
+    /// that makes this row authoritative: the apply path flushes it together
+    /// with the head row in one atomic batch (`RCV-02`), and the head's
+    /// `undo_extent` names it only from that receipt on. Writing it earlier
+    /// keeps it readable for planning; it is an orphan tail, safely
+    /// discarded, until the head names it.
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         let mut batch = self.store.new_batch();
         batch.put(

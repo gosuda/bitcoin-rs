@@ -375,6 +375,17 @@ impl FlatFileBlockStore {
         self.writer.lock().file_no
     }
 
+    /// Returns the first byte offset in the current file that the next
+    /// append will write to.
+    ///
+    /// Together with [`Self::current_file_number`] this is the append cursor
+    /// a durable head names: every frame at or below the cursor was written
+    /// through this store, and [`Self::sync`] makes all of it durable.
+    #[must_use]
+    pub fn append_offset(&self) -> u64 {
+        self.writer.lock().append_offset
+    }
+
     /// Returns the path of a numbered flat file.
     #[must_use]
     pub fn file_path(&self, file_no: u32) -> PathBuf {
