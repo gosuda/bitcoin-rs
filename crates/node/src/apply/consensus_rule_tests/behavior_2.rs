@@ -294,6 +294,7 @@ fn every_validation_context_mismatch_rebuilds_from_live_utxo()
             Some(ProvenApply::Proven(proof)),
             BlockProvenance::Network,
             &chain_proof,
+            super::super::window::PublishMode::Now,
         ) else {
             panic!("a mismatched proof must re-read the now-missing live prevout");
         };

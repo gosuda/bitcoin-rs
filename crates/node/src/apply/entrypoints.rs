@@ -11,6 +11,7 @@ use super::WindowApplyDisposition;
 use super::WindowApplyError;
 use super::connect::apply_block_admitted;
 use super::connect::apply_block_inner;
+use super::window::PublishMode;
 use crate::apply::error::ApplyError;
 use bitcoin_rs_primitives::Block;
 use std::sync::atomic::Ordering;
@@ -174,6 +175,7 @@ impl Chainstate {
             None,
             BlockProvenance::Network,
             ApplyIntent::Propose,
+            PublishMode::Now,
         )? {
             ApplyFinish::Proposed => Ok(()),
             ApplyFinish::Committed(_) => {

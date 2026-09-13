@@ -357,6 +357,7 @@ fn a_window_skips_scripts_for_assume_valid_blocks_and_proves_nothing_for_them()
         Some(skipped),
         BlockProvenance::Network,
         &proof,
+        super::super::window::PublishMode::Now,
     );
     assert!(
         matches!(

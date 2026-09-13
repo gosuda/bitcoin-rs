@@ -110,11 +110,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use window::PublishMode;
 use window::apply_window_admitted;
 #[cfg(test)]
 use window::is_permanent_apply_error;
 #[cfg(test)]
 use window::prove_window;
+pub use window::{DURABLE_HEAD_GROUP_BLOCKS, DURABLE_HEAD_GROUP_MAX_BYTES};
 
 /// Typed chainstate mutation failures.
 pub mod error;
@@ -624,6 +626,7 @@ impl<'a> ChainTransition<'a> {
             None,
             BlockProvenance::Network,
             &self.proof,
+            PublishMode::Now,
         )
     }
 
@@ -654,6 +657,7 @@ impl<'a> ChainTransition<'a> {
             None,
             BlockProvenance::LocalReplay,
             &self.proof,
+            PublishMode::Now,
         )
     }
 

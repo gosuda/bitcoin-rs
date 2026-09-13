@@ -219,6 +219,71 @@ fn stable_generation_is_even_after_window() {
 }
 
 #[test]
+fn a_window_spans_multiple_durable_groups_in_order() {
+    let (handles, genesis, _genesis_hash) = setup_regtest_with_genesis();
+
+    // One block past the group cap, so the window crosses a group boundary
+    // mid-verification and must land two durable commits.
+    let mut blocks = Vec::with_capacity(super::DURABLE_HEAD_GROUP_BLOCKS + 1);
+    let mut parent = genesis.block_hash();
+    for index in 0..=super::DURABLE_HEAD_GROUP_BLOCKS {
+        let seed = u8::try_from(index).unwrap_or(u8::MAX);
+        let block =
+            mined_block_with_prev_hash_and_transactions(parent, vec![coinbase_transaction(seed)])
+                .unwrap_or_else(|error| panic!("mine block {index}: {error}"));
+        parent = block.block_hash();
+        blocks.push(block);
+    }
+    let serialized: Vec<bytes::Bytes> = blocks
+        .iter()
+        .map(|b| bytes::Bytes::from(super::consensus_bytes(b)))
+        .collect();
+    let block_refs: Vec<&bitcoin_rs_primitives::Block> = blocks.iter().collect();
+
+    let committed = handles
+        .apply_window(&block_refs, &serialized)
+        .unwrap_or_else(|error| panic!("window succeeds: {error}"));
+
+    assert_eq!(
+        committed.len(),
+        super::DURABLE_HEAD_GROUP_BLOCKS + 1,
+        "every block of both groups commits"
+    );
+    let first_group = committed[0].commit_id;
+    assert_eq!(
+        committed[super::DURABLE_HEAD_GROUP_BLOCKS - 1].commit_id,
+        first_group,
+        "the capped first group shares one prefix commit id"
+    );
+    assert_eq!(
+        committed[super::DURABLE_HEAD_GROUP_BLOCKS].commit_id,
+        first_group + 1,
+        "the block past the cap lands in the next commit"
+    );
+    let head = handles
+        .durable_head
+        .load()
+        .unwrap_or_else(|error| panic!("head loads: {error}"))
+        .unwrap_or_else(|| panic!("a committed window leaves a durable head"));
+    assert_eq!(head.commit_id, first_group + 1);
+    let tip_height = u32::try_from(super::DURABLE_HEAD_GROUP_BLOCKS + 1).unwrap_or(u32::MAX);
+    assert_eq!(head.height, tip_height);
+    assert_eq!(
+        head.tip,
+        Hash256::from(blocks[super::DURABLE_HEAD_GROUP_BLOCKS].block_hash())
+    );
+    assert_eq!(
+        handles
+            .applied_tip
+            .load_full()
+            .as_deref()
+            .map(|tip| tip.height),
+        Some(tip_height),
+        "the flushed prefix publishes up to the window tip"
+    );
+}
+
+#[test]
 fn chain_change_proof_finish_restores_even_generation() {
     let (handles, _genesis, _genesis_hash) = setup_regtest_with_genesis();
 

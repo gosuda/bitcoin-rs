@@ -2,8 +2,24 @@
 
 use super::AppliedPublication;
 use super::Chainstate;
+use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Block;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+/// Publishes one connected block: the applied tip, the chain event, and the
+/// advanced chain tx count, under one seqlock publication.
+///
+/// Extracted so the grouped window path can publish a committed prefix in
+/// order after its durable batch — the exact values the batch certified.
+pub(super) fn publish_connect(handles: &Chainstate, tip: &TipSnapshot, tx_count_delta: u64) {
+    let _publication = begin_applied_publication(handles);
+    handles.applied_tip.store(Some(Arc::new(tip.clone())));
+    handles
+        .chain_events
+        .record(crate::state::HintKind::Connected, tip.height, tip.hash);
+    advance_chain_tx_count(handles, tip.height, tx_count_delta);
+}
 
 pub(super) fn begin_applied_publication(handles: &Chainstate) -> AppliedPublication<'_> {
     let previous = handles.applied_seq.fetch_add(1, Ordering::AcqRel);
@@ -47,7 +63,17 @@ pub(super) fn advanced_chain_tx_count(
     height: u32,
     tx_count_delta: u64,
 ) -> u64 {
-    let known = handles.chain_tx_count.load(Ordering::Relaxed);
+    advanced_chain_tx_count_from(
+        handles.chain_tx_count.load(Ordering::Relaxed),
+        height,
+        tx_count_delta,
+    )
+}
+
+/// The pure form, from an explicit known count: the grouped window path
+/// advances from the staged prefix's count, which publication has not
+/// stored yet.
+pub(super) fn advanced_chain_tx_count_from(known: u64, height: u32, tx_count_delta: u64) -> u64 {
     if known == 0 && height != 0 {
         return 0;
     }

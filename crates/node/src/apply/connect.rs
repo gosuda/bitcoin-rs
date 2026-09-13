@@ -17,14 +17,17 @@ use super::contextual::check_pow_limit_and_continuity;
 use super::contextual::check_unseen_header_timestamp;
 use super::contextual::compact_is_met_by;
 use super::contextual::compute_verify_flags;
-use super::durable::{ConnectCommitFacts, commit_connect_head, sync_appended_blocks};
+use super::durable::{
+    ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
+};
 use super::prepare::prepare_apply;
 use super::prepare::verify_block_transactions;
-use super::publication::advance_chain_tx_count;
 use super::publication::advanced_chain_tx_count;
-use super::publication::begin_applied_publication;
+use super::publication::advanced_chain_tx_count_from;
+use super::publication::publish_connect;
 use super::publication::tx_count_delta_for;
 use super::scratch::ApplyScratch;
+use super::window::{PendingBlockCommit, PublishMode};
 use crate::apply::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
@@ -34,9 +37,11 @@ use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::consensus_bytes;
+use bitcoin_rs_storage::CommitRecords;
 use bitcoin_rs_utxo::connect::BlockChangeError;
 use bitcoin_rs_utxo::connect::build_block_changes;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Applies one serialized block while the caller holds admission and `chain_transition`.
 ///
@@ -54,6 +59,7 @@ pub(super) fn apply_block_with_serialized_admitted(
         None,
         BlockProvenance::Network,
         proof,
+        PublishMode::Now,
     )
 }
 
@@ -71,6 +77,7 @@ pub(super) fn apply_block_inner(
         None,
         provenance,
         transition.proof(),
+        PublishMode::Now,
     );
     if result.is_ok() {
         let _ = transition.finish();
@@ -87,6 +94,7 @@ pub(super) fn apply_committed_block_admitted<'b>(
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     _proof: &ChainChangeProof<'_>,
+    publication: PublishMode<'_>,
 ) -> core::result::Result<ConnectOutcome, ApplyError> {
     match apply_block_admitted(
         handles,
@@ -95,6 +103,7 @@ pub(super) fn apply_committed_block_admitted<'b>(
         proven,
         provenance,
         ApplyIntent::Commit,
+        publication,
     )? {
         ApplyFinish::Committed(outcome) => Ok(outcome),
         ApplyFinish::Proposed => unreachable!("commit intent returns a committed tip"),
@@ -118,11 +127,18 @@ pub(super) fn apply_block_admitted<'b>(
     proven: Option<ProvenApply<'b>>,
     provenance: BlockProvenance,
     intent: ApplyIntent,
+    publication: PublishMode<'_>,
 ) -> core::result::Result<ApplyFinish, ApplyError> {
     let total_started = quanta::Instant::now();
     let block_hash = block.block_hash().0;
     let prev_hash = block.header.prev_blockhash.0;
-    let (prior, height) = applied_predecessor(handles, block_hash, prev_hash)?;
+    let (prior, height) = match &publication {
+        PublishMode::Grouped(group) => match group.predecessor(prev_hash)? {
+            Some((tip, height)) => (Some(tip), height),
+            None => applied_predecessor(handles, block_hash, prev_hash)?,
+        },
+        PublishMode::Now => applied_predecessor(handles, block_hash, prev_hash)?,
+    };
     if intent == ApplyIntent::Commit
         && let Some(journal) = &handles.journal
     {
@@ -447,36 +463,6 @@ pub(super) fn apply_block_admitted<'b>(
         .record(utxo_commit_dur.as_secs_f64());
     utxo_commit_result.map_err(ApplyError::UtxoCommit)?;
 
-    // RCV-02 steps 3–4: certify, then commit. `sync` makes the appended
-    // body bytes, the blocks directory, and every deferred index row
-    // durable; the durable-head batch then names them with one
-    // `write_durable_if` receipt — head, undo record, and locator row
-    // together. `Ok` is the receipt for the whole prefix (`INV-06`: the
-    // head never names bytes that are not already durable). An `Err` is
-    // not a rollback receipt: like a `UtxoCommit` refusal it leaves the
-    // caller to reconcile through recovery.
-    let durable_sync_started = quanta::Instant::now();
-    sync_appended_blocks(handles)?;
-    metrics::histogram!("node.apply_block.durable_sync_seconds")
-        .record(durable_sync_started.elapsed().as_secs_f64());
-    let durable_commit_started = quanta::Instant::now();
-    let commit_id = commit_connect_head(
-        handles,
-        &ConnectCommitFacts {
-            prev_hash,
-            tip: block_hash,
-            height,
-            undo_record: &undo_record,
-            chain_tx_count_after: advanced_chain_tx_count(
-                handles,
-                height,
-                tx_count_delta_for(block),
-            ),
-        },
-    )?;
-    metrics::histogram!("node.apply_block.durable_commit_seconds")
-        .record(durable_commit_started.elapsed().as_secs_f64());
-
     // §2.3 linearization point for the chainstate journal (issue #230): the
     // in-memory UTXO commit above is the commit of record; everything the
     // journal needs to reconstruct this block's semantic delta is still
@@ -605,24 +591,72 @@ pub(super) fn apply_block_admitted<'b>(
         total_us = total_dur.as_micros(),
         "apply_block: profile"
     );
-    {
-        let _publication = begin_applied_publication(handles);
-        handles.applied_tip.store(Some(Arc::new(tip.clone())));
-        handles
-            .chain_events
-            .record(crate::state::HintKind::Connected, tip.height, tip.hash);
-        advance_chain_tx_count(handles, height, tx_count_delta_for(block));
-    }
     let (txids, raw_txs) = scratch.into_payloads();
-    Ok(ApplyFinish::Committed(ConnectOutcome {
-        tip,
-        commit_id,
+    let mut outcome = ConnectOutcome {
+        tip: tip.clone(),
+        commit_id: 0,
         height,
         hash: block_hash,
         txids,
         block_bytes,
         raw_txs,
-    }))
+    };
+    match publication {
+        PublishMode::Now => {
+            // RCV-02 steps 3–4: certify, then commit. `sync` makes the
+            // appended body bytes, the blocks directory, and every deferred
+            // index row durable; the durable-head batch then names them with
+            // one `write_durable_if` receipt — head, undo record, and
+            // locator row together. `Ok` is the receipt for the whole
+            // prefix (`INV-06`: the head never names bytes that are not
+            // already durable). An `Err` is not a rollback receipt: like a
+            // `UtxoCommit` refusal it leaves the caller to reconcile
+            // through recovery.
+            let durable_sync_started = quanta::Instant::now();
+            sync_appended_blocks(handles)?;
+            metrics::histogram!("node.apply_block.durable_sync_seconds")
+                .record(durable_sync_started.elapsed().as_secs_f64());
+            let undo_rows = vec![(height, block_hash, undo_record.as_slice())];
+            let body_rows = stored_body_row(handles, height, block_hash)?
+                .into_iter()
+                .collect();
+            let durable_commit_started = quanta::Instant::now();
+            let commit_id = commit_connect_head(
+                handles,
+                &ConnectCommitFacts {
+                    prev_hash,
+                    tip: block_hash,
+                    height,
+                    chain_tx_count_after: advanced_chain_tx_count(handles, height, tx_count_delta),
+                    undo_extent: Some((height, block_hash)),
+                },
+                &CommitRecords {
+                    undo_rows,
+                    body_rows,
+                },
+            )?;
+            metrics::histogram!("node.apply_block.durable_commit_seconds")
+                .record(durable_commit_started.elapsed().as_secs_f64());
+            publish_connect(handles, &tip, tx_count_delta);
+            outcome.commit_id = commit_id;
+        }
+        PublishMode::Grouped(group) => {
+            // The window buffers the durable work: facts ride in the group
+            // until its boundary, where one sync and one head batch commit
+            // the whole verified prefix and the prefix publishes in order.
+            let known = group
+                .chain_tx_count_base()
+                .unwrap_or_else(|| handles.chain_tx_count.load(Ordering::Relaxed));
+            group.stage(PendingBlockCommit {
+                outcome: outcome.clone(),
+                undo_record,
+                tx_count_delta,
+                chain_tx_count_after: advanced_chain_tx_count_from(known, height, tx_count_delta),
+                prev_hash,
+            });
+        }
+    }
+    Ok(ApplyFinish::Committed(outcome))
 }
 
 pub(super) fn applied_predecessor(

@@ -24,22 +24,25 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 
 /// Facts of one connected block that its durable head commit names.
-pub(super) struct ConnectCommitFacts<'a> {
-    /// Parent the durable head must currently name. A stored head naming any
-    /// other tip means the durable chain and the in-memory chain have
-    /// diverged (a crash landed the batch but not the publication, and
-    /// recovery has not replayed the gap yet): refuse rather than advance a
-    /// head whose lineage would break.
+pub(super) struct ConnectCommitFacts {
+    /// Parent the durable head must currently name — for a group, the
+    /// parent of its first block. A stored head naming any other tip means
+    /// the durable chain and the in-memory chain have diverged (a crash
+    /// landed the batch but not the publication, and recovery has not
+    /// replayed the gap yet): refuse rather than advance a head whose
+    /// lineage would break.
     pub prev_hash: Hash256,
-    /// The block's hash: the tip this commit certifies.
+    /// The prefix tip this commit certifies.
     pub tip: Hash256,
     /// Height of `tip`.
     pub height: u32,
-    /// The block's encoded undo record, landed in the same receipt.
-    pub undo_record: &'a [u8],
-    /// Cumulative chain transaction count after this block, matching what
+    /// Cumulative chain transaction count at `tip`, matching what
     /// publication will store.
     pub chain_tx_count_after: u64,
+    /// The newest undo row `(height, hash)` this commit certifies: a
+    /// connect or group names its last block, a disconnect keeps the prior
+    /// extent.
+    pub undo_extent: Option<(u32, Hash256)>,
 }
 
 /// Makes the appended block data durable before the head may name it.
@@ -63,7 +66,8 @@ pub(super) fn sync_appended_blocks(handles: &Chainstate) -> Result<(), ApplyErro
 /// on disk and keeps `commit_id` strictly monotonic (`P3`).
 pub(super) fn commit_connect_head(
     handles: &Chainstate,
-    facts: &ConnectCommitFacts<'_>,
+    facts: &ConnectCommitFacts,
+    records: &CommitRecords<'_>,
 ) -> Result<u64, ApplyError> {
     let prior = handles
         .durable_head
@@ -77,17 +81,6 @@ pub(super) fn commit_connect_head(
             prev: facts.prev_hash,
         });
     }
-    let body_rows = match handles.block_body_store.as_ref() {
-        Some(store) => {
-            let position = store
-                .block_position(facts.height, facts.tip)
-                .map_err(ApplyError::BlockBodyPersistence)?;
-            position
-                .map(|position| vec![(facts.height, facts.tip, position)])
-                .unwrap_or_default()
-        }
-        None => Vec::new(),
-    };
     let next = DurableHead {
         commit_id: prior.as_ref().map_or(1, |head| head.commit_id + 1),
         height: facts.height,
@@ -97,18 +90,30 @@ pub(super) fn commit_connect_head(
             .block_body_store
             .as_ref()
             .and_then(|store| store.append_cursor()),
-        undo_extent: Some((facts.height, facts.tip)),
-    };
-    let records = CommitRecords {
-        undo_rows: vec![(facts.height, facts.tip, facts.undo_record)],
-        body_rows,
+        undo_extent: facts.undo_extent,
     };
     handles
         .durable_head
-        .commit(prior.as_ref(), &next, &records)
+        .commit(prior.as_ref(), &next, records)
         .map_err(ApplyError::DurableHeadCommit)?;
     metrics::counter!("node.durable_head.commits").increment(1);
     Ok(next.commit_id)
+}
+
+/// Resolves the stored flat-file locator of one committed block, when the
+/// store indexes positions. A group lands one locator row per block.
+pub(super) fn stored_body_row(
+    handles: &Chainstate,
+    height: u32,
+    hash: Hash256,
+) -> Result<Option<(u32, Hash256, bitcoin_rs_storage::BlockFilePosition)>, ApplyError> {
+    let Some(store) = handles.block_body_store.as_ref() else {
+        return Ok(None);
+    };
+    Ok(store
+        .block_position(height, hash)
+        .map_err(ApplyError::BlockBodyPersistence)?
+        .map(|position| (height, hash, position)))
 }
 
 /// Advances the durable head for one disconnected block.
