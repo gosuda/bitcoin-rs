@@ -189,6 +189,11 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     state.publish_checkpoint()?;
     let child = mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_tip = state.apply_block(&child)?;
+    // Contract: docs/contracts/chainstate-journal-v1.md (chainstate-journal-writer/v1.0.0),
+    // JW-DUR-1 requires a durable flush before the head advances and JW-REC-1
+    // requires the record to survive reopen. The 1-second configured deadline
+    // (line 183) plus a 3-second wait provides two deadline periods of slack
+    // before exercising those restart-durability requirements.
     let worker = state.start_chainstate_maintenance()?;
     std::thread::sleep(Duration::from_secs(3));
     state.shutdown().store(true, Ordering::Release);
