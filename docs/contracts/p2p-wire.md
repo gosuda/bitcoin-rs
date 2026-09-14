@@ -41,7 +41,7 @@ This page assigns ownership and cites proof under the
   record (`PeerInfo.best_known_height` plus the accepted header tips retained
   by the live session) and its identity-checked mutation
   (`PeerTable::note_announced_tip`, `PeerTable::note_announced_height`).
-  `crates/node/src/sync.rs` owns the eligibility/ordering consumption
+  `crates/p2p/src/sync.rs` owns the eligibility/ordering consumption
   (`sync_peer_candidate`, `outranks`) and the active-branch filter that
   decides which accepted headers establish credit.
 - Credit is initialized from the handshake `start_height`, raised
@@ -71,9 +71,9 @@ This page assigns ownership and cites proof under the
 ## Live gaps
 
 - **Peer lifecycle boundary**: Header-request planning and getdata fan-out
-  still execute in `crates/node` `BlockSync`. Policy types already live in
-  `crates/p2p`. Moving those remaining executor seams is tracked under #217
-  (open). `P2pService` no longer holds a shadow download window.
+  execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
+  `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
+  holds a shadow download window.
 
 ## Proven by
 
@@ -102,7 +102,7 @@ This page assigns ownership and cites proof under the
   `note_announced_height_raises_monotonically_and_reports_actual_updates`
   pin the identity-checked, monotonic credit mutation and retained tip
   evidence (P2P-03).
-- `crates/node/src/sync.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
+- `crates/p2p/src/sync/tests/transitions_1.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
   (at-tip request eligibility after catch-up, P2P-03/#617) and
   `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
   earn credit on the reselected best chain),

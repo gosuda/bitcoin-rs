@@ -399,7 +399,7 @@ name = "header acceptance on the P2P path"
 parent = "cell.wall"
 concurrency_group = "p2p-sched"
 domains = ["p2p"]
-seams = ["crates/node/src/sync.rs", "crates/chain/src/header_sync.rs"]
+seams = ["crates/p2p/src/sync.rs", "crates/chain/src/header_sync.rs"]
 disposition = "blocked"
 evidence = "Shares apply.header_accept work, different entry. Unmeasured."
 
@@ -410,7 +410,7 @@ name = "peer selection, getheaders/getdata construction, queue-to-writer delay"
 parent = "cell.wall"
 concurrency_group = "p2p-sched"
 domains = ["p2p"]
-seams = ["crates/node/src/sync.rs", "crates/p2p/src/download_window.rs", "crates/p2p/src/dispatch.rs"]
+seams = ["crates/p2p/src/sync.rs", "crates/p2p/src/download_window.rs", "crates/p2p/src/dispatch.rs"]
 histogram = "node.sync.getdata_batch_size"
 disposition = "blocked"
 evidence = "Count bound binds before the byte budget on small historical blocks (#51). Candidate is count-and-byte window, not a constant bump. Needs a #35 product-cell disable-delta."
@@ -433,7 +433,7 @@ name = "staller, timeout, hedge, retry, cooldown, disconnect"
 parent = "cell.wall"
 concurrency_group = "p2p-sched"
 domains = ["p2p"]
-seams = ["crates/p2p/src/download_window.rs", "crates/node/src/sync.rs"]
+seams = ["crates/p2p/src/download_window.rs", "crates/p2p/src/sync.rs"]
 disposition = "blocked"
 evidence = "Required for #35 fixture fidelity. Neutralizing stallers changes the workload."
 

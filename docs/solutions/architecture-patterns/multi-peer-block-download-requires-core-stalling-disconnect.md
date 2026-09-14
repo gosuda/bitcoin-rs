@@ -2,7 +2,7 @@
 title: Multi-peer block download is the only IBD wall-time lever and requires Core-style stalling-disconnect
 date: 2026-06-08
 category: docs/solutions/architecture-patterns
-module: IBD block-download scheduler (window and constants in crates/p2p/src/download_window.rs; BlockSync in crates/node/src/sync.rs)
+module: IBD block-download scheduler (window and constants in crates/p2p/src/download_window.rs; BlockSync in crates/p2p/src/sync.rs)
 problem_type: architecture_pattern
 component: background_job
 severity: high
@@ -32,7 +32,7 @@ tags:
 
 **The design this document prescribes has since landed.** The window scheduler and its
 constants now live in `crates/p2p/src/download_window.rs` (imported by `BlockSync` in
-`crates/node/src/sync.rs`). It carries `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16`,
+`crates/p2p/src/sync.rs`). It carries `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16`,
 `MIN_PEERS_FOR_FANOUT = 8` (matching the default outbound target; the source comment explicitly
 warns against deriving it from `PENDING_BUDGET`), the single-peer deep pipeline as the
 sub-threshold fallback (`PEER_INFLIGHT_BUDGET = PENDING_BUDGET`), window-blocked staller
@@ -178,7 +178,7 @@ PENDING_TIMEOUT = 1 min         // re-request timeout (too slow for a stalled fr
 RECEIVED_BLOCK_BYTE_BUDGET = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE = 128 * 2 MiB
 ```
 
-Scheduler entry points: `BlockSync` (`crates/node/src/sync.rs`), `DownloadWindow::next_peer_request`,
+Scheduler entry points: `BlockSync` (`crates/p2p/src/sync.rs`), `DownloadWindow::next_peer_request`,
 `mark_received` (now a test-only shorthand for `mark_received_from`), `expire_pending`,
 `release_disconnected_peers`, `request_peer_scan_limit` (`crates/p2p/src/download_window.rs`).
 

@@ -169,6 +169,6 @@ Known deltas from Core 31.1:
   Run with `cargo test -p bitcoin-rs-p2p --lib`.
 - **Fuzz**: `fuzz/fuzz_targets/p2p_message.rs` drives every payload decoder named by `COMMANDS` (a missing inventory row is a decoder no fuzz input can reach).
 - **Live lane (cut)**: owned by [`CORE-01` / `CORE-02`](../contracts/core-differential.md). This policy does not restate the Core version, RPC set, or CI job.
-- Node-level reorg is implemented: `crates/node/src/reorg.rs` (`switch_to_branch`, `invalidate_block`) moves the applied tip off a losing branch, and sync calls `switch_to_branch` when a higher-work header branch wins (`crates/node/src/sync.rs`). The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
+- Node-level reorg is implemented: `crates/node/src/reorg.rs` (`switch_to_branch`, `invalidate_block`) moves the applied tip off a losing branch, and sync calls `switch_to_branch` when a higher-work header branch wins (`crates/p2p/src/sync.rs`). The reorg fixture pins the peer-visible part of this at the `ChainQuery` seam — the exact surface `ActiveChainQuery` implements — via `reorg_switches_which_chain_a_peer_sees` (`crates/p2p/tests/core_compat.rs`).
 
 See also [docs/contracts/p2p-wire.md](../contracts/p2p-wire.md) for the contracts index and precedence rule.

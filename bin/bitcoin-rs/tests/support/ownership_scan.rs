@@ -117,9 +117,9 @@ pub(crate) const PEER_TABLE_PATTERNS: &[&str] =
 /// never a lookalike local.
 pub(crate) const AUTHORIZED_PEER_TABLE_CALLS: &[(&str, &str)] = &[
     // Header sync tears down the peer a fault was blamed on.
-    ("crates/node/src/sync/headers.rs", "self.peer_table"),
+    ("crates/p2p/src/sync/headers.rs", "self.peer_table"),
     // Download-window selection drops a stale peer connection.
-    ("crates/node/src/sync/peers.rs", "self.peer_table"),
+    ("crates/p2p/src/sync/peers.rs", "self.peer_table"),
 ];
 
 /// Chainstate transition promotion/lock constructors (ARCH-07).
@@ -878,7 +878,7 @@ mod tests {
             &stems
         ));
         assert!(!is_test_module_file(
-            Path::new("/workspace/crates/node/src/sync/peers.rs"),
+            Path::new("/workspace/crates/p2p/src/sync/peers.rs"),
             &stems
         ));
         assert!(!is_test_module_file(
@@ -976,22 +976,22 @@ mod tests {
                 0,
             ),
             (
-                "/workspace/crates/node/src/sync/headers.rs",
+                "/workspace/crates/p2p/src/sync/headers.rs",
                 "self.peer_table.disconnect_source(source)",
                 0,
             ),
             (
-                "/workspace/crates/node/src/sync/headers.rs",
+                "/workspace/crates/p2p/src/sync/headers.rs",
                 "if self.peer_table.disconnect_source(source) {",
                 0,
             ),
             (
-                "/workspace/crates/node/src/sync/headers.rs",
+                "/workspace/crates/node/src/fake.rs",
                 "xself.peer_table.disconnect_source(source)",
                 1,
             ),
             (
-                "/workspace/crates/node/src/sync/peers.rs",
+                "/workspace/crates/p2p/src/sync/peers.rs",
                 "if !self\n    .peer_table\n    .disconnect_connection(peer_addr, connection_id)\n{\n}",
                 0,
             ),
@@ -1006,7 +1006,7 @@ mod tests {
                 1,
             ),
             (
-                "/workspace/crates/node/src/sync/headers.rs",
+                "/workspace/crates/node/src/fake.rs",
                 "other.peer_table.disconnect_source(source)",
                 1,
             ),

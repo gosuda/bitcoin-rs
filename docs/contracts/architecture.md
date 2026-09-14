@@ -259,9 +259,11 @@ Owners:
   node keeps the `MiningCoordinator` facade and the `tx_ingress` consumer as
   composition.
   `crates/node` still carries leftover domain mechanics: UTXO undo persistence
-  and disconnect markers (`apply.rs`), the node-side sync executor (`sync.rs`
-  driving `p2p::DownloadWindow`), and direct backend construction and cache
-  share dispatch (`state.rs`). `P2pService` no longer holds a second download
+  and disconnect markers (`apply.rs`), while the block-download executor lives
+  in `crates/p2p/src/sync.rs` behind `SyncChain`; node retains the seam
+  implementation for header admission, window commit, branch switch, and
+  genesis bootstrap, plus direct backend construction and cache share dispatch
+  (`state.rs`). `P2pService` no longer holds a second download
   window. Relocating leftover node mechanics into `crates/utxo`,
   `crates/storage`, and `crates/p2p` remains tracked under #217 (open). A
   dedicated `crates/chainstate` waits until journal,
