@@ -171,9 +171,9 @@ mod tests {
 
     use super::{OutputSource, WindowOverlay};
 
-    /// Consensus `MAX_SCRIPT_SIZE`, pinned here so the boundary test cannot
-    /// drift from the value the apply path passes.
-    const MAX_SCRIPT_SIZE: usize = 10_000;
+    /// Test-local script-size limit; the overlay treats it as an opaque bound
+    /// and the apply path supplies the consensus value.
+    const MAX_SCRIPT_SIZE: usize = 64;
 
     fn none() -> hashbrown::HashSet<OutPoint> {
         hashbrown::HashSet::new()
@@ -284,8 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn script_size_boundary_matches_the_committed_utxo_set()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn script_size_boundary_is_inclusive() -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
         let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let accepted = paying_tx(vec![0x51; MAX_SCRIPT_SIZE], 1);
@@ -305,13 +304,13 @@ mod tests {
             overlay
                 .get_entry(&OutPoint::new(accepted_txid, 0))
                 .is_some(),
-            "MAX_SCRIPT_SIZE must remain spendable"
+            "a script at the limit must remain spendable"
         );
         assert!(
             overlay
                 .get_entry(&OutPoint::new(rejected_txid, 0))
                 .is_none(),
-            "MAX_SCRIPT_SIZE + 1 must remain absent"
+            "a script over the limit must remain absent"
         );
         Ok(())
     }
