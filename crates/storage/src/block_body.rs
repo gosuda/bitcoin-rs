@@ -205,6 +205,30 @@ fn decode_body_position(
         .transpose()
 }
 
+/// Advances a prefetched body cursor after validating the request position.
+///
+/// Keeping this transition here ensures all readers use the same ordering and
+/// exhaustion contract.
+pub fn consume_prefetched_position(
+    next: &mut usize,
+    expected: Option<(u32, Hash256)>,
+    height: u32,
+    hash: Hash256,
+) -> Result<(), StorageError> {
+    let Some((expected_height, expected_hash)) = expected else {
+        return Err(StorageError::InvalidOperation(
+            "prefetched body positions are exhausted",
+        ));
+    };
+    if expected_height != height || expected_hash != hash {
+        return Err(StorageError::InvalidOperation(
+            "prefetched body position consumed out of order",
+        ));
+    }
+    *next += 1;
+    Ok(())
+}
+
 struct IndexedBlockBodyReader<'a> {
     index: Box<dyn KvSnapshot + 'a>,
     files: FlatFileBlockReader,
@@ -261,18 +285,15 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
                 decode_body_position(height, encoded.as_deref())?
             }
             PositionLookup::Prefetched { entries, next } => {
-                let Some(&(expected_height, expected_hash, position)) = entries.get(*next) else {
-                    return Err(StorageError::InvalidOperation(
-                        "prefetched body positions are exhausted",
-                    ));
-                };
-                if expected_height != height || expected_hash != hash {
-                    return Err(StorageError::InvalidOperation(
-                        "prefetched body position consumed out of order",
-                    ));
-                }
-                *next += 1;
-                position
+                let position = entries.get(*next).copied();
+                consume_prefetched_position(
+                    next,
+                    position.map(|(entry_height, entry_hash, _)| (entry_height, entry_hash)),
+                    height,
+                    hash,
+                )?;
+                position.expect("validated prefetched position")
+                    .2
             }
         };
         let Some(position) = position else {

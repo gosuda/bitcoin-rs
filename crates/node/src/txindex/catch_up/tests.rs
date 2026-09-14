@@ -1,8 +1,9 @@
 use super::*;
 use bitcoin_rs_storage::StorageError;
+use bitcoin_rs_storage::block_body::consume_prefetched_position;
 
-/// Mirrors `IndexedBlockBodyReader`'s prefetched cursor: positions are
-/// consumed strictly in prefetch order and every load advances it.
+/// Body bytes for a prefetched position. Cursor advancement is delegated to
+/// the storage reader's authoritative implementation.
 struct CursorReader {
     entries: Vec<(u32, Hash256, Vec<u8>)>,
     next: usize,
@@ -14,18 +15,17 @@ impl BlockBodyReader for CursorReader {
         height: u32,
         hash: Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        let Some((expected_height, expected_hash, body)) = self.entries.get(self.next) else {
-            return Err(StorageError::InvalidOperation(
-                "prefetched body positions are exhausted",
-            ));
-        };
-        if *expected_height != height || *expected_hash != hash {
-            return Err(StorageError::InvalidOperation(
-                "prefetched body position consumed out of order",
-            ));
-        }
-        self.next += 1;
-        Ok(Some(body.clone()))
+        let position = self
+            .entries
+            .get(self.next)
+            .map(|(entry_height, entry_hash, body)| (*entry_height, *entry_hash, body.clone()));
+        consume_prefetched_position(
+            &mut self.next,
+            position.map(|(entry_height, entry_hash, _)| (entry_height, entry_hash)),
+            height,
+            hash,
+        )?;
+        Ok(Some(position.expect("validated prefetched position").2))
     }
 }
 
