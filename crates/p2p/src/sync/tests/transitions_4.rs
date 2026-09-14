@@ -16,7 +16,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders()
 
     // Seed only the invalid peer so the first tick routes a GetHeaders to
     // it and arms the pending gate against its address.
-    let invalid_lease = bitcoin_rs_p2p::PeerLease::new(invalid_tx);
+    let invalid_lease = crate::PeerLease::new(invalid_tx);
     peers.register(invalid_peer, invalid_lease.clone());
     peers.publish_info(
         invalid_peer,
@@ -60,7 +60,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders()
     );
 
     // Re-introduce a healthy peer; the next getheaders must rotate to it.
-    let other_lease = bitcoin_rs_p2p::PeerLease::new(other_tx);
+    let other_lease = crate::PeerLease::new(other_tx);
     peers.register(other_peer, other_lease.clone());
     peers.publish_info(other_peer, &other_lease, synthetic_peer(other_peer, 8));
     sync.tick();
@@ -120,11 +120,11 @@ fn disconnected_outbound_channel_does_not_mark_blocks_pending()
     register_info(&peers, synthetic_peer(addr, 100));
     let (tx, rx) = unbounded::<Message>();
     drop(rx);
-    peers.register(addr, bitcoin_rs_p2p::PeerLease::new(tx));
+    peers.register(addr, crate::PeerLease::new(tx));
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     assert_eq!(sync.download_window.lock().pending_len(), 0);
     Ok(())
 }
@@ -145,7 +145,7 @@ fn tick_fanout_distributes_window_front_first_across_eligible_peers()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     // Effective fan-out stripe (mirrors `effective_peer_inflight`).
     let cap = super::super::PENDING_BUDGET
         .div_ceil(super::super::MIN_PEERS_FOR_FANOUT)
@@ -250,7 +250,7 @@ fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::erro
     );
 
     for block in &blocks[..4] {
-        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone());
+        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -300,8 +300,8 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
 
     sync.tick();
     let applied_tip = sync
-        .handles
-        .applied_tip
+        .chain
+        .applied_tip()
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
     let next_apply_height = applied_tip
@@ -376,14 +376,12 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
     };
     assert_eq!(
         witness_block_inventory(inventory)?,
-        alloc::vec![blocks[0].block_hash(), blocks[1].block_hash()]
+        std::vec![blocks[0].block_hash(), blocks[1].block_hash()]
     );
 
     // The successor stages; byte headroom hits zero (R + P at the byte
     // budget) with the front still pending to the staller.
-    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-        blocks[1].clone(),
-    ))?;
+    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
     sync.tick();
     {
         let window = sync.download_window.lock();
@@ -409,12 +407,10 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
     };
     assert_eq!(
         witness_block_inventory(retry)?,
-        alloc::vec![blocks[0].block_hash()]
+        std::vec![blocks[0].block_hash()]
     );
 
-    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-        blocks[0].clone(),
-    ))?;
+    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
     sync.tick();
     // The re-request narrowed the expected-apply cache to the front, so
     // the staged successor drains on the following tick's tree walk.

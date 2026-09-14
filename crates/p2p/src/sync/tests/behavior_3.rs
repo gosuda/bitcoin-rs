@@ -24,7 +24,7 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected headroom-clamped getdata").into());
     };
@@ -177,7 +177,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
     let _ = next_getdata(&owner_rx)?;
     let _ = next_getdata(&alternate_rx)?;
     for block in &blocks[..4] {
-        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone());
+        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -196,7 +196,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
         ));
     }
     for block in &blocks[4..8] {
-        let mut inbound = bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone());
+        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
         inbound.source = Some(current_source(&peers, alternate));
         blocks_tx.send(inbound)?;
     }
@@ -325,8 +325,8 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     }
 
     let applied = sync
-        .handles
-        .applied_tip
+        .chain
+        .applied_tip()
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
     let far_future = Instant::now() + Duration::from_mins(1);
@@ -393,7 +393,7 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
 
     // Tick 1: eight eligible peers engage fan-out and stripe the window.
     sync.tick();
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     assert!(sync.download_window.lock().fanout_active());
     for (idx, rx) in rxs.iter().enumerate() {
         let Message::GetData(inventory) = rx.try_recv()? else {
@@ -408,9 +408,9 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
     // The healthy peers deliver their stripes; the front-stripe owner
     // stalls past the pending timeout — eligible peers dip 8 -> 7.
     for height in 3..=16_u32 {
-        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-            header_chain_block(&expected, height)?,
-        ))?;
+        blocks_tx.send(crate::InboundBlock::from_decoded(header_chain_block(
+            &expected, height,
+        )?))?;
     }
     std::thread::sleep(Duration::from_millis(300));
     sync.tick();

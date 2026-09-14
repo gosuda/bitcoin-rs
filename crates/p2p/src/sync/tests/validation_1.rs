@@ -24,7 +24,7 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn s
         blocks.iter().map(Block::block_hash).collect::<Vec<_>>()
     );
     for block in &blocks {
-        blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
+        blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
     }
     sync.tick();
     assert_eq!(
@@ -40,9 +40,7 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn s
         "the replay must be unsolicited after its request was applied"
     );
 
-    blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-        blocks[0].clone(),
-    ))?;
+    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
     sync.tick();
 
     assert!(!sync.block_stager.lock().contains(&stale_hash));
@@ -69,13 +67,13 @@ fn received_only_state_uses_scan_path_without_duplicate_request()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected getdata").into());
     };
     assert_eq!(
         witness_block_inventory(inventory)?,
-        alloc::vec![expected[0], expected[2]]
+        std::vec![expected[0], expected[2]]
     );
     assert!(rx.try_recv().is_err());
     Ok(())

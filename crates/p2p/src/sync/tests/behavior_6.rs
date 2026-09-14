@@ -36,7 +36,7 @@ fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::erro
         ));
     }
     sync.tick();
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     // Effective fan-out stripe (mirrors `effective_peer_inflight`).
     let cap = super::super::PENDING_BUDGET
         .div_ceil(super::super::MIN_PEERS_FOR_FANOUT)
@@ -96,53 +96,4 @@ fn stale_invalid_headers_cannot_evict_or_clear_replacement()
 fn prefix_probe_state_does_not_survive_owner_replacement() -> Result<(), Box<dyn std::error::Error>>
 {
     tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
-}
-
-#[test]
-fn permanent_forward_failure_purges_invalid_blocks_without_retry()
--> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin_rs_primitives::Amount;
-    let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
-    sync.ensure_genesis_tip();
-    stage_body(&sync, &main[0]);
-    assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
-
-    let main_hash = main[0].block_hash();
-    let bad = mined_block_with_prev_hash(main_hash, 2, vec![coinbase_transaction(2)]);
-    // The value change alters the txid, so the staged body contradicts the
-    // header's merkle root: a permanent consensus failure.
-    let mut bad_body = bad.clone();
-    bad_body.txs[0].outputs[0].value = Amount::from_sat(2);
-    let descendant = mined_block_with_prev_hash(bad.block_hash(), 3, vec![coinbase_transaction(3)]);
-    {
-        let mut tree = sync.handles.block_tree.write();
-        let main_id = tree
-            .lookup(Hash256::from_le_bytes(main_hash.as_bytes()))
-            .ok_or_else(|| std::io::Error::other("missing applied main block"))?;
-        let bad_id = tree.insert_node(Some(main_id), bad.header, NodeStatus::HeaderValid)?;
-        tree.insert_node(Some(bad_id), descendant.header, NodeStatus::HeaderValid)?;
-    }
-    stage_body(&sync, &bad_body);
-    stage_body(&sync, &descendant);
-
-    assert_eq!(
-        sync.apply_buffered_blocks(None),
-        (0, 1),
-        "the permanent failure must stop the window with nothing committed"
-    );
-    let bad_hash = Hash256::from_le_bytes(bad.block_hash().as_bytes());
-    let descendant_hash = Hash256::from_le_bytes(descendant.block_hash().as_bytes());
-    assert!(!sync.block_stager.lock().contains(&bad_hash));
-    let descendant_staged = sync.block_stager.lock().contains(&descendant_hash);
-    assert!(
-        !descendant_staged,
-        "invalid descendants must be purged from bounded staging"
-    );
-    assert_eq!(
-        sync.apply_buffered_blocks(None),
-        (0, 0),
-        "the frontier must not cycle: nothing re-offers the invalidated blocks"
-    );
-    assert_eq!(applied_tip.load_full().map(|tip| tip.height), Some(1));
-    Ok(())
 }

@@ -29,14 +29,14 @@ fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -54,7 +54,7 @@ fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let first = rx.try_recv()?;
     let Message::GetData(inventory) = first else {
         return Err(std::io::Error::other("expected getdata").into());
@@ -93,14 +93,14 @@ fn second_tick_does_not_re_request_already_pending_blocks() -> Result<(), Box<dy
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -111,7 +111,7 @@ fn second_tick_does_not_re_request_already_pending_blocks() -> Result<(), Box<dy
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let first = rx.try_recv()?;
     if !matches!(first, Message::GetData(_)) {
         return Err(std::io::Error::other("expected first tick getdata").into());
@@ -150,7 +150,7 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> Result<(), Box<dy
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let first = rx.try_recv()?;
     let Message::GetData(inventory) = first else {
         return Err(std::io::Error::other("expected getdata").into());
@@ -209,7 +209,7 @@ fn tick_respects_pending_byte_budget() -> Result<(), Box<dyn std::error::Error>>
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected getdata").into());
     };
@@ -233,7 +233,7 @@ fn tick_limits_inflight_per_peer() -> Result<(), Box<dyn std::error::Error>> {
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected getdata").into());
     };
@@ -264,7 +264,7 @@ fn tick_falls_back_to_single_deep_peer_below_fanout_threshold()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rxs[0].try_recv()? else {
         return Err(std::io::Error::other("expected deep getdata for highest peer").into());
     };
@@ -313,7 +313,7 @@ fn demoted_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std:
     // expires every pending immediately, soft-demoting it.
     let demoted_rx = connect_peer(&peers, eligible_peer(test_addr(9240, 0)?, 300));
     sync.tick();
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(initial) = demoted_rx.try_recv()? else {
         return Err(std::io::Error::other("expected initial deep getdata").into());
     };
@@ -371,7 +371,7 @@ fn ineligible_peers_receive_no_block_requests_during_fanout()
     // and never delivers.
     let demoted_rx = connect_peer(&peers, eligible_peer(test_addr(9250, 0)?, 290));
     sync.tick();
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(initial) = demoted_rx.try_recv()? else {
         return Err(std::io::Error::other("expected initial deep getdata").into());
     };

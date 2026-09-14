@@ -21,14 +21,14 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std:
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -39,7 +39,7 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std:
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let first = rx.try_recv()?;
     let Message::GetData(inventory) = first else {
         return Err(std::io::Error::other("expected getdata").into());
@@ -104,14 +104,14 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::e
     let peers = Arc::new(PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -194,10 +194,14 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std:
     let peers = Arc::new(PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let sync = BlockSync::for_test(
-        apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+    let sync = BlockSync::new(
+        std::sync::Arc::new(TestChain::new(
+            chain_tip,
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        )),
         Arc::clone(&peers),
         inbound_headers_rx,
         inbound_blocks_rx,
@@ -279,10 +283,14 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
     let peers = Arc::new(PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let sync = BlockSync::for_test(
-        apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+    let sync = BlockSync::new(
+        std::sync::Arc::new(TestChain::new(
+            chain_tip,
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        )),
         Arc::clone(&peers),
         inbound_headers_rx,
         inbound_blocks_rx,

@@ -17,7 +17,7 @@ fn tick_retries_expired_pending_before_new_heights() -> Result<(), Box<dyn std::
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(first) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected first getdata").into());
     };
@@ -52,7 +52,7 @@ fn tick_fills_mixed_retry_and_new_height_batch() -> Result<(), Box<dyn std::erro
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(first) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected first getdata").into());
     };
@@ -90,14 +90,14 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> Result<(), Box<dyn
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -105,15 +105,15 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> Result<(), Box<dyn
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(genesis))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(genesis))?;
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected getdata").into());
     };
-    assert_eq!(witness_block_inventory(inventory)?, alloc::vec![expected]);
+    assert_eq!(witness_block_inventory(inventory)?, std::vec![expected]);
     Ok(())
 }
 
@@ -137,14 +137,14 @@ fn oversized_received_block_releases_pending_budget_for_retry()
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -164,18 +164,18 @@ fn oversized_received_block_releases_pending_budget_for_retry()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected getdata").into());
     };
     assert_eq!(
         witness_block_inventory(inventory)?,
-        alloc::vec![expected_hash]
+        std::vec![expected_hash]
     );
     let _headers = rx.try_recv()?;
     assert_eq!(sync.download_window.lock().pending_len(), 1);
 
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block))?;
     sync.drain_inbound_blocks();
 
     {
@@ -189,7 +189,7 @@ fn oversized_received_block_releases_pending_budget_for_retry()
     let Message::GetData(retry) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected retry getdata").into());
     };
-    assert_eq!(witness_block_inventory(retry)?, alloc::vec![expected_hash]);
+    assert_eq!(witness_block_inventory(retry)?, std::vec![expected_hash]);
     Ok(())
 }
 
@@ -215,14 +215,14 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -242,19 +242,19 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected getdata").into());
     };
     assert_eq!(
         witness_block_inventory(inventory)?,
-        alloc::vec![block1_hash, block2_hash]
+        std::vec![block1_hash, block2_hash]
     );
     let _headers = rx.try_recv()?;
 
     // Deliver only the successor: it stages (waiting on block1) and
     // exactly exhausts the staging byte budget.
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block2.clone()))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2.clone()))?;
     sync.drain_inbound_blocks();
     assert_eq!(
         sync.block_stager.lock().received_bytes(),
@@ -271,7 +271,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
     // The window-front block arrives: the stager admits it past the
     // exhausted budget (expected-block exemption), apply drains both, and
     // request capacity returns for block3.
-    inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block1))?;
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block1))?;
     sync.tick();
 
     let applied_height = applied_tip
@@ -283,10 +283,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
     let Message::GetData(recovered) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected recovery getdata").into());
     };
-    assert_eq!(
-        witness_block_inventory(recovered)?,
-        alloc::vec![block3_hash]
-    );
+    assert_eq!(witness_block_inventory(recovered)?, std::vec![block3_hash]);
     Ok(())
 }
 
@@ -359,7 +356,7 @@ fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
     };
     assert_eq!(
         witness_block_inventory(retry)?,
-        alloc::vec![block1_hash, block2_hash]
+        std::vec![block1_hash, block2_hash]
     );
     while let Ok(message) = stalled_rx.try_recv() {
         if matches!(message, Message::GetData(_)) {
@@ -388,7 +385,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
 
         sync.tick();
 
-        assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+        assert_applied_genesis(&applied_tip, &block_tree)?;
         let Message::GetData(inventory) = outbound_rx.try_recv()? else {
             return Err(std::io::Error::other("expected proxy getdata").into());
         };
@@ -400,7 +397,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
         let _headers = outbound_rx.try_recv()?;
 
         for block in blocks[1..].iter().rev() {
-            inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))?;
+            inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
         }
         sync.drain_inbound_blocks();
         let (received_count, peak_staged_bytes) = {
@@ -412,10 +409,8 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
         assert_gauge(&recorder, "node.sync.received_blocks", received_count);
         assert_gauge(&recorder, "node.sync.received_bytes", peak_staged_bytes);
 
-        inbound_blocks_tx.send(bitcoin_rs_p2p::InboundBlock::from_decoded(
-            blocks[0].clone(),
-        ))?;
-        let apply_started = quanta::Instant::now();
+        inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+        let apply_started = Instant::now();
         sync.drain_inbound_blocks();
         let apply_elapsed = apply_started.elapsed();
         let applied_height = applied_tip

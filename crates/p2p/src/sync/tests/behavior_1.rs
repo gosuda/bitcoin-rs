@@ -40,9 +40,13 @@ fn indexed_sync_frontiers_match_parent_plans() -> Result<(), Box<dyn std::error:
     let block_tree = Arc::new(RwLock::new(tree));
     let peers = Arc::new(PeerTable::new());
     let (_, headers_rx) = unbounded::<InboundHeaders>();
-    let (_, blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let sync = BlockSync::for_test(
-        apply_handles(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree)),
+    let (_, blocks_rx) = unbounded::<crate::InboundBlock>();
+    let sync = BlockSync::new(
+        std::sync::Arc::new(TestChain::new(
+            chain_tip,
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        )),
         Arc::clone(&peers),
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),
@@ -126,10 +130,14 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
     let peers = Arc::new(PeerTable::new());
     let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let sync = BlockSync::for_test(
-        apply_handles(chain_tip, Arc::clone(&applied_tip), block_tree),
+    let sync = BlockSync::new(
+        std::sync::Arc::new(TestChain::new(
+            chain_tip,
+            Arc::clone(&applied_tip),
+            block_tree,
+        )),
         Arc::clone(&peers),
         inbound_headers_rx,
         inbound_blocks_rx,
@@ -138,8 +146,8 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
     let (tx, rx) = unbounded::<Message>();
     peers.register(peer, PeerLease::new(tx));
     let chain_tip = sync
-        .handles
-        .chain_tip
+        .chain
+        .chain_tip()
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing winning chain tip"))?;
     let applied_tip = applied_tip
@@ -193,14 +201,14 @@ fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std
     let peers = Arc::new(PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -252,14 +260,14 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
     let peers = Arc::new(PeerTable::new());
     let (inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
     let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
+    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
     let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
-    let handles = apply_handles(
+    let handles = std::sync::Arc::new(TestChain::new(
         Arc::clone(&chain_tip),
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
-    );
-    let sync = BlockSync::for_test(
+    ));
+    let sync = BlockSync::new(
         handles,
         Arc::clone(&peers),
         inbound_headers_rx,
@@ -348,7 +356,7 @@ fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(first_inventory) = first_rx.try_recv()? else {
         return Err(std::io::Error::other("expected first peer getdata").into());
     };
@@ -401,7 +409,7 @@ fn tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer()
 
     sync.tick();
 
-    assert_applied_genesis(&applied_tip, &block_tree, &sync.handles)?;
+    assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(first_inventory) = stale_rx.try_recv()? else {
         return Err(std::io::Error::other("expected stale peer getdata").into());
     };
