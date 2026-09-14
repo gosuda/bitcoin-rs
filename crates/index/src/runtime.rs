@@ -94,7 +94,7 @@ pub struct DerivedIndexRuntime {
     phase: arc_swap::ArcSwap<ReconcilePhase>,
 }
 impl DerivedIndexRuntime {
-    /// Creates a runtime attached to `wake_tx`.
+    /// Creates shared runtime state.
     #[must_use]
     pub fn new(wake_tx: Sender<()>) -> Self {
         Self {
@@ -119,7 +119,7 @@ impl DerivedIndexRuntime {
         self.publish_phase(self.phase().with_leg(capabilities, leg));
     }
 
-    /// Returns the reconciliation phase the worker last published.
+    /// Reads the published reconciliation phase.
     #[must_use]
     pub fn phase(&self) -> ReconcilePhase {
         **self.phase.load()
@@ -141,13 +141,13 @@ impl DerivedIndexRuntime {
         self.failed.store(true, Ordering::Release);
     }
 
-    /// Returns the current revision.
+    /// Reads the wake revision.
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 
-    /// Returns true once a failure or shutdown has been published.
+    /// Reports whether shutdown or failure was published.
     #[must_use]
     pub fn should_stop(&self) -> bool {
         self.shutdown.load(Ordering::Acquire) || self.failed.load(Ordering::Acquire)
@@ -159,7 +159,7 @@ impl DerivedIndexRuntime {
         let _ = self.wake_tx.try_send(());
     }
 
-    /// Returns the published failure message, if any.
+    /// Reads the published failure message.
     #[must_use]
     pub fn failure_message(&self) -> Option<CompactString> {
         self.failure_message.read().clone()
@@ -265,7 +265,7 @@ const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
 /// Upper bound on waiting for backend recovery. Timeout isolates the index
 /// failure from the node; it does not prove recovery stopped making progress.
-/// The backend helper cannot be cancelled, so abandonment poisons its namespace.
+/// The backend open thread cannot be cancelled, so abandonment poisons its namespace.
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
 
 /// Monotonic publication token. Each worker holds one; a revoked token makes
@@ -286,7 +286,7 @@ impl Generation {
         }
     }
 
-    /// Returns the generation identifier.
+    /// Reads the generation identifier.
     #[must_use]
     pub fn id(&self) -> u64 {
         self.id
@@ -297,7 +297,7 @@ impl Generation {
         self.revoked.store(true, Ordering::Release);
     }
 
-    /// Returns true once the token is revoked.
+    /// Reports whether this generation was revoked.
     #[must_use]
     pub fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
@@ -641,7 +641,7 @@ pub enum DerivedIndexWorkerError {
     /// A block body needed for indexing or rollback was absent.
     #[error("txindex worker: missing body at height {height}, hash {hash}")]
     MissingBody {
-        /// Height of the missing body.
+        /// Block height whose body is missing.
         height: u32,
         /// Active-chain hash of the missing body.
         hash: Hash256,
@@ -658,15 +658,15 @@ pub enum DerivedIndexWorkerError {
     /// A rewind needed an undo record that is missing or unreadable.
     #[error("txindex worker: undo record missing or unreadable at height {height}, hash {hash}")]
     UndoUnavailable {
-        /// Height of the unavailable undo record.
+        /// Block height whose undo record is unavailable.
         height: u32,
-        /// Hash of the block whose undo record is unavailable.
+        /// Block hash whose undo record is unavailable.
         hash: Hash256,
     },
     /// The rollback plan referenced a chain node not present in the tree.
     #[error("txindex worker: target chain node missing at height {height}")]
     MissingTargetChain {
-        /// Height of the missing chain node.
+        /// Height whose chain node is missing.
         height: u32,
     },
     /// The rollback evidence sink failed to publish the index-ahead event.
@@ -675,7 +675,7 @@ pub enum DerivedIndexWorkerError {
 }
 
 impl DerivedIndexWorkerError {
-    /// The backend helper may still hold or acquire the store after this error.
+    /// The backend open thread may still hold or acquire the store after this error.
     fn abandoned_open(&self) -> bool {
         matches!(self, Self::OpenStopped | Self::OpenTimeout { .. })
     }

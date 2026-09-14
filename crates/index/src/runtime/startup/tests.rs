@@ -27,7 +27,7 @@ fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Res
     Ok(())
 }
 
-/// IDX-07: completed workers and failures with no detached helper can release.
+/// IDX-07: completed workers and failures with no detached thread can release.
 #[test]
 fn completed_worker_outcomes_release_without_poisoning() -> std::io::Result<()> {
     for result in [

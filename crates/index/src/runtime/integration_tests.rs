@@ -531,9 +531,9 @@ fn open_timeout_publishes_error_not_infinite_spin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // Simulate a stuck open: the helper thread will sleep 10 seconds before
+    // Simulate a stuck open: the open thread will sleep 10 seconds before
     // even attempting the store open. The timeout is set to 1 second, so the
-    // deadline fires while the helper is still sleeping.
+    // deadline fires while the open thread is still sleeping.
     let mut spec = test_open_spec(dir.path(), 1);
     spec.open_store = Arc::new(move |_dir| {
         std::thread::sleep(Duration::from_secs(10));
