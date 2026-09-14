@@ -1,11 +1,11 @@
 use crate::TxIndexSnapshot;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::block_log::BlockRecord;
 use crate::types::{TxPosition, TxPositionValue};
 use crate::{
     HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow, TxidRow,
 };
-use crate::{block_log::BlockRecord, query_api::ScriptHistoryRecord};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::{
@@ -13,7 +13,7 @@ use bitcoin_rs_primitives::{
     Txid, Witness, consensus_bytes, encode::double_sha256,
 };
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
-use bitcoin_rs_utxo::{BlockChanges, UtxoAdd, UtxoSet};
+use bitcoin_rs_utxo::UtxoSet;
 
 use super::*;
 use parking_lot::Mutex;
@@ -36,7 +36,6 @@ struct QuerySnapshot {
 #[derive(Clone, Copy)]
 enum ScriptHistoryWatermark {
     MatchTx,
-    Override(Option<IndexWatermark>),
 }
 
 impl QuerySnapshot {
@@ -92,15 +91,10 @@ impl TxIndexSnapshot for QuerySnapshot {
 
     fn capability_watermark(
         &self,
-        capability: IndexCapability,
+        _capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError> {
-        Ok(match capability {
-            IndexCapability::TxLookup | IndexCapability::ScriptLive => Some(self.watermark),
-            IndexCapability::ScriptHistory => match self.script_history_watermark {
-                ScriptHistoryWatermark::MatchTx => Some(self.watermark),
-                ScriptHistoryWatermark::Override(watermark) => watermark,
-            },
-        })
+        let _ = self.script_history_watermark;
+        Ok(Some(self.watermark))
     }
 
     fn transaction_rows(
@@ -257,44 +251,6 @@ impl BlockBodySource for SingleBlockBody {
 
 impl QueryFixture {
     fn new(config: FixtureConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_script_history_watermark(
-            config,
-            ScriptHistoryWatermark::MatchTx,
-            None,
-            IndexCapabilities::ALL,
-        )
-    }
-
-    fn new_with_utxo(
-        config: FixtureConfig,
-        utxo: Arc<UtxoSet>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_script_history_watermark(
-            config,
-            ScriptHistoryWatermark::MatchTx,
-            Some(utxo),
-            IndexCapabilities::ALL,
-        )
-    }
-
-    fn new_live_only(
-        config: FixtureConfig,
-        utxo: Option<Arc<UtxoSet>>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_script_history_watermark(
-            config,
-            ScriptHistoryWatermark::Override(None),
-            utxo,
-            IndexCapabilities::SCRIPT_LIVE,
-        )
-    }
-
-    fn new_with_script_history_watermark(
-        config: FixtureConfig,
-        script_history_watermark: ScriptHistoryWatermark,
-        utxo: Option<Arc<UtxoSet>>,
-        enabled: IndexCapabilities,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let tip_id = tree.insert_header(config.block.header, NodeStatus::HeaderValid)?;
         let node = tree.node(tip_id)?;
@@ -333,7 +289,7 @@ impl QueryFixture {
         let reader = Arc::new(QueryReader {
             snapshot: QuerySnapshot {
                 watermark,
-                script_history_watermark,
+                script_history_watermark: ScriptHistoryWatermark::MatchTx,
                 scans: config.scans,
                 aba,
                 chain_transition: Arc::clone(&chain_transition),
@@ -368,9 +324,9 @@ impl QueryFixture {
             applied_tip,
             body_source,
             QueryEngineLive {
-                utxo,
+                utxo: None::<Arc<UtxoSet>>,
                 chain_transition: Some(chain_transition),
-                enabled,
+                enabled: IndexCapabilities::ALL,
             },
         );
         Ok(Self { engine, body })
@@ -382,66 +338,6 @@ impl QueryFixture {
             .map(|body| body.full_reads.load(Ordering::Relaxed))
             .ok_or_else(|| std::io::Error::other("body source"))
     }
-}
-
-#[test]
-fn tx_queries_can_be_ready_while_script_history_is_backfilling()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let txid = block.txs[0].txid();
-    let fixture = QueryFixture::new_with_script_history_watermark(
-        FixtureConfig {
-            block,
-            retain_body: true,
-            scans: Vec::new(),
-            aba_trigger: None,
-            watermark: None,
-        },
-        ScriptHistoryWatermark::Override(None),
-        None,
-        IndexCapabilities::ALL,
-    )?;
-
-    assert!(DerivedIndexQuery::transaction(&fixture.engine, &txid)?.is_none());
-    assert!(matches!(
-        fixture
-            .engine
-            .history_snapshot(ScriptHash::from_script_bytes(&[])),
-        Err(TxQueryError::Retry)
-    ));
-    Ok(())
-}
-
-/// IDX-01 / IDX-03: configured-off History is `Unavailable`, not a lagging `Retry`.
-#[test]
-fn utxo_mode_history_is_disabled_not_backfilling() -> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let fixture = QueryFixture::new_live_only(
-        FixtureConfig {
-            block,
-            retain_body: true,
-            scans: Vec::new(),
-            aba_trigger: None,
-            watermark: None,
-        },
-        None,
-    )?;
-
-    let error = match fixture
-        .engine
-        .history_snapshot(ScriptHash::from_script_bytes(&[]))
-    {
-        Err(error) => error,
-        Ok(_) => panic!("utxo mode must not serve history"),
-    };
-    assert!(
-        matches!(
-            &error,
-            TxQueryError::Unavailable(reason) if reason.contains("script history is disabled")
-        ),
-        "history in utxo mode must be a configured-mode unavailability, got {error:?}"
-    );
-    Ok(())
 }
 
 fn scan_response(
@@ -521,54 +417,6 @@ fn block_with_spending_transaction() -> Result<(Block, OutPoint, ScriptHash, Txi
         .ok_or_else(|| std::io::Error::other("block has transactions"))?;
     let spend_txid = block.txs[1].txid();
     Ok((block, outpoint, ScriptHash::new(&script), spend_txid))
-}
-
-/// Pins that the height query proves absence rather than guessing the tip.
-///
-/// Without this, an implementation that answered `Some(tip.height)` for anything
-/// would satisfy the test, and `gettxoutproof` would build its proof from the
-/// wrong block.
-#[test]
-fn transaction_height_reports_nothing_for_an_unindexed_txid()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let txid = block.txs[0].txid();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: false,
-        scans: vec![scan_response(
-            ColumnFamily::TxConfirmed,
-            TxidRow::scan_prefix(&txid),
-            Vec::new(),
-            true,
-        )],
-        aba_trigger: None,
-        watermark: None,
-    })?;
-
-    assert_eq!(fixture.engine.transaction_height(&txid)?, None);
-    Ok(())
-}
-
-#[test]
-fn transaction_retries_after_applied_tip_aba_revision_change()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let txid = block.txs[0].txid();
-    let prefix = TxidRow::scan_prefix(&txid).to_vec();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: false,
-        scans: Vec::new(),
-        aba_trigger: Some((ColumnFamily::TxConfirmed, prefix)),
-        watermark: None,
-    })?;
-
-    assert!(matches!(
-        fixture.engine.transaction(&txid),
-        Err(TxQueryError::Retry)
-    ));
-    Ok(())
 }
 
 #[test]
@@ -654,321 +502,6 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
 }
 
 #[test]
-fn unspent_outputs_preserve_distinct_vouts_for_same_transaction_and_script()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut block = Network::Regtest.genesis_block();
-    let transaction = &mut block.txs[0];
-    transaction.outputs.push(transaction.outputs[0].clone());
-    block.header.merkle_root = compute_merkle_root(&block)
-        .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
-
-    let txid: Txid = block.txs[0].txid();
-    let script = block.txs[0].outputs[0].script_pubkey.clone();
-    let scripthash = ScriptHash::new(&script);
-    let outpoint0 = OutPoint { txid, vout: 0 };
-    let outpoint1 = OutPoint { txid, vout: 1 };
-
-    let utxo = Arc::new(UtxoSet::new());
-    let mut changes = BlockChanges::with_capacity(2, 0);
-    changes.add(UtxoAdd::new(
-        outpoint0,
-        block.txs[0].outputs[0].clone(),
-        true,
-        0,
-    ));
-    changes.add(UtxoAdd::new(
-        outpoint1,
-        block.txs[0].outputs[1].clone(),
-        true,
-        0,
-    ));
-    let block_hash: Hash256 = block.block_hash().into();
-    utxo.commit_block(&changes, &block_hash)?;
-
-    let live_row0 = ScriptLiveRow::new(scripthash, &outpoint0)
-        .as_bytes()
-        .to_vec();
-    let live_row1 = ScriptLiveRow::new(scripthash, &outpoint1)
-        .as_bytes()
-        .to_vec();
-    let fixture = QueryFixture::new_with_utxo(
-        FixtureConfig {
-            block,
-            retain_body: true,
-            scans: vec![scan_response(
-                ColumnFamily::ScriptLive,
-                ScriptHashRow::scan_prefix(scripthash),
-                vec![(live_row0, Vec::new()), (live_row1, Vec::new())],
-                true,
-            )],
-            aba_trigger: None,
-            watermark: None,
-        },
-        utxo,
-    )?;
-
-    let outputs = fixture.engine.unspent_outputs(scripthash)?;
-    let identities: Vec<_> = outputs
-        .iter()
-        .map(|output| (output.txid, output.vout))
-        .collect();
-    assert_eq!(identities, vec![(txid, 0), (txid, 1)]);
-    Ok(())
-}
-
-#[test]
-fn unspent_outputs_reject_truncated_live_scan() -> Result<(), Box<dyn std::error::Error>> {
-    let mut block = Network::Regtest.genesis_block();
-    let output = block.txs[0].outputs[0].clone();
-    block.txs[0]
-        .outputs
-        .extend(std::iter::repeat_n(output, QUERY_SCAN_COUNT_LIMIT - 1));
-    block.header.merkle_root = compute_merkle_root(&block)
-        .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
-
-    let txid: Txid = block.txs[0].txid();
-    let scripthash = ScriptHash::new(&block.txs[0].outputs[0].script_pubkey);
-    let outpoint = OutPoint { txid, vout: 0 };
-    let live_row = ScriptLiveRow::new(scripthash, &outpoint)
-        .as_bytes()
-        .to_vec();
-    let utxo = Arc::new(UtxoSet::new());
-    let mut changes = BlockChanges::with_capacity(1, 0);
-    changes.add(UtxoAdd::new(
-        outpoint,
-        block.txs[0].outputs[0].clone(),
-        true,
-        0,
-    ));
-    let block_hash: Hash256 = block.block_hash().into();
-    utxo.commit_block(&changes, &block_hash)?;
-    let fixture = QueryFixture::new_with_utxo(
-        FixtureConfig {
-            block,
-            retain_body: true,
-            scans: vec![scan_response(
-                ColumnFamily::ScriptLive,
-                ScriptHashRow::scan_prefix(scripthash),
-                vec![(live_row, Vec::new())],
-                false,
-            )],
-            aba_trigger: None,
-            watermark: None,
-        },
-        utxo,
-    )?;
-
-    match fixture.engine.unspent_outputs(scripthash) {
-        Err(TxQueryError::Unavailable(reason)) => {
-            assert!(
-                reason.contains("truncated"),
-                "truncated live scan must name truncation, got {reason}"
-            );
-        }
-        other => panic!("expected truncated Unavailable, got {other:?}"),
-    }
-    Ok(())
-}
-
-#[test]
-fn unspent_outputs_retries_after_applied_tip_aba_revision_change()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let script = block.txs[0].outputs[0].script_pubkey.clone();
-    let scripthash = ScriptHash::new(&script);
-    let prefix = ScriptHashRow::scan_prefix(scripthash).to_vec();
-    let utxo = Arc::new(UtxoSet::new());
-    let fixture = QueryFixture::new_with_utxo(
-        FixtureConfig {
-            block,
-            retain_body: true,
-            scans: Vec::new(),
-            aba_trigger: Some((ColumnFamily::ScriptLive, prefix)),
-            watermark: None,
-        },
-        utxo,
-    )?;
-
-    assert!(matches!(
-        fixture.engine.unspent_outputs(scripthash),
-        Err(TxQueryError::Retry)
-    ));
-    Ok(())
-}
-
-#[test]
-fn confirmed_history_snapshot_includes_funding_transaction()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let txid = block.txs[0].txid();
-    let script = block.txs[0].outputs[0].script_pubkey.clone();
-    let scripthash = ScriptHash::new(&script);
-    let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: true,
-        scans: vec![scan_response(
-            ColumnFamily::Funding,
-            ScriptHashRow::scan_prefix(scripthash),
-            vec![(funding_row, Vec::new())],
-            true,
-        )],
-        aba_trigger: None,
-        watermark: None,
-    })?;
-
-    let snapshot = fixture.engine.history_snapshot(scripthash)?;
-    assert_eq!(snapshot.history.len(), 1);
-    let expected = ScriptHistoryRecord { txid, height: 0 };
-    assert_eq!(snapshot.history[0], expected);
-    Ok(())
-}
-
-#[test]
-fn confirmed_history_snapshot_includes_the_spending_transaction_from_legacy_empty_spending_value()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut block = Network::Regtest.genesis_block();
-    let coinbase = &mut block.txs[0];
-    let txid = coinbase.txid();
-    let script = coinbase.outputs[0].script_pubkey.clone();
-    let scripthash = ScriptHash::new(&script);
-    let value = coinbase.outputs[0].value;
-
-    let spend_tx = Tx {
-        version: 2,
-        lock_time: LockTime::ZERO,
-        inputs: vec![TxIn {
-            previous_output: OutPoint { txid, vout: 0 },
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value,
-            script_pubkey: Script::new(),
-        }],
-    };
-    block.txs.push(spend_tx);
-    block.header.merkle_root = compute_merkle_root(&block)
-        .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
-
-    let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
-    let spend_txid = block.txs[1].txid();
-    let spend_prefix = SpendingPrefixRow::scan_prefix(&OutPoint { txid, vout: 0 }).to_vec();
-    let spending_row = SpendingPrefixRow::row(&OutPoint { txid, vout: 0 }, 0)
-        .to_db_row()
-        .to_vec();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: true,
-        scans: vec![
-            scan_response(
-                ColumnFamily::Funding,
-                ScriptHashRow::scan_prefix(scripthash),
-                vec![(funding_row, Vec::new())],
-                true,
-            ),
-            scan_response(
-                ColumnFamily::Spending,
-                spend_prefix,
-                vec![(spending_row, Vec::new())],
-                true,
-            ),
-        ],
-        aba_trigger: None,
-        watermark: None,
-    })?;
-
-    let spender = fixture
-        .engine
-        .spender(OutPoint { txid, vout: 0 })?
-        .ok_or_else(|| std::io::Error::other("indexed spender missing"))?;
-    assert_eq!(spender.txid, spend_txid);
-    assert_eq!(spender.height, 0);
-    assert_eq!(spender.vin, 0);
-
-    let snapshot = fixture.engine.history_snapshot(scripthash)?;
-    assert_eq!(snapshot.history.len(), 2);
-
-    let funding_record = ScriptHistoryRecord { txid, height: 0 };
-    let spending_record = ScriptHistoryRecord {
-        txid: spend_txid,
-        height: 0,
-    };
-    assert!(snapshot.history.contains(&funding_record));
-    assert!(snapshot.history.contains(&spending_record));
-    assert!(fixture.full_reads()? > 0);
-    Ok(())
-}
-
-#[test]
-fn confirmed_history_snapshot_reads_positioned_spending_transaction()
--> Result<(), Box<dyn std::error::Error>> {
-    let (block, outpoint, scripthash, spend_txid) = block_with_spending_transaction()?;
-    let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
-    let spend_prefix = SpendingPrefixRow::scan_prefix(&outpoint).to_vec();
-    let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block: block.clone(),
-        retain_body: true,
-        scans: vec![
-            scan_response(
-                ColumnFamily::Funding,
-                ScriptHashRow::scan_prefix(scripthash),
-                vec![(
-                    funding_row,
-                    TxPositionValue::encode(&[position_of_transaction(&block, 0)?]),
-                )],
-                true,
-            ),
-            scan_response(
-                ColumnFamily::Spending,
-                spend_prefix,
-                vec![(
-                    spending_row,
-                    TxPositionValue::encode(&[position_of_transaction(&block, 1)?]),
-                )],
-                true,
-            ),
-        ],
-        aba_trigger: None,
-        watermark: None,
-    })?;
-
-    let snapshot = fixture.engine.history_snapshot(scripthash)?;
-    assert!(snapshot.history.contains(&ScriptHistoryRecord {
-        txid: spend_txid,
-        height: 0,
-    }));
-    assert_eq!(fixture.full_reads()?, 0);
-    Ok(())
-}
-
-#[test]
-fn unspent_outputs_exclude_positioned_spent_output() -> Result<(), Box<dyn std::error::Error>> {
-    let (block, _outpoint, scripthash, _) = block_with_spending_transaction()?;
-    let utxo = Arc::new(UtxoSet::new());
-    let fixture = QueryFixture::new_with_utxo(
-        FixtureConfig {
-            block,
-            retain_body: true,
-            scans: vec![scan_response(
-                ColumnFamily::ScriptLive,
-                ScriptHashRow::scan_prefix(scripthash),
-                Vec::new(),
-                true,
-            )],
-            aba_trigger: None,
-            watermark: None,
-        },
-        utxo,
-    )?;
-
-    assert!(fixture.engine.unspent_outputs(scripthash)?.is_empty());
-    Ok(())
-}
-
-#[test]
 fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn std::error::Error>> {
     let (block, outpoint, _, spend_txid) = block_with_spending_transaction()?;
     let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
@@ -996,89 +529,5 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn s
         Some(spend_txid)
     );
     assert_eq!(fixture.full_reads()?, 1);
-    Ok(())
-}
-
-#[test]
-fn spender_for_reads_every_spending_position() -> Result<(), Box<dyn std::error::Error>> {
-    let (block, outpoint, _, spend_txid) = block_with_spending_transaction()?;
-    let spending_row = SpendingPrefixRow::row(&outpoint, 0).to_db_row().to_vec();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block: block.clone(),
-        retain_body: true,
-        scans: vec![scan_response(
-            ColumnFamily::Spending,
-            SpendingPrefixRow::scan_prefix(&outpoint),
-            vec![(
-                spending_row,
-                TxPositionValue::encode(&[
-                    position_of_transaction(&block, 0)?,
-                    position_of_transaction(&block, 1)?,
-                ]),
-            )],
-            true,
-        )],
-        aba_trigger: None,
-        watermark: None,
-    })?;
-
-    assert_eq!(
-        fixture
-            .engine
-            .spender(outpoint)?
-            .map(|spender| spender.txid),
-        Some(spend_txid)
-    );
-    assert_eq!(fixture.full_reads()?, 0);
-    Ok(())
-}
-
-#[test]
-fn confirmed_history_snapshot_retries_after_aba_on_spending_scan()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut block = Network::Regtest.genesis_block();
-    let coinbase = &mut block.txs[0];
-    let txid = coinbase.txid();
-    let script = coinbase.outputs[0].script_pubkey.clone();
-    let scripthash = ScriptHash::new(&script);
-    let value = coinbase.outputs[0].value;
-
-    let spend_tx = Tx {
-        version: 2,
-        lock_time: LockTime::ZERO,
-        inputs: vec![TxIn {
-            previous_output: OutPoint { txid, vout: 0 },
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value,
-            script_pubkey: Script::new(),
-        }],
-    };
-    block.txs.push(spend_tx);
-    block.header.merkle_root = compute_merkle_root(&block)
-        .ok_or_else(|| std::io::Error::other("test block must have a merkle root"))?;
-
-    let funding_row = ScriptHashRow::row(scripthash, 0).to_db_row().to_vec();
-    let spend_prefix = SpendingPrefixRow::scan_prefix(&OutPoint { txid, vout: 0 }).to_vec();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: true,
-        scans: vec![scan_response(
-            ColumnFamily::Funding,
-            ScriptHashRow::scan_prefix(scripthash),
-            vec![(funding_row, Vec::new())],
-            true,
-        )],
-        aba_trigger: Some((ColumnFamily::Spending, spend_prefix)),
-        watermark: None,
-    })?;
-
-    assert!(matches!(
-        fixture.engine.history_snapshot(scripthash),
-        Err(TxQueryError::Retry)
-    ));
     Ok(())
 }

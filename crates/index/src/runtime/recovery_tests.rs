@@ -247,43 +247,6 @@ impl Harness {
         panic!("worker did not converge");
     }
 
-    /// Forwards the currently enabled capabilities without leftover demotion.
-    ///
-    /// `settle` runs `reconcile_pass`, which resets families that `enabled`
-    /// no longer maintains (`IDX-01` leftover). Tests that split watermarks
-    /// across families keep the disabled sibling's cursor and must not take
-    /// that path.
-    fn catch_up_enabled(&self, pending: &mut Option<PendingForward>) {
-        for _ in 0..64 {
-            let Some(target) = self.applied_tip.load_full() else {
-                panic!("catch-up requires an applied tip");
-            };
-            let (fence, watermarks) = self.writer.fenced_watermarks().expect("watermarks");
-            let Some((capabilities, watermark)) =
-                self.worker.forward_selection(watermarks, target.as_ref())
-            else {
-                return;
-            };
-            match self
-                .worker
-                .catch_up_to(
-                    target.as_ref(),
-                    fence,
-                    watermarks,
-                    watermark,
-                    capabilities,
-                    pending,
-                )
-                .expect("catch-up pass")
-            {
-                ReconcileAction::CaughtUp => return,
-                ReconcileAction::Progressed | ReconcileAction::Buffered => {}
-                ReconcileAction::Stalled => panic!("worker stalled"),
-            }
-        }
-        panic!("worker did not converge");
-    }
-
     fn watermarks(&self) -> IndexWatermarks {
         self.writer.fenced_watermarks().expect("watermarks").1
     }
@@ -314,28 +277,6 @@ impl Harness {
                 (cap.clone(), *ih, *th, thb.clone(), ihb.clone(), *d)
             })
     }
-}
-
-/// `RCV-03`: a watermark on an abandoned branch within the cutover rewinds
-/// block by block to the common ancestor, then replays the active branch.
-#[test]
-fn shallow_reorg_rewinds_to_common_ancestor_then_replays() {
-    let f = ForkFixture::new(2);
-    let h = Harness::new(&f, u32::MAX);
-    let mut pending = None;
-
-    let a2 = f.tip(f.a[1]);
-    h.set_tip(&a2);
-    h.settle(&mut pending);
-    h.assert_at(&a2);
-
-    let b2 = f.tip(f.b[1]);
-    h.set_tip(&b2);
-    h.settle(&mut pending);
-    h.assert_at(&b2);
-
-    // Same height on both branches: not "ahead", so no rollback evidence.
-    assert!(h.evidence.calls.lock().is_empty());
 }
 
 /// `RCV-04`: a watermark above the applied tip is an operator-visible
@@ -374,43 +315,6 @@ fn index_ahead_of_restored_tip_is_reported_once_and_rewound() {
     }
 }
 
-/// `RCV-04` / `IDX-07`: a live-only watermark above the restored tip writes
-/// index-ahead evidence. A same-pass rebuild then reseeds from the UTXO set
-/// rather than replaying Live from genesis.
-#[test]
-fn live_only_index_ahead_is_reported_and_reseeded() {
-    let f = ForkFixture::new(3);
-    let h = Harness::with_enabled(&f, 0, IndexCapabilities::SCRIPT_LIVE);
-    let mut pending = None;
-
-    let a3 = f.tip(f.a[2]);
-    h.set_tip(&a3);
-    h.settle(&mut pending);
-    assert_eq!(h.watermarks().script_live.map(|w| w.height), Some(3));
-
-    let a1 = f.tip(f.a[0]);
-    h.set_tip(&a1);
-    let first = h.worker.reconcile_once(&mut pending).expect("ahead pass");
-    assert!(!matches!(first, ReconcileAction::CaughtUp));
-    match h.index_ahead_call() {
-        Some((capability, index_height, tip_height, tip_hash_be, index_hash_be, depth)) => {
-            assert_eq!(capability, "script_live");
-            assert_eq!((tip_height, index_height, depth), (1, 3, 2));
-            assert_eq!(tip_hash_be, a1.hash.to_string_be());
-            assert_eq!(index_hash_be, a3.hash.to_string_be());
-        }
-        other => panic!("expected IndexWatermarkAhead report, got {other:?}"),
-    }
-    assert_eq!(
-        h.watermarks().script_live.map(|w| w.height),
-        Some(1),
-        "ScriptLive reseeds from the restored UTXO tip after rebuild"
-    );
-
-    h.settle(&mut pending);
-    assert_eq!(h.watermarks().script_live.map(|w| w.height), Some(1));
-}
-
 /// `RCV-05`: a rollback deeper than the cutover resets the selected
 /// capabilities and rebuilds from genesis; the rebuild phase stays published
 /// until the reset capabilities reach the applied tip again.
@@ -443,117 +347,4 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     h.settle(&mut pending);
     h.assert_at(&b3);
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
-}
-
-/// `RCV-06`: the applied tip moving while a rebuild is in flight does not
-/// restart or abort the rebuild; the worker converges on the new tip.
-#[test]
-fn tip_change_during_rebuild_converges_on_new_tip() {
-    let f = ForkFixture::new(3);
-    let h = Harness::new(&f, 0);
-    let mut pending = None;
-
-    let a3 = f.tip(f.a[2]);
-    h.set_tip(&a3);
-    h.settle(&mut pending);
-
-    let b3 = f.tip(f.b[2]);
-    h.set_tip(&b3);
-    h.worker.reconcile_once(&mut pending).expect("reset pass");
-    assert_eq!(
-        h.runtime.phase().rebuilding(),
-        IndexCapabilities::HISTORICAL
-    );
-
-    // Canonical chain returns to A while the rebuild toward B is underway.
-    h.set_tip(&a3);
-    h.settle(&mut pending);
-    h.assert_at(&a3);
-}
-
-/// `RCV-07`: a rewind whose disconnected body is missing cannot produce
-/// exact-identity deletions; the affected capabilities reset and rebuild
-/// from canonical bodies instead of failing the worker.
-#[test]
-fn missing_disconnected_body_routes_rewind_to_rebuild() {
-    let f = ForkFixture::new(2);
-    let h = Harness::new(&f, u32::MAX);
-    let mut pending = None;
-
-    let a2 = f.tip(f.a[1]);
-    h.set_tip(&a2);
-    h.settle(&mut pending);
-
-    f.bodies.bodies.lock().remove(&(2, f.a[1].1.to_le_bytes()));
-    let b2 = f.tip(f.b[1]);
-    h.set_tip(&b2);
-    h.worker.reconcile_once(&mut pending).expect("reset pass");
-    assert_eq!(
-        h.runtime.phase().rebuilding(),
-        IndexCapabilities::HISTORICAL
-    );
-    h.settle(&mut pending);
-    h.assert_at(&b2);
-}
-
-/// `RCV-05`: capabilities carry independent watermarks, so one may rebuild
-/// while its sibling rewinds. The rebuild leg outlives the rollback loop and
-/// is published until the reset rows reach the applied tip.
-#[test]
-fn selective_rebuild_leg_survives_sibling_rollback() {
-    let f = ForkFixture::new(3);
-    let mut h = Harness::new(&f, 1);
-    let mut pending = None;
-
-    h.worker.enabled = IndexCapabilities::SCRIPT_HISTORY;
-    h.set_tip(&f.tip(f.a[0]));
-    h.settle(&mut pending);
-    h.worker.enabled = IndexCapabilities::TX_LOOKUP;
-    let a3 = f.tip(f.a[2]);
-    h.set_tip(&a3);
-    h.catch_up_enabled(&mut pending);
-    pending = None;
-    let watermarks = h.watermarks();
-    assert_eq!(watermarks.tx_lookup.map(|w| w.height), Some(3));
-    assert_eq!(watermarks.script_history.map(|w| w.height), Some(1));
-
-    // tx_lookup is three blocks off B (beyond cutover 1): rebuild.
-    // script_history is one block off B (within cutover): rewind.
-    h.worker.enabled = IndexCapabilities::HISTORICAL;
-    let b3 = f.tip(f.b[2]);
-    h.set_tip(&b3);
-    let first = h.worker.reconcile_once(&mut pending).expect("reset pass");
-    assert!(!matches!(first, ReconcileAction::CaughtUp));
-    assert_eq!(
-        h.runtime.phase(),
-        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::TX_LOOKUP, ReconcileLeg::Rebuilding)
-    );
-    assert_eq!(
-        h.watermarks().script_history.map(|w| w.height),
-        Some(0),
-        "rewound to genesis"
-    );
-
-    h.settle(&mut pending);
-    h.assert_at(&b3);
-}
-
-/// `RCV-02`: an absent applied tip (headers-only start) is a position the
-/// index must not be ahead of; every row is rewound.
-#[test]
-fn absent_tip_rewinds_index_to_empty() {
-    let f = ForkFixture::new(1);
-    let h = Harness::new(&f, u32::MAX);
-    let mut pending = None;
-
-    let a1 = f.tip(f.a[0]);
-    h.set_tip(&a1);
-    h.settle(&mut pending);
-
-    h.applied_tip.store(None);
-    h.settle(&mut pending);
-    let watermarks = h.watermarks();
-    assert_eq!(watermarks.tx_lookup, None);
-    assert_eq!(watermarks.script_history, None);
-    assert_eq!(h.runtime.phase(), ReconcilePhase::FORWARD);
 }

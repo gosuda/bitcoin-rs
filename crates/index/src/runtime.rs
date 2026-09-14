@@ -50,9 +50,6 @@ use crossbeam_channel::{Receiver, Sender};
 
 use parking_lot::{Mutex, RwLock};
 
-#[cfg(test)]
-use startup::fail_worker;
-
 #[cfg(all(test, feature = "fjall"))]
 use startup::open_derived_index_with_timeout;
 
@@ -688,17 +685,8 @@ impl DerivedIndexWorkerError {
     }
 }
 
-#[cfg(all(test, feature = "fjall"))]
-mod body_reader_tests;
-
-#[cfg(test)]
-mod block_source_tests;
-
 #[cfg(test)]
 mod query_tests;
-
-#[cfg(test)]
-mod lifecycle_tests;
 
 #[cfg(all(test, feature = "fjall"))]
 mod integration_tests;

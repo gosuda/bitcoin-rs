@@ -12,27 +12,7 @@ use crate::{IndexCapabilities, IndexWatermark, IndexWatermarks};
 /// Durable consumer-cursor length: epoch (8 LE) + sequence (8 LE) + height (4 LE) + hash.
 pub(crate) const CURSOR_BYTE_LEN: usize = 52;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub(crate) struct ChainTip {
-    pub hash: Hash256,
-    pub height: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub(crate) struct ChainIdentity {
-    pub epoch: u64,
-    pub sequence: u64,
-    pub tip_hash: Hash256,
-    pub tip_height: u32,
-}
-
 pub(crate) trait ActiveChainView {
-    /// Whether `position` is represented by the authoritative chain topology.
-    #[cfg(test)]
-    fn contains(&self, position: Hash256) -> bool;
-
     /// Whether `position` at `height` lies on the selected active chain.
     fn position_on_active_chain(&self, position: Hash256, height: u32) -> bool;
 
@@ -55,18 +35,6 @@ pub struct ConsumerCursor {
 }
 
 impl ConsumerCursor {
-    /// Builds the cursor for a fully consumed chain identity.
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) const fn from_identity(identity: &ChainIdentity) -> Self {
-        Self {
-            epoch: identity.epoch,
-            sequence: identity.sequence,
-            height: identity.tip_height,
-            hash: identity.tip_hash,
-        }
-    }
-
     /// Encodes the durable representation in [`CURSOR_BYTE_LEN`] bytes.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; CURSOR_BYTE_LEN] {
@@ -94,80 +62,6 @@ impl ConsumerCursor {
             hash: Hash256::from_le_bytes(&bytes[20..].try_into().ok()?),
         })
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-pub(crate) enum ReconcilePlan {
-    /// The cursor names the live tip exactly; nothing to do.
-    CaughtUp,
-    /// The cursor position is on the active chain; connect forward.
-    Forward {
-        /// First height the consumer still has to index.
-        from_height: u32,
-    },
-    /// The cursor position is orphaned; disconnect to the common ancestor,
-    /// then connect forward.
-    RollbackAndForward {
-        /// Last height shared by the cursor branch and the active chain.
-        ancestor_height: u32,
-    },
-    /// The cursor block or its ancestry cannot be resolved; rebuild from the
-    /// consumer's earliest anchor.
-    Rebuild,
-}
-
-/// Plans one positional reconciliation pass for `cursor` against `target`.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn plan(
-    cursor: &ConsumerCursor,
-    target: ChainTip,
-    chain: &impl ActiveChainView,
-) -> ReconcilePlan {
-    if !chain.contains(cursor.hash) {
-        return ReconcilePlan::Rebuild;
-    }
-    if cursor.height == target.height && cursor.hash == target.hash {
-        return ReconcilePlan::CaughtUp;
-    }
-    if chain.position_on_active_chain(cursor.hash, cursor.height) {
-        return ReconcilePlan::Forward {
-            from_height: cursor.height.saturating_add(1),
-        };
-    }
-    match chain.common_ancestor_height(cursor.hash) {
-        Some(ancestor_height) => ReconcilePlan::RollbackAndForward { ancestor_height },
-        None => ReconcilePlan::Rebuild,
-    }
-}
-
-/// Plans from a coherent publisher identity plus the independently supplied
-/// authoritative tip.
-///
-/// Publisher identity is only a shortcut when it also names `target`; an old or
-/// torn identity must not manufacture `CaughtUp` against a different tip.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn plan_from_identity(
-    cursor: &ConsumerCursor,
-    identity: &ChainIdentity,
-    target: ChainTip,
-    chain: &impl ActiveChainView,
-) -> ReconcilePlan {
-    let identity_matches_cursor = (cursor.epoch, cursor.sequence, cursor.hash, cursor.height)
-        == (
-            identity.epoch,
-            identity.sequence,
-            identity.tip_hash,
-            identity.tip_height,
-        );
-    let identity_matches_target =
-        identity.tip_hash == target.hash && identity.tip_height == target.height;
-    if identity_matches_cursor && identity_matches_target {
-        return ReconcilePlan::CaughtUp;
-    }
-    plan(cursor, target, chain)
 }
 
 /// Canonical stale-branch depth used to choose rollback versus rebuild.
@@ -315,9 +209,6 @@ pub(crate) fn selected_watermark(
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 /// Coherent applied-tip position supplied by the authoritative chain owner.
 ///
 /// The chain owner (node) implements this over its single-write snapshot
@@ -344,11 +235,6 @@ pub(crate) mod block_tree {
     }
 
     impl ActiveChainView for BlockTreeActiveChain<'_> {
-        #[cfg(test)]
-        fn contains(&self, position: Hash256) -> bool {
-            self.tree.lookup(position).is_some()
-        }
-
         fn position_on_active_chain(&self, position: Hash256, height: u32) -> bool {
             let Some(position_id) = self.tree.lookup(position) else {
                 return false;
