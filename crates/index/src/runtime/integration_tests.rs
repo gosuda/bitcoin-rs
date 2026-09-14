@@ -7,6 +7,7 @@
     reason = "test: integration tests use expect for clarity"
 )]
 
+use super::startup::Heartbeat;
 use super::*;
 use crate::block_log::BlockLog;
 use arc_swap::ArcSwap;

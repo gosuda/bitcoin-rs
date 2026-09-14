@@ -511,7 +511,6 @@ mod tests {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::{Network, consensus_bytes};
     use std::error::Error;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     type TestResult = Result<(), Box<dyn Error>>;
 
     struct TestBodySource {

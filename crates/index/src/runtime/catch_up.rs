@@ -400,6 +400,11 @@ pub(super) fn wait_for_batch_deadline(
 #[cfg(all(test, feature = "fjall"))]
 mod tests {
     use super::*;
+    use bitcoin_rs_storage::FjallStore;
+    use bitcoin_rs_storage::FlatFileBlockStore;
+    use bitcoin_rs_storage::block_body::{BlockBodyStore, IndexedBlockBodyStore};
+    use std::cell::Cell;
+    use std::sync::Arc;
     fn identity(height: u32) -> BlockIdentity {
         let mut hash = [0_u8; 32];
         hash[0..4].copy_from_slice(&height.to_le_bytes());
@@ -545,7 +550,6 @@ mod tests {
         Ok(())
     }
     use super::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
-    use crate::runtime::DerivedIndexRuntime;
     use crate::runtime::DerivedIndexRuntime;
 
     // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (wake coalescing).

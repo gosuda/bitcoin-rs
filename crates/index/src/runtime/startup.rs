@@ -401,6 +401,8 @@ pub(super) fn wait_for_open_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
     /// IDX-07: a detached backend may still access the namespace after its worker exits.
     #[test]
     fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Result<()> {
