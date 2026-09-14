@@ -445,6 +445,8 @@ mod tests {
         }
         Ok(())
     }
+    // Contract: indexing contract IDX-07 and IDX-08 define the open-wait
+    // shutdown, timeout, and result-variant behavior covered by this group.
     #[test]
     fn pending_open_rechecks_shutdown_before_the_open_deadline() {
         let (open_tx, open_rx) = mpsc::channel();

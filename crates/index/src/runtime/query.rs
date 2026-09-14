@@ -507,6 +507,9 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Contract: indexing contract IDX-03, with CONSTRAINTS.md CL-14 governing
+    // the shared query byte budget and admission behavior in this test group.
     #[test]
     fn historical_and_live_scans_share_the_byte_budget() -> Result<(), TxQueryError> {
         let mut budget = QueryBudget::new();
