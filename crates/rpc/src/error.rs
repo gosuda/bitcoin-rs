@@ -162,7 +162,8 @@ impl From<fmt::Error> for RpcError {
     }
 }
 
-/// Maps a transaction-index failure to an explicit JSON-RPC error.
+/// Converts a transaction-index query failure to an explicit JSON-RPC error.
+#[must_use]
 pub fn tx_query_error(error: crate::context::TxQueryError) -> RpcError {
     match error {
         crate::context::TxQueryError::Retry => {
