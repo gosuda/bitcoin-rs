@@ -9,7 +9,6 @@ use bitcoin_rs_mining::GenerateSelection;
 use bitcoin_rs_mining::GeneratedBlock;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::solve_block;
-use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::consensus_bytes;
 use compact_str::CompactString;
 use std::sync::atomic::Ordering;
@@ -53,7 +52,9 @@ impl MiningCoordinator {
             let mut block = candidate.into_unsolved_block();
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
                 // CONTRACT: docs/contracts/external-api.md#API-30
-                self.test_generateblock_validity(&block)?;
+                self.apply_handles
+                    .validate_block(&block)
+                    .map_err(test_block_validity_error)?;
             }
             solve_block(&mut block, request.max_tries).map_err(|error| {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
@@ -81,18 +82,5 @@ impl MiningCoordinator {
             });
         }
         Ok(generated)
-    }
-
-    /// Core `generateblock` `TestBlockValidity` before `GenerateBlock`.
-    ///
-    /// `ApplyIntent::Propose` already skips hash-meets-target. This path does
-    /// not use [`Self::propose`], which owns GBT `LookupBlockIndex` duplicate
-    /// vocabulary (`API-18`).
-    /// CONTRACT: docs/contracts/external-api.md#API-30
-    fn test_generateblock_validity(&self, block: &Block) -> Result<(), MiningControlError> {
-        match self.apply_handles.validate_block(block) {
-            Ok(()) => Ok(()),
-            Err(error) => Err(test_block_validity_error(error)),
-        }
     }
 }

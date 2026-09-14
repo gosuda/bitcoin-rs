@@ -72,16 +72,12 @@ impl MempoolSequenceWake for RecordingControl {
 }
 
 #[test]
-fn detached_signal_is_a_noop() {
-    let signal = MiningGenerationSignal::new();
-    // No coordinator attached: nothing to wake, nothing panics.
-    signal.publish_generation();
-    signal.publish_generation();
-    signal.publish_generation_from(1);
-}
-
-#[test]
 fn attached_signal_forwards_every_generation_publication() {
+    // Detached: nothing to wake, nothing panics.
+    let detached = MiningGenerationSignal::new();
+    detached.publish_generation();
+    detached.publish_generation_from(1);
+
     let signal = MiningGenerationSignal::new();
     let control = Arc::new(RecordingControl::default());
     let control_dyn: Arc<dyn MiningControl> = control.clone();
@@ -102,11 +98,16 @@ fn attached_signal_forwards_sequence_wake_without_mempool_lock() {
     let signal = MiningGenerationSignal::new();
     let control = Arc::new(RecordingControl::default());
     let control_dyn: Arc<dyn MiningControl> = control.clone();
-    let wake_dyn: Arc<dyn MempoolSequenceWake> = control.clone();
     signal.attach(&control_dyn);
+
+    // Without attach_sequence_wake, publish_generation_from falls back.
+    signal.publish_generation_from(1);
+    assert_eq!(*control.published.lock(), 1);
+    assert!(control.published_from.lock().is_empty());
+
+    let wake_dyn: Arc<dyn MempoolSequenceWake> = control.clone();
     signal.attach_sequence_wake(&wake_dyn);
 
-    assert!(control.published_from.lock().is_empty());
     signal.publish_generation_from(7);
     signal.publish_generation_from(8);
     assert_eq!(
@@ -116,26 +117,7 @@ fn attached_signal_forwards_sequence_wake_without_mempool_lock() {
     );
     assert_eq!(
         *control.published.lock(),
-        0,
-        "sequence wakes must not fall back to publish_generation"
-    );
-}
-
-#[test]
-fn sequence_wake_falls_back_when_not_attached() {
-    let signal = MiningGenerationSignal::new();
-    let control = Arc::new(RecordingControl::default());
-    let control_dyn: Arc<dyn MiningControl> = control.clone();
-    signal.attach(&control_dyn);
-
-    signal.publish_generation_from(1);
-    assert_eq!(
-        *control.published.lock(),
         1,
-        "without attach_sequence_wake, publish_generation_from falls back"
-    );
-    assert!(
-        control.published_from.lock().is_empty(),
-        "the lock-free path is not taken without attach_sequence_wake"
+        "sequence wakes must not fall back to publish_generation"
     );
 }

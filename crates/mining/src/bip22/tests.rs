@@ -10,6 +10,14 @@ use bitcoin_rs_primitives::Hash256;
 
 #[test]
 fn consensus_failures_use_core_bip22_reasons() {
+    let bip = |bip| ConsensusError::Bip {
+        bip,
+        reason: "x".to_owned(),
+    };
+    let script = |reason: &str| ConsensusError::Script {
+        input_index: 0,
+        reason: reason.to_owned(),
+    };
     for (error, want) in [
         (
             ConsensusError::CoinbaseAmount {
@@ -48,32 +56,14 @@ fn consensus_failures_use_core_bip22_reasons() {
             },
             "bad-txns-in-belowout",
         ),
+        (bip("BIP34"), "bad-cb-height"),
+        (bip("BIP113"), "bad-txns-nonfinal"),
         (
-            ConsensusError::Bip {
-                bip: "BIP34",
-                reason: "x".to_owned(),
-            },
-            "bad-cb-height",
-        ),
-        (
-            ConsensusError::Bip {
-                bip: "BIP113",
-                reason: "x".to_owned(),
-            },
-            "bad-txns-nonfinal",
-        ),
-        (
-            ConsensusError::Bip {
-                bip: "COINBASE_MATURITY",
-                reason: "x".to_owned(),
-            },
+            bip("COINBASE_MATURITY"),
             "bad-txns-premature-spend-of-coinbase",
         ),
         (
-            ConsensusError::Script {
-                input_index: 0,
-                reason: "EVAL_FALSE".to_owned(),
-            },
+            script("EVAL_FALSE"),
             "block-script-verify-flag-failed (EVAL_FALSE)",
         ),
     ] {

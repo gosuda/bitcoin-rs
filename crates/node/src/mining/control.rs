@@ -14,8 +14,23 @@ use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Header;
 use compact_str::CompactString;
 
-impl MiningCoordinator {
-    pub(super) fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
+impl MiningControl for MiningCoordinator {
+    fn get_block_template(
+        &self,
+        request: BlockTemplateRequest,
+    ) -> Result<BlockTemplateResult, MiningControlError> {
+        match request.mode {
+            BlockTemplateMode::Proposal(block) => {
+                Ok(BlockTemplateResult::Proposal(self.propose(&block)))
+            }
+            BlockTemplateMode::Template => Ok(BlockTemplateResult::Template(
+                self.service
+                    .get_block_template(request.long_poll_id.as_deref())?,
+            )),
+        }
+    }
+
+    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
         let tip = self.applied_tip.load_full();
         let network_hashes_per_second = {
             let tree = self.block_tree.read();
@@ -35,27 +50,6 @@ impl MiningCoordinator {
             .collect();
         self.service
             .mining_info(network_hashes_per_second, warnings, tip.as_deref())
-    }
-}
-
-impl MiningControl for MiningCoordinator {
-    fn get_block_template(
-        &self,
-        request: BlockTemplateRequest,
-    ) -> Result<BlockTemplateResult, MiningControlError> {
-        match request.mode {
-            BlockTemplateMode::Proposal(block) => {
-                Ok(BlockTemplateResult::Proposal(self.propose(&block)))
-            }
-            BlockTemplateMode::Template => Ok(BlockTemplateResult::Template(
-                self.service
-                    .get_block_template(request.long_poll_id.as_deref())?,
-            )),
-        }
-    }
-
-    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
-        self.mining_info_snapshot()
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {

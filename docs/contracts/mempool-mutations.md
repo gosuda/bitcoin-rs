@@ -300,8 +300,7 @@ state (`crates/mempool/src/orphan.rs`).
   `mempool_event_payloads_carry_reversed_txid_label_and_le_sequence`,
   `sequence_event_payload_uses_core_hash_orientation_and_label`.
 - `crates/mining/src/generation_signal/tests.rs`:
-  `attached_signal_forwards_sequence_wake_without_mempool_lock`,
-  `sequence_wake_falls_back_when_not_attached`.
+  `attached_signal_forwards_sequence_wake_without_mempool_lock`.
 - `crates/node/tests/mining.rs`:
   `publish_generation_from_does_not_take_mempool_lock`,
   `concurrent_publish_generation_paths_do_not_deadlock`,

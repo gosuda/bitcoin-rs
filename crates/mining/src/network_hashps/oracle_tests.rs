@@ -6,33 +6,32 @@ use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::BlockHash;
+use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 
 const BITS: u32 = 0x207f_ffff;
 
-fn header(prev: BlockHash, time: u32) -> Header {
-    use bitcoin_rs_primitives::CompactTarget;
-    Header {
-        version: 1,
-        prev_blockhash: prev,
-        merkle_root: Hash256::default(),
-        time,
-        bits: CompactTarget::from_consensus(BITS),
-        nonce: 0,
-    }
-}
-
 fn append(tree: &mut BlockTree, prev: BlockHash, time: u32) -> NodeId {
-    tree.insert_header(header(prev, time), NodeStatus::HeaderValid)
-        .unwrap_or_else(|err| panic!("insert header at time {time}: {err}"))
+    tree.insert_header(
+        Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(BITS),
+            nonce: 0,
+        },
+        NodeStatus::HeaderValid,
+    )
+    .unwrap_or_else(|err| panic!("insert header at time {time}: {err}"))
 }
 
 fn snapshot(tree: &BlockTree, tip_id: NodeId) -> TipSnapshot {
     let node = tree
         .node(tip_id)
-        .unwrap_or_else(|err| panic!("missing tip {tip_id:?}: {err}"));
+        .unwrap_or_else(|err| panic!("missing tip: {err}"));
     TipSnapshot {
         tip_id,
         height: node.height,

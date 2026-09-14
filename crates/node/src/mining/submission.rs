@@ -96,17 +96,11 @@ impl MiningCoordinator {
         }
     }
 }
-
-pub(super) fn is_operational_apply_error(error: &ApplyError) -> bool {
-    matches!(
-        error,
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_)
-    )
-}
-
 pub(super) fn map_apply_error(error: ApplyError) -> BlockValidationResult {
     match error {
-        error if is_operational_apply_error(&error) => BlockValidationResult::Inconclusive,
+        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+            BlockValidationResult::Inconclusive
+        }
         other => BlockValidationResult::Rejected(bip22_reject_reason(&other)),
     }
 }
@@ -117,7 +111,7 @@ pub(super) fn map_apply_error(error: ApplyError) -> BlockValidationResult {
 /// as `TestBlockValidity`. CONTRACT: docs/contracts/external-api.md#API-30
 pub(super) fn test_block_validity_error(error: ApplyError) -> MiningControlError {
     match error {
-        error if is_operational_apply_error(&error) => {
+        error @ (ApplyError::Shutdown | ApplyError::JournalBackpressure(_)) => {
             MiningControlError::Unavailable(CompactString::from(error.to_string()))
         }
         other => MiningControlError::Rejected(CompactString::from(format!(

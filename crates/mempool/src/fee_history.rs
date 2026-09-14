@@ -8,20 +8,12 @@ use parking_lot::RwLock;
 
 use crate::Mempool;
 
-/// Name of the estimator's history file inside the datadir.
 const HISTORY_FILE: &str = "fee-estimator-history.dat";
-/// Staging name for the atomic publish; same filesystem, renamed into place.
 const HISTORY_TEMP: &str = "fee-estimator-history.dat.tmp";
-/// Read-side bound: a history payload larger than this cannot be a genuine
-/// version-1 file (the encoder's worst case is a few megabytes), so treat it
-/// as corrupt without buffering it.
+/// Version-1 payloads larger than this bound are treated as corrupt.
 const MAX_HISTORY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Adopts the persisted estimator history at node open, if any.
-///
-/// A missing file is a normal cold start. A rejected payload logs a typed
-/// warning naming the reject reason and leaves the pool's fresh,
-/// insufficient-data estimator in place.
+/// Adopts persisted estimator history at node open, if any.
 pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     let path = data_dir.join(HISTORY_FILE);
     let Ok(metadata) = std::fs::metadata(&path) else {
@@ -163,12 +155,13 @@ mod tests {
         let fresh = open_pool();
         assert_eq!(fresh.read().estimate_fee_rate(1), None);
         load(dir.path(), &fresh);
+        let seeded_rate = seeded.read().estimate_fee_rate(1);
+        assert!(seeded_rate.is_some());
         assert_eq!(
             fresh.read().estimate_fee_rate(1),
-            seeded.read().estimate_fee_rate(1),
+            seeded_rate,
             "the saved history must survive the datadir round trip"
         );
-        assert!(fresh.read().estimate_fee_rate(1).is_some());
     }
 
     #[test]

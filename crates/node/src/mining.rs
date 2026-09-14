@@ -1,7 +1,7 @@
 //! Node-owned mining control facade.
 //!
-//! Header admission and proposal/submission projection over the
-//! authoritative chainstate. Candidate lifecycle lives in `bitcoin_rs_mining`.
+//! Header admission and proposal/submission projection over the authoritative
+//! chainstate. Candidate lifecycle lives in `bitcoin_rs_mining`.
 
 mod candidate;
 mod control;
@@ -21,8 +21,6 @@ use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mining::AppliedTipSource;
 use bitcoin_rs_mining::AvailableMiningRule;
-#[cfg(test)]
-use bitcoin_rs_mining::BlockValidationResult;
 use bitcoin_rs_mining::ChainContextSource;
 use bitcoin_rs_mining::GenerateSelection;
 use bitcoin_rs_mining::MempoolSequenceWake;
@@ -40,16 +38,8 @@ use bitcoin_rs_primitives::Network;
 use compact_str::CompactString;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
-#[cfg(test)]
-use submission::map_apply_error;
 
 /// Production mining coordinator owned by the node process.
-///
-/// `coinbase_script` is immutable coordinator configuration captured at
-/// construction. There is no wallet coupling and no default miner address:
-/// callers must pass the template coinbase `ScriptBuf` explicitly. Callers may
-/// pass an empty script for transport-only GBT assembly (RPC exposes
-/// `coinbasevalue` / `default_witness_commitment`, not a node-owned payout).
 pub struct MiningCoordinator {
     network: Network,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -57,16 +47,11 @@ pub struct MiningCoordinator {
     apply_handles: Chainstate,
     followers: ChainFollowers,
     shutdown: Arc<AtomicBool>,
-    /// Mining-domain lifecycle service over the capability adapters.
     service: MiningService,
 }
 
 impl MiningCoordinator {
     /// Builds a coordinator over the shared applied-chain and mempool handles.
-    ///
-    /// `coinbase_script` is required and stored immutably. Pass
-    /// `Vec::new()` for transport-only template assembly when the node
-    /// does not own a miner payout script.
     #[must_use]
     pub fn new(
         network: Network,
