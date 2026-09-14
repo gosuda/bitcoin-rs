@@ -588,6 +588,9 @@ const READINESS_OUTCOMES: [&str; 8] = [
 ];
 
 fn readiness_deadline() -> Instant {
+    // Local test safety bound for the readiness semantics owned by
+    // docs/contracts/indexing.md (contract 1.1, IDX-02/IDX-03); this is not a
+    // normative startup-latency guarantee.
     Instant::now() + Duration::from_mins(2)
 }
 
@@ -1007,6 +1010,9 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     // Backfill may trail the watermark report; poll the row, and on failure
     // keep the chain-side evidence in the panic.
     let mut restored = None;
+    // Local test safety bound for the historical lookup/readiness requirements
+    // in docs/contracts/indexing.md (contract 1.1, IDX-02/IDX-03); it is not a
+    // normative index-rebuild latency guarantee.
     let row_deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < row_deadline {
         if let Ok(back) = rebuilt.rpc("getrawtransaction", &json!([txid])) {
