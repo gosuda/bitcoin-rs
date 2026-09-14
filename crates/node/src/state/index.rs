@@ -248,9 +248,9 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
     use super::*;
 
-    /// `open_derived_index_on_worker` dispatches to the concrete backend
-    /// constructor and the store opens successfully on the caller's thread.
-    // CONTRACT: docs/contracts/architecture.md#ARCH-03
+    /// Contract: `docs/contracts/architecture.md#ARCH-03` requires backend
+    /// composition to dispatch to the selected concrete constructor and open
+    /// successfully on the caller's thread.
     #[test]
     fn open_dispatch_preserves_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
