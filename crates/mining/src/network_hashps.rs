@@ -83,6 +83,11 @@ pub fn estimate_network_hashps(
     if start_node.height == 0 {
         return 0.0;
     }
+    // Negative lookup values other than -1 are invalid; never turn them into
+    // an unbounded ancestor walk.
+    if lookup < -1 {
+        return 0.0;
+    }
     let mut walk = if lookup == -1 {
         let interval = i64::from(network.retarget_interval());
         if interval <= 0 {
