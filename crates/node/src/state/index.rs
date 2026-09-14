@@ -7,8 +7,7 @@ use anyhow::Result;
 use anyhow::bail;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_index::runtime::{
-    DEFAULT_BATCH_LIMITS, OpenDerivedIndex, REDB_BATCH_LIMITS, ROCKSDB_BATCH_LIMITS,
-    open_derived_index_store_on_worker,
+    DEFAULT_BATCH_LIMITS, OpenDerivedIndex, REDB_BATCH_LIMITS, open_derived_index_store_on_worker,
 };
 use bitcoin_rs_storage::{KvStore, StorageBackend};
 use crossbeam_channel::Receiver;
@@ -83,8 +82,7 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
         S: KvStore,
     {
         let batch_limits = match self.backend {
-            StorageBackend::RocksDb => ROCKSDB_BATCH_LIMITS,
-            StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
+            StorageBackend::RocksDb | StorageBackend::Fjall => DEFAULT_BATCH_LIMITS,
             StorageBackend::Redb => REDB_BATCH_LIMITS,
         };
         open_derived_index_store_on_worker(store, batch_limits, self.epoch)

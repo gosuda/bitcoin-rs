@@ -13,10 +13,8 @@ use super::QueryEngineLive;
 use super::REVISION_QUIET_PERIOD;
 use super::TXINDEX_OPEN_TIMEOUT;
 use super::Worker;
-use super::heartbeat::Heartbeat;
 use super::namespace::NAMESPACE_REGISTRY;
 use super::namespace::NamespaceRegistry;
-use super::wait_txindex_open_gate;
 use crate::PreparedBatchLimits;
 use crate::recovery::open_writer;
 use crate::writer::TxIndexWriter;
@@ -32,7 +30,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Worker-owned open: opens the store, constructs writer/reader/engine,
 /// publishes lifecycle, and runs reconciliation — all behind one
@@ -193,9 +192,6 @@ pub(super) fn open_and_run(
     shutdown: &Arc<AtomicBool>,
     wake_rx: &Receiver<()>,
 ) -> Result<(), DerivedIndexWorkerError> {
-    // Wait for the test-only open gate before touching the store.
-    wait_txindex_open_gate();
-
     let txindex_dir = spec.data_dir.join(spec.namespace);
     std::fs::create_dir_all(&txindex_dir)
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
@@ -263,9 +259,9 @@ pub(super) fn open_and_run(
 ///
 /// The storage engine open (fjall/lsm-tree recovery, rocksdb column-family
 /// open) can wedge on a large or partially-corrupted store, spinning one
-/// thread at 100% CPU indefinitely. This wrapper runs the open on a helper
+/// thread at 100% CPU indefinitely. This wrapper runs the open on a separate
 /// thread and waits with [`TXINDEX_OPEN_TIMEOUT`]. If the deadline fires, the
-/// helper thread is detached (it may eventually finish or hang — we cannot
+/// open thread is detached (it may eventually finish or hang — we cannot
 /// kill a thread) and `OpenTimeout` is returned so the worker publishes
 /// `Failed` and the node stays operable without the index.
 pub(super) fn open_derived_index_with_timeout(
@@ -274,7 +270,7 @@ pub(super) fn open_derived_index_with_timeout(
     open_timeout: Duration,
     should_stop: impl Fn() -> bool,
 ) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
-    // No helper exists yet: cancellation here can release the namespace.
+    // No open thread exists yet: cancellation here can release the namespace.
     if should_stop() {
         return Err(DerivedIndexWorkerError::Stopped);
     }
@@ -288,13 +284,13 @@ pub(super) fn open_derived_index_with_timeout(
         })
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
 
-    let result = open_wait::wait_for_open_result(&rx, open_timeout, should_stop);
+    let result = wait_for_open_result(&rx, open_timeout, should_stop);
     if matches!(&result, Err(DerivedIndexWorkerError::OpenTimeout { .. })) {
         tracing::error!(
             timeout_secs = open_timeout.as_secs(),
             backend = %spec.storage_backend,
             dir = %txindex_dir.display(),
-            "txindex store open timed out; detaching the open helper and poisoning its namespace"
+            "txindex store open timed out; detaching the open thread and poisoning its namespace"
         );
     }
     result
@@ -319,7 +315,226 @@ where
     })
 }
 
-mod open_wait;
+/// Heartbeat: emits a log line every 30 seconds while the worker's
+/// backend open is blocked. Observability only — not a timeout.
+pub(super) struct Heartbeat {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    pub(super) fn start(capability: &'static str, namespace: String, backend: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let start = Instant::now();
+        let handle = thread::Builder::new()
+            .name(format!("bitcoin-rs-{capability}-heartbeat"))
+            .spawn(move || {
+                while !stop_clone.load(Ordering::Acquire) {
+                    let elapsed = start.elapsed();
+                    tracing::info!(
+                        capability,
+                        namespace = %namespace,
+                        backend = %backend,
+                        elapsed_secs = elapsed.as_secs(),
+                        "index store recovery in progress"
+                    );
+                    for _ in 0..300 {
+                        if stop_clone.load(Ordering::Acquire) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            })
+            .ok();
+        Self { stop, handle }
+    }
+
+    pub(super) fn stop_and_join(mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Maximum gap between cancellation checks while backend recovery is pending.
+const OPEN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The caller must retain namespace exclusion for abandoned-open errors.
+pub(super) fn wait_for_open_result(
+    receiver: &std::sync::mpsc::Receiver<Result<OpenDerivedIndex, DerivedIndexWorkerError>>,
+    timeout: Duration,
+    should_stop: impl Fn() -> bool,
+) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        // Shutdown wins even when its observation coincides with the deadline.
+        if should_stop() {
+            return Err(DerivedIndexWorkerError::OpenStopped);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(DerivedIndexWorkerError::OpenTimeout {
+                secs: timeout.as_secs(),
+            });
+        }
+        match receiver.recv_timeout(remaining.min(OPEN_POLL_INTERVAL)) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(DerivedIndexWorkerError::Storage(
+                    bitcoin_rs_storage::StorageError::Backend(
+                        "txindex open thread exited without result".to_owned(),
+                    ),
+                ));
+            }
+        }
+    }
+}
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    /// IDX-07: a detached backend may still access the namespace after its worker exits.
+    #[test]
+    fn abandoned_open_outcomes_poison_the_namespace_before_release() -> std::io::Result<()> {
+        for error in [
+            DerivedIndexWorkerError::OpenStopped,
+            DerivedIndexWorkerError::OpenTimeout { secs: 1 },
+        ] {
+            let dir = tempfile::tempdir()?;
+            let key = dir.path().join("txindex");
+            let generation = Generation::new(1);
+            let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
+            let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
+            assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
+            finish_worker(&runtime, &lifecycle, &generation, &key, Err(error));
+            assert!(runtime.should_stop());
+            assert!(matches!(
+                **lifecycle.load(),
+                DerivedIndexLifecycle::Failed(_)
+            ));
+            assert!(NAMESPACE_REGISTRY.is_poisoned(&key));
+            assert!(!NAMESPACE_REGISTRY.claim(key, 2));
+        }
+        Ok(())
+    }
+
+    /// IDX-07: completed workers and failures with no detached thread can release.
+    #[test]
+    fn completed_worker_outcomes_release_without_poisoning() -> std::io::Result<()> {
+        for result in [
+            Ok(()),
+            Err(DerivedIndexWorkerError::Stopped),
+            Err(DerivedIndexWorkerError::NoBodyStore),
+        ] {
+            let dir = tempfile::tempdir()?;
+            let key = dir.path().join("txindex");
+            let generation = Generation::new(1);
+            let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
+            let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
+            assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
+            finish_worker(&runtime, &lifecycle, &generation, &key, result);
+            assert!(!NAMESPACE_REGISTRY.is_poisoned(&key));
+            assert!(NAMESPACE_REGISTRY.claim(key.clone(), 2));
+            NAMESPACE_REGISTRY.release(&key, 2);
+        }
+        Ok(())
+    }
+    #[test]
+    fn pending_open_rechecks_shutdown_before_the_open_deadline() {
+        let (open_tx, open_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let checks = AtomicUsize::new(0);
+            let result = wait_for_open_result(&open_rx, Duration::from_secs(30), || {
+                // Stop on the second check, after one pending receive. No scheduler
+                // race or storage-engine sleep is needed to put the wait in flight.
+                checks.fetch_add(1, Ordering::Relaxed) > 0
+            });
+            let _ = done_tx.send(result);
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        // Unblock even the old, uncapped receive before asserting, so a regression
+        // fails promptly rather than leaking a 30-second test thread.
+        drop(open_tx);
+        assert!(worker.join().is_ok());
+        assert!(matches!(
+            result,
+            Ok(Err(DerivedIndexWorkerError::OpenStopped))
+        ));
+    }
+
+    #[test]
+    fn shutdown_wins_over_an_expired_open_deadline() {
+        let (_tx, rx) = mpsc::channel();
+        assert!(matches!(
+            wait_for_open_result(&rx, Duration::ZERO, || true),
+            Err(DerivedIndexWorkerError::OpenStopped)
+        ));
+    }
+
+    #[test]
+    fn expired_open_deadline_is_typed() {
+        let (_tx, rx) = mpsc::channel();
+        assert!(matches!(
+            wait_for_open_result(&rx, Duration::ZERO, || false),
+            Err(DerivedIndexWorkerError::OpenTimeout { secs: 0 })
+        ));
+    }
+
+    #[test]
+    fn disconnected_open_thread_is_a_storage_failure() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        assert!(matches!(
+            wait_for_open_result(&rx, Duration::from_secs(1), || false),
+            Err(DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Backend(reason)))
+                if reason == "txindex open thread exited without result"
+        ));
+    }
+
+    #[test]
+    fn backend_error_is_preserved_without_becoming_abandonment() {
+        let (tx, rx) = mpsc::channel();
+        assert!(
+            tx.send(Err(DerivedIndexWorkerError::Storage(
+                bitcoin_rs_storage::StorageError::InvalidOperation("backend sentinel")
+            )))
+            .is_ok()
+        );
+        assert!(matches!(
+            wait_for_open_result(&rx, Duration::from_secs(1), || false),
+            Err(DerivedIndexWorkerError::Storage(
+                bitcoin_rs_storage::StorageError::InvalidOperation("backend sentinel")
+            ))
+        ));
+    }
+
+    #[test]
+    fn shutdown_before_thread_creation_never_touches_the_store() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("must-not-be-created");
+        let spec = DerivedIndexOpenSpec {
+            data_dir: dir.path().to_path_buf(),
+            namespace: "txindex",
+            storage_backend: bitcoin_rs_storage::StorageBackend::Fjall,
+            epoch: 1,
+            enabled: crate::IndexCapabilities::default(),
+            rollback_rebuild_cutover: 0,
+            canonical_data_root: dir.path().to_path_buf(),
+            open_store: std::sync::Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
+            utxo: None,
+            chain_transition: None,
+        };
+        let result =
+            open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);
+        assert!(matches!(result, Err(DerivedIndexWorkerError::Stopped)));
+        assert!(!path.exists());
+        Ok(())
+    }
+}

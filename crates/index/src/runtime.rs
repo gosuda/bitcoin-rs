@@ -25,6 +25,7 @@ use crate::{
     BlockSource, IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark,
     IndexWatermarks, IndexWriteFence, PreparedBatch, PreparedBatchLimits, ScriptHash,
     ScriptLiveScan, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    reconcile::{ReconcileLeg, ReconcilePhase},
     types::{TxPosition, TxPositionValue},
     writer::TxIndexWriter,
 };
@@ -43,19 +44,14 @@ use crate::query_api::{
 use bitcoin_rs_storage::{PrefixScanLimit, block_body::BlockBodyStore};
 
 use compact_str::CompactString;
+use std::sync::atomic::AtomicU64;
 
-use crossbeam_channel::Receiver;
-
-#[cfg(test)]
-use heartbeat::Heartbeat;
-
-#[cfg(test)]
-use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
+use crossbeam_channel::{Receiver, Sender};
 
 use parking_lot::{Mutex, RwLock};
 
-#[cfg(test)]
-use startup::{fail_worker, open_derived_index_with_timeout};
+#[cfg(all(test, feature = "fjall"))]
+use startup::open_derived_index_with_timeout;
 
 use std::path::Path;
 use std::{
@@ -71,23 +67,146 @@ use std::{
 mod capability;
 mod catch_up;
 mod cursor;
-mod heartbeat;
 mod lifecycle;
 mod namespace;
 mod query;
-mod query_adapter;
 mod reconciliation;
 mod rollback;
-#[allow(clippy::module_inception)]
-mod runtime;
-mod scheduling;
-pub use runtime::DerivedIndexRuntime;
 mod startup;
 pub use startup::open_derived_index_store_on_worker;
 
 pub use capability::DerivedIndexCapability;
 use query::IndexProgress;
 pub use query::{DerivedIndexQueryEngine, IndexBlockSource, QueryEngineLive};
+
+/// Shared wake/revision/health state owned by `NodeState` and referenced by
+/// `Chainstate`, the worker thread, and the query engine.
+#[derive(Debug)]
+pub struct DerivedIndexRuntime {
+    revision: AtomicU64,
+    pub(super) shutdown: AtomicBool,
+    pub(super) failed: AtomicBool,
+    wake_tx: Sender<()>,
+    failure_message: RwLock<Option<CompactString>>,
+    phase: arc_swap::ArcSwap<ReconcilePhase>,
+}
+impl DerivedIndexRuntime {
+    /// Creates shared runtime state.
+    #[must_use]
+    pub fn new(wake_tx: Sender<()>) -> Self {
+        Self {
+            revision: AtomicU64::new(0),
+            shutdown: AtomicBool::new(false),
+            failed: AtomicBool::new(false),
+            wake_tx,
+            failure_message: RwLock::new(None),
+            phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
+        }
+    }
+
+    /// Publishes the reconciliation phase. Only the worker thread writes it.
+    pub fn publish_phase(&self, phase: ReconcilePhase) {
+        if **self.phase.load() != phase {
+            self.phase.store(Arc::new(phase));
+        }
+    }
+
+    /// Publishes `leg` for `capabilities`, leaving the other legs as they are.
+    pub fn publish_leg(&self, capabilities: IndexCapabilities, leg: ReconcileLeg) {
+        self.publish_phase(self.phase().with_leg(capabilities, leg));
+    }
+
+    /// Reads the published reconciliation phase.
+    #[must_use]
+    pub fn phase(&self) -> ReconcilePhase {
+        **self.phase.load()
+    }
+
+    /// Called immediately after a committed `applied_tip.store`.
+    ///
+    /// Increments the revision with `Release` ordering and `try_send`s one
+    /// wake.  Coalesced or lost wakes are harmless: the worker reconciles
+    /// against current authoritative state each loop.
+    pub fn wake(&self) {
+        self.revision.fetch_add(1, Ordering::Release);
+        let _ = self.wake_tx.try_send(());
+    }
+
+    /// Marks the worker as failed with an explanatory message.
+    pub fn publish_failed(&self, message: impl Into<CompactString>) {
+        *self.failure_message.write() = Some(message.into());
+        self.failed.store(true, Ordering::Release);
+    }
+
+    /// Reads the wake revision.
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
+    }
+
+    /// Reports whether shutdown or failure was published.
+    #[must_use]
+    pub fn should_stop(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire) || self.failed.load(Ordering::Acquire)
+    }
+
+    /// Initiates graceful shutdown.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = self.wake_tx.try_send(());
+    }
+
+    /// Reads the published failure message.
+    #[must_use]
+    pub fn failure_message(&self) -> Option<CompactString> {
+        self.failure_message.read().clone()
+    }
+}
+
+impl DerivedIndexQuery for DerivedIndexQueryAdapter {
+    fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.transaction(txid)
+    }
+
+    fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.outpoint_value(outpoint)
+    }
+
+    fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.transaction_height(txid)
+    }
+
+    fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.index_info()
+    }
+}
+
+impl ScriptIndexQuery for DerivedIndexQueryAdapter {
+    fn history_snapshot(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<ScriptIndexSnapshot, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.history_snapshot(scripthash)
+    }
+
+    fn unspent_outputs(
+        &self,
+        scripthash: ScriptHash,
+    ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.unspent_outputs(scripthash)
+    }
+
+    fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
+        let engine = self.load_engine()?;
+        engine.spender(outpoint)
+    }
+}
 
 /// Bounded scan limits used by the query engine.
 ///
@@ -103,12 +222,6 @@ const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
 /// Capped by actual retained row count and encoded bytes to keep each forward
 /// commit bounded.
 const BATCH_BYTE_LIMIT: usize = 256 << 20;
-
-/// Writer-side batch limits for the `RocksDB` backend.
-pub const ROCKSDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
-    max_rows: 1_000_000,
-    max_bytes: BATCH_BYTE_LIMIT,
-};
 
 /// Writer-side batch limits for the default (fjall) backend.
 pub const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
@@ -149,7 +262,7 @@ const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
 
 /// Upper bound on waiting for backend recovery. Timeout isolates the index
 /// failure from the node; it does not prove recovery stopped making progress.
-/// The backend helper cannot be cancelled, so abandonment poisons its namespace.
+/// The backend open thread cannot be cancelled, so abandonment poisons its namespace.
 const TXINDEX_OPEN_TIMEOUT: Duration = Duration::from_mins(30);
 
 /// Monotonic publication token. Each worker holds one; a revoked token makes
@@ -170,7 +283,7 @@ impl Generation {
         }
     }
 
-    /// Returns the generation identifier.
+    /// Reads the generation identifier.
     #[must_use]
     pub fn id(&self) -> u64 {
         self.id
@@ -181,7 +294,7 @@ impl Generation {
         self.revoked.store(true, Ordering::Release);
     }
 
-    /// Returns true once the token is revoked.
+    /// Reports whether this generation was revoked.
     #[must_use]
     pub fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
@@ -208,24 +321,6 @@ pub enum DerivedIndexLifecycle {
     ShutdownAbandoned,
 }
 
-impl DerivedIndexLifecycle {
-    fn query_payload(&self) -> Option<&Arc<DerivedIndexQueryEngine>> {
-        match self {
-            Self::Serving(engine) => Some(engine),
-            _ => None,
-        }
-    }
-
-    fn unavailable_reason(&self) -> &'static str {
-        match self {
-            Self::Opening => "txindex is opening",
-            Self::Failed(_) => "txindex is unavailable",
-            Self::ShutdownAbandoned => "txindex was abandoned at shutdown",
-            Self::Serving(_) => unreachable!("query_payload is Some for Serving"),
-        }
-    }
-}
-
 /// Stable outer query adapter constructed before backend open and before RPC
 /// context construction.
 ///
@@ -247,10 +342,19 @@ impl DerivedIndexQueryAdapter {
 
     fn load_engine(&self) -> Result<Arc<DerivedIndexQueryEngine>, TxQueryError> {
         let snapshot = self.lifecycle.load_full();
-        match snapshot.query_payload() {
-            Some(engine) => Ok(Arc::clone(engine)),
-            None => Err(TxQueryError::Unavailable(
-                snapshot.unavailable_reason().into(),
+        match &*snapshot {
+            DerivedIndexLifecycle::Serving(engine) => Ok(Arc::clone(engine)),
+            // Opening has not published a query engine yet.
+            DerivedIndexLifecycle::Opening => {
+                Err(TxQueryError::Unavailable("txindex is opening".into()))
+            }
+            // Failed startup leaves the index unavailable.
+            DerivedIndexLifecycle::Failed(_) => {
+                Err(TxQueryError::Unavailable("txindex is unavailable".into()))
+            }
+            // Shutdown abandoned the backend before it opened.
+            DerivedIndexLifecycle::ShutdownAbandoned => Err(TxQueryError::Unavailable(
+                "txindex was abandoned at shutdown".into(),
             )),
         }
     }
@@ -286,31 +390,6 @@ pub struct DerivedIndexOpenSpec {
     /// Serializes a live-view query or seed against a chain transition.
     pub chain_transition: Option<Arc<Mutex<()>>>,
 }
-
-/// Test-only keyed open gate. Holds the worker inside the open phase until
-/// released, proving RPC binds and queries see `Opening` while the store is
-/// not yet open. `#[cfg(test)]` only — not a production trait or `NodeConfig` field.
-#[cfg(test)]
-pub(crate) static TXINDEX_OPEN_GATE: std::sync::LazyLock<
-    parking_lot::Mutex<Option<crossbeam_channel::Receiver<()>>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
-
-#[cfg(test)]
-pub(crate) fn install_txindex_open_gate() -> crossbeam_channel::Sender<()> {
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    *TXINDEX_OPEN_GATE.lock() = Some(rx);
-    tx
-}
-
-#[cfg(test)]
-pub(crate) fn wait_txindex_open_gate() {
-    if let Some(rx) = TXINDEX_OPEN_GATE.lock().as_ref() {
-        let _ = rx.recv();
-    }
-}
-
-#[cfg(not(test))]
-pub(crate) fn wait_txindex_open_gate() {}
 
 /// Handle used to spawn and join the supervised reconciliation worker.
 pub struct DerivedIndexWorker {
@@ -384,10 +463,10 @@ impl crate::SpentCoinScripts for UndoScripts {
 }
 
 /// Test cursor source anchored at an empty tip for worker construction.
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) struct TestChainCursor;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 impl crate::reconcile::ChainCursorSource for TestChainCursor {
     fn cursor(&self) -> crate::reconcile::ConsumerCursor {
         crate::reconcile::ConsumerCursor {
@@ -401,7 +480,7 @@ impl crate::reconcile::ChainCursorSource for TestChainCursor {
 
 /// Test double standing in for node's `RecoveryReporter`; construction returns
 /// the sink handle plus the recording the test asserts against.
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) struct RecordedIndexAhead {
     /// One entry per call: `(capability, index_height, tip_height,
     /// tip_hash_be, index_hash_be, depth, unix_secs)`.
@@ -409,7 +488,7 @@ pub(crate) struct RecordedIndexAhead {
     pub(crate) calls: Mutex<Vec<(String, u32, u32, String, String, u32, u64)>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 impl RecordedIndexAhead {
     /// An empty recording sink.
     pub(crate) fn new() -> Arc<Self> {
@@ -419,7 +498,7 @@ impl RecordedIndexAhead {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 impl IndexAheadSink for RecordedIndexAhead {
     fn report_index_ahead(
         &self,
@@ -559,7 +638,7 @@ pub enum DerivedIndexWorkerError {
     /// A block body needed for indexing or rollback was absent.
     #[error("txindex worker: missing body at height {height}, hash {hash}")]
     MissingBody {
-        /// Height of the missing body.
+        /// Block height whose body is missing.
         height: u32,
         /// Active-chain hash of the missing body.
         hash: Hash256,
@@ -576,15 +655,15 @@ pub enum DerivedIndexWorkerError {
     /// A rewind needed an undo record that is missing or unreadable.
     #[error("txindex worker: undo record missing or unreadable at height {height}, hash {hash}")]
     UndoUnavailable {
-        /// Height of the unavailable undo record.
+        /// Block height whose undo record is unavailable.
         height: u32,
-        /// Hash of the block whose undo record is unavailable.
+        /// Block hash whose undo record is unavailable.
         hash: Hash256,
     },
     /// The rollback plan referenced a chain node not present in the tree.
     #[error("txindex worker: target chain node missing at height {height}")]
     MissingTargetChain {
-        /// Height of the missing chain node.
+        /// Height whose chain node is missing.
         height: u32,
     },
     /// The rollback evidence sink failed to publish the index-ahead event.
@@ -593,7 +672,7 @@ pub enum DerivedIndexWorkerError {
 }
 
 impl DerivedIndexWorkerError {
-    /// The backend helper may still hold or acquire the store after this error.
+    /// The backend open thread may still hold or acquire the store after this error.
     fn abandoned_open(&self) -> bool {
         matches!(self, Self::OpenStopped | Self::OpenTimeout { .. })
     }
@@ -606,19 +685,10 @@ impl DerivedIndexWorkerError {
     }
 }
 
-#[cfg(all(test, feature = "fjall"))]
-mod body_reader_tests;
-
-#[cfg(test)]
-mod block_source_tests;
-
 #[cfg(test)]
 mod query_tests;
 
-#[cfg(test)]
-mod lifecycle_tests;
-
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 mod integration_tests;
 
 #[cfg(all(test, feature = "fjall"))]

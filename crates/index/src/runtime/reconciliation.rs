@@ -5,9 +5,9 @@ use super::DerivedIndexWorkerError;
 use super::PendingForward;
 use super::ReconcileAction;
 use super::Worker;
-use super::scheduling::BatchWait;
-use super::scheduling::wait_for_batch_deadline;
-use super::scheduling::wait_for_revision_quiet;
+use super::catch_up::BatchWait;
+use super::catch_up::wait_for_batch_deadline;
+use super::catch_up::wait_for_revision_quiet;
 use crate::IndexCapabilities;
 use crate::IndexError;
 use crate::IndexWatermark;
@@ -181,7 +181,14 @@ impl Worker {
                 reported_ahead = true;
                 self.report_index_ahead(capabilities, watermark, target)?;
             }
-            let depth = self.rollback_depth_for(watermark, target.as_deref());
+            let depth = target.as_ref().and_then(|target| {
+                crate::reconcile::block_tree::rollback_depth(
+                    &self.block_tree.read(),
+                    Hash256::from_le_bytes(&watermark.hash),
+                    watermark.height,
+                    target.tip_id,
+                )
+            });
             if depth.is_some_and(|depth| depth > self.rollback_rebuild_cutover) {
                 tracing::warn!(
                     depth,
@@ -435,25 +442,6 @@ impl Worker {
     ) -> bool {
         let tree = self.block_tree.read();
         crate::reconcile::block_tree::position_on_active_chain(
-            &tree,
-            Hash256::from_le_bytes(&watermark.hash),
-            watermark.height,
-            target.tip_id,
-        )
-    }
-
-    /// Canonical rollback-versus-rebuild depth for one watermark, captured
-    /// under a short tree lock. `None` leaves the per-block rollback route:
-    /// an unresolvable watermark hash or an absent target fails inside
-    /// `rollback_one` into the error-driven reset arm.
-    pub(super) fn rollback_depth_for(
-        &self,
-        watermark: IndexWatermark,
-        target: Option<&TipSnapshot>,
-    ) -> Option<u32> {
-        let target = target?;
-        let tree = self.block_tree.read();
-        crate::reconcile::block_tree::rollback_depth(
             &tree,
             Hash256::from_le_bytes(&watermark.hash),
             watermark.height,

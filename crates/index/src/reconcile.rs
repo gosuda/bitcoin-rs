@@ -10,43 +10,9 @@ use bitcoin_rs_primitives::Hash256;
 use crate::{IndexCapabilities, IndexWatermark, IndexWatermarks};
 
 /// Durable consumer-cursor length: epoch (8 LE) + sequence (8 LE) + height (4 LE) + hash.
-pub const CURSOR_BYTE_LEN: usize = 52;
+pub(crate) const CURSOR_BYTE_LEN: usize = 52;
 
-/// Applied-tip identity consumed by index reconciliation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainTip {
-    /// Applied tip block hash.
-    pub hash: Hash256,
-    /// Applied tip height.
-    pub height: u32,
-}
-
-/// Coherent publisher identity supplied by the authoritative chain owner.
-///
-/// The index does not own or advance these fields. It compares them with its
-/// durable cursor so dropped wakeups and process restarts converge through the
-/// same positional reconciliation path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainIdentity {
-    /// Process epoch of the supplied committed-chain snapshot.
-    pub epoch: u64,
-    /// Commit sequence in that epoch.
-    pub sequence: u64,
-    /// Applied tip block hash.
-    pub tip_hash: Hash256,
-    /// Applied tip height.
-    pub tip_height: u32,
-}
-
-/// Minimal authoritative-chain topology needed by derived-index reconciliation.
-///
-/// Index owns the decision. Node/chainstate owns the concrete tree and answers
-/// topology questions against one selected active tip. Process lifecycle,
-/// storage, and wake delivery are intentionally absent from this interface.
-pub trait ActiveChainView {
-    /// Whether `position` is represented by the authoritative chain topology.
-    fn contains(&self, position: Hash256) -> bool;
-
+pub(crate) trait ActiveChainView {
     /// Whether `position` at `height` lies on the selected active chain.
     fn position_on_active_chain(&self, position: Hash256, height: u32) -> bool;
 
@@ -69,17 +35,6 @@ pub struct ConsumerCursor {
 }
 
 impl ConsumerCursor {
-    /// Builds the cursor for a fully consumed chain identity.
-    #[must_use]
-    pub const fn from_identity(identity: &ChainIdentity) -> Self {
-        Self {
-            epoch: identity.epoch,
-            sequence: identity.sequence,
-            height: identity.tip_height,
-            hash: identity.tip_hash,
-        }
-    }
-
     /// Encodes the durable representation in [`CURSOR_BYTE_LEN`] bytes.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; CURSOR_BYTE_LEN] {
@@ -109,81 +64,9 @@ impl ConsumerCursor {
     }
 }
 
-/// What a derived-index consumer must do to move its rows onto the active chain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReconcilePlan {
-    /// The cursor names the live tip exactly; nothing to do.
-    CaughtUp,
-    /// The cursor position is on the active chain; connect forward.
-    Forward {
-        /// First height the consumer still has to index.
-        from_height: u32,
-    },
-    /// The cursor position is orphaned; disconnect to the common ancestor,
-    /// then connect forward.
-    RollbackAndForward {
-        /// Last height shared by the cursor branch and the active chain.
-        ancestor_height: u32,
-    },
-    /// The cursor block or its ancestry cannot be resolved; rebuild from the
-    /// consumer's earliest anchor.
-    Rebuild,
-}
-
-/// Plans one positional reconciliation pass for `cursor` against `target`.
-#[must_use]
-pub fn plan(
-    cursor: &ConsumerCursor,
-    target: ChainTip,
-    chain: &impl ActiveChainView,
-) -> ReconcilePlan {
-    if !chain.contains(cursor.hash) {
-        return ReconcilePlan::Rebuild;
-    }
-    if cursor.height == target.height && cursor.hash == target.hash {
-        return ReconcilePlan::CaughtUp;
-    }
-    if chain.position_on_active_chain(cursor.hash, cursor.height) {
-        return ReconcilePlan::Forward {
-            from_height: cursor.height.saturating_add(1),
-        };
-    }
-    match chain.common_ancestor_height(cursor.hash) {
-        Some(ancestor_height) => ReconcilePlan::RollbackAndForward { ancestor_height },
-        None => ReconcilePlan::Rebuild,
-    }
-}
-
-/// Plans from a coherent publisher identity plus the independently supplied
-/// authoritative tip.
-///
-/// Publisher identity is only a shortcut when it also names `target`; an old or
-/// torn identity must not manufacture `CaughtUp` against a different tip.
-#[must_use]
-pub fn plan_from_identity(
-    cursor: &ConsumerCursor,
-    identity: &ChainIdentity,
-    target: ChainTip,
-    chain: &impl ActiveChainView,
-) -> ReconcilePlan {
-    let identity_matches_cursor = (cursor.epoch, cursor.sequence, cursor.hash, cursor.height)
-        == (
-            identity.epoch,
-            identity.sequence,
-            identity.tip_hash,
-            identity.tip_height,
-        );
-    let identity_matches_target =
-        identity.tip_hash == target.hash && identity.tip_height == target.height;
-    if identity_matches_cursor && identity_matches_target {
-        return ReconcilePlan::CaughtUp;
-    }
-    plan(cursor, target, chain)
-}
-
 /// Canonical stale-branch depth used to choose rollback versus rebuild.
 #[must_use]
-pub fn rollback_depth(
+pub(crate) fn rollback_depth(
     chain: &impl ActiveChainView,
     position: Hash256,
     position_height: u32,
@@ -295,7 +178,7 @@ impl ReconcilePhase {
 /// `Valid(None)` is an aligned, unindexed selection, not an empty selection
 /// and not proof that a query is ready.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SelectedWatermark {
+pub(crate) enum SelectedWatermark {
     /// Every selected capability has the same optional height and block hash.
     Valid(Option<IndexWatermark>),
     /// No capability was selected, or selected capabilities disagree.
@@ -304,7 +187,7 @@ pub enum SelectedWatermark {
 
 /// Selects an exact common watermark without consulting or owning chainstate.
 #[must_use]
-pub fn selected_watermark(
+pub(crate) fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> SelectedWatermark {
@@ -326,9 +209,6 @@ pub fn selected_watermark(
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 /// Coherent applied-tip position supplied by the authoritative chain owner.
 ///
 /// The chain owner (node) implements this over its single-write snapshot
@@ -343,11 +223,11 @@ pub trait ChainCursorSource: Send + Sync {
 ///
 /// The index owns reconciliation policy; the tree only answers topology
 /// questions against one selected active tip.
-pub mod block_tree {
-    use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
+pub(crate) mod block_tree {
+    use bitcoin_rs_chain::{BlockTree, NodeId};
     use bitcoin_rs_primitives::Hash256;
 
-    use super::{ActiveChainView, ChainIdentity, ChainTip, ConsumerCursor, ReconcilePlan};
+    use super::ActiveChainView;
 
     struct BlockTreeActiveChain<'a> {
         tree: &'a BlockTree,
@@ -355,10 +235,6 @@ pub mod block_tree {
     }
 
     impl ActiveChainView for BlockTreeActiveChain<'_> {
-        fn contains(&self, position: Hash256) -> bool {
-            self.tree.lookup(position).is_some()
-        }
-
         fn position_on_active_chain(&self, position: Hash256, height: u32) -> bool {
             let Some(position_id) = self.tree.lookup(position) else {
                 return false;
@@ -377,66 +253,9 @@ pub mod block_tree {
         }
     }
 
-    const fn target(tip: &TipSnapshot) -> ChainTip {
-        ChainTip {
-            hash: tip.hash,
-            height: tip.height,
-        }
-    }
-
-    /// Plans one reconciliation pass against the authoritative tree.
-    #[must_use]
-    pub fn plan(
-        cursor: &ConsumerCursor,
-        target_tip: &TipSnapshot,
-        tree: &BlockTree,
-    ) -> ReconcilePlan {
-        let chain = BlockTreeActiveChain {
-            tree,
-            active_tip: target_tip.tip_id,
-        };
-        super::plan(cursor, target(target_tip), &chain)
-    }
-
-    /// Plans from the publisher's cursor plus the authoritative tip.
-    ///
-    /// The publisher cursor is only a shortcut when it also names `target`; an
-    /// old or torn cursor must not manufacture `CaughtUp` against a different
-    /// tip.
-    #[must_use]
-    pub fn plan_from_cursor(
-        cursor: &ConsumerCursor,
-        publisher: &ConsumerCursor,
-        target_tip: &TipSnapshot,
-        tree: &BlockTree,
-    ) -> ReconcilePlan {
-        let chain = BlockTreeActiveChain {
-            tree,
-            active_tip: target_tip.tip_id,
-        };
-        let identity = ChainIdentity {
-            epoch: publisher.epoch,
-            sequence: publisher.sequence,
-            tip_hash: publisher.hash,
-            tip_height: publisher.height,
-        };
-        super::plan_from_identity(cursor, &identity, target(target_tip), &chain)
-    }
-
-    /// Height of the newest block shared by `position` and `active_tip`.
-    #[must_use]
-    pub fn common_ancestor_height(
-        tree: &BlockTree,
-        position: Hash256,
-        active_tip: NodeId,
-    ) -> Option<u32> {
-        let chain = BlockTreeActiveChain { tree, active_tip };
-        ActiveChainView::common_ancestor_height(&chain, position)
-    }
-
     /// Canonical stale-branch depth, with the decision owned by `index`.
     #[must_use]
-    pub fn rollback_depth(
+    pub(crate) fn rollback_depth(
         tree: &BlockTree,
         position: Hash256,
         position_height: u32,
@@ -448,7 +267,7 @@ pub mod block_tree {
 
     /// Whether `position` at `height` lies on the selected active chain.
     #[must_use]
-    pub fn position_on_active_chain(
+    pub(crate) fn position_on_active_chain(
         tree: &BlockTree,
         position: Hash256,
         height: u32,
