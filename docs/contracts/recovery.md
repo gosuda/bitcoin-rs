@@ -5,10 +5,16 @@ write, a reorganization, or an incompatible datadir. `chainstate` is the
 single durable authority. Every other persisted component is derived and
 reconciles to it.
 
-Owners:
+Owners (current implementation paths):
 - Authoritative durable root and ordered commit protocol:
-  `crates/chainstate/src/transition.rs`
-- Recovery and schema admission: `crates/chainstate/src/recovery.rs`
+  `crates/storage` and `crates/node/src/apply`
+- Recovery and schema admission: `crates/storage` and `crates/node/src`
+
+Planned extraction:
+- `crates/chainstate` is a target ownership boundary, not a crate currently
+  present in this workspace. The paths below describe the intended post-gate
+  layout; operational readers should use the current paths above until the
+  extraction lands and its gates pass.
 - Persistent coin transition boundary: `crates/utxo/src/set/persistent.rs`
 - Crash and lost-write fault tests: `crates/node/tests/overhaul_crash_matrix.rs`
 - Reorg and disconnect: `crates/node/tests/overhaul_streaming_reorg.rs`
