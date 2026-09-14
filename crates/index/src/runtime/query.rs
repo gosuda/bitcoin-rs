@@ -13,13 +13,173 @@ use super::{
     deserialize, record_at_height,
 };
 
-mod block_source;
-mod budget;
 mod scripts;
 mod transactions;
 
-pub use block_source::IndexBlockSource;
-use budget::QueryBudget;
+/// Private index-side `BlockSource`: active-chain identity from the tree,
+/// bodies from the chain body store. Not a node-owned concept.
+#[derive(Clone)]
+pub struct IndexBlockSource {
+    blocks: Arc<RwLock<BlockLog>>,
+    block_body_source: Option<Arc<dyn BlockBodySource>>,
+    block_tree: Option<Arc<RwLock<BlockTree>>>,
+}
+
+impl IndexBlockSource {
+    /// A source backed only by the log of connected block records.
+    #[must_use]
+    pub const fn new(blocks: Arc<RwLock<BlockLog>>) -> Self {
+        Self {
+            blocks,
+            block_body_source: None,
+            block_tree: None,
+        }
+    }
+
+    /// Adds the chain body store used to fetch raw block bodies.
+    #[must_use]
+    pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
+        self.block_body_source = Some(source);
+        self
+    }
+
+    /// Adds the authoritative block tree used for active-chain identity.
+    #[must_use]
+    pub fn with_block_tree(mut self, tree: Arc<RwLock<BlockTree>>) -> Self {
+        self.block_tree = Some(tree);
+        self
+    }
+
+    /// Returns the stored body bytes for the block identified by height and
+    /// hash, or `None` when no body store is attached or the body is absent.
+    pub fn block_body_bytes_for(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+        self.block_body_source.as_ref()?.block_body(height, hash)
+    }
+
+    pub(super) fn resolve_block_by_hash(&self, height: u32, active_hash: Hash256) -> Option<Block> {
+        let bytes = self.block_body_bytes_for(height, BlockHash::from(active_hash))?;
+        let block = deserialize::<Block>(&bytes).ok()?;
+        (block.block_hash() == BlockHash::from(active_hash)).then_some(block)
+    }
+}
+
+impl core::fmt::Debug for IndexBlockSource {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("IndexBlockSource").finish_non_exhaustive()
+    }
+}
+
+impl BlockSource for IndexBlockSource {
+    fn block_at_height(&self, height: u32) -> Option<Block> {
+        let active_hash = if let Some(tree) = &self.block_tree {
+            tree.read().active_node_at_height(height)?.hash
+        } else {
+            let guard = self.blocks.read();
+            Hash256::from(record_at_height(&guard, height)?.hash)
+        };
+        self.resolve_block_by_hash(height, active_hash)
+    }
+
+    fn block_bytes_at_height(&self, height: u32, offset: u32, len: u32) -> Option<Vec<u8>> {
+        let source = self.block_body_source.as_ref()?;
+        let hash = if let Some(tree) = &self.block_tree {
+            BlockHash::from(tree.read().active_node_at_height(height)?.hash)
+        } else {
+            let guard = self.blocks.read();
+            record_at_height(&guard, height)?.hash
+        };
+        source.block_body_range(height, hash, offset, len)
+    }
+}
+
+/// Aggregate work budget shared by every operation in one public query.
+pub(super) struct QueryBudget {
+    remaining_rows: usize,
+    remaining_bytes: usize,
+    remaining_scans: usize,
+    remaining_body_reads: usize,
+}
+
+impl QueryBudget {
+    pub(super) const fn new() -> Self {
+        Self {
+            remaining_rows: QUERY_SCAN_ROW_LIMIT,
+            remaining_bytes: QUERY_SCAN_BYTE_LIMIT,
+            remaining_scans: QUERY_SCAN_COUNT_LIMIT,
+            remaining_body_reads: QUERY_BODY_READ_LIMIT,
+        }
+    }
+
+    pub(super) fn next_scan_limit(&mut self) -> Result<PrefixScanLimit, TxQueryError> {
+        if self.remaining_scans == 0 || self.remaining_rows == 0 || self.remaining_bytes == 0 {
+            return Err(TxQueryError::Unavailable(
+                "txindex query work budget exhausted".into(),
+            ));
+        }
+        self.remaining_scans -= 1;
+        Ok(PrefixScanLimit {
+            max_rows: self.remaining_rows,
+            max_bytes: self.remaining_bytes,
+        })
+    }
+
+    pub(super) fn accept_scan(
+        &mut self,
+        scan: TxIndexScan,
+    ) -> Result<Vec<TxIndexScanRow>, TxQueryError> {
+        if !scan.complete {
+            return Err(TxQueryError::Unavailable(
+                "txindex prefix scan truncated".into(),
+            ));
+        }
+        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        Ok(scan.rows)
+    }
+
+    pub(super) fn accept_live_scan(
+        &mut self,
+        scan: ScriptLiveScan,
+    ) -> Result<Vec<crate::ScriptLiveRow>, TxQueryError> {
+        if !scan.complete {
+            return Err(TxQueryError::Unavailable(
+                "txindex live prefix scan truncated".into(),
+            ));
+        }
+        self.charge_scan(scan.rows.len(), scan.encoded_bytes)?;
+        Ok(scan.rows)
+    }
+
+    fn charge_scan(&mut self, rows: usize, encoded_bytes: usize) -> Result<(), TxQueryError> {
+        if rows > self.remaining_rows || encoded_bytes > self.remaining_bytes {
+            return Err(TxQueryError::Unavailable(
+                "txindex query work budget exceeded".into(),
+            ));
+        }
+        self.remaining_rows -= rows;
+        self.remaining_bytes -= encoded_bytes;
+        Ok(())
+    }
+
+    pub(super) fn reserve_body_read(&mut self, max_bytes: usize) -> Result<(), TxQueryError> {
+        if self.remaining_body_reads == 0 || max_bytes > self.remaining_bytes {
+            return Err(TxQueryError::Unavailable(
+                "txindex query body budget exhausted".into(),
+            ));
+        }
+        self.remaining_body_reads -= 1;
+        Ok(())
+    }
+
+    pub(super) fn charge_body_bytes(&mut self, bytes: usize) -> Result<(), TxQueryError> {
+        if bytes > self.remaining_bytes {
+            return Err(TxQueryError::Unavailable(
+                "txindex query body budget exceeded".into(),
+            ));
+        }
+        self.remaining_bytes -= bytes;
+        Ok(())
+    }
+}
 
 /// Authoritative Live query sources: capability selection, the UTXO set, and
 /// the chain-transition lock Live composition requires.
@@ -341,5 +501,403 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
             IndexCapabilities::SCRIPT_HISTORY,
             |snapshot, tip, budget| self.spender_for(snapshot, tip, budget, &outpoint),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_log::BlockRecord;
+    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_primitives::{Network, consensus_bytes};
+    use std::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    struct TestBodySource {
+        bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+    }
+
+    impl BlockBodySource for TestBodySource {
+        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+            self.bodies
+                .iter()
+                .find(|(record_height, record_hash, _)| {
+                    *record_height == height && *record_hash == hash
+                })
+                .map(|(_, _, bytes)| bytes.clone())
+        }
+    }
+
+    /// Serves the full body but declines range reads via the trait default.
+    struct FullBodyOnlySource {
+        height: u32,
+        hash: BlockHash,
+        bytes: Vec<u8>,
+    }
+
+    impl BlockBodySource for FullBodyOnlySource {
+        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+            (self.height == height && self.hash == hash).then(|| self.bytes.clone())
+        }
+    }
+
+    #[test]
+    fn block_at_height_returns_some_after_record_added() {
+        let genesis = Network::Regtest.genesis_block();
+        let record = BlockRecord::from_block(0, &genesis);
+        let body_source = Arc::new(TestBodySource {
+            bodies: vec![(record.height, record.hash, consensus_bytes(&genesis))],
+        });
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
+        let source = IndexBlockSource::new(blocks).with_block_body_source(body_source);
+        let Some(decoded) = source.block_at_height(0) else {
+            panic!("expected block at height 0");
+        };
+        assert_eq!(decoded.block_hash(), genesis.block_hash());
+    }
+
+    /// Body source that can slice, backed by one in-memory body.
+    struct RangedBody {
+        height: u32,
+        hash: BlockHash,
+        bytes: Vec<u8>,
+    }
+
+    impl BlockBodySource for RangedBody {
+        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+            (self.height == height && self.hash == hash).then(|| self.bytes.clone())
+        }
+
+        fn block_body_range(
+            &self,
+            height: u32,
+            hash: BlockHash,
+            offset: u32,
+            len: u32,
+        ) -> Option<Vec<u8>> {
+            if self.height != height || self.hash != hash {
+                return None;
+            }
+            let start = usize::try_from(offset).ok()?;
+            let end = start.checked_add(usize::try_from(len).ok()?)?;
+            self.bytes.get(start..end).map(<[u8]>::to_vec)
+        }
+    }
+
+    #[test]
+    fn block_bytes_at_height_agrees_with_slicing_the_whole_block() -> TestResult {
+        let genesis = Network::Regtest.genesis_block();
+        let bytes = consensus_bytes(&genesis);
+        let record = BlockRecord::from_block(0, &genesis);
+        let body_source = Arc::new(RangedBody {
+            height: record.height,
+            hash: record.hash,
+            bytes: bytes.clone(),
+        });
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
+        let source = IndexBlockSource::new(blocks).with_block_body_source(body_source);
+
+        for offset in 0..u32::try_from(bytes.len())? {
+            for len in [0_u32, 1, 7] {
+                let end = offset.saturating_add(len);
+                let ranged = source.block_bytes_at_height(0, offset, len);
+                if usize::try_from(end)? > bytes.len() {
+                    assert_eq!(
+                        ranged, None,
+                        "a range past the end must not be served short"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    ranged.as_deref(),
+                    Some(&bytes[usize::try_from(offset)?..usize::try_from(end)?]),
+                    "range ({offset}, {len}) diverged from the serialized block"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn block_bytes_at_height_declines_when_the_source_cannot_slice() {
+        let genesis = Network::Regtest.genesis_block();
+        let record = BlockRecord::from_block(0, &genesis);
+        let body_source = Arc::new(FullBodyOnlySource {
+            height: record.height,
+            hash: record.hash,
+            bytes: consensus_bytes(&genesis),
+        });
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
+        let source = IndexBlockSource::new(blocks).with_block_body_source(body_source);
+
+        assert!(source.block_bytes_at_height(0, 0, 4).is_none());
+        assert!(
+            source.block_at_height(0).is_some(),
+            "declining a range must not mean the block is unavailable"
+        );
+    }
+
+    #[test]
+    fn block_at_height_returns_none_when_missing() {
+        let blocks: Arc<RwLock<BlockLog>> = Arc::new(RwLock::new(BlockLog::new()));
+        let source = IndexBlockSource::new(blocks);
+        assert!(source.block_at_height(0).is_none());
+    }
+
+    #[test]
+    fn block_at_height_reads_metadata_only_record_from_body_source() {
+        struct SingleBlockSource {
+            height: u32,
+            hash: BlockHash,
+            bytes: Vec<u8>,
+        }
+
+        impl BlockBodySource for SingleBlockSource {
+            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+                (self.height == height && self.hash == hash).then(|| self.bytes.clone())
+            }
+        }
+
+        let genesis = Network::Regtest.genesis_block();
+        let record = BlockRecord::from_block(0, &genesis);
+        let body_source = Arc::new(SingleBlockSource {
+            height: record.height,
+            hash: record.hash,
+            bytes: consensus_bytes(&genesis),
+        });
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
+        let source = IndexBlockSource::new(blocks).with_block_body_source(body_source);
+
+        let Some(decoded) = source.block_at_height(0) else {
+            panic!("expected block at height 0");
+        };
+        assert_eq!(decoded.block_hash(), genesis.block_hash());
+    }
+
+    #[test]
+    fn block_at_height_returns_first_record_for_duplicate_height() {
+        let anchor = Network::Regtest.genesis_block();
+        let mut first = anchor.clone();
+        first.header.nonce = first.header.nonce.saturating_add(1);
+        let mut second = first.clone();
+        second.header.nonce = second.header.nonce.saturating_add(1);
+        let first_record = BlockRecord::from_block(2, &first);
+        let second_record = BlockRecord::from_block(2, &second);
+        let body_source = Arc::new(TestBodySource {
+            bodies: vec![
+                (
+                    first_record.height,
+                    first_record.hash,
+                    consensus_bytes(&first),
+                ),
+                (
+                    second_record.height,
+                    second_record.hash,
+                    consensus_bytes(&second),
+                ),
+            ],
+        });
+        let records = vec![
+            BlockRecord::from_block(0, &anchor),
+            first_record,
+            second_record,
+        ];
+        let source = IndexBlockSource::new(Arc::new(RwLock::new(
+            records.into_iter().collect::<BlockLog>(),
+        )))
+        .with_block_body_source(body_source);
+
+        let Some(decoded) = source.block_at_height(2) else {
+            panic!("expected duplicate height record");
+        };
+        assert_eq!(decoded.block_hash(), first.block_hash());
+    }
+
+    #[test]
+    fn block_at_height_resolves_from_tree_with_empty_records() -> TestResult {
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = genesis.block_hash();
+        let body_bytes = consensus_bytes(&genesis);
+
+        // Seed an active tree with the genesis header.
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let tree = Arc::new(RwLock::new(tree));
+
+        // Empty record vector — simulates post-checkpoint-restore state.
+        let blocks: Arc<RwLock<BlockLog>> = Arc::new(RwLock::new(BlockLog::new()));
+        let source = IndexBlockSource::new(blocks)
+            .with_block_body_source(Arc::new(TestBodySource {
+                bodies: vec![(0, genesis_hash, body_bytes)],
+            }))
+            .with_block_tree(tree);
+
+        let decoded = source.block_at_height(0).ok_or_else(|| {
+            std::io::Error::other("tree-authoritative resolution must succeed with empty records")
+        })?;
+        assert_eq!(decoded.block_hash(), genesis.block_hash());
+        Ok(())
+    }
+
+    #[test]
+    fn block_at_height_tree_rejects_stale_cache_entry() -> TestResult {
+        let genesis = Network::Regtest.genesis_block();
+        let mut stale_block = genesis.clone();
+        stale_block.header.nonce = stale_block.header.nonce.wrapping_add(1);
+        let stale_hash = stale_block.block_hash();
+        let correct_hash = genesis.block_hash();
+        assert_ne!(stale_hash, correct_hash);
+
+        // Tree says height 0 = correct_hash.
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis.header, NodeStatus::HeaderValid)?;
+        let tree = Arc::new(RwLock::new(tree));
+
+        // Record vector has a STALE entry at height 0 (different hash).
+        let stale_record = BlockRecord::from_block(0, &stale_block);
+        let blocks = Arc::new(RwLock::new(BlockLog::from_iter([stale_record])));
+
+        let body_source = Arc::new(TestBodySource {
+            bodies: vec![(0, correct_hash, consensus_bytes(&genesis))],
+        });
+
+        let source = IndexBlockSource::new(blocks)
+            .with_block_body_source(body_source)
+            .with_block_tree(tree);
+
+        // Must resolve via body source (stale record hash does not match tree).
+        let decoded = source.block_at_height(0).ok_or_else(|| {
+            std::io::Error::other(
+                "must fall through to body source when record hash mismatches tree",
+            )
+        })?;
+        assert_eq!(decoded.block_hash(), genesis.block_hash());
+        Ok(())
+    }
+    #[test]
+    fn historical_and_live_scans_share_the_byte_budget() -> Result<(), TxQueryError> {
+        let mut budget = QueryBudget::new();
+        budget.remaining_bytes = 5;
+        budget.accept_scan(TxIndexScan {
+            rows: Vec::new(),
+            encoded_bytes: 2,
+            complete: true,
+        })?;
+        budget.accept_live_scan(ScriptLiveScan {
+            rows: Vec::new(),
+            encoded_bytes: 3,
+            complete: true,
+        })?;
+        assert_eq!(budget.remaining_bytes, 0);
+        assert!(matches!(
+            budget.next_scan_limit(),
+            Err(TxQueryError::Unavailable(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn truncated_scan_families_fail_without_charging_rows_or_bytes() {
+        let mut budget = QueryBudget::new();
+        let before = (budget.remaining_rows, budget.remaining_bytes);
+        let historical = budget.accept_scan(TxIndexScan {
+            rows: Vec::new(),
+            encoded_bytes: 2,
+            complete: false,
+        });
+        assert!(
+            matches!(historical, Err(TxQueryError::Unavailable(reason)) if reason == "txindex prefix scan truncated")
+        );
+        let live = budget.accept_live_scan(ScriptLiveScan {
+            rows: Vec::new(),
+            encoded_bytes: 3,
+            complete: false,
+        });
+        assert!(
+            matches!(live, Err(TxQueryError::Unavailable(reason)) if reason == "txindex live prefix scan truncated")
+        );
+        assert_eq!((budget.remaining_rows, budget.remaining_bytes), before);
+    }
+
+    #[test]
+    fn rejected_scan_charge_does_not_partially_consume_budget() -> Result<(), TxQueryError> {
+        let mut budget = QueryBudget::new();
+        budget.remaining_rows = 2;
+        budget.remaining_bytes = 5;
+        for (rows, bytes) in [(3, 1), (1, 6), (usize::MAX, usize::MAX)] {
+            assert!(matches!(
+                budget.charge_scan(rows, bytes),
+                Err(TxQueryError::Unavailable(_))
+            ));
+            assert_eq!((budget.remaining_rows, budget.remaining_bytes), (2, 5));
+        }
+        budget.charge_scan(2, 5)?;
+        assert_eq!((budget.remaining_rows, budget.remaining_bytes), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn scan_count_rows_and_bytes_each_stop_admission() {
+        for (rows, bytes, scans) in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
+            let mut budget = QueryBudget {
+                remaining_rows: rows,
+                remaining_bytes: bytes,
+                remaining_scans: scans,
+                remaining_body_reads: 1,
+            };
+            assert!(matches!(
+                budget.next_scan_limit(),
+                Err(TxQueryError::Unavailable(_))
+            ));
+            assert_eq!(budget.remaining_scans, scans);
+        }
+    }
+
+    #[test]
+    fn scan_limit_is_remaining_work_and_reserves_one_scan() -> Result<(), TxQueryError> {
+        let mut budget = QueryBudget::new();
+        budget.remaining_rows = 7;
+        budget.remaining_bytes = 11;
+        budget.remaining_scans = 1;
+        let limit = budget.next_scan_limit()?;
+        assert_eq!((limit.max_rows, limit.max_bytes), (7, 11));
+        assert!(matches!(
+            budget.next_scan_limit(),
+            Err(TxQueryError::Unavailable(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn bodies_and_scans_share_bytes_but_reserve_body_reads_separately() -> Result<(), TxQueryError>
+    {
+        let mut budget = QueryBudget::new();
+        budget.remaining_bytes = 5;
+        budget.remaining_body_reads = 1;
+        assert!(matches!(
+            budget.reserve_body_read(6),
+            Err(TxQueryError::Unavailable(_))
+        ));
+        assert_eq!(budget.remaining_body_reads, 1);
+        budget.reserve_body_read(5)?;
+        assert_eq!(budget.remaining_bytes, 5);
+        assert!(matches!(
+            budget.reserve_body_read(1),
+            Err(TxQueryError::Unavailable(_))
+        ));
+        budget.charge_body_bytes(3)?;
+        assert!(matches!(
+            budget.charge_body_bytes(3),
+            Err(TxQueryError::Unavailable(_))
+        ));
+        assert_eq!(budget.remaining_bytes, 2);
+        budget.accept_live_scan(ScriptLiveScan {
+            rows: Vec::new(),
+            encoded_bytes: 2,
+            complete: true,
+        })?;
+        assert_eq!(budget.remaining_bytes, 0);
+        Ok(())
     }
 }

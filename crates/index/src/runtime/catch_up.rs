@@ -2,6 +2,7 @@
 
 use super::BlockIdentity;
 use super::ChunkAction;
+use super::DerivedIndexRuntime;
 use super::DerivedIndexWorkerError;
 use super::IDENTITY_CHUNK_BLOCKS;
 use super::POSITION_PREFETCH_BLOCKS;
@@ -22,8 +23,9 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyReader;
+use crossbeam_channel::Receiver;
 use rayon::prelude::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 impl Worker {
     /// Copies one bounded chunk of active-chain identities under one short
@@ -339,5 +341,275 @@ fn load_body_prefix(
     Ok(Some(bodies))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BatchWait {
+    Woken,
+    Deadline,
+    Stopped,
+}
+
+pub(super) fn wait_for_revision_quiet(
+    runtime: &DerivedIndexRuntime,
+    wake_rx: &Receiver<()>,
+    quiet_period: Duration,
+    mut seen_revision: u64,
+) -> Option<u64> {
+    loop {
+        if runtime.should_stop() {
+            return None;
+        }
+        match wake_rx.recv_timeout(quiet_period) {
+            Ok(()) => seen_revision = runtime.revision(),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                let current = runtime.revision();
+                if current == seen_revision {
+                    return Some(current);
+                }
+                seen_revision = current;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+/// Waits for a wake hint or the pending batch's original deadline.
+pub(super) fn wait_for_batch_deadline(
+    runtime: &DerivedIndexRuntime,
+    wake_rx: &Receiver<()>,
+    deadline: Instant,
+) -> BatchWait {
+    if runtime.should_stop() {
+        return BatchWait::Stopped;
+    }
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        return BatchWait::Deadline;
+    };
+    if remaining.is_zero() {
+        return BatchWait::Deadline;
+    }
+    match wake_rx.recv_timeout(remaining) {
+        Ok(()) if runtime.should_stop() => BatchWait::Stopped,
+        Ok(()) => BatchWait::Woken,
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) if runtime.should_stop() => {
+            BatchWait::Stopped
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
+    }
+}
+
 #[cfg(all(test, feature = "fjall"))]
-mod tests;
+mod tests {
+    use super::*;
+    fn identity(height: u32) -> BlockIdentity {
+        let mut hash = [0_u8; 32];
+        hash[0..4].copy_from_slice(&height.to_le_bytes());
+        BlockIdentity {
+            height,
+            hash,
+            parent_hash: [0_u8; 32],
+        }
+    }
+
+    fn body_store(
+        dir: &std::path::Path,
+    ) -> Result<IndexedBlockBodyStore<FjallStore>, Box<dyn std::error::Error>> {
+        let index = Arc::new(FjallStore::open(dir.join("index"))?);
+        let files = Arc::new(FlatFileBlockStore::open(dir)?);
+        Ok(IndexedBlockBodyStore::new(index, files))
+    }
+
+    /// The store's prefetched-position cursor is consumed strictly in request
+    /// order: every `load_block_body` advances it. `load_body_prefix` must retain
+    /// every body it loads, so `identities` advances by exactly the positions the
+    /// cursor consumed (#1032).
+    #[test]
+    fn byte_cap_retains_every_body_the_cursor_consumed() -> Result<(), Box<dyn std::error::Error>> {
+        // Three bodies of just over half the cap: the second reaches the cap.
+        let size = PREPARE_CHUNK_BYTES / 2 + 1;
+        let identities: Vec<BlockIdentity> = (0..3).map(identity).collect();
+
+        let temp = tempfile::tempdir()?;
+        let store = body_store(temp.path())?;
+        for identity in &identities {
+            store.persist_block_body(
+                identity.height,
+                Hash256::from_le_bytes(&identity.hash),
+                &vec![0_u8; size],
+            )?;
+        }
+        let requests: Vec<(u32, Hash256)> = identities
+            .iter()
+            .map(|identity| (identity.height, Hash256::from_le_bytes(&identity.hash)))
+            .collect();
+        let mut reader = store.reader()?;
+        reader.prefetch_positions(&requests)?;
+
+        let first = load_body_prefix(reader.as_mut(), &identities, &|| false)?
+            .ok_or(StorageError::InvalidOperation("body missing"))?;
+        assert_eq!(first.len(), 2);
+
+        let rest = load_body_prefix(reader.as_mut(), &identities[first.len()..], &|| false)?
+            .ok_or(StorageError::InvalidOperation("body missing"))?;
+        assert_eq!(rest.len(), 1);
+
+        // The cursor consumed all three prefetched positions; identities and the
+        // reader are aligned.
+        assert!(matches!(
+            reader.load_block_body(
+                identities[2].height,
+                Hash256::from_le_bytes(&identities[2].hash)
+            ),
+            Err(StorageError::InvalidOperation(
+                "prefetched body positions are exhausted"
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn count_cap_bounds_the_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        let count = u32::try_from(PREPARE_CHUNK_BLOCKS)
+            .map_err(|_| StorageError::InvalidOperation("cap exceeds u32"))?;
+        let identities: Vec<BlockIdentity> = (0..=count).map(identity).collect();
+
+        let temp = tempfile::tempdir()?;
+        let store = body_store(temp.path())?;
+        for identity in &identities {
+            store.persist_block_body(
+                identity.height,
+                Hash256::from_le_bytes(&identity.hash),
+                &[0_u8],
+            )?;
+        }
+        let requests: Vec<(u32, Hash256)> = identities
+            .iter()
+            .map(|identity| (identity.height, Hash256::from_le_bytes(&identity.hash)))
+            .collect();
+        let mut reader = store.reader()?;
+        reader.prefetch_positions(&requests)?;
+
+        let first = load_body_prefix(reader.as_mut(), &identities, &|| false)?
+            .ok_or(StorageError::InvalidOperation("body missing"))?;
+        assert_eq!(first.len(), PREPARE_CHUNK_BLOCKS);
+
+        // Exactly `PREPARE_CHUNK_BLOCKS` positions were consumed; the next cursor
+        // entry is identities[256].
+        let next = reader.load_block_body(
+            identities[PREPARE_CHUNK_BLOCKS].height,
+            Hash256::from_le_bytes(&identities[PREPARE_CHUNK_BLOCKS].hash),
+        )?;
+        assert!(next.is_some());
+        Ok(())
+    }
+
+    /// A mid-load shutdown keeps the bodies already read: the returned prefix is
+    /// still exactly the positions the cursor consumed.
+    #[test]
+    fn shutdown_keeps_the_prefix_aligned_with_the_cursor() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let identities: Vec<BlockIdentity> = (0..3).map(identity).collect();
+
+        let temp = tempfile::tempdir()?;
+        let store = body_store(temp.path())?;
+        for identity in &identities {
+            store.persist_block_body(
+                identity.height,
+                Hash256::from_le_bytes(&identity.hash),
+                &[0_u8],
+            )?;
+        }
+        let requests: Vec<(u32, Hash256)> = identities
+            .iter()
+            .map(|identity| (identity.height, Hash256::from_le_bytes(&identity.hash)))
+            .collect();
+        let mut reader = store.reader()?;
+        reader.prefetch_positions(&requests)?;
+
+        // Shutdown is polled before each load; it fires on the second poll, so
+        // only the first body is retained.
+        let polls = Cell::new(0_u32);
+        let should_stop = || {
+            polls.set(polls.get() + 1);
+            polls.get() >= 2
+        };
+        let prefix = load_body_prefix(reader.as_mut(), &identities, &should_stop)?
+            .ok_or(StorageError::InvalidOperation("body missing"))?;
+        assert_eq!(prefix.len(), 1);
+
+        // The cursor sits at exactly position 1: loading identities[1] succeeds.
+        let next = reader.load_block_body(
+            identities[1].height,
+            Hash256::from_le_bytes(&identities[1].hash),
+        )?;
+        assert!(next.is_some());
+        Ok(())
+    }
+    use super::{BatchWait, wait_for_batch_deadline, wait_for_revision_quiet};
+    use crate::runtime::DerivedIndexRuntime;
+    use crate::runtime::DerivedIndexRuntime;
+
+    // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (wake coalescing).
+    #[test]
+    fn coalesced_wakes_still_observe_the_latest_revision() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let runtime = DerivedIndexRuntime::new(sender);
+        runtime.wake();
+        runtime.wake();
+        assert_eq!(receiver.len(), 1);
+        assert_eq!(runtime.revision(), 2);
+        assert_eq!(
+            wait_for_revision_quiet(&runtime, &receiver, Duration::ZERO, 0),
+            Some(2)
+        );
+    }
+
+    // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (shutdown precedence).
+    #[test]
+    fn shutdown_short_circuits_quiet_wait() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let runtime = DerivedIndexRuntime::new(sender);
+        runtime.request_shutdown();
+        assert_eq!(
+            wait_for_revision_quiet(&runtime, &receiver, Duration::ZERO, 0),
+            None
+        );
+    }
+
+    // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (shutdown precedence).
+    #[test]
+    fn shutdown_takes_precedence_over_an_expired_deadline() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let runtime = DerivedIndexRuntime::new(sender);
+        let deadline = Instant::now();
+        runtime.request_shutdown();
+        assert_eq!(
+            wait_for_batch_deadline(&runtime, &receiver, deadline),
+            BatchWait::Stopped
+        );
+    }
+
+    // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (deadline expiry).
+    #[test]
+    fn an_expired_batch_deadline_does_not_wait_for_a_wake() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let runtime = DerivedIndexRuntime::new(sender);
+        assert_eq!(
+            wait_for_batch_deadline(&runtime, &receiver, Instant::now()),
+            BatchWait::Deadline
+        );
+    }
+
+    // Contract: docs/contracts/indexing.md, version 1.1, IDX-08 (wake/deadline behavior).
+    #[test]
+    fn a_queued_wake_interrupts_the_wait_without_replacing_the_deadline() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        let runtime = DerivedIndexRuntime::new(sender);
+        let deadline = Instant::now() + Duration::from_mins(1);
+        runtime.wake();
+        assert_eq!(
+            wait_for_batch_deadline(&runtime, &receiver, deadline),
+            BatchWait::Woken
+        );
+        assert_eq!(runtime.revision(), 1);
+    }
+}
