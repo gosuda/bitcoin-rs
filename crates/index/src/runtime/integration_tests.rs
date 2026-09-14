@@ -387,6 +387,8 @@ fn wakes_before_store_open_are_reconciled() {
 // 8. async_index_open_preserves_backend
 // ---------------------------------------------------------------------------
 
+/// Contract: `docs/contracts/indexing.md`, “Store-open cancellation evidence”
+/// (IDX-07/IDX-08), with lifecycle integration evidence listed in that section.
 #[test]
 fn async_index_open_preserves_backend() {
     let dir = tempfile::tempdir().expect("tempdir");
