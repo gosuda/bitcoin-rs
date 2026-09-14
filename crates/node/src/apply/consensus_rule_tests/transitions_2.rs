@@ -85,7 +85,10 @@ fn disconnect_refuses_when_the_undo_record_is_absent() -> Result<(), Box<dyn std
         matches!(
             &outcome,
             Err(crate::DisconnectError::Refused(boxed))
-                if matches!(**boxed, ApplyError::UndoRecordMissing { .. })
+                if matches!(
+                    **boxed,
+                    ApplyError::UndoLoad(bitcoin_rs_utxo::UndoLoadError::Missing { .. })
+                )
         ),
         "a missing undo record must refuse the disconnect, got {outcome:?}"
     );

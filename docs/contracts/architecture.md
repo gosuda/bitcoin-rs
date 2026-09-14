@@ -248,12 +248,16 @@ Owners:
   `ChainFollowers` / `ChainEffects` and are dispatched after commit
   while the `ChainTransition` is still held; `Chainstate` does not hold
   them. `crates/p2p` owns `DownloadWindow`, `BlockStager`, and `SyncPlanner`.
-  `crates/node` still carries leftover domain mechanics: UTXO undo persistence
-  and disconnect markers (`apply.rs`), the node-side sync executor (`sync.rs`
-  driving `p2p::DownloadWindow`), and direct backend construction and cache
-  share dispatch (`state.rs`). `P2pService` no longer holds a second download
-  window. Relocating leftover node mechanics into `crates/utxo`,
-  `crates/storage`, and `crates/p2p` remains tracked under #217 (open). A
+  `crates/utxo` owns UTXO undo persistence, the marker-fenced block rollback,
+  and the apply-side window prevout overlay (`bitcoin_rs_utxo::undo`,
+  `bitcoin_rs_utxo::overlay`); `crates/node` calls `persist_block_undo`,
+  `load_block_undo`, and `rollback_block` and keeps only the ordering of that
+  rollback against the journal, durable head, and tip publication.
+  `crates/node` still carries leftover domain mechanics: the node-side sync
+  executor (`sync.rs` driving `p2p::DownloadWindow`), and direct backend
+  construction and cache share dispatch (`state.rs`). `P2pService` no longer
+  holds a second download window. Relocating leftover node mechanics into
+  `crates/storage` and `crates/p2p` remains tracked under #217 (open). A
   dedicated `crates/chainstate` waits until journal,
   checkpoint, and
   `ChainEventPublisher` also leave node. `crates/node` is the composition

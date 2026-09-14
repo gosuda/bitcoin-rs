@@ -1,4 +1,7 @@
-//! Preflighted tip disconnection and the durable rollback-marker transaction.
+//! Preflighted tip disconnection sequenced across the node's stores.
+//!
+//! The marker-fenced UTXO rollback itself is [`bitcoin_rs_utxo::undo`]; this
+//! module orders it against the journal, the durable head, and publication.
 
 use super::ChainChangeProof;
 use super::Chainstate;
@@ -15,6 +18,9 @@ use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_utxo::{
+    BlockRollback, RollbackError, RollbackFailure, load_block_undo, rollback_block,
+};
 use std::sync::Arc;
 
 pub(super) fn plan_disconnect(
@@ -76,42 +82,16 @@ pub(super) fn plan_disconnect(
         )
     };
 
-    let encoded = handles
-        .undo_store
-        .load_undo(height, block_hash)
-        .map_err(ApplyError::UndoRead)?
-        .ok_or(ApplyError::UndoRecordMissing {
-            hash: block_hash,
-            height,
-        })?;
-    let undo = bitcoin_rs_utxo::undo_codec::decode(&encoded, block_hash).map_err(|error| {
-        ApplyError::UndoRecordUnreadable {
-            hash: block_hash,
-            reason: error.to_string(),
-        }
-    })?;
+    let undo = load_block_undo(handles.undo_store.as_ref(), height, block_hash)?;
 
-    // The coinstats rewind itself has to run after `undo_block`, because the
-    // per-coin fields ride the UTXO change listener. This is the only place its
-    // preconditions can be checked while a refusal is still free.
+    // The coinstats rewind itself runs inside the marker-fenced rollback, after
+    // the UTXO undo. This is the only place its preconditions can be checked
+    // while a refusal is still free.
     let tx_count_delta = tx_count_delta_for(block);
-    let stats = handles.coin_stats.snapshot();
-    if stats.height != height {
-        return Err(ApplyError::CoinStatsRewind(
-            bitcoin_rs_utxo::stats::CoinStatsRewindError::HeightMismatch {
-                expected: height,
-                found: stats.height,
-            },
-        ));
-    }
-    if stats.tx_count < tx_count_delta {
-        return Err(ApplyError::CoinStatsRewind(
-            bitcoin_rs_utxo::stats::CoinStatsRewindError::TxCountUnderflow {
-                tx_count: stats.tx_count,
-                tx_delta: tx_count_delta,
-            },
-        ));
-    }
+    handles
+        .coin_stats
+        .check_rewind(height, tx_count_delta)
+        .map_err(ApplyError::CoinStatsRewind)?;
 
     Ok(DisconnectPlan {
         parent_tip,
@@ -143,84 +123,53 @@ pub(super) fn disconnect_block_admitted(
     } = plan_disconnect(handles, block, block_hash)
         .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
 
-    // Armed before the first mutation and cleared after the last, so the window
-    // it covers is exactly the window in which state can be torn. Errors are not
-    // what this guards against; a crash is. A crash writes no error anywhere,
-    // and the marker is the only thing that survives it.
-    //
-    // Above the UTXO undo, not below it: once that undo commits, a crash
-    // between it and the arming would leave the UTXO set rolled back while the
-    // tip still names the block.
+    let poison = |error| {
+        handles.admission.close_permanently();
+        error
+    };
+    // The UTXO crate owns the marker-fenced rollback: arm, undo the UTXO set,
+    // rewind the block-level coinstats, move the marker to `RolledBack`. A
+    // `Refused` touched nothing; a `Fatal` may have torn state and poisons
+    // admission so only recovery reconciles it.
     //
     // Deliberately per-disconnect rather than per-reorg: each disconnect commits
     // fully, so a branch switch interrupted BETWEEN disconnects leaves a
     // consistent chain at a lower tip, which is recoverable by connecting
     // forward. Holding the marker across a whole switch would refuse startup for
     // that case and force a needless reindex.
-    // Read before arming. A branch switch disconnects several blocks in a row,
-    // and arming overwrites the marker, so an earlier disconnect's `RolledBack`
-    // debt — still owed a checkpoint — would be destroyed by the next arm and
-    // then cleared by a refusal. Loading the marker first lets a read failure
-    // refuse before any mutation.
-    handles
-        .undo_store
-        .load_disconnect_marker()
-        .map_err(|error| {
-            crate::DisconnectError::Refused(Box::new(ApplyError::UndoPersistence(error)))
-        })?;
-    handles
-        .undo_store
-        .arm_disconnect(height, block_hash)
-        .map_err(|error| {
-            crate::DisconnectError::Refused(Box::new(ApplyError::UndoPersistence(error)))
-        })?;
-    let poison = |error| {
-        handles.admission.close_permanently();
-        error
-    };
-    // Past this line every failure is `Fatal`. The UTXO commit walks shards and
-    // can stop part-way, so from here some state is rolled back and some is
-    // not.
-    handles.utxo.undo_block(&undo).map_err(|error| {
-        poison(crate::DisconnectError::Fatal {
+    //
+    // The marker's `RolledBack` write is the rollback's own durable receipt,
+    // still owed a checkpoint; only then does the durable head advance its
+    // commit id onto the parent tip: a reorg may lower the height, never the
+    // commit id. An `Err` from the head batch is not a rollback receipt, so
+    // like every failure past the undo it is fatal and recovery owns the
+    // reconciliation.
+    rollback_block(
+        handles.undo_store.as_ref(),
+        handles.utxo.as_ref(),
+        handles.coin_stats.as_ref(),
+        &BlockRollback {
             hash: block_hash,
             height,
-            source: Box::new(ApplyError::UtxoCommit(error)),
-        })
+            parent_height: parent_tip.height,
+            tx_count_delta,
+        },
+        &undo,
+    )
+    .map_err(|error| match error {
+        RollbackError::Refused(source) => {
+            crate::DisconnectError::Refused(Box::new(ApplyError::UndoPersistence(source)))
+        }
+        RollbackError::Fatal(failure) => poison(crate::DisconnectError::Fatal {
+            hash: block_hash,
+            height,
+            source: Box::new(match failure {
+                RollbackFailure::Utxo(source) => ApplyError::UtxoCommit(source),
+                RollbackFailure::CoinStats(source) => ApplyError::CoinStatsRewind(source),
+                RollbackFailure::Marker(source) => ApplyError::UndoPersistence(source),
+            }),
+        }),
     })?;
-
-    // The per-coin coinstats fields need nothing here: `coin_stats` is the
-    // `UtxoSet` change listener, so `undo_block` already drove them in reverse.
-    // The block-level fields are not part of that, because `finish_block` sets
-    // them directly on connect.
-    handles
-        .coin_stats
-        .rewind_block(height, parent_tip.height, tx_count_delta)
-        .map_err(|error| {
-            poison(crate::DisconnectError::Fatal {
-                hash: block_hash,
-                height,
-                source: Box::new(ApplyError::CoinStatsRewind(error)),
-            })
-        })?;
-
-    // The rollback finished in memory; make it durably authoritative before
-    // anything publishes it. The marker moves to `RolledBack` first — its
-    // own durable write, unchanged in ownership, still owed a checkpoint —
-    // then the durable head advances its commit id onto the parent tip: a
-    // reorg may lower the height, never the commit id. An `Err` from the
-    // head batch is not a rollback receipt, so like every failure past the
-    // undo it is fatal and recovery owns the reconciliation.
-    handles
-        .undo_store
-        .complete_disconnect(height, block_hash)
-        .map_err(|error| {
-            poison(crate::DisconnectError::Fatal {
-                hash: block_hash,
-                height,
-                source: Box::new(ApplyError::UndoPersistence(error)),
-            })
-        })?;
     // The journal follows the durable head, never leads it: rewind the
     // derived journal onto the parent first, then advance the head, so a
     // kill between the two leaves the head as the high-water mark.

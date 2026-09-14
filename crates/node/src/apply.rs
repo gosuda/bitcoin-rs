@@ -1223,7 +1223,7 @@ impl ResolvedUtxoView {
     /// Generic so a window can substitute an overlay carrying the outputs its
     /// earlier blocks created. Every caller outside a window passes the
     /// committed set.
-    fn resolve<S: crate::window_overlay::OutputSource + ?Sized>(
+    fn resolve<S: bitcoin_rs_utxo::OutputSource + ?Sized>(
         utxo: &S,
         block: &Block,
         tx_plan: &BlockTxPlan,

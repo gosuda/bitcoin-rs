@@ -141,21 +141,45 @@ impl CoinStats {
         parent_height: u32,
         tx_delta: u64,
     ) -> Result<(), CoinStatsRewindError> {
+        match self.check_rewind(disconnected_height, tx_delta) {
+            Ok(tx_count) => {
+                self.height = parent_height;
+                self.tx_count = tx_count;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The invariants [`Self::rewind_block`] enforces, without moving anything.
+    ///
+    /// Returns the transaction count the rewind would land on. A disconnect
+    /// preflights with this while a refusal is still free: the rewind itself
+    /// has to run after the UTXO undo, because the per-coin fields ride the
+    /// UTXO change listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stats are not at `disconnected_height`, or
+    /// when `tx_delta` exceeds the recorded `tx_count`.
+    pub const fn check_rewind(
+        &self,
+        disconnected_height: u32,
+        tx_delta: u64,
+    ) -> Result<u64, CoinStatsRewindError> {
         if self.height != disconnected_height {
             return Err(CoinStatsRewindError::HeightMismatch {
                 expected: disconnected_height,
                 found: self.height,
             });
         }
-        let Some(tx_count) = self.tx_count.checked_sub(tx_delta) else {
-            return Err(CoinStatsRewindError::TxCountUnderflow {
+        match self.tx_count.checked_sub(tx_delta) {
+            Some(tx_count) => Ok(tx_count),
+            None => Err(CoinStatsRewindError::TxCountUnderflow {
                 tx_count: self.tx_count,
                 tx_delta,
-            });
-        };
-        self.height = parent_height;
-        self.tx_count = tx_count;
-        Ok(())
+            }),
+        }
     }
 
     /// Serializes stats in a stable byte layout.
@@ -699,6 +723,24 @@ impl CoinStatsListener {
             .lock()
             .stats
             .rewind_block(disconnected_height, parent_height, tx_delta)
+    }
+
+    /// Checks [`Self::rewind_block`]'s invariants against the current stats
+    /// without moving them.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`CoinStats::check_rewind`]'s invariant failures.
+    pub fn check_rewind(
+        &self,
+        disconnected_height: u32,
+        tx_delta: u64,
+    ) -> Result<(), CoinStatsRewindError> {
+        self.state
+            .lock()
+            .stats
+            .check_rewind(disconnected_height, tx_delta)
+            .map(|_| ())
     }
 }
 

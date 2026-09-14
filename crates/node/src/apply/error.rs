@@ -80,28 +80,12 @@ pub enum ApplyError {
         /// Output index of the unresolvable spend.
         vout: u32,
     },
-    /// The undo record for a block being disconnected is absent.
+    /// The undo record for a block being disconnected could not be loaded.
     ///
-    /// Fatal: without it the UTXO set cannot be restored, and guessing would
-    /// silently corrupt the chainstate.
-    #[error("no undo record for block {hash} at height {height}")]
-    UndoRecordMissing {
-        /// Block whose record is absent.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Height the block was applied at.
-        height: u32,
-    },
-    /// A stored undo record could not be decoded.
-    #[error("undo record for block {hash} is unreadable: {reason}")]
-    UndoRecordUnreadable {
-        /// Block whose record is unreadable.
-        hash: bitcoin_rs_primitives::Hash256,
-        /// Why the codec rejected it.
-        reason: String,
-    },
-    /// Reading a stored undo record failed.
-    #[error("undo record read: {0}")]
-    UndoRead(#[source] bitcoin_rs_storage::StorageError),
+    /// Fatal for the disconnect: without it the UTXO set cannot be restored,
+    /// and guessing would silently corrupt the chainstate.
+    #[error(transparent)]
+    UndoLoad(#[from] bitcoin_rs_utxo::UndoLoadError),
     /// The block asked to be disconnected is not the applied tip.
     ///
     /// Blocks must be disconnected tip-first. Taking one from the middle would

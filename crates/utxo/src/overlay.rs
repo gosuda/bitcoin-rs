@@ -6,15 +6,17 @@
 //! it answers lookups and it is advanced one block at a time.
 
 use bitcoin_rs_primitives::{Block, OutPoint, Txid};
-use bitcoin_rs_utxo::{UtxoSet, shard::LiveOutput};
 use hashbrown::HashMap;
+
+use crate::connect::is_coinbase_tx;
+use crate::{UtxoSet, shard::LiveOutput};
 
 /// Where a block's prevouts are read from.
 ///
 /// One implementation is the committed set, used by every apply today. The
 /// other is [`WindowOverlay`], which answers for blocks that have been prepared
 /// but not yet committed.
-pub(crate) trait OutputSource {
+pub trait OutputSource {
     /// The live output an outpoint refers to, or `None` if it is unspendable
     /// from this view.
     fn get_entry(&self, outpoint: &OutPoint) -> Option<LiveOutput>;
@@ -31,17 +33,25 @@ impl OutputSource for UtxoSet {
 /// Entries are tombstoned rather than removed. A window block can spend an
 /// outpoint and a later one recreate it, and two separate sets would answer
 /// that sequence wrongly whichever order they were consulted in.
-pub(crate) struct WindowOverlay<'u> {
+pub struct WindowOverlay<'u> {
     base: &'u UtxoSet,
+    /// Consensus script-size limit; larger outputs never enter the committed
+    /// set, so they never enter this view either.
+    max_script_size: usize,
     /// `Some` for created and still live, `None` for spent. Absent means "ask
     /// the committed set".
     changed: HashMap<OutPoint, Option<LiveOutput>>,
 }
 
 impl<'u> WindowOverlay<'u> {
-    pub(crate) fn new(base: &'u UtxoSet) -> Self {
+    /// Starts an empty view over `base`.
+    ///
+    /// `max_script_size` is the consensus limit the committed set applies
+    /// when it skips oversized outputs; the view must apply the same one.
+    pub fn new(base: &'u UtxoSet, max_script_size: usize) -> Self {
         Self {
             base,
+            max_script_size,
             changed: HashMap::new(),
         }
     }
@@ -49,7 +59,7 @@ impl<'u> WindowOverlay<'u> {
     /// Folds one block's net effect into the view.
     ///
     /// `same_block_spent` holds outpoints a block both creates and spends. They
-    /// are skipped on both sides, exactly as `build_utxo_changes` skips them,
+    /// are skipped on both sides, exactly as [`build_block_changes`](crate::connect::build_block_changes) skips them,
     /// because such an output never reaches the committed set and a view that
     /// disagreed would resolve, or refuse, a later spend the real set would not.
     ///
@@ -67,7 +77,7 @@ impl<'u> WindowOverlay<'u> {
     /// Refuses a `txids` slice that does not cover every transaction. Zipping
     /// the two would drop the trailing transactions instead, leaving their
     /// creations invisible and their spends unrecorded.
-    pub(crate) fn advance(
+    pub fn advance(
         &mut self,
         block: &Block,
         txids: &[Txid],
@@ -85,12 +95,12 @@ impl<'u> WindowOverlay<'u> {
         }
         for (tx, txid) in block.txs.iter().zip(txids) {
             let txid = *txid;
-            let coinbase = is_coinbase(tx);
+            let coinbase = is_coinbase_tx(tx);
             for (vout, txout) in tx.outputs.iter().enumerate() {
                 // An OP_RETURN or oversized script is provably unspendable and
                 // never enters the committed set, so it must not enter this one.
                 if is_op_return(&txout.script_pubkey)
-                    || txout.script_pubkey.len() > bitcoin_rs_consensus::MAX_SCRIPT_SIZE
+                    || txout.script_pubkey.len() > self.max_script_size
                 {
                     continue;
                 }
@@ -127,7 +137,7 @@ impl<'u> WindowOverlay<'u> {
 
 /// Why the view refused to fold in a block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum WindowOverlayError {
+pub enum WindowOverlayError {
     /// The caller's txid list does not cover the block's transactions.
     #[error("block has {transactions} transactions but {txids} txids were supplied")]
     TxidCountMismatch {
@@ -147,25 +157,23 @@ impl OutputSource for WindowOverlay<'_> {
     }
 }
 
-fn is_coinbase(tx: &bitcoin_rs_primitives::Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
-}
-
 fn is_op_return(script: &[u8]) -> bool {
     script.first() == Some(&0x6a)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{UndoBatch, UtxoAdd, UtxoSet};
     use bitcoin_rs_primitives::{
         Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx,
         TxIn, TxOut, Txid, Witness,
     };
-    use bitcoin_rs_utxo::{UndoBatch, UtxoAdd, UtxoSet};
 
     use super::{OutputSource, WindowOverlay};
+
+    /// Consensus `MAX_SCRIPT_SIZE`, pinned here so the boundary test cannot
+    /// drift from the value the apply path passes.
+    const MAX_SCRIPT_SIZE: usize = 10_000;
 
     fn none() -> hashbrown::HashSet<OutPoint> {
         hashbrown::HashSet::new()
@@ -177,7 +185,7 @@ mod tests {
     fn an_output_created_by_a_window_block_becomes_visible()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 500);
         let txid = tx.txid();
         let block = block_of(vec![tx]);
@@ -203,7 +211,7 @@ mod tests {
         let utxo = UtxoSet::new();
         let funded = OutPoint::new(txid_of(0x31), 0);
         seed(&utxo, funded, 900)?;
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         assert!(
             overlay.get_entry(&funded).is_some(),
             "the committed output must be visible before the spend"
@@ -229,7 +237,7 @@ mod tests {
     fn an_outpoint_recreated_after_being_spent_is_live_again()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 100);
         let txid = tx.txid();
         let created = OutPoint::new(txid, 0);
@@ -262,7 +270,7 @@ mod tests {
     #[test]
     fn unspendable_outputs_never_enter_the_view() -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying_tx(vec![0x6a], 0);
         let txid = tx.txid();
 
@@ -279,9 +287,9 @@ mod tests {
     fn script_size_boundary_matches_the_committed_utxo_set()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
-        let accepted = paying_tx(vec![0x51; bitcoin_rs_consensus::MAX_SCRIPT_SIZE], 1);
-        let rejected = paying_tx(vec![0x51; bitcoin_rs_consensus::MAX_SCRIPT_SIZE + 1], 1);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let accepted = paying_tx(vec![0x51; MAX_SCRIPT_SIZE], 1);
+        let rejected = paying_tx(vec![0x51; MAX_SCRIPT_SIZE + 1], 1);
         let accepted_txid = accepted.txid();
         let rejected_txid = rejected.txid();
 
@@ -311,7 +319,7 @@ mod tests {
     #[test]
     fn genesis_contributes_nothing() -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 5_000_000_000);
         let txid = tx.txid();
 
@@ -330,7 +338,7 @@ mod tests {
     #[test]
     fn a_txid_list_that_misses_transactions_is_refused() {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let block = block_of(vec![coinbase(), spending_tx(OutPoint::new(txid_of(5), 0))]);
 
         let outcome = overlay.advance(&block, &[txid_of(6)], HEIGHT, &none());
@@ -352,7 +360,7 @@ mod tests {
     fn an_output_created_and_spent_in_one_block_is_skipped_on_both_sides()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo);
+        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 400);
         let txid = tx.txid();
         let created = OutPoint::new(txid, 0);
@@ -376,7 +384,7 @@ mod tests {
         Ok(())
     }
 
-    type UtxoError = bitcoin_rs_utxo::UtxoError;
+    type UtxoError = crate::UtxoError;
 
     fn seed(utxo: &UtxoSet, outpoint: OutPoint, value: u64) -> Result<(), UtxoError> {
         let mut batch = UndoBatch::default();

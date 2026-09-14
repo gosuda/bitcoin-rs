@@ -57,8 +57,6 @@ pub mod storage_footprint;
 pub mod sync;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
-/// Prevout lookups across a window of consecutive blocks.
-mod window_overlay;
 pub use apply::{
     ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
     error::{ApplyError, DisconnectError},

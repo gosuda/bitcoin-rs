@@ -491,7 +491,10 @@ pub(super) fn prove_window<'a>(
     metrics::histogram!("node.window.parse_seconds").record(parse_started.elapsed().as_secs_f64());
 
     let prepare_started = quanta::Instant::now();
-    let mut overlay = crate::window_overlay::WindowOverlay::new(handles.utxo.as_ref());
+    let mut overlay = bitcoin_rs_utxo::WindowOverlay::new(
+        handles.utxo.as_ref(),
+        bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
+    );
     let mut prepared = Vec::with_capacity(blocks.len());
     for ((block, parsed), context) in blocks.iter().zip(parsed).zip(&contexts) {
         let Ok((kernel_block, txids)) = parsed else {

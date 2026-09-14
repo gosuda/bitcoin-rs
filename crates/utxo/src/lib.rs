@@ -14,6 +14,8 @@ mod compress;
 pub mod connect;
 /// UTXO hash-table key.
 pub mod key;
+/// Prevout lookups over the committed set plus prepared-but-uncommitted blocks.
+pub mod overlay;
 /// Owned UTXO records.
 pub mod record;
 /// UTXO-set mutations and lookup.
@@ -24,11 +26,14 @@ pub mod shard;
 pub mod snapshot;
 /// Running UTXO-set statistics over the live set above.
 pub mod stats;
+/// Block-level undo persistence and the marker-fenced rollback.
+pub mod undo;
 /// Versioned on-disk encoding for undo records.
 pub mod undo_codec;
 
 pub use connect::{BlockChangeError, BlockValueTotals, SpentOutputLookup, is_coinbase_tx};
 pub use key::{UtxoBuildHasher, UtxoKey};
+pub use overlay::{OutputSource, WindowOverlay, WindowOverlayError};
 pub use record::{OneUtxoOut, UtxoRecord};
 pub use set::{
     BlockChanges, BorrowedBlockChanges, BorrowedUtxoAdd, ScannedUtxo, UndoBatch, UtxoAdd,
@@ -40,6 +45,10 @@ pub use snapshot::{
     SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, aggregate_hash, hash_serialized_3,
     read_snapshot_strict_v4, read_snapshot_strict_v4_observed, write_snapshot,
     write_snapshot_observed,
+};
+pub use undo::{
+    BlockRollback, RollbackError, RollbackFailure, UndoLoadError, load_block_undo,
+    persist_block_undo, rollback_block,
 };
 pub use undo_codec::{
     UNDO_FORMAT_VERSION, UndoCodecError, decode as decode_undo, encode as encode_undo,

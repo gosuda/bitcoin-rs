@@ -395,14 +395,12 @@ pub(super) fn apply_block_admitted<'b>(
     // record cannot be written the block must not apply at all, and leaving
     // body bytes or index rows behind for it would be worse than not starting.
     let undo_persist_started = quanta::Instant::now();
-    let undo_record = bitcoin_rs_utxo::encode_undo(&undo, block_hash);
-    let undo_persist_result = handles
-        .undo_store
-        .persist_undo(height, block_hash, &undo_record)
-        .map_err(ApplyError::UndoPersistence);
+    let undo_persist_result =
+        bitcoin_rs_utxo::persist_block_undo(handles.undo_store.as_ref(), height, block_hash, &undo)
+            .map_err(ApplyError::UndoPersistence);
     metrics::histogram!("node.apply_block.undo_persist_seconds")
         .record(undo_persist_started.elapsed().as_secs_f64());
-    undo_persist_result?;
+    let undo_record = undo_persist_result?;
 
     // Serialize the block lazily: only when a consumer actually needs the
     // full bytes. During IBD with pruning+txindex disabled this avoids a

@@ -107,7 +107,7 @@ pub(super) fn parse_block_for_apply(
 /// `source` is where prevouts come from. Every caller outside a window passes
 /// the committed UTXO set; a window passes an overlay so a block can see
 /// outputs an earlier block in the same window created.
-pub(super) fn prepare_apply<'b, S: crate::window_overlay::OutputSource + ?Sized>(
+pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::OutputSource + ?Sized>(
     block: &'b Block,
     provided_serialized: Option<bytes::Bytes>,
     source: &S,
