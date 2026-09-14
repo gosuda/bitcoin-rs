@@ -2443,6 +2443,7 @@ mod tests {
         assert_eq!(window.request_peer_scan_limit(now), 8);
     }
 
+    // Contract: docs/contracts/fast-sync.md §FS-02–FS-03 (v1).
     #[test]
     fn fast_sync_budget_stripes_window_across_fast_outbound_target() {
         let mut window = DownloadWindow::new(fast_sync_budget());

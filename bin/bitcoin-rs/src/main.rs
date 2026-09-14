@@ -214,6 +214,7 @@ mod tests {
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
     }
 
+    // Contract: docs/contracts/fast-sync.md §FS-01 (v1).
     #[test]
     fn fast_sync_defaults_off_and_enables_from_flag_or_environment() {
         let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())

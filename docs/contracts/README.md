@@ -33,6 +33,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-13` | Product cells, overlap accounting, evidence identity, promotion thresholds | `g18_hot_path_ledger`; `overhaul_evidence` |
 | [dependency-range.md](dependency-range.md) | `DEP-01`–`DEP-02` | Declared Cargo ranges compile at their minimum and maximum resolvable versions; one copy each of `bitcoin`, `bitcoin_hashes`, `secp256k1`, `secp256k1-sys` | `scripts/check-dep-range.sh`; `g20_unique_consensus_crates`; `cargo deny check` |
 | [feature-matrix.md](feature-matrix.md) | `FEAT-01`–`FEAT-02` | Named supported feature combinations; no empty backend markers on crates that do not own storage | `scripts/check-feature-matrix.sh`; `g17_dependency_direction` |
+| [fast-sync.md](fast-sync.md) | `FS-01`–`FS-03` | Opt-in fast-sync configuration, fan-out threshold, and dynamic window striping | fast-sync configuration and download-window tests |
 | [reference-set.md](reference-set.md) | `REF-01`–`REF-07` | Released Core, kernel, corpus, and formal-tool identities | compatibility manifest and `overhaul_reference_set` |
 
 ## Permanent suite traceability
