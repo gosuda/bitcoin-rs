@@ -503,7 +503,7 @@ mod tests {
     fn missing_tx_requests_getblocktxn_and_completes_on_blocktxn() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2), test_tx(3)], 2, 0x99);
         let hints = SetHints {
-            txs: vec![native.txs[0].clone(), native.txs[2].clone()],
+            txs: vec![native.txs[0].clone()],
         };
         let mut reconstruction = Reconstruction::new();
 
@@ -512,7 +512,7 @@ mod tests {
         let Outcome::RequestMissing(request) = outcome else {
             panic!("expected getblocktxn request, got {outcome:?}");
         };
-        assert_eq!(request.txs_request.indexes, vec![1]);
+        assert_eq!(request.txs_request.indexes, vec![1, 2]);
         assert_eq!(
             request.txs_request.block_hash,
             wire_block_hash(native.block_hash())
@@ -521,7 +521,7 @@ mod tests {
         let txn = BlockTxn {
             transactions: BlockTransactions {
                 block_hash: request.txs_request.block_hash,
-                transactions: vec![registry_tx(&test_tx(2))],
+                transactions: vec![registry_tx(&test_tx(2)), registry_tx(&test_tx(3))],
             },
         };
         let outcome = reconstruction.receive_blocktxn(&txn, now());
@@ -555,6 +555,19 @@ mod tests {
         };
         let outcome = reconstruction.receive_blocktxn(&wrong_size, now());
         assert!(matches!(outcome, Outcome::Fallback(_)));
+
+        // Once fallback is latched, a late retry must not resurrect the
+        // abandoned compact-block reconstruction.
+        let late = BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: request.txs_request.block_hash,
+                transactions: vec![registry_tx(&test_tx(2))],
+            },
+        };
+        assert!(matches!(
+            reconstruction.receive_blocktxn(&late, now()),
+            Outcome::Idle
+        ));
     }
 
     /// A `blocktxn` for an unknown (or expired) block does nothing, and the
