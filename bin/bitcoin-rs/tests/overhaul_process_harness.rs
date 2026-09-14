@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
+use bitcoin_rs_index::capabilities::CapabilityState;
 use serde_json::{Value, json};
 use support::process_node::{
     ClockControl, HarnessError, NodeBinary, ProcessNode, START_TIMEOUT, compare_reply, compare_rpc,
@@ -576,16 +577,9 @@ const MINING_ADDRESS: &str = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 /// The readiness outcomes documented for the txindex capability. The gauge
 /// label and the `getcapabilities` row spell them identically; a state
 /// outside this vocabulary is a behavior failure, never a poll artifact.
-const READINESS_OUTCOMES: [&str; 8] = [
-    "Ready",
-    "CatchingUp",
-    "RollingBack",
-    "Rebuilding",
-    "Failed",
-    "Disabled",
-    "Opening",
-    "ShutdownAbandoned",
-];
+fn readiness_outcomes() -> impl Iterator<Item = &'static str> {
+    CapabilityState::ALL.iter().map(CapabilityState::wire_name)
+}
 
 fn readiness_deadline() -> Instant {
     Instant::now() + Duration::from_mins(2)
@@ -615,7 +609,7 @@ fn readiness_outcome(row: &Value) -> String {
             .to_owned()
     };
     assert!(
-        READINESS_OUTCOMES.contains(&tag.as_str()),
+        readiness_outcomes().any(|outcome| outcome == tag),
         "readiness outcome outside the documented vocabulary: {tag}"
     );
     tag
@@ -765,7 +759,7 @@ fn is_zero(value: f64) -> bool {
 fn assert_one_active(samples: &[(String, f64)], expected: &str) {
     assert_eq!(
         samples.len(),
-        READINESS_OUTCOMES.len(),
+        CapabilityState::ALL.len(),
         "every documented outcome must render: {samples:?}"
     );
     let active: Vec<_> = samples.iter().filter(|(_, value)| is_one(*value)).collect();
