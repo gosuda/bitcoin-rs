@@ -55,7 +55,7 @@ Historical results are retained from the pre-rewrite document. Headings are demo
 
 ### Knob
 
-`txindex::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (`crates/index/src/runtime.rs`), default
+`bitcoin_rs_index::runtime::DEFAULT_ROLLBACK_REBUILD_CUTOVER` (`crates/index/src/runtime.rs`), default
 `100_000`.
 
 Decision rule implemented by the txindex worker (`reconcile_once`): for each
