@@ -229,6 +229,11 @@ pub const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_bytes: BATCH_BYTE_LIMIT,
 };
 
+/// Writer-side batch limits for the `RocksDB` backend.
+///
+/// Retained as a public compatibility alias until the next minor release.
+pub const ROCKSDB_BATCH_LIMITS: PreparedBatchLimits = DEFAULT_BATCH_LIMITS;
+
 /// Writer-side batch limits for the redb backend.
 pub const REDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 16_000_000,
