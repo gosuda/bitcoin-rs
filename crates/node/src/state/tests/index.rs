@@ -91,6 +91,8 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     config.indexes.txindex = true;
     let mut state = NodeState::open(config, None)?;
 
+    // Indexing startup contract: docs/contracts/indexing.md, IDX-01 and the
+    // Owners section require configured workers to start only when requested.
     assert!(
         state
             .derived_index_lifecycle
