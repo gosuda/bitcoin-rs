@@ -206,10 +206,10 @@ fn bip16_exception_accepts_bare_p2sh_template_spend_that_normal_p2sh_rejects()
     };
 
     // At height 170060 the only height-gated flag is P2SH, so:
-    //   exception block -> compute_verify_flags drops P2SH
-    //   normal block    -> compute_verify_flags carries P2SH
-    let exc_flags = compute_verify_flags(Network::Mainnet, 170_060, exception_hash, softforks);
-    let normal_flags = compute_verify_flags(Network::Mainnet, 170_060, normal_hash, softforks);
+    //   exception block -> verify_flags drops P2SH
+    //   normal block    -> verify_flags carries P2SH
+    let exc_flags = bitcoin_rs_consensus::verify_flags(Network::Mainnet, 170_060, exception_hash, softforks);
+    let normal_flags = bitcoin_rs_consensus::verify_flags(Network::Mainnet, 170_060, normal_hash, softforks);
     assert!(!exc_flags.contains(bitcoin_rs_script::VerifyFlags::P2SH));
     assert!(normal_flags.contains(bitcoin_rs_script::VerifyFlags::P2SH));
 
