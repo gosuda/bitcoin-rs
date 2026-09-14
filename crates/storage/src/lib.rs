@@ -114,6 +114,8 @@ pub mod error;
 pub mod footprint;
 /// Retention and deletion of block bodies and undo rows.
 pub mod pruning;
+/// Durable rollback-evidence sidecars and the warning snapshot.
+pub mod recovery_evidence;
 /// Backend-neutral key-value store traits.
 pub mod trait_;
 /// Per-block UTXO undo records and the in-flight disconnect marker.

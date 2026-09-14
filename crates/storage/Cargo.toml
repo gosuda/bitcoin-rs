@@ -18,6 +18,7 @@ fjall = ["dep:fjall"]
 redb = ["dep:redb"]
 
 [dependencies]
+arc-swap.workspace = true
 bitcoin-rs-primitives.workspace = true
 bytemuck.workspace = true
 bytes.workspace = true
@@ -27,6 +28,7 @@ metrics.workspace = true
 parking_lot.workspace = true
 rustix.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

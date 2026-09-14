@@ -138,8 +138,8 @@ pub struct NodeState {
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
-    /// Process-wide rollback-evidence warning snapshot (`ArcSwap`).
-    warning_store: Arc<crate::recovery_evidence::WarningStore>,
+    /// Process-wide rollback-evidence reporter (warning snapshot + marker).
+    recovery_reporter: Arc<crate::recovery_reporter::RecoveryReporter>,
 }
 
 impl Drop for NodeState {
@@ -343,10 +343,10 @@ impl NodeState {
         Arc::clone(&self.p2p_outbound_rx)
     }
 
-    /// Returns the rollback-evidence warning store for `getblockchaininfo`.
+    /// Returns the rollback-evidence reporter for `getblockchaininfo`.
     #[must_use]
-    pub(crate) fn warning_store(&self) -> Arc<crate::recovery_evidence::WarningStore> {
-        Arc::clone(&self.warning_store)
+    pub(crate) fn recovery_reporter(&self) -> Arc<crate::recovery_reporter::RecoveryReporter> {
+        Arc::clone(&self.recovery_reporter)
     }
 
     /// Returns a cloned `Sender` that the P2P listener pushes inbound

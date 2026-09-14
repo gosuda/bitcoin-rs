@@ -500,6 +500,7 @@ dependencies = [
 name = "bitcoin-rs-storage"
 version = "0.5.0"
 dependencies = [
+ "arc-swap",
  "bitcoin-rs-primitives",
  "bytemuck",
  "bytes",
@@ -512,6 +513,7 @@ dependencies = [
  "rust-rocksdb",
  "rustix",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror",

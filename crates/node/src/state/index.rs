@@ -97,7 +97,7 @@ pub(super) struct TxIndexSpawn {
     pub(super) block_source: bitcoin_rs_index::runtime::IndexBlockSource,
     pub(super) body_source: Arc<dyn BlockBodySource>,
     pub(super) wake_rx: Receiver<()>,
-    pub(super) recovery_reporter: Arc<crate::recovery_evidence::RecoveryReporter>,
+    pub(super) recovery_reporter: Arc<crate::recovery_reporter::RecoveryReporter>,
 }
 
 impl NodeState {

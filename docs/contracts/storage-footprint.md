@@ -7,6 +7,8 @@ it already is. This collector is a separate, explicit measurement command.
 Owners:
 - Physical walk and logical column-family scan: `crates/storage/src/footprint.rs`
 - Evidence envelope, identity, namespace inventory, and budget verdict:
+  `crates/storage/src/footprint/evidence.rs`
+- Measurement orchestration and identity projection:
   `crates/node/src/storage_footprint.rs`
 - Default-lane full-tip conservative high-water evidence:
   `bin/bitcoin-rs/tests/overhaul_storage_evidence.rs`

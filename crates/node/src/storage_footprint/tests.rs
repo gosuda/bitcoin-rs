@@ -1,5 +1,6 @@
 use super::*;
 use crate::Network;
+use bitcoin_rs_storage::footprint::evidence::DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES;
 use bitcoin_rs_storage::measure_physical_tree;
 use tempfile::tempdir;
 
@@ -34,7 +35,7 @@ fn default_regtest_record_is_inapplicable_to_the_mainnet_budget() -> Result<()> 
     assert!(evidence.logical.not_a_filesystem_allocation);
     assert_eq!(
         evidence.physical.observation_kind,
-        PhysicalObservationKind::SnapshotLowerBound.as_str()
+        PhysicalObservationKind::SnapshotLowerBound
     );
     assert!(
         evidence
@@ -71,7 +72,7 @@ fn conservative_high_water_can_pass_the_default_mainnet_budget() -> Result<()> {
     assert_eq!(evidence.budget.verdict, "pass");
     assert_eq!(
         evidence.physical.observation_kind,
-        PhysicalObservationKind::ConservativeHighWater.as_str()
+        PhysicalObservationKind::ConservativeHighWater
     );
     Ok(())
 }
@@ -189,7 +190,7 @@ fn oversized_current_witness_falls_back_to_prev() -> Result<()> {
     std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
     let genesis = Network::Regtest.genesis_block_hash().to_string_be();
     let prev = witness_json(&genesis, 3);
-    let mut current = " ".repeat(crate::recovery_evidence::MAX_FILE_BYTES + 1);
+    let mut current = " ".repeat(bitcoin_rs_storage::recovery_evidence::MAX_FILE_BYTES + 1);
     current.push_str(&witness_json(&genesis, 9));
     std::fs::write(dir.path().join("applied-tip-witness.json"), current)?;
     std::fs::write(dir.path().join("applied-tip-witness.json.prev"), prev)?;

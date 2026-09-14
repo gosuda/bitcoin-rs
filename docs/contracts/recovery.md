@@ -275,12 +275,18 @@ tests.
 
 ### `RCV-12`: Recovery evidence warning and marker ordering
 
-- `RecoveryReporter` is evidence publication, not chainstate authority. It
-  reports a recovery fact only after the restored authoritative position is
-  known; neither the warning store nor the marker may move chainstate.
-- For checkpoint fallback and index-watermark-ahead evidence, the reporter
-  first renders/logs the warning and updates the process-visible
-  `WarningStore`, then attempts the atomic durable marker write.
+- The storage-owned `RecoveryEvidencePublisher`
+  (`crates/storage/src/recovery_evidence.rs`) owns warning rendering, the
+  warning snapshot, the marker/witness codec, and the atomic write
+  protocol; it is evidence publication, not chainstate authority. It
+  publishes a recovery fact only after the restored authoritative position is
+  known; neither the warning store nor the marker may move chainstate. The
+  node crate keeps `RecoveryReporter` (`crates/node/src/recovery_reporter.rs`)
+  as the composition adapter implementing `IndexAheadSink` and
+  `RollbackWarningSource`.
+- For checkpoint fallback and index-watermark-ahead evidence, the publisher
+  first renders/logs the warning and updates the process-visible warning
+  snapshot, then attempts the atomic durable marker write.
 - Marker persistence failure is returned to the caller and keeps the warning
   visible for the lifetime of that process. Callers that require durable
   evidence fail closed rather than pretending the marker succeeded.
