@@ -173,9 +173,11 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        // Load bodies serially through the single reader until either cap.
-        // The first body is always retained so catch-up moves; a later body
-        // that would cross the byte cap is left at the front of `identities`.
+        // Load bodies serially through the single reader. Every body the
+        // reader hands out is retained: the reader's prefetch cursor is
+        // strictly sequential, so a consumed entry cannot be given back.
+        // The caps are therefore stop conditions, not admission checks, and
+        // one chunk may exceed the byte budget by its last body.
         let mut bodies = Vec::new();
         let mut loaded_bytes = 0_usize;
         for identity in *identities {
@@ -185,11 +187,6 @@ impl Worker {
             let hash = Hash256::from_le_bytes(&identity.hash);
             match body_reader.load_block_body(identity.height, hash) {
                 Ok(Some(body)) => {
-                    if !bodies.is_empty()
-                        && loaded_bytes.saturating_add(body.len()) > PREPARE_CHUNK_BYTES
-                    {
-                        break;
-                    }
                     loaded_bytes = loaded_bytes.saturating_add(body.len());
                     bodies.push(body);
                 }
@@ -201,7 +198,7 @@ impl Worker {
                 }
                 Err(e) => return Err(DerivedIndexWorkerError::Storage(e)),
             }
-            if bodies.len() >= PREPARE_CHUNK_BLOCKS {
+            if bodies.len() >= PREPARE_CHUNK_BLOCKS || loaded_bytes >= PREPARE_CHUNK_BYTES {
                 break;
             }
         }

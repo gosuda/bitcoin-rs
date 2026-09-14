@@ -136,10 +136,10 @@ const POSITION_PREFETCH_BLOCKS: usize = 65_536;
 /// are small; catch-up also prepares already-stored bodies, so this is not
 /// `RECEIVED_BLOCK_BUDGET`. The byte budget below is independent of P2P staging.
 const PREPARE_CHUNK_BLOCKS: usize = 256;
-/// Serialized-body budget for one parallel prepare step. Later bodies are not
-/// retained once this bound would be exceeded. Stops a 1 MiB-class window from
-/// holding 256 bodies in RAM while still packing early-chain blocks up to the
-/// count cap.
+/// Serialized-body budget for one parallel prepare step. Loading stops once
+/// the retained bodies reach this bound, so one step holds at most this many
+/// bytes plus one body. Stops a 1 MiB-class window from holding 256 bodies in
+/// RAM while still packing early-chain blocks up to the count cap.
 const PREPARE_CHUNK_BYTES: usize = 32 << 20;
 const REVISION_QUIET_PERIOD: Duration = Duration::from_millis(100);
 const FORWARD_BATCH_DELAY: Duration = Duration::from_millis(100);
@@ -512,6 +512,7 @@ impl DerivedIndexWorkerError {
 }
 
 #[cfg(all(test, feature = "fjall"))]
+#[allow(clippy::expect_used, clippy::panic)]
 mod body_reader_tests;
 
 #[cfg(test)]
