@@ -12,10 +12,9 @@ use std::path::{Path, PathBuf};
 pub mod evidence;
 
 use bitcoin_rs_node::metrics::{CorpusIdentity, EvidenceIdentity, Sha256Hex};
-use evidence::{Interval, IntervalKind, Ledger as RuntimeLedger, Sample};
+use evidence::{Interval, IntervalKind, LEDGER_SCHEMA, Ledger as RuntimeLedger, Sample};
 use serde::Deserialize;
 
-const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";
 const CONTRACT: &str = "docs/contracts/hot-path-attribution.md";
 const LEDGER: &str = "docs/benchmarks/hot-path-ledger.toml";
 const CELL_COUNT: usize = 36;
@@ -210,7 +209,7 @@ fn known(value: &str, allowed: &[&str]) -> bool {
 #[test]
 fn ledger_schema_and_contract_are_current() {
     let ledger = load_ledger();
-    assert_eq!(ledger.schema, SCHEMA);
+    assert_eq!(ledger.schema, LEDGER_SCHEMA);
     assert_eq!(ledger.contract, CONTRACT);
     assert!(
         workspace_file(&ledger.contract).is_file(),
