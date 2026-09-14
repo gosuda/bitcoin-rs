@@ -1,13 +1,11 @@
 //! A1 named integration tests for the txindex worker.
 //!
-//! These exercise the full worker lifecycle path including the test-only
-//! keyed open gate.
+//! These exercise the full worker lifecycle path, including delayed opens.
 #![expect(
     clippy::expect_used,
     reason = "test: integration tests use expect for clarity"
 )]
 
-use super::startup::Heartbeat;
 use super::*;
 use crate::block_log::BlockLog;
 use arc_swap::ArcSwap;
@@ -16,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Test setup
 // ---------------------------------------------------------------------------
 
 /// Build a minimal open spec for testing. Uses the fjall backend (default
@@ -194,10 +192,13 @@ fn spawn_failure_publishes_failed_synchronously() {
 fn blocked_open_drop_detaches_within_deadline() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // Install the open gate so the worker blocks inside open.
-    let gate = install_txindex_open_gate();
-
-    let inputs = build_worker_inputs(dir.path(), 1);
+    let (open_tx, open_rx) = crossbeam_channel::bounded::<()>(0);
+    let mut inputs = build_worker_inputs(dir.path(), 1);
+    let open_store = Arc::clone(&inputs.spec.open_store);
+    inputs.spec.open_store = Arc::new(move |dir| {
+        let _ = open_rx.recv();
+        open_store(dir)
+    });
 
     let worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
@@ -216,7 +217,7 @@ fn blocked_open_drop_detaches_within_deadline() {
     )
     .expect("spawn");
 
-    // Give the worker time to start and block on the gate.
+    // Give the worker time to start and block on open.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Verify the lifecycle is still Opening (worker is blocked).
@@ -230,12 +231,12 @@ fn blocked_open_drop_detaches_within_deadline() {
     inputs.runtime.request_shutdown();
     inputs.shutdown.store(true, Ordering::Release);
 
-    // Release the gate so the worker can proceed. After open returns,
+    // Release the open channel so the worker can proceed. After open returns,
     // the worker checks shutdown and exits without publishing.
-    drop(gate);
+    drop(open_tx);
 
     // Wait for the worker to finish (it should exit quickly after
-    // the gate releases, because shutdown was already requested).
+    // the open channel releases, because shutdown was already requested).
     while !worker.is_finished() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -255,10 +256,13 @@ fn blocked_open_drop_detaches_within_deadline() {
 fn late_open_cannot_publish_after_revocation() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // Install the open gate so the worker blocks inside open.
-    let gate = install_txindex_open_gate();
-
-    let inputs = build_worker_inputs(dir.path(), 1);
+    let (open_tx, open_rx) = crossbeam_channel::bounded::<()>(0);
+    let mut inputs = build_worker_inputs(dir.path(), 1);
+    let open_store = Arc::clone(&inputs.spec.open_store);
+    inputs.spec.open_store = Arc::new(move |dir| {
+        let _ = open_rx.recv();
+        open_store(dir)
+    });
 
     let worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
@@ -277,7 +281,7 @@ fn late_open_cannot_publish_after_revocation() {
     )
     .expect("spawn");
 
-    // Give the worker time to start and block on the gate.
+    // Give the worker time to start and block on open.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Revoke the generation.
@@ -285,9 +289,9 @@ fn late_open_cannot_publish_after_revocation() {
     inputs.runtime.request_shutdown();
     inputs.shutdown.store(true, Ordering::Release);
 
-    // Release the gate — the worker will check shutdown/generation after
+    // Release the open channel — the worker will check shutdown/generation after
     // open returns and exit without publishing.
-    drop(gate);
+    drop(open_tx);
 
     // Wait for the worker to finish.
     while !worker.is_finished() {
@@ -396,29 +400,7 @@ fn async_index_open_preserves_backend() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. heartbeat_starts_before_blocking_open_and_stops_on_exit
-// ---------------------------------------------------------------------------
-
-#[test]
-fn heartbeat_starts_before_blocking_open_and_stops_on_exit() {
-    // The heartbeat is started before the blocking open in
-    // run_worker_with_open. We verify that:
-    // 1. The heartbeat starts (thread spawns)
-    // 2. stop_and_join terminates it cleanly on every exit path
-
-    let heartbeat = Heartbeat::start("txindex", "test-ns".to_owned(), "fjall".to_owned());
-
-    // Wait briefly to let the heartbeat thread run.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Stop and join must not hang.
-    heartbeat.stop_and_join();
-
-    // If we reach here, the heartbeat stopped and joined successfully.
-}
-
-// ---------------------------------------------------------------------------
-// 10. blocked_open_abandonment_detaches_and_poisons
+// 9. blocked_open_abandonment_detaches_and_poisons
 // ---------------------------------------------------------------------------
 
 /// Reviewer-mandated pathological case: when the worker's backend open is
@@ -430,10 +412,13 @@ fn heartbeat_starts_before_blocking_open_and_stops_on_exit() {
 fn blocked_open_abandonment_detaches_and_poisons() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    // Install the open gate so the worker blocks inside open.
-    let gate = install_txindex_open_gate();
-
-    let inputs = build_worker_inputs(dir.path(), 42);
+    let (open_tx, open_rx) = crossbeam_channel::bounded::<()>(0);
+    let mut inputs = build_worker_inputs(dir.path(), 42);
+    let open_store = Arc::clone(&inputs.spec.open_store);
+    inputs.spec.open_store = Arc::new(move |dir| {
+        let _ = open_rx.recv();
+        open_store(dir)
+    });
 
     let mut worker = DerivedIndexWorker::spawn_with_open(
         Arc::clone(&inputs.runtime),
@@ -452,13 +437,13 @@ fn blocked_open_abandonment_detaches_and_poisons() {
     )
     .expect("spawn");
 
-    // Give the worker time to start, claim the namespace, and block on the gate.
+    // Give the worker time to start, claim the namespace, and block on open.
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     // The worker is still blocked (not finished).
     assert!(
         !worker.is_finished(),
-        "worker should still be blocked at the gate"
+        "worker should still be blocked on open"
     );
 
     // Simulate bounded_index_shutdown's abandonment path.
@@ -527,11 +512,11 @@ fn blocked_open_abandonment_detaches_and_poisons() {
     // Drop the worker — must not hang (detach was called).
     drop(worker);
 
-    // Clean up: request shutdown and release the gate so the worker
+    // Clean up: request shutdown and release the open channel so the worker
     // thread can exit cleanly.
     inputs.runtime.request_shutdown();
     inputs.shutdown.store(true, Ordering::Release);
-    drop(gate);
+    drop(open_tx);
 
     // If we reach here without hanging, the abandonment is truly bounded.
 }

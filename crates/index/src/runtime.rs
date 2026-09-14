@@ -226,12 +226,6 @@ const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
 /// commit bounded.
 const BATCH_BYTE_LIMIT: usize = 256 << 20;
 
-/// Writer-side batch limits for the `RocksDB` backend.
-pub const ROCKSDB_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
-    max_rows: 1_000_000,
-    max_bytes: BATCH_BYTE_LIMIT,
-};
-
 /// Writer-side batch limits for the default (fjall) backend.
 pub const DEFAULT_BATCH_LIMITS: PreparedBatchLimits = PreparedBatchLimits {
     max_rows: 1_000_000,
@@ -399,31 +393,6 @@ pub struct DerivedIndexOpenSpec {
     /// Serializes a live-view query or seed against a chain transition.
     pub chain_transition: Option<Arc<Mutex<()>>>,
 }
-
-/// Test-only keyed open gate. Holds the worker inside the open phase until
-/// released, proving RPC binds and queries see `Opening` while the store is
-/// not yet open. `#[cfg(test)]` only — not a production trait or `NodeConfig` field.
-#[cfg(test)]
-pub(crate) static TXINDEX_OPEN_GATE: std::sync::LazyLock<
-    parking_lot::Mutex<Option<crossbeam_channel::Receiver<()>>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
-
-#[cfg(test)]
-pub(crate) fn install_txindex_open_gate() -> crossbeam_channel::Sender<()> {
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    *TXINDEX_OPEN_GATE.lock() = Some(rx);
-    tx
-}
-
-#[cfg(test)]
-pub(crate) fn wait_txindex_open_gate() {
-    if let Some(rx) = TXINDEX_OPEN_GATE.lock().as_ref() {
-        let _ = rx.recv();
-    }
-}
-
-#[cfg(not(test))]
-pub(crate) fn wait_txindex_open_gate() {}
 
 /// Handle used to spawn and join the supervised reconciliation worker.
 pub struct DerivedIndexWorker {

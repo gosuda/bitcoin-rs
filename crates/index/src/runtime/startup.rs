@@ -15,7 +15,6 @@ use super::TXINDEX_OPEN_TIMEOUT;
 use super::Worker;
 use super::namespace::NAMESPACE_REGISTRY;
 use super::namespace::NamespaceRegistry;
-use super::wait_txindex_open_gate;
 use crate::PreparedBatchLimits;
 use crate::recovery::open_writer;
 use crate::writer::TxIndexWriter;
@@ -193,9 +192,6 @@ pub(super) fn open_and_run(
     shutdown: &Arc<AtomicBool>,
     wake_rx: &Receiver<()>,
 ) -> Result<(), DerivedIndexWorkerError> {
-    // Wait for the test-only open gate before touching the store.
-    wait_txindex_open_gate();
-
     let txindex_dir = spec.data_dir.join(spec.namespace);
     std::fs::create_dir_all(&txindex_dir)
         .map_err(|e| DerivedIndexWorkerError::Storage(bitcoin_rs_storage::StorageError::Io(e)))?;
