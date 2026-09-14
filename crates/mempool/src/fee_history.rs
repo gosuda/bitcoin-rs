@@ -155,6 +155,7 @@ mod tests {
         let fresh = open_pool();
         assert_eq!(fresh.read().estimate_fee_rate(1), None);
         load(dir.path(), &fresh);
+        assert!(fresh.read().estimate_fee_rate(1).is_some());
         assert_eq!(
             fresh.read().estimate_fee_rate(1),
             seeded.read().estimate_fee_rate(1),
