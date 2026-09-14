@@ -889,6 +889,8 @@ mod tests {
 
     #[test]
     fn only_derived_index_owners_select_capabilities() {
+        // Ownership contract: docs/contracts/indexing.md, IDX-01 and the
+        // Owners section define the permitted capability owners.
         for (path, source) in [
             (
                 "/workspace/crates/node/src/state/index.rs",
