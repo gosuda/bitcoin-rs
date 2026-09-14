@@ -390,6 +390,8 @@ fn wakes_before_store_open_are_reconciled() {
 #[test]
 fn async_index_open_preserves_backend() {
     let dir = tempfile::tempdir().expect("tempdir");
+    // Backend composition contract: docs/contracts/indexing.md, IDX-01 and the
+    // Owners section require backend opening to remain part of index startup.
     let spec = test_open_spec(dir.path(), 1);
     let opened = (spec.open_store)(&dir.path().join("txindex"));
     assert!(opened.is_ok(), "composing open closure must succeed");
