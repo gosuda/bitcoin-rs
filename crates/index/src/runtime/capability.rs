@@ -1,5 +1,3 @@
-//! Txindex lifecycle/progress projection for RPC capability reporting.
-
 use super::{
     Arc, ArcSwap, CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource,
     DerivedIndexLifecycle, DerivedIndexQueryEngine, DerivedIndexRuntime, IndexCapabilities,
