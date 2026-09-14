@@ -330,24 +330,6 @@ pub enum DerivedIndexLifecycle {
     ShutdownAbandoned,
 }
 
-impl DerivedIndexLifecycle {
-    fn query_payload(&self) -> Option<&Arc<DerivedIndexQueryEngine>> {
-        match self {
-            Self::Serving(engine) => Some(engine),
-            _ => None,
-        }
-    }
-
-    fn unavailable_reason(&self) -> &'static str {
-        match self {
-            Self::Opening => "txindex is opening",
-            Self::Failed(_) => "txindex is unavailable",
-            Self::ShutdownAbandoned => "txindex was abandoned at shutdown",
-            Self::Serving(_) => unreachable!("query_payload is Some for Serving"),
-        }
-    }
-}
-
 /// Stable outer query adapter constructed before backend open and before RPC
 /// context construction.
 ///
@@ -369,10 +351,19 @@ impl DerivedIndexQueryAdapter {
 
     fn load_engine(&self) -> Result<Arc<DerivedIndexQueryEngine>, TxQueryError> {
         let snapshot = self.lifecycle.load_full();
-        match snapshot.query_payload() {
-            Some(engine) => Ok(Arc::clone(engine)),
-            None => Err(TxQueryError::Unavailable(
-                snapshot.unavailable_reason().into(),
+        match &*snapshot {
+            DerivedIndexLifecycle::Serving(engine) => Ok(Arc::clone(engine)),
+            // Opening has not published a query engine yet.
+            DerivedIndexLifecycle::Opening => {
+                Err(TxQueryError::Unavailable("txindex is opening".into()))
+            }
+            // Failed startup leaves the index unavailable.
+            DerivedIndexLifecycle::Failed(_) => {
+                Err(TxQueryError::Unavailable("txindex is unavailable".into()))
+            }
+            // Shutdown abandoned the backend before it opened.
+            DerivedIndexLifecycle::ShutdownAbandoned => Err(TxQueryError::Unavailable(
+                "txindex was abandoned at shutdown".into(),
             )),
         }
     }

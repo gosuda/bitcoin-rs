@@ -347,7 +347,7 @@ pub mod block_tree {
     use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot};
     use bitcoin_rs_primitives::Hash256;
 
-    use super::{ActiveChainView, ChainIdentity, ChainTip, ConsumerCursor, ReconcilePlan};
+    use super::{ActiveChainView, ChainTip, ConsumerCursor, ReconcilePlan};
 
     struct BlockTreeActiveChain<'a> {
         tree: &'a BlockTree,
@@ -396,31 +396,6 @@ pub mod block_tree {
             active_tip: target_tip.tip_id,
         };
         super::plan(cursor, target(target_tip), &chain)
-    }
-
-    /// Plans from the publisher's cursor plus the authoritative tip.
-    ///
-    /// The publisher cursor is only a shortcut when it also names `target`; an
-    /// old or torn cursor must not manufacture `CaughtUp` against a different
-    /// tip.
-    #[must_use]
-    pub fn plan_from_cursor(
-        cursor: &ConsumerCursor,
-        publisher: &ConsumerCursor,
-        target_tip: &TipSnapshot,
-        tree: &BlockTree,
-    ) -> ReconcilePlan {
-        let chain = BlockTreeActiveChain {
-            tree,
-            active_tip: target_tip.tip_id,
-        };
-        let identity = ChainIdentity {
-            epoch: publisher.epoch,
-            sequence: publisher.sequence,
-            tip_hash: publisher.hash,
-            tip_height: publisher.height,
-        };
-        super::plan_from_identity(cursor, &identity, target(target_tip), &chain)
     }
 
     /// Height of the newest block shared by `position` and `active_tip`.
