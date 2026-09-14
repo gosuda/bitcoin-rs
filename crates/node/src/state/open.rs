@@ -471,7 +471,7 @@ impl NodeState {
                 durable_tip_height: Arc::clone(&durable_tip_height),
             },
         ));
-        let sync = Arc::new(crate::BlockSync::new(
+        let sync = Arc::new(crate::sync::block_sync(
             apply_handles.clone(),
             followers.clone(),
             Arc::clone(&peer_table),

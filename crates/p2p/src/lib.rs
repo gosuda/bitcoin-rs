@@ -43,6 +43,8 @@ pub mod service;
 pub mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
+/// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
+pub mod sync;
 /// Download planner: window, staging, and conviction policy.
 pub mod sync_planner;
 /// Bounded transaction announcements and their peer relay worker.

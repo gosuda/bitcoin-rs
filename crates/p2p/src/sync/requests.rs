@@ -6,17 +6,17 @@ use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
 use super::peers::body_capability_height;
 use super::telemetry::metric_count;
-use alloc::vec::Vec;
+use crate::Message;
+use crate::download_window::SyncPeer;
+use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_p2p::Message;
-use bitcoin_rs_p2p::download_window::SyncPeer;
-use bitcoin_rs_p2p::download_window::statically_fanout_eligible;
 use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::time::Instant;
+use std::vec::Vec;
 
 /// Requested blocks within this distance of the header tip ride the
 /// compact-block flavor: reconstruction costs a fraction of the full-body
@@ -80,7 +80,7 @@ impl BlockSync {
     /// flavor and collects the hashes of the request's contiguous leading
     /// run starting at `applied_height + 1` for the fast-apply cache.
     fn build_inventory(
-        request: &bitcoin_rs_p2p::download_window::PeerRequest,
+        request: &crate::download_window::PeerRequest,
         compact_fetch: bool,
         applied_height: u32,
     ) -> (Vec<Inventory>, ExpectedBlockHashes, bool) {
@@ -115,7 +115,7 @@ impl BlockSync {
     /// near-tip window of the header tip.
     fn compact_fetch_eligible(
         &self,
-        request: &bitcoin_rs_p2p::download_window::PeerRequest,
+        request: &crate::download_window::PeerRequest,
         chain_tip: &TipSnapshot,
     ) -> bool {
         let Some((first_height, _)) = request.entries().next() else {
@@ -134,7 +134,7 @@ impl BlockSync {
         applied_tip: &TipSnapshot,
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
-        let tree = self.handles.block_tree.read();
+        let tree = self.chain.block_tree().read();
         let Some(request_start_height) =
             Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)
         else {
@@ -233,8 +233,8 @@ impl BlockSync {
         now: Instant,
     ) -> Option<SocketAddr> {
         let sessions = self.peer_table.sessions();
-        let tree = self.handles.block_tree.read();
-        let active_tip = self.handles.chain_tip.load_full()?.tip_id;
+        let tree = self.chain.block_tree().read();
+        let active_tip = self.chain.chain_tip().load_full()?.tip_id;
         let active_front_height = tree.active_height_of(active_tip, front_hash)?;
         let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
         for session in sessions {

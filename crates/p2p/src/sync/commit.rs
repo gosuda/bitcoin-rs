@@ -1,66 +1,21 @@
-//! Ordered staged-block application, generation settlement, and expected-prefix caching.
+//! Ordered staged-block commit draining and expected-prefix caching.
+//!
+//! The window application itself — the chain transition, derived-consumer
+//! dispatch, and generation settlement — lives behind
+//! [`SyncChain::commit_window`] (node, ARCH-07); this module owns the
+//! staging/drain bookkeeping around it.
 
 use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::ExpectedRun;
-use crate::apply::error::ApplyError;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use bitcoin_rs_p2p::DrainedBlock;
+use super::chain::WindowCommitDisposition;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use std::time::Instant;
+use std::vec::Vec;
 
-pub(super) fn settle_window_failure(
-    transition: crate::apply::ChainTransition<'_>,
-    mut error: crate::apply::WindowApplyError,
-) -> crate::apply::WindowApplyError {
-    if matches!(error.source, ApplyError::UtxoCommit(_)) {
-        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
-    } else if let Err(finish_source) = transition.finish() {
-        tracing::error!(
-            original = %error.source,
-            finish = %finish_source,
-            "chain transition could not be settled after a window failure; \
-             mempool admission stays closed until recovery or restart"
-        );
-        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
-    }
-    error
-}
-
-/// Settles a successful window: finishes the transition, or classifies a
-/// finish failure as [`WindowApplyDisposition::Fatal`] when the reserved
-/// even generation could not be published.
-///
-/// Symmetric with [`settle_window_failure`]: both paths attempt `finish`
-/// and surface a `Fatal` disposition when the CAS fails, so the caller
-/// stops retrying instead of wedging on an odd generation.
-#[allow(clippy::result_large_err)]
-pub(super) fn settle_window_success(
-    transition: crate::apply::ChainTransition<'_>,
-    applied: usize,
-    committed: Vec<crate::apply::ConnectOutcome>,
-) -> core::result::Result<usize, crate::apply::WindowApplyError> {
-    match transition.finish() {
-        Ok(()) => Ok(applied),
-        Err(finish_source) => {
-            tracing::error!(
-                finish = %finish_source,
-                "chain transition could not be settled after a committed window; \
-                 mempool admission stays closed until recovery or restart"
-            );
-            Err(crate::apply::WindowApplyError {
-                applied,
-                committed,
-                source: finish_source,
-                disposition: crate::apply::WindowApplyDisposition::Fatal,
-                invalidated: Box::default(),
-            })
-        }
-    }
-}
+use crate::DrainedBlock;
 
 /// Where restoration of un-applied drained blocks must start.
 ///
@@ -79,51 +34,14 @@ pub(super) fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize
 }
 
 impl BlockSync {
-    /// Applies a window, then dispatches derived consumers while the
-    /// transition is still held.
-    #[allow(clippy::result_large_err)]
-    pub(super) fn apply_window_followed(
-        &self,
-        blocks: &[&Block],
-        bodies: &[bytes::Bytes],
-    ) -> core::result::Result<usize, crate::apply::WindowApplyError> {
-        let transition =
-            self.handles
-                .begin_transition()
-                .map_err(|source| crate::apply::WindowApplyError {
-                    applied: 0,
-                    committed: Vec::new(),
-                    source,
-                    // Admission can also stay closed after a prior torn
-                    // `UtxoCommit` or a `Fatal` settlement; recovery must
-                    // reset the gateway generation before a retry can begin
-                    // (`ChainTransition` owns that recovery rule).
-                    disposition: crate::apply::WindowApplyDisposition::Operational,
-                    invalidated: Box::default(),
-                })?;
-        match transition.connect_window(blocks, bodies) {
-            Ok(outcomes) => {
-                for (block, outcome) in blocks.iter().zip(&outcomes) {
-                    self.followers.connected(block, outcome);
-                }
-                let applied = outcomes.len();
-                settle_window_success(transition, applied, outcomes)
-            }
-            Err(error) => {
-                for (block, outcome) in blocks.iter().zip(&error.committed) {
-                    self.followers.connected(block, outcome);
-                }
-                // `ChainTransition` documents which failures may safely
-                // publish the reserved even generation.
-                Err(settle_window_failure(transition, error))
-            }
-        }
-    }
-
     /// Records a Fatal window settlement: logs the terminal state and latches
     /// the halt flag so later ticks keep staging inbound blocks but start no
     /// further chain transition. Staged blocks stay queued until recreation.
-    pub(super) fn note_fatal_settlement(&self, stopped: usize, source: &ApplyError) {
+    pub(super) fn note_fatal_settlement(
+        &self,
+        stopped: usize,
+        source: &(dyn core::error::Error + Send + Sync),
+    ) {
         tracing::error!(
             applied = stopped,
             error = %source,
@@ -136,15 +54,14 @@ impl BlockSync {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn apply_buffered_blocks(
-        &self,
-        next_expected_hash: Option<Hash256>,
-    ) -> (usize, usize) {
-        // A latched Fatal settlement left the gateway generation odd: starting
-        // another transition would bounce off `AlreadyActive` and churn staged
-        // state every tick. Staged blocks stay queued until recreation. The
-        // counter keeps the stall observable: the one `error!` in
-        // `note_fatal_settlement` fires once, these ticks stay quiet.
+    #[doc(hidden)]
+    pub fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
+        // A latched Fatal settlement left the implementation's admission
+        // closed: starting another transition would bounce off the same
+        // refusal and churn staged state every tick. Staged blocks stay
+        // queued until recreation. The counter keeps the stall observable:
+        // the one `error!` in `note_fatal_settlement` fires once, these
+        // ticks stay quiet.
         if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
             metrics::counter!("node.sync.apply_halted_ticks").increment(1);
             return (0, 0);
@@ -189,11 +106,11 @@ impl BlockSync {
         while chunk_start < drained.len() {
             // Bounded by block count AND by bytes, so a window of tip-sized
             // blocks does not hold gigabytes just because the count allows it.
-            let chunk_end = chunk_start.saturating_add(crate::apply::window_len(
-                drained[chunk_start..]
-                    .iter()
-                    .map(|drained| drained.serialized.len()),
-            ));
+            let chunk_end =
+                chunk_start
+                    .saturating_add(self.chain.window_len(
+                        &mut drained[chunk_start..].iter().map(|d| d.serialized.len()),
+                    ));
             let chunk = &drained[chunk_start..chunk_end];
             // Borrowed, not cloned. `DrainedBlock` owns a whole block, so
             // cloning one deep-copies every transaction and witness; doing that
@@ -206,7 +123,7 @@ impl BlockSync {
             // The window reports how far it got rather than just failing,
             // because only the committed prefix may be marked applied; the rest
             // has to go back on the stager untouched.
-            let committed = match self.apply_window_followed(&blocks, &bodies) {
+            let committed = match self.chain.commit_window(&blocks, &bodies) {
                 Ok(applied) => applied,
                 Err(error) => {
                     let stopped = error.applied.min(chunk.len());
@@ -215,8 +132,8 @@ impl BlockSync {
                     if let Some(blocker) = blocker {
                         failed_hash = Some(blocker.hash);
                     }
-                    if error.disposition == crate::apply::WindowApplyDisposition::Fatal {
-                        self.note_fatal_settlement(stopped, &error.source);
+                    if error.disposition == WindowCommitDisposition::Fatal {
+                        self.note_fatal_settlement(stopped, error.source.as_ref());
                     } else if let Some(blocker) = blocker {
                         tracing::warn!(
                             hash = %blocker.hash,
@@ -239,7 +156,7 @@ impl BlockSync {
                     self.block_stager
                         .lock()
                         .restore_many(drained[restore_from..].iter().cloned());
-                    if error.disposition == crate::apply::WindowApplyDisposition::Permanent {
+                    if error.disposition == WindowCommitDisposition::Permanent {
                         // The failed block's descendants can never become
                         // valid, so they must not occupy bounded download
                         // state or the frontier would cycle on them forever.
@@ -317,8 +234,8 @@ impl BlockSync {
         if max_count == 0 {
             return None;
         }
-        let chain_tip = self.handles.chain_tip.load_full()?;
-        let applied_tip = self.handles.applied_tip.load_full()?;
+        let chain_tip = self.chain.chain_tip().load_full()?;
+        let applied_tip = self.chain.applied_tip().load_full()?;
         let start_height = applied_tip.height.checked_add(1)?;
         if start_height > chain_tip.height {
             return None;
@@ -330,7 +247,7 @@ impl BlockSync {
             .min(chain_tip.height);
         let capacity = usize::try_from(end_height.saturating_sub(start_height).saturating_add(1))
             .unwrap_or(max_count);
-        let tree = self.handles.block_tree.read();
+        let tree = self.chain.block_tree().read();
         let mut cursor = tree.node_at_height_from(chain_tip.tip_id, end_height)?;
         let mut hashes = ExpectedBlockHashes::with_capacity(capacity);
         let mut reached_start = false;
@@ -384,8 +301,8 @@ impl BlockSync {
         &self,
         max_count: usize,
     ) -> Option<(Vec<DrainedBlock>, usize)> {
-        let chain_tip = self.handles.chain_tip.load_full()?;
-        let applied_tip = self.handles.applied_tip.load_full()?;
+        let chain_tip = self.chain.chain_tip().load_full()?;
+        let applied_tip = self.chain.applied_tip().load_full()?;
         let cache = self.expected_apply_cache.lock();
         let cache = cache.as_ref()?;
         if cache.chain_tip_hash != chain_tip.hash
@@ -419,11 +336,11 @@ impl BlockSync {
         if cache_guard.is_none() {
             return;
         }
-        let Some(chain_tip) = self.handles.chain_tip.load_full() else {
+        let Some(chain_tip) = self.chain.chain_tip().load_full() else {
             *cache_guard = None;
             return;
         };
-        let Some(applied_tip) = self.handles.applied_tip.load_full() else {
+        let Some(applied_tip) = self.chain.applied_tip().load_full() else {
             *cache_guard = None;
             return;
         };
@@ -457,33 +374,14 @@ impl BlockSync {
     }
 
     pub(super) fn next_expected_block_hash(&self) -> Option<Hash256> {
-        let chain_tip = self.handles.chain_tip.load_full()?;
-        let applied_tip = self.handles.applied_tip.load_full()?;
+        let chain_tip = self.chain.chain_tip().load_full()?;
+        let applied_tip = self.chain.applied_tip().load_full()?;
         let height = applied_tip.height.checked_add(1)?;
         if height > chain_tip.height {
             return None;
         }
-        let tree = self.handles.block_tree.read();
+        let tree = self.chain.block_tree().read();
         let node_id = tree.node_at_height_from(chain_tip.tip_id, height)?;
         Some(tree.node(node_id).ok()?.hash)
-    }
-
-    pub(super) fn ensure_genesis_tip(&self) {
-        if self.handles.applied_tip.load_full().is_some() {
-            return;
-        }
-
-        let had_chain_tip = self.handles.chain_tip.load_full().is_some();
-        let genesis = self.handles.network.genesis_block();
-        match self.followers.apply_connect(&self.handles, &genesis) {
-            Ok(outcome) => {
-                if !had_chain_tip {
-                    self.handles.chain_tip.store(Some(Arc::new(outcome.tip)));
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "block sync: failed to bootstrap genesis");
-            }
-        }
     }
 }

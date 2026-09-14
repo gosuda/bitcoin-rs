@@ -629,7 +629,7 @@ impl SyncFixture {
             Arc::clone(&block_tree),
         )
         .capturing(capture_rawtx, capture_block_bytes);
-        let sync = BlockSync::new(
+        let sync = bitcoin_rs_node::sync::block_sync(
             handles,
             followers,
             Arc::clone(&peer_table),

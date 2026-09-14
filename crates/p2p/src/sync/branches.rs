@@ -1,6 +1,7 @@
 //! Heavier-branch handoff and committed reorganization body retirement.
 
 use super::BlockSync;
+use super::chain::BranchSwitchError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Hash256;
@@ -14,56 +15,53 @@ impl BlockSync {
     /// application cannot close that gap, because the blocks it wants to apply
     /// do not build on the applied tip.
     ///
-    /// Availability is left to [`crate::reorg::switch_to_branch`]. It may
-    /// commit the contiguous winning prefix already present in bounded staging,
-    /// then report `MissingBody` for the first absent suffix block. Only a
+    /// Availability is left to the implementation's switch. It may commit the
+    /// contiguous winning prefix already present in bounded staging, then
+    /// report `MissingBody` for the first absent suffix block. Only a
     /// zero-length available connect prefix guarantees no mutation. Keeping
     /// this as one authority avoids a pre-check that can disagree with the
     /// transition witness.
-    pub(super) fn switch_branch_if_outweighed(&self) {
+    #[doc(hidden)]
+    pub fn switch_branch_if_outweighed(&self) {
         let Some(target) = self.outweighed_branch_target() else {
             return;
         };
-        let outcome = crate::reorg::switch_to_branch(
-            &self.handles,
-            &self.followers,
+        let outcome = self.chain.switch_to_branch(
             target,
-            |hash| self.block_stager.lock().staged_body(hash),
-            |hash| self.retire_applied_reorg_body(hash),
+            &mut |hash| self.block_stager.lock().staged_body(hash),
+            &mut |hash| self.retire_applied_reorg_body(hash),
         );
         match outcome {
             Ok(()) => {
                 let height = self
-                    .handles
-                    .applied_tip
+                    .chain
+                    .applied_tip()
                     .load_full()
                     .map_or(0, |tip| tip.height);
                 tracing::info!(height, "block sync: switched to the heavier branch");
             }
-            Err(crate::reorg::ReorgError::MissingBody { height, .. }) => {
+            Err(BranchSwitchError::MissingBody { height }) => {
                 tracing::trace!(height, "block sync: heavier branch still downloading");
             }
-            Err(error @ crate::reorg::ReorgError::Fatal(_)) => {
-                self.handles.admission.close_permanently();
-                self.handles
-                    .shutdown
-                    .store(true, std::sync::atomic::Ordering::Release);
+            Err(error @ BranchSwitchError::Fatal(_)) => {
+                // The implementation has already closed admission and
+                // requested shutdown.
                 tracing::error!(
                     %error,
                     "block sync: chainstate torn by a failed disconnect, shutting down"
                 );
             }
-            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
+            Err(error @ BranchSwitchError::TransitionSettlement(_)) => {
                 // The reorg owner has closed admission and requested shutdown.
                 tracing::error!(%error, "block sync: reorg generation settlement failed");
             }
-            Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
+            Err(error @ BranchSwitchError::CheckpointSettlement(_)) => {
                 tracing::error!(
                     %error,
                     "block sync: reorg left checkpoint debt unsettled; a clean shutdown will retry"
                 );
             }
-            Err(crate::reorg::ReorgError::ConnectFailed {
+            Err(BranchSwitchError::ConnectFailed {
                 hash, invalidated, ..
             }) => {
                 // Invalid descendants cannot occupy bounded download state or
@@ -81,11 +79,6 @@ impl BlockSync {
                             window.drop_for_retry(invalid_hash);
                         }
                     }
-                    // Invalidation can move the active branch away from the
-                    // pinned assume-valid anchor.
-                    self.handles
-                        .assume_valid_gate
-                        .evaluate(&self.handles.block_tree.read());
                 }
                 tracing::warn!(
                     failed_hash = %hash,
@@ -93,10 +86,9 @@ impl BlockSync {
                     "block sync: connect failed"
                 );
             }
-            Err(crate::reorg::ReorgError::DisconnectBodyLost {
+            Err(BranchSwitchError::DisconnectBodyLost {
                 disconnected,
                 stopped_at,
-                ..
             }) => {
                 tracing::debug!(
                     disconnected,
@@ -110,7 +102,8 @@ impl BlockSync {
         }
     }
 
-    pub(super) fn retire_applied_reorg_body(&self, hash: Hash256) {
+    #[doc(hidden)]
+    pub fn retire_applied_reorg_body(&self, hash: Hash256) {
         self.download_window.lock().mark_received_applied(&hash);
         self.block_stager.lock().retire_applied(&hash);
     }
@@ -126,13 +119,14 @@ impl BlockSync {
     ///
     /// The applied tip is on the branch exactly when the header tip's ancestor
     /// at the applied height is the applied block itself.
-    pub(super) fn outweighed_branch_target(&self) -> Option<NodeId> {
-        let chain_tip = self.handles.chain_tip.load_full()?;
-        let applied = self.handles.applied_tip.load_full()?;
+    #[doc(hidden)]
+    pub fn outweighed_branch_target(&self) -> Option<NodeId> {
+        let chain_tip = self.chain.chain_tip().load_full()?;
+        let applied = self.chain.applied_tip().load_full()?;
         if chain_tip.hash == applied.hash {
             return None;
         }
-        let tree = self.handles.block_tree.read();
+        let tree = self.chain.block_tree().read();
         let applied_id = tree.lookup(applied.hash)?;
         // Normal IBD extends the applied chain. Its trusted height index proves
         // ancestry without allocating a plan for the entire remaining chain.

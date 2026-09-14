@@ -1,21 +1,21 @@
 //! Session reconciliation, useful-peer selection, and stalled-peer retirement.
 
 use super::BlockSync;
-use alloc::vec::Vec;
+use crate::PeerInfo;
+use crate::download_window::DownloadWindow;
+use crate::download_window::FanoutCandidate;
+use crate::download_window::SyncPeer;
+use crate::download_window::SyncPeerSelection;
+use crate::download_window::configure_request_mode;
+use crate::download_window::statically_fanout_eligible;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_p2p::PeerInfo;
-use bitcoin_rs_p2p::download_window::DownloadWindow;
-use bitcoin_rs_p2p::download_window::FanoutCandidate;
-use bitcoin_rs_p2p::download_window::SyncPeer;
-use bitcoin_rs_p2p::download_window::SyncPeerSelection;
-use bitcoin_rs_p2p::download_window::configure_request_mode;
-use bitcoin_rs_p2p::download_window::statically_fanout_eligible;
 use bitcoin_rs_primitives::Hash256;
 use std::net::SocketAddr;
 use std::time::Instant;
+use std::vec::Vec;
 
 pub(super) fn is_peer_fault(error: &ChainError) -> bool {
     match error {
@@ -89,7 +89,7 @@ impl BlockSync {
     /// Clears leftover address-scoped scheduler state for a newly ready
     /// connection. Stale sources are ignored; see
     /// `docs/solutions/architecture-patterns/p2p-owns-peer-lifecycle.md`.
-    pub fn on_peer_ready(&self, source: bitcoin_rs_p2p::PeerSource) {
+    pub fn on_peer_ready(&self, source: crate::PeerSource) {
         // Window before table, matching `tick` / `send_getdata_for_pending_blocks`.
         let mut window = self.download_window.lock();
         if !self.peer_table.is_current(source) {
@@ -126,7 +126,7 @@ impl BlockSync {
         let mut header_peer: Option<SyncPeer> = None;
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         let sessions = self.peer_table.sessions();
-        let tree = self.handles.block_tree.read();
+        let tree = self.chain.block_tree().read();
         let active_tip = tree.tip_id();
         for session in sessions {
             let Some(peer) = session.info else {
@@ -187,7 +187,7 @@ impl BlockSync {
             .map(|candidate| candidate.peer)
             .collect();
         let mut request_peers: Vec<SyncPeer> = if let Some(preferred) = cold_preferred {
-            alloc::vec![preferred]
+            std::vec![preferred]
         } else if fanout_active {
             candidates
                 .iter()

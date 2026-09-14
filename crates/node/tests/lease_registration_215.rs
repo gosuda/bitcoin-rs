@@ -39,7 +39,7 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         gateway,
         Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0).0),
     );
-    BlockSync::new(
+    bitcoin_rs_node::sync::block_sync(
         handles,
         bitcoin_rs_node::ChainFollowers::noop(),
         peer_table,

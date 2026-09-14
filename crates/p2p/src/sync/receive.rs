@@ -1,15 +1,15 @@
 //! Bounded inbound body draining and exact staged-body admission.
 
 use super::BlockSync;
-use alloc::vec::Vec;
+use crate::InboundBlock;
+use crate::StagedBlock;
+use crate::download_window::INBOUND_BLOCK_STAGE_CHUNK;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_p2p::InboundBlock;
-use bitcoin_rs_p2p::StagedBlock;
-use bitcoin_rs_p2p::download_window::INBOUND_BLOCK_STAGE_CHUNK;
 use bitcoin_rs_primitives::Hash256;
 use std::time::Instant;
+use std::vec::Vec;
 
 impl BlockSync {
     pub(super) fn drain_inbound_blocks(&self) {
@@ -40,7 +40,7 @@ impl BlockSync {
         let dropped = self.block_stager.lock().prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
-            let tree = self.handles.block_tree.read();
+            let tree = self.chain.block_tree().read();
             let height_updates: Vec<(Hash256, u32)> = dropped
                 .iter()
                 .filter_map(|dropped| {
@@ -126,8 +126,8 @@ impl BlockSync {
         // A cold-start hedge can arrive after its original copy was applied.
         // Drop only blocks proven to lie on the applied ancestry; a known
         // side-chain block at the same or lower height must remain eligible.
-        if let Some(applied_tip) = self.handles.applied_tip.load_full() {
-            let tree = self.handles.block_tree.read();
+        if let Some(applied_tip) = self.chain.applied_tip().load_full() {
+            let tree = self.chain.block_tree().read();
             let indexed_tip = Self::indexed_applied_ancestry_tip(&tree, &applied_tip);
             blocks.retain(|inbound| {
                 let hash = Hash256::from(inbound.block.block_hash());

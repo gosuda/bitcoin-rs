@@ -11,8 +11,8 @@ impl BlockSync {
     /// missing during IBD — without it, `docker logs` shows no indication
     /// that the node is alive and applying blocks.
     pub fn emit_sync_progress(&self) {
-        let applied_tip = self.handles.applied_tip.load_full();
-        let chain_tip = self.handles.chain_tip.load_full();
+        let applied_tip = self.chain.applied_tip().load_full();
+        let chain_tip = self.chain.chain_tip().load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let live_peers = self.peer_table.len();

@@ -5,23 +5,23 @@ use super::HEADER_REQUEST_TIMEOUT;
 use super::LOCATOR_MAX_ENTRIES;
 use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
+use super::chain::HeaderAdmission;
 use super::peers::active_demonstrated_height;
 use super::peers::is_peer_fault;
 use super::peers::outranks;
 use super::peers::sync_peer_candidate;
-use alloc::vec::Vec;
+use crate::InboundHeaders;
+use crate::Message;
+use crate::PeerSource;
+use crate::download_window::SyncPeer;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
-use bitcoin_rs_p2p::InboundHeaders;
-use bitcoin_rs_p2p::Message;
-use bitcoin_rs_p2p::PeerSource;
-use bitcoin_rs_p2p::download_window::SyncPeer;
 use bitcoin_rs_primitives::Hash256;
 use std::net::SocketAddr;
 use std::time::Instant;
+use std::vec::Vec;
 
 impl BlockSync {
-    #[allow(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
         let receiver = self.inbound_headers_rx.lock();
         let mut total_headers = 0_usize;
@@ -41,51 +41,26 @@ impl BlockSync {
             }
 
             // Header admission moves the header tip, which the apply path
-            // reads under the transition; the lock keeps it fixed until commit.
-            let transition = match self.handles.lock_transition() {
-                Ok(transition) => transition,
-                Err(error) => {
-                    tracing::debug!(%error, "block sync: header admission refused; dropping batch");
-                    continue;
-                }
-            };
-            let mut tree = self.handles.block_tree.write();
-            let acceptance = bitcoin_rs_chain::accept_headers(
-                &mut tree,
-                &headers,
-                self.handles.network,
-                bitcoin_rs_chain::current_unix_seconds(),
-            );
-            match acceptance {
-                Ok(node_ids) => {
-                    let announced_tip = node_ids
-                        .last()
-                        .and_then(|id| tree.node(*id).ok())
-                        .map(|node| node.hash);
-                    let active_height =
-                        tree.tip()
-                            .zip(announced_tip)
-                            .and_then(|(active_tip, hash)| {
-                                tree.active_height_of(active_tip.tip_id, hash)
-                                    .and_then(|height| i32::try_from(height).ok())
-                            });
-                    self.handles.assume_valid_gate.evaluate(&tree);
-                    drop(tree);
-                    drop(transition);
+            // reads under the transition; the implementation holds that lock
+            // inside `admit_headers` until commit.
+            match self.chain.admit_headers(&headers) {
+                HeaderAdmission::Accepted {
+                    accepted,
+                    announced_tip,
+                    active_height,
+                } => {
                     if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
                         self.peer_table
                             .note_announced_tip(source, tip_hash, active_height);
                     }
                     self.refresh_active_peer_credit();
                     tracing::debug!(
-                        accepted = node_ids.len(),
+                        accepted,
                         received = batch_len,
                         "block sync: accepted inbound headers batch",
                     );
                 }
-                Err(error) if is_peer_fault(&error) => {
-                    drop(tree);
-                    drop(transition);
+                HeaderAdmission::Rejected(error) if is_peer_fault(&error) => {
                     let mut blamed_peer = None;
                     if let Some(source) = source {
                         let mut window = self.download_window.lock();
@@ -109,14 +84,15 @@ impl BlockSync {
                         );
                     }
                 }
-                Err(error) => {
-                    drop(tree);
-                    drop(transition);
+                HeaderAdmission::Rejected(error) => {
                     tracing::warn!(
                         received = batch_len,
                         %error,
                         "block sync: rejected inbound headers batch",
                     );
+                }
+                HeaderAdmission::Refused(error) => {
+                    tracing::debug!(%error, "block sync: header admission refused; dropping batch");
                 }
             }
         }
@@ -128,7 +104,7 @@ impl BlockSync {
     pub(super) fn refresh_active_peer_credit(&self) {
         let sessions = self.peer_table.sessions();
         let updates: Vec<(PeerSource, i32)> = {
-            let tree = self.handles.block_tree.read();
+            let tree = self.chain.block_tree().read();
             let Some(active_tip) = tree.tip() else {
                 return;
             };
@@ -162,9 +138,9 @@ impl BlockSync {
     /// both messages leave in the same tick either way, so there is no
     /// throughput reason to prefer the other order.
     pub(super) fn request_headers_from_best_peer(&self) {
-        let applied_tip = self.handles.applied_tip.load_full();
+        let applied_tip = self.chain.applied_tip().load_full();
         let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let chain_tip = self.handles.chain_tip.load_full();
+        let chain_tip = self.chain.chain_tip().load_full();
         let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
         let mut header_peer: Option<SyncPeer> = None;
         for peer in self.peer_table.infos() {
@@ -261,13 +237,13 @@ impl BlockSync {
     }
 
     pub(super) fn build_locator(&self) -> Vec<Hash256> {
-        if let Some(tip) = self.handles.chain_tip.load_full() {
+        if let Some(tip) = self.chain.chain_tip().load_full() {
             return self
-                .handles
-                .block_tree
+                .chain
+                .block_tree()
                 .read()
                 .block_locator(tip.tip_id, LOCATOR_MAX_ENTRIES);
         }
-        alloc::vec![self.handles.network.genesis_block_hash()]
+        std::vec![self.chain.network().genesis_block_hash()]
     }
 }

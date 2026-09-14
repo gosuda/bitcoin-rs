@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
-use bitcoin_rs_node::{BlockSync, Network, apply::Chainstate};
+use bitcoin_rs_node::{Network, apply::Chainstate};
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, encode::double_sha256,
@@ -39,7 +39,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
-    let sync = BlockSync::new(
+    let sync = bitcoin_rs_node::sync::block_sync(
         handles,
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
@@ -93,7 +93,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
-    let sync = BlockSync::new(
+    let sync = bitcoin_rs_node::sync::block_sync(
         handles,
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
