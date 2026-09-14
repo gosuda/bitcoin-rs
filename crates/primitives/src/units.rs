@@ -99,6 +99,12 @@ impl Sequence {
     pub const ZERO: Self = Self(0);
     /// `0xffffffff` — final, disables relative locktime and RBF signaling.
     pub const MAX: Self = Self(u32::MAX);
+    /// BIP68 disable flag.
+    pub const BIP68_DISABLE_FLAG: u32 = 1 << 31;
+    /// BIP68 type flag.
+    pub const BIP68_TYPE_FLAG: u32 = 1 << 22;
+    /// BIP68 relative-lock magnitude mask.
+    pub const BIP68_MASK: u32 = 0x0000_ffff;
     /// BIP125 opt-in RBF without locktime (`0xfffffffd`).
     pub const ENABLE_RBF_NO_LOCKTIME: Self = Self(0xffff_fffd);
 

@@ -1,11 +1,11 @@
 use crate::ConsensusError;
 
 /// BIP68 disable flag (`1 << 31`).
-pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
+pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = bitcoin_rs_primitives::Sequence::BIP68_DISABLE_FLAG;
 /// BIP68 type flag: set means time-based, clear means height-based (`1 << 22`).
-pub const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
+pub const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = bitcoin_rs_primitives::Sequence::BIP68_TYPE_FLAG;
 /// BIP68 relative-lock magnitude mask.
-pub const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
+pub const SEQUENCE_LOCKTIME_MASK: u32 = bitcoin_rs_primitives::Sequence::BIP68_MASK;
 /// BIP68 time-based granularity in seconds (`2^9`).
 pub const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
 

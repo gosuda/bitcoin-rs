@@ -9,7 +9,7 @@
 //! (`CheckSignatureEncoding`, `CheckPubKeyEncoding`, `IsLowDERSignature`,
 //! `CheckLockTime`, `CheckSequence`).
 
-use bitcoin_rs_primitives::{Amount, Hash256, Sighash, SighashCache, SighashError, Tx, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, Sequence, Sighash, SighashCache, SighashError, Tx, TxOut};
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
@@ -32,13 +32,13 @@ pub enum SigVersion {
 const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 
 /// BIP112 sequence-type flag: bit 22 of the sequence field.
-const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
+const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = Sequence::BIP68_TYPE_FLAG;
 
 /// BIP112 sequence lock-time mask: the low 16 bits carry the relative lock value.
-const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
+const SEQUENCE_LOCKTIME_MASK: u32 = Sequence::BIP68_MASK;
 
 /// BIP112 disable flag: bit 31 of the sequence field disables relative locktime.
-const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
+const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = Sequence::BIP68_DISABLE_FLAG;
 
 /// The sequence value that marks an input as finalized (disables locktime checks).
 const SEQUENCE_FINAL: u32 = 0xffff_ffff;

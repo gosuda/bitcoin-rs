@@ -723,7 +723,7 @@ fn dispatch(
                     });
                 }
                 // Disabled-flag operands behave as a NOP.
-                if sequence & (1 << 31) == 0 && !checker.check_sequence(sequence) {
+                if sequence & bitcoin_rs_primitives::Sequence::BIP68_DISABLE_FLAG == 0 && !checker.check_sequence(sequence) {
                     return Err(ScriptError::Invalid {
                         code: ScriptErrCode::UnsatisfiedLocktime,
                     });
