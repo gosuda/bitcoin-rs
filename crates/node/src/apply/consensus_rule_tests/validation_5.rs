@@ -154,30 +154,6 @@ fn disconnect_refuses_duplicate_last_transaction_merkle_mutation()
 }
 
 #[test]
-fn apply_block_rejects_same_block_coinbase_spend() -> Result<(), Box<dyn std::error::Error>> {
-    let genesis = Network::Regtest.genesis_block();
-    let handles = apply_handles_without_tx_index(Network::Regtest, empty_utxo());
-    let genesis_tip =
-        applied_header_tip(&handles, Hash256::from(genesis.block_hash()), &genesis, 0)?;
-    handles.applied_tip.store(Some(Arc::new(genesis_tip)));
-
-    let mut coinbase = coinbase_transaction(0x94);
-    coinbase.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
-    let coinbase_outpoint = OutPoint::new(coinbase.txid(), 0);
-    let spend = spending_transaction_to_script(coinbase_outpoint, u32::MAX, op_true_script());
-    let block =
-        mined_block_with_prev_hash_and_transactions(genesis.block_hash(), vec![coinbase, spend])?;
-
-    let error = match handles.apply_block(&block).map(|outcome| outcome.tip) {
-        Ok(_) => panic!("same-block coinbase spend must fail the apply"),
-        Err(error) => error,
-    };
-
-    assert_bip_error(&error, "COINBASE_MATURITY");
-    Ok(())
-}
-
-#[test]
 fn apply_block_rejects_future_same_block_prevout_without_utxo_commit()
 -> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();

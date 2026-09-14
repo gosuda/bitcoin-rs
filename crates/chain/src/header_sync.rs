@@ -2,7 +2,8 @@ use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 pub use pow::compact_is_met_by;
-use pow::{compact_to_target, target_to_compact};
+pub use pow::compact_to_target;
+use pow::target_to_compact;
 
 use crate::{
     ChainError,
@@ -203,7 +204,17 @@ fn validate_candidate_nbits(
     validate_header_nbits(tree, parent_id, header, network)
 }
 
-fn validate_pow(header: &BlockHeader, hash: Hash256, network: Network) -> Result<(), ChainError> {
+/// Validates a header's proof-of-work target and hash.
+///
+/// # Errors
+///
+/// Returns [`ChainError::ZeroTarget`], [`ChainError::TargetExceedsLimit`], or
+/// [`ChainError::InvalidPow`] when the header's target/hash is invalid.
+pub fn validate_pow(
+    header: &BlockHeader,
+    hash: Hash256,
+    network: Network,
+) -> Result<(), ChainError> {
     let target = compact_to_target(header.bits);
     if target == ChainWork::ZERO {
         return Err(ChainError::ZeroTarget { hash });
@@ -369,7 +380,7 @@ pub(crate) mod pow {
 
     /// Decodes a compact target, returning zero for negative encodings.
     #[must_use]
-    pub(crate) fn compact_to_target(bits: CompactTarget) -> ChainWork {
+    pub fn compact_to_target(bits: CompactTarget) -> ChainWork {
         let decoded = decode_compact(bits.to_consensus());
         if decoded.negative {
             ChainWork::ZERO

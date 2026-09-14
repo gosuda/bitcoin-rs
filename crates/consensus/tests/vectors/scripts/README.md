@@ -61,8 +61,8 @@ for independent cross-checking.
 ## Flags
 
 `flags` strings parse via `VerifyFlags::from_core_names` and match the
-derivation in production's `compute_verify_flags`
-(`crates/node/src/apply.rs`): `P2SH` is set **unconditionally** at every
+derivation in production's `bitcoin_rs_consensus::verify_flags`
+(`crates/consensus/src/verify_block.rs`): `P2SH` is set **unconditionally** at every
 height (BIP16 is treated as always-on for supported validation paths — hence
 `P2SH`, never `NONE`, on the height-170/2812 legacy fixtures, where it is
 verdict-identical because no P2SH-pattern output is spent), and the remaining

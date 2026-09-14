@@ -1,13 +1,12 @@
-//! Shared contract-test fixture construction.
-
 use super::super::*;
+use super::BIP68_TEST_PREVOUT_MTP;
+use super::MapBodyStore;
+use super::ReorgBodyLoadingFixture;
 use super::apply_handles_without_tx_index;
-use super::fixtures_validation::coinbase_transaction_with_height;
-use super::fixtures_validation::op_true_script;
-use super::fixtures_validation::spending_transaction_to_script;
-use super::fixtures_validation::txids_merkle_root;
-use bitcoin_rs_chain::node::ChainWork;
+use super::coinbase_transaction;
+use super::mined_block_with_prev_hash_and_transactions;
 use bitcoin_rs_chain::node::NodeStatus;
+use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_primitives::BlockHash;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
@@ -18,6 +17,7 @@ use bitcoin_rs_script::script::push_int;
 use bitcoin_rs_utxo::BlockChanges;
 use bitcoin_rs_utxo::UtxoAdd;
 use bitcoin_rs_utxo::UtxoSet;
+use compact_str::CompactString;
 use std::sync::Arc;
 
 /// Parses `block` the way production does, so tests exercise the real
@@ -44,15 +44,6 @@ pub(super) fn validation_context(
         flags,
         locktime_cutoff,
     }
-}
-
-#[allow(clippy::arc_with_non_send_sync)]
-pub(super) fn apply_height_one_block(
-    extra: Vec<Tx>,
-    coinbase_value: u64,
-) -> Result<TipSnapshot, ApplyError> {
-    let (handles, block) = height_one_prepared(extra, coinbase_value)?;
-    handles.apply_block(&block).map(|outcome| outcome.tip)
 }
 
 #[allow(clippy::arc_with_non_send_sync)]
@@ -216,72 +207,9 @@ pub(super) fn next_fixture_time() -> u32 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(super) fn interpolated_time(
-    anchor_time: u32,
-    tip_time: u32,
-    height: u32,
-    tip_height: u32,
-) -> u32 {
-    if height == 0 || tip_height == 0 {
-        return anchor_time;
-    }
-    let span = u64::from(tip_time.saturating_sub(anchor_time));
-    let offset = span.saturating_mul(u64::from(height)) / u64::from(tip_height);
-    anchor_time.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX))
-}
-
 /// Fixture txid with every consensus byte set to `seed`.
 pub(super) fn fixture_txid(seed: u8) -> Txid {
     Txid(Hash256::from_le_bytes(&[seed; 32]))
-}
-
-/// Compact target encoding of a 256-bit target: mirrors Bitcoin Core's
-/// `GetCompact` and `bitcoin_rs_chain`'s crate-private
-/// `pow::target_to_compact` (lossy past three bytes, sign bit never set).
-pub(super) fn target_to_compact_lossy(target: ChainWork) -> u32 {
-    if target == ChainWork::ZERO {
-        return 0;
-    }
-    let mut size = target.bit_len().div_ceil(8);
-    let mut compact = if size <= 3 {
-        u32::try_from(target.as_limbs()[0] << (8 * (3 - size))).unwrap_or(0)
-    } else {
-        u32::try_from((target >> (8 * (size - 3))).as_limbs()[0]).unwrap_or(0)
-    };
-    if compact & 0x0080_0000 != 0 {
-        compact >>= 8;
-        size += 1;
-    }
-    compact | (u32::try_from(size).unwrap_or(0) << 24)
-}
-
-pub(super) fn retarget_bits_for_test(
-    handles: &Chainstate,
-    previous_bits: u32,
-    actual_timespan: u32,
-    expected_timespan: u32,
-) -> u32 {
-    let min_timespan = expected_timespan / 4;
-    let max_timespan = expected_timespan * 4;
-    let actual_clamped = actual_timespan.clamp(min_timespan, max_timespan);
-    let previous_target = compact_to_target(previous_bits);
-    let actual = ChainWork::from(actual_clamped);
-    let expected = ChainWork::from(expected_timespan);
-    let target = ((previous_target / expected) * actual)
-        + (((previous_target % expected) * actual) / expected);
-    let target = target.min(handles.network.max_target());
-    target_to_compact_lossy(target)
-}
-
-pub(super) fn assert_nbits_error(error: &ApplyError, actual: u32, expected: u32, height: u32) {
-    assert!(matches!(
-        error,
-        ApplyError::NbitsNonRetargetMismatch {
-            actual: got_actual,
-            expected: got_expected,
-            height: got_height,
-        } if *got_actual == actual && *got_expected == expected && *got_height == height
-    ));
 }
 
 pub(super) fn spending_transaction(previous_output: OutPoint, sequence: u32) -> Tx {
@@ -455,7 +383,313 @@ pub(super) fn apply_followed(
     Ok(followers.apply_connect(handles, block)?.tip)
 }
 
+pub(super) fn zmq_followers(
+    publisher: Arc<dyn crate::ZmqPublisher>,
+) -> crate::chain_effects::ChainFollowers {
+    crate::chain_effects::ChainFollowers::new(
+        crate::chain_effects::ChainEffects::noop().with_zmq_publisher(publisher),
+        Arc::new(crate::mining::MiningGenerationSignal::new()),
+        None,
+    )
+}
+
 #[allow(clippy::arc_with_non_send_sync)]
-pub(super) fn empty_utxo() -> Arc<UtxoSet> {
-    Arc::new(UtxoSet::new())
+pub(super) fn one_block_window_fixture(
+    utxo: Arc<UtxoSet>,
+    txdata: Vec<Tx>,
+    assume_valid_height: u32,
+) -> Result<(Chainstate, Block, bytes::Bytes), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let mut handles = apply_handles_for_network(Network::Regtest, utxo);
+    handles.assume_valid_height = assume_valid_height;
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+    handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+    let block = mined_block_with_prev_hash_and_transactions(genesis.block_hash(), txdata)?;
+    let block_hash = Hash256::from(block.block_hash());
+    applied_header_tip(&handles, block_hash, &block, 1)?;
+    let raw = bytes::Bytes::from(consensus_bytes(&block));
+    Ok((handles, block, raw))
+}
+
+pub(super) fn reorg_body_loading_fixture()
+-> Result<ReorgBodyLoadingFixture, Box<dyn std::error::Error>> {
+    let utxo = Arc::new(UtxoSet::new());
+    let mut handles = apply_handles_without_tx_index(Network::Regtest, Arc::clone(&utxo));
+    let bodies = Arc::new(MapBodyStore::default());
+    let body_arc = Arc::clone(&bodies);
+    let body_handle: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore> = body_arc;
+    handles.block_body_store = Some(body_handle);
+
+    let genesis = Network::Regtest.genesis_block();
+    let genesis_hash = Hash256::from(genesis.block_hash());
+    let genesis_tip = applied_header_tip(&handles, genesis_hash, &genesis, 0)?;
+    handles.applied_tip.store(Some(Arc::new(genesis_tip)));
+
+    let losing = mined_block_with_prev_hash_and_transactions(
+        genesis.block_hash(),
+        vec![coinbase_transaction(1)],
+    )?;
+    let raw = bytes::Bytes::from(consensus_bytes(&losing));
+    let applied = handles
+        .apply_block_with_serialized(&losing, raw.clone())?
+        .tip;
+    bodies
+        .bodies
+        .write()
+        .insert((applied.height, applied.hash), raw.to_vec());
+
+    let win_one = mined_block_with_prev_hash_and_transactions(
+        genesis.block_hash(),
+        vec![coinbase_transaction(2)],
+    )?;
+    let win_two = mined_block_with_prev_hash_and_transactions(
+        win_one.block_hash(),
+        vec![coinbase_transaction(3)],
+    )?;
+    let target = {
+        let mut tree = handles.block_tree.write();
+        let mut last = None;
+        for (height, block) in [(1_u32, &win_one), (2_u32, &win_two)] {
+            let hash = Hash256::from(block.block_hash());
+            last = Some(tree.insert_header(block.header, NodeStatus::HeaderValid)?);
+            bodies
+                .bodies
+                .write()
+                .insert((height, hash), consensus_bytes(block));
+        }
+        last.ok_or_else(|| anyhow::anyhow!("no winning branch built"))?
+    };
+
+    Ok(ReorgBodyLoadingFixture {
+        handles,
+        utxo,
+        bodies,
+        target,
+        losing,
+        applied,
+    })
+}
+
+pub(super) fn assert_reorg_load_failure_preserved_state(
+    handles: &Chainstate,
+    utxo: &UtxoSet,
+    losing: &Block,
+    applied: &TipSnapshot,
+    tree_tip_before: Option<(bitcoin_rs_chain::NodeId, u32, Hash256)>,
+    utxo_len_before: usize,
+) {
+    assert_eq!(
+        handles
+            .applied_tip
+            .load_full()
+            .map(|tip| (tip.tip_id, tip.height, tip.hash)),
+        Some((applied.tip_id, applied.height, applied.hash)),
+        "body loading failure must not move the applied tip"
+    );
+    assert_eq!(
+        handles
+            .block_tree
+            .read()
+            .tip()
+            .map(|tip| (tip.tip_id, tip.height, tip.hash)),
+        tree_tip_before,
+        "body loading failure must not change the active header index"
+    );
+    assert_eq!(
+        utxo.len(),
+        utxo_len_before,
+        "body loading failure must not change UTXO cardinality"
+    );
+    assert!(
+        utxo.has_live_outputs_for_txid(&Hash256::from(losing.txs[0].txid())),
+        "body loading failure must leave the applied branch coin live"
+    );
+}
+
+pub(super) fn disconnect_followed(
+    handles: &Chainstate,
+    followers: &crate::chain_effects::ChainFollowers,
+    block: &Block,
+) -> core::result::Result<TipSnapshot, crate::DisconnectError> {
+    Ok(followers.apply_disconnect(handles, block)?.parent_tip)
+}
+
+pub(super) fn generation_unavailable() -> MiningControlError {
+    MiningControlError::Unavailable(CompactString::from("not wired in this test"))
+}
+
+pub(super) fn coinbase_transaction_with_height(height: u32) -> Tx {
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            script_sig: Script::from_bytes(push_int(i64::from(height))),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::new(),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    }
+}
+
+pub(super) fn pow_header(prev_blockhash: BlockHash, bits: u32, time: u32, nonce: u32) -> Header {
+    Header {
+        version: 1,
+        prev_blockhash,
+        merkle_root: Hash256::default(),
+        time,
+        bits: CompactTarget::from_consensus(bits),
+        nonce,
+    }
+}
+
+pub(super) fn seed_pow_chain_with_headers(
+    handles: &Chainstate,
+    headers: &[(u32, u32)],
+) -> Result<BlockHash, Box<dyn std::error::Error>> {
+    let mut tree = handles.block_tree.write();
+    let mut parent = None;
+    let mut prev_hash = BlockHash::default();
+    for (height, &(bits, time)) in headers.iter().enumerate() {
+        let height = u32::try_from(height)?;
+        let header = pow_header(prev_hash, bits, time, height);
+        prev_hash = header.compute_hash();
+        parent = Some(tree.insert_node(parent, header, NodeStatus::Active)?);
+    }
+    handles.chain_tip.store(tree.tip());
+    Ok(prev_hash)
+}
+
+/// `OP_RETURN <data>` output script.
+pub(super) fn op_return_script(data: &[u8]) -> Vec<u8> {
+    let mut script = vec![0x6a_u8];
+    script.extend_from_slice(&push_data(data));
+    script
+}
+
+/// Merkle root over the block's txids: pairwise double-SHA256 over the
+/// little-endian id bytes, duplicating the last leaf on odd widths.
+pub(super) fn txids_merkle_root(block: &Block) -> Option<Hash256> {
+    let mut leaves: Vec<[u8; 32]> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
+    merkle_root_bytes(&mut leaves).map(|bytes| Hash256::from_le_bytes(&bytes))
+}
+
+pub(super) fn spending_transaction_to_script(
+    previous_output: OutPoint,
+    sequence: u32,
+    script_pubkey: Vec<u8>,
+) -> Tx {
+    Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output,
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(sequence),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::from_bytes(script_pubkey),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    }
+}
+
+pub(super) fn op_true_script() -> Vec<u8> {
+    vec![0x51]
+}
+
+pub(super) fn seed_block_tree_for_bip68_time_at_height(
+    handles: &Chainstate,
+    tip_height: u32,
+) -> Result<bitcoin_rs_chain::node::NodeId, ApplyError> {
+    let mut tree = handles.block_tree.write();
+    let mut parent = None;
+    let mut tip = None;
+    for height in 0..=tip_height {
+        let header = Header {
+            version: 1,
+            prev_blockhash: parent
+                .and_then(|id| tree.node(id).ok().map(|node| BlockHash::from(node.hash)))
+                .unwrap_or_else(BlockHash::default),
+            merkle_root: Hash256::default(),
+            time: BIP68_TEST_PREVOUT_MTP,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: height,
+        };
+        let id = tree.insert_node(parent, header, NodeStatus::Active)?;
+        parent = Some(id);
+        tip = Some(id);
+    }
+    match tip {
+        Some(tip) => Ok(tip),
+        None => Err(ApplyError::HeightOverflow(0)),
+    }
+}
+
+pub(super) fn assert_bip_error(error: &ApplyError, bip: &str) {
+    assert!(matches!(
+        error,
+        ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: actual, .. }) if *actual == bip
+    ));
+}
+
+pub(super) fn assert_bip_error_reason_contains(error: &ApplyError, bip: &str, needle: &str) {
+    assert!(matches!(
+        error,
+        ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: actual, reason })
+            if *actual == bip && reason.contains(needle)
+    ));
+}
+
+pub(super) fn duplicate_spend_block()
+-> Result<(Block, BlockTxPlan, Arc<UtxoSet>), Box<dyn std::error::Error>> {
+    let base_prevout = OutPoint::new(fixture_txid(0x64), 0);
+    let utxo = utxo_with_output(base_prevout, 1)?;
+    let first_spend = spending_transaction_to_script(base_prevout, u32::MAX, op_true_script());
+    let second_spend = spending_transaction_to_script(base_prevout, u32::MAX - 1, op_true_script());
+    let block = block_with_transactions(vec![first_spend, second_spend]);
+    let plan = tx_plan(&block);
+    Ok((block, plan, utxo))
+}
+
+pub(super) fn bad_script_spend_block()
+-> Result<(Block, BlockTxPlan, Arc<UtxoSet>), Box<dyn std::error::Error>> {
+    let base_prevout = OutPoint::new(fixture_txid(0x65), 0);
+    let utxo = Arc::new(UtxoSet::new());
+    let mut changes = BlockChanges::default();
+    changes.add(UtxoAdd::new(
+        base_prevout,
+        TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: Script::from_bytes(vec![0x87]),
+        },
+        false,
+        1,
+    ));
+    utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
+
+    let mut script_sig = push_int(7);
+    script_sig.extend_from_slice(&push_int(8));
+    let spend = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: base_prevout,
+            script_sig: Script::from_bytes(script_sig),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::from_bytes(op_true_script()),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let block = block_with_transaction(spend);
+    let plan = tx_plan(&block);
+    Ok((block, plan, utxo))
 }

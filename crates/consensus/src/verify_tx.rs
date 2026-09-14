@@ -19,6 +19,9 @@ const SEQUENCE_FINAL: u32 = 0xffff_ffff;
 const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
 const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
+/// Number of blocks after a coinbase that its outputs become spendable.
+pub const COINBASE_MATURITY: u32 = 100;
+
 // Width of the script-verification pool. 16 was chosen on the belief that SMT
 // siblings slow secp256k1 down past that width. A full-verification replay of
 // mainnet 0..150_000 reading local block files measures otherwise on this host
@@ -104,6 +107,29 @@ fn is_coinbase(tx: &Tx) -> bool {
 /// coinbase marker. The derived all-zero outpoint (`vout` 0) is not null.
 fn is_null_outpoint(outpoint: &OutPoint) -> bool {
     outpoint.txid == Txid::default() && outpoint.vout == u32::MAX
+}
+
+/// Checks whether a transaction may spend a coinbase output at `spend_height`.
+///
+/// # Errors
+///
+/// Returns `ConsensusError::Bip` when the coinbase output has fewer than 100 confirmations.
+pub fn check_coinbase_maturity(
+    coinbase: bool,
+    created_height: u32,
+    spend_height: u32,
+) -> Result<(), ConsensusError> {
+    let depth = spend_height.saturating_sub(created_height);
+    if coinbase && depth < COINBASE_MATURITY {
+        // Coinbase output is spent before its maturity depth.
+        return Err(ConsensusError::Bip {
+            bip: "COINBASE_MATURITY",
+            reason: format!(
+                "spent coinbase output created at height {created_height} cannot be spent at height {spend_height} (depth {depth} < {COINBASE_MATURITY})"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Returns `true` iff the transaction is locktime-final at `block_height` and `locktime_cutoff`.
@@ -2113,5 +2139,22 @@ mod tests {
         );
         assert!(result.is_ok());
         assert!(scan_started.get(), "the serial error scan must have run");
+    }
+
+    #[test]
+    fn coinbase_maturity_boundaries() {
+        let error = match super::check_coinbase_maturity(true, 10, 109) {
+            Ok(()) => panic!("depth 99 must reject"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ConsensusError::Bip {
+                bip: "COINBASE_MATURITY",
+                ..
+            }
+        ));
+        assert_eq!(super::check_coinbase_maturity(true, 10, 110), Ok(()));
+        assert_eq!(super::check_coinbase_maturity(false, 10, 10), Ok(()));
     }
 }

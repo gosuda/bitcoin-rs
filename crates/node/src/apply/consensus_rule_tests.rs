@@ -1,12 +1,8 @@
-mod fixtures_behavior;
-mod fixtures_notifications;
-mod fixtures_transitions;
-mod fixtures_validation;
+mod fixtures;
 
 use super::*;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
-#[cfg(test)]
 use bitcoin_rs_chain::node::NodeStatus;
 use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_primitives::BlockHash;
@@ -21,108 +17,7 @@ use bitcoin_rs_utxo::BlockChanges;
 #[cfg(test)]
 use bitcoin_rs_utxo::UtxoAdd;
 use bitcoin_rs_utxo::UtxoSet;
-#[cfg(test)]
-use fixtures_behavior::apply_followed;
-#[cfg(test)]
-use fixtures_behavior::apply_handles;
-#[cfg(test)]
-use fixtures_behavior::apply_handles_for_network;
-#[cfg(test)]
-use fixtures_behavior::apply_handles_with_assume_valid;
-#[cfg(test)]
-use fixtures_behavior::assert_nbits_error;
-use fixtures_behavior::block_with_prev_hash_and_transactions;
-#[cfg(test)]
-use fixtures_behavior::block_with_transaction;
-#[cfg(test)]
-use fixtures_behavior::block_with_transactions;
-use fixtures_behavior::empty_apply_handles_for_network;
-#[cfg(test)]
-use fixtures_behavior::empty_utxo;
-#[cfg(test)]
-use fixtures_behavior::excess_value_spend_block;
-#[cfg(test)]
-use fixtures_behavior::fixture_txid;
-#[cfg(test)]
-use fixtures_behavior::height_one_prepared;
-#[cfg(test)]
-use fixtures_behavior::kernel_block_of;
-#[cfg(test)]
-#[cfg(feature = "kernel")]
-use fixtures_behavior::p2sh_template_bare_spend_block;
-#[cfg(test)]
-use fixtures_behavior::retarget_bits_for_test;
-#[cfg(test)]
-use fixtures_behavior::seed_block_tree_with_times;
-#[cfg(test)]
-use fixtures_behavior::softfork_state;
-#[cfg(test)]
-use fixtures_behavior::spending_transaction_with_version;
-#[cfg(test)]
-use fixtures_behavior::transaction;
-#[cfg(test)]
-use fixtures_behavior::tx_plan;
-#[cfg(test)]
-use fixtures_behavior::utxo_with_output;
-#[cfg(test)]
-use fixtures_behavior::utxo_with_outputs_at_height;
-#[cfg(test)]
-use fixtures_behavior::validation_context;
-#[cfg(test)]
-use fixtures_behavior::wait_until;
-#[cfg(test)]
-use fixtures_notifications::apply_block_with_a_fee_paying_transaction;
-#[cfg(test)]
-use fixtures_notifications::zmq_followers;
-#[cfg(test)]
-use fixtures_transitions::assert_reorg_load_failure_preserved_state;
-#[cfg(test)]
-use fixtures_transitions::disconnect_followed;
-use fixtures_transitions::generation_unavailable;
-#[cfg(test)]
-use fixtures_transitions::one_block_window_fixture;
-#[cfg(test)]
-use fixtures_transitions::reorg_body_loading_fixture;
-#[cfg(test)]
-use fixtures_validation::apply_coinbase_only_block;
-#[cfg(test)]
-use fixtures_validation::assert_bip_error;
-#[cfg(test)]
-use fixtures_validation::assert_bip_error_reason_contains;
-#[cfg(test)]
-use fixtures_validation::bad_script_spend_block;
-#[cfg(test)]
-use fixtures_validation::block_with_pow_header;
-#[cfg(test)]
-use fixtures_validation::coinbase_transaction_with_height;
-#[cfg(test)]
-use fixtures_validation::duplicate_spend_block;
-#[cfg(test)]
-use fixtures_validation::op_return_script;
-#[cfg(test)]
-use fixtures_validation::op_true_script;
-#[cfg(test)]
-use fixtures_validation::pow_header;
-#[cfg(test)]
-use fixtures_validation::pow_limit_bits;
-#[cfg(test)]
-use fixtures_validation::scaled_pow_limit_bits;
-#[cfg(test)]
-use fixtures_validation::seed_block_tree_for_bip68_time;
-#[cfg(test)]
-use fixtures_validation::seed_block_tree_for_bip68_time_at_height;
-#[cfg(test)]
-use fixtures_validation::seed_known_bip34_activation_chain;
-#[cfg(test)]
-use fixtures_validation::seed_pow_chain;
-#[cfg(test)]
-use fixtures_validation::seed_pow_chain_with_headers;
-#[cfg(test)]
-use fixtures_validation::seed_pow_period_with_tip_bits;
-#[cfg(test)]
-use fixtures_validation::spending_transaction_to_script;
-#[cfg(test)]
-use fixtures_validation::txids_merkle_root;
+use fixtures::*;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -130,9 +25,6 @@ use std::sync::Arc;
 
 const BIP68_TEST_PREVOUT_HEIGHT: u32 = 100;
 const BIP68_TEST_PREVOUT_MTP: u32 = 1_000_000;
-const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
-const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
-const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
 
 /// A store that refuses every write, to prove the undo persistence is a
 /// real gate rather than a best-effort side effect.

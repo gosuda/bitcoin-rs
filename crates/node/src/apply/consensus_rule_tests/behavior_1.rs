@@ -417,33 +417,3 @@ fn apply_scratch_keeps_rawtx_bytes_when_requested() -> Result<(), Box<dyn std::e
     assert_eq!(raw_txs[0], consensus_bytes(&block.txs[0]));
     Ok(())
 }
-
-#[test]
-fn daa_non_retarget_height_requires_parent_bits() -> Result<(), Box<dyn std::error::Error>> {
-    let handles = empty_apply_handles();
-    let parent_hash = seed_pow_chain(
-        &handles,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + 600,
-        1,
-    )?;
-    let block = block_with_pow_header(
-        parent_hash,
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-        DAA_ANCHOR_TIME + 1_200,
-        2,
-    );
-
-    let error = match check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, 2) {
-        Ok(()) => panic!("non-retarget height must inherit parent nBits"),
-        Err(error) => error,
-    };
-    assert_nbits_error(
-        &error,
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-        MAINNET_POW_LIMIT_BITS,
-        2,
-    );
-    Ok(())
-}

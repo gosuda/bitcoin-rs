@@ -2,6 +2,9 @@ use bitcoin_rs_primitives::Hash256;
 
 use crate::ConsensusError;
 
+/// Core's BIP34 recheck limit: above it BIP30 duplicate scans always run.
+pub const BIP34_IMPLIES_BIP30_LIMIT: u32 = 1_983_702;
+
 /// The two mainnet blocks that duplicated a still-live txid before BIP30, keyed
 /// by height AND block hash.
 ///

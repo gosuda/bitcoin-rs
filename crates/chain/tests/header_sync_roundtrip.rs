@@ -1,5 +1,5 @@
 //! Header synchronization integration tests.
-use bitcoin_rs_chain::header_sync::{next_work_required, validate_header_nbits};
+use bitcoin_rs_chain::header_sync::{compact_to_target, next_work_required, validate_header_nbits};
 use bitcoin_rs_chain::{
     BlockHeader, BlockTree, ChainError, Network, NodeStatus, accept_headers, current_unix_seconds,
 };
@@ -476,4 +476,430 @@ fn raw_header_with(
         bits,
         nonce: 0,
     }
+}
+
+const MAINNET_POW_LIMIT_BITS: u32 = 0x1d00_ffff;
+const MAINNET_POW_LIMIT_DIV_4_BITS: u32 = 0x1c3f_ffc0;
+const DAA_ANCHOR_TIME: u32 = 1_600_000_000;
+
+fn pow_limit_bits(_network: Network) -> u32 {
+    MAINNET_POW_LIMIT_BITS
+}
+
+fn target_to_compact_lossy(target: bitcoin_rs_chain::ChainWork) -> u32 {
+    if target == bitcoin_rs_chain::ChainWork::ZERO {
+        return 0;
+    }
+    let mut size = target.bit_len().div_ceil(8);
+    let mut compact = if size <= 3 {
+        u32::try_from(target.as_limbs()[0] << (8 * (3 - size))).unwrap_or(0)
+    } else {
+        u32::try_from((target >> (8 * (size - 3))).as_limbs()[0]).unwrap_or(0)
+    };
+    if compact & 0x0080_0000 != 0 {
+        compact >>= 8;
+        size += 1;
+    }
+    compact | (u32::try_from(size).unwrap_or(0) << 24)
+}
+
+fn scaled_pow_limit_bits(network: Network, divisor: u64) -> u32 {
+    let limit = compact_to_target(CompactTarget::from_consensus(pow_limit_bits(network)));
+    target_to_compact_lossy(limit / bitcoin_rs_chain::ChainWork::from(divisor))
+}
+
+fn retarget_bits_for_test(
+    network: Network,
+    previous_bits: u32,
+    actual_timespan: u32,
+    expected_timespan: u32,
+) -> u32 {
+    let actual_timespan = actual_timespan.clamp(expected_timespan / 4, expected_timespan * 4);
+    let previous_target = compact_to_target(CompactTarget::from_consensus(previous_bits));
+    let actual = bitcoin_rs_chain::ChainWork::from(actual_timespan);
+    let expected = bitcoin_rs_chain::ChainWork::from(expected_timespan);
+    let target = ((previous_target / expected) * actual)
+        + (((previous_target % expected) * actual) / expected);
+    target_to_compact_lossy(target.min(compact_to_target(CompactTarget::from_consensus(
+        pow_limit_bits(network),
+    ))))
+}
+
+fn seed_headers(
+    tree: &mut BlockTree,
+    headers: &[(u32, u32)],
+) -> Result<(bitcoin_rs_chain::NodeId, BlockHash), Box<dyn std::error::Error>> {
+    let mut parent = None;
+    let mut previous_hash = BlockHash::default();
+    let mut tip = None;
+    for (height, &(bits, time)) in headers.iter().enumerate() {
+        let height = u32::try_from(height)?;
+        let header = raw_header_with(previous_hash, height, time, bits);
+        let node_id = tree.insert_node(parent, header, NodeStatus::HeaderValid)?;
+        previous_hash = tree.node(node_id)?.hash.into();
+        parent = Some(node_id);
+        tip = Some(node_id);
+    }
+    Ok((tip.ok_or("empty header seed")?, previous_hash))
+}
+
+fn seed_period(
+    tree: &mut BlockTree,
+    bits: u32,
+    anchor_time: u32,
+    tip_time: u32,
+    tip_height: u32,
+) -> Result<(bitcoin_rs_chain::NodeId, BlockHash), Box<dyn std::error::Error>> {
+    let headers: Vec<_> = (0..=tip_height)
+        .map(|height| {
+            (
+                bits,
+                anchor_time.saturating_add(
+                    u32::try_from(
+                        u64::from(tip_time - anchor_time) * u64::from(height)
+                            / u64::from(tip_height),
+                    )
+                    .unwrap_or(u32::MAX),
+                ),
+            )
+        })
+        .collect();
+    seed_headers(tree, &headers)
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn assert_nbits_mismatch(result: Result<(), ChainError>, actual: u32, expected: u32, height: u32) {
+    assert!(matches!(
+        result,
+        Err(ChainError::NbitsMismatch {
+            actual: got_actual,
+            expected: got_expected,
+            height: got_height,
+        }) if got_actual == actual && got_expected == expected && got_height == height
+    ));
+}
+
+#[test]
+fn daa_non_retarget_height_requires_parent_bits() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        MAINNET_POW_LIMIT_BITS,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + 600,
+        1,
+    )?;
+    let parent_hash = tree.node(parent_id)?.hash.into();
+    let header = raw_header_with(
+        parent_hash,
+        2,
+        DAA_ANCHOR_TIME + 1_200,
+        MAINNET_POW_LIMIT_DIV_4_BITS,
+    );
+    assert_nbits_mismatch(
+        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
+        MAINNET_POW_LIMIT_DIV_4_BITS,
+        MAINNET_POW_LIMIT_BITS,
+        2,
+    );
+    Ok(())
+}
+
+#[test]
+fn daa_retarget_accepts_expected_bits_at_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let interval = Network::Mainnet.retarget_interval();
+    let expected_timespan = interval * 600;
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        MAINNET_POW_LIMIT_BITS,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + expected_timespan,
+        interval - 1,
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan + 600,
+        MAINNET_POW_LIMIT_BITS,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn daa_retarget_rejects_wrong_bits_at_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let interval = Network::Mainnet.retarget_interval();
+    let expected_timespan = interval * 600;
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        MAINNET_POW_LIMIT_BITS,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + expected_timespan,
+        interval - 1,
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan + 600,
+        MAINNET_POW_LIMIT_DIV_4_BITS,
+    );
+    assert_nbits_mismatch(
+        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
+        MAINNET_POW_LIMIT_DIV_4_BITS,
+        MAINNET_POW_LIMIT_BITS,
+        interval,
+    );
+    Ok(())
+}
+
+#[test]
+fn daa_retarget_clamps_fast_timespan_to_quarter_target() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let interval = Network::Mainnet.retarget_interval();
+    let expected_timespan = interval * 600;
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        MAINNET_POW_LIMIT_BITS,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + expected_timespan / 4 - 1,
+        interval - 1,
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan,
+        MAINNET_POW_LIMIT_DIV_4_BITS,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn daa_retarget_clamps_slow_timespan_to_quadruple_target() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut tree = BlockTree::new();
+    let interval = Network::Mainnet.retarget_interval();
+    let expected_timespan = interval * 600;
+    let start_bits = scaled_pow_limit_bits(Network::Mainnet, 16);
+    let expected_bits = retarget_bits_for_test(
+        Network::Mainnet,
+        start_bits,
+        expected_timespan * 4 + 1,
+        expected_timespan,
+    );
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        start_bits,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + expected_timespan * 4 + 1,
+        interval - 1,
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan * 4 + 600,
+        expected_bits,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn testnet_allows_min_difficulty_after_time_gap() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
+    let min_bits = pow_limit_bits(Network::Testnet3);
+    let (parent_id, _) = seed_headers(
+        &mut tree,
+        &[
+            (regular_bits, DAA_ANCHOR_TIME),
+            (regular_bits, DAA_ANCHOR_TIME + 600),
+        ],
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        2,
+        DAA_ANCHOR_TIME + 1_801,
+        min_bits,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &header, Network::Testnet3),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn testnet_timely_block_after_min_difficulty_inherits_last_non_min_bits()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
+    let min_bits = pow_limit_bits(Network::Testnet3);
+    let (parent_id, _) = seed_headers(
+        &mut tree,
+        &[
+            (regular_bits, DAA_ANCHOR_TIME),
+            (regular_bits, DAA_ANCHOR_TIME + 600),
+            (min_bits, DAA_ANCHOR_TIME + 1_801),
+        ],
+    )?;
+    let timely_time = DAA_ANCHOR_TIME + 2_400;
+    let accepted = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        3,
+        timely_time,
+        regular_bits,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &accepted, Network::Testnet3),
+        Ok(())
+    );
+    let rejected = raw_header_with(tree.node(parent_id)?.hash.into(), 3, timely_time, min_bits);
+    assert_nbits_mismatch(
+        validate_header_nbits(&tree, parent_id, &rejected, Network::Testnet3),
+        min_bits,
+        regular_bits,
+        3,
+    );
+    Ok(())
+}
+
+#[test]
+fn mainnet_rejects_min_difficulty_after_time_gap() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
+    let min_bits = pow_limit_bits(Network::Mainnet);
+    let (parent_id, _) = seed_headers(
+        &mut tree,
+        &[
+            (regular_bits, DAA_ANCHOR_TIME),
+            (regular_bits, DAA_ANCHOR_TIME + 600),
+        ],
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        2,
+        DAA_ANCHOR_TIME + 1_801,
+        min_bits,
+    );
+    assert_nbits_mismatch(
+        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
+        min_bits,
+        regular_bits,
+        2,
+    );
+    Ok(())
+}
+
+#[test]
+fn testnet_min_difficulty_does_not_override_retarget_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let interval = Network::Testnet3.retarget_interval();
+    let expected_timespan = interval * 600;
+    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
+    let min_bits = pow_limit_bits(Network::Testnet3);
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        regular_bits,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + expected_timespan,
+        interval - 1,
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan + 1_201,
+        min_bits,
+    );
+    assert_nbits_mismatch(
+        validate_header_nbits(&tree, parent_id, &header, Network::Testnet3),
+        min_bits,
+        regular_bits,
+        interval,
+    );
+    Ok(())
+}
+
+#[test]
+fn testnet4_retarget_uses_first_period_bits_after_min_difficulty_tip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let network = Network::Testnet4;
+    let interval = network.retarget_interval();
+    let expected_timespan = interval * 600;
+    let first_period_bits = scaled_pow_limit_bits(network, 16);
+    let min_bits = pow_limit_bits(network);
+    let mut headers = Vec::with_capacity(usize::try_from(interval).unwrap_or(usize::MAX));
+    for height in 0..interval {
+        let bits = if height == interval - 1 {
+            min_bits
+        } else {
+            first_period_bits
+        };
+        headers.push((
+            bits,
+            DAA_ANCHOR_TIME.saturating_add(
+                u32::try_from(
+                    u64::from(expected_timespan) * u64::from(height) / u64::from(interval - 1),
+                )
+                .unwrap_or(u32::MAX),
+            ),
+        ));
+    }
+    let (parent_id, _) = seed_headers(&mut tree, &headers)?;
+    let expected_bits = retarget_bits_for_test(
+        network,
+        first_period_bits,
+        expected_timespan,
+        expected_timespan,
+    );
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan + 600,
+        expected_bits,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &header, network),
+        Ok(())
+    );
+    Ok(())
+}
+
+#[test]
+fn daa_retarget_caps_slow_timespan_at_pow_limit() -> Result<(), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let network = Network::Mainnet;
+    let interval = network.retarget_interval();
+    let expected_timespan = interval * 600;
+    let (parent_id, _) = seed_period(
+        &mut tree,
+        MAINNET_POW_LIMIT_BITS,
+        DAA_ANCHOR_TIME,
+        DAA_ANCHOR_TIME + expected_timespan * 4,
+        interval - 1,
+    )?;
+    let header = raw_header_with(
+        tree.node(parent_id)?.hash.into(),
+        interval,
+        DAA_ANCHOR_TIME + expected_timespan * 4 + 600,
+        MAINNET_POW_LIMIT_BITS,
+    );
+    assert_eq!(
+        validate_header_nbits(&tree, parent_id, &header, network),
+        Ok(())
+    );
+    Ok(())
 }

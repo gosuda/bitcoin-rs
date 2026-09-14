@@ -13,7 +13,6 @@ use super::WindowApplyDisposition;
 use super::WindowApplyError;
 use super::connect::apply_committed_block_admitted;
 use super::connect::emit_journal_record;
-use super::contextual::compute_verify_flags;
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
 };
@@ -468,7 +467,7 @@ pub(super) fn prove_window<'a>(
                 hash,
                 parent: parent_hash,
                 height,
-                flags: compute_verify_flags(handles.network, height, hash, softfork),
+                flags: bitcoin_rs_consensus::verify_flags(handles.network, height, hash, softfork),
                 locktime_cutoff: cutoff,
             });
             parent_id = node_id;

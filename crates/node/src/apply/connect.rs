@@ -3,20 +3,16 @@
 use super::ApplyFinish;
 use super::ApplyIntent;
 use super::Bip68Context;
+use super::BlockLocalUtxoView;
 use super::BlockProvenance;
+use super::BlockTxPlan;
 use super::BlockValidationContext;
 use super::ChainChangeProof;
 use super::Chainstate;
 use super::ConnectOutcome;
 use super::PreparedApply;
 use super::ProvenApply;
-use super::contextual::check_bip30_and_bip34;
-use super::contextual::check_bip68_sequence_locks;
-use super::contextual::check_coinbase_maturity_with_tx_plan;
-use super::contextual::check_pow_limit_and_continuity;
-use super::contextual::check_unseen_header_timestamp;
-use super::contextual::compact_is_met_by;
-use super::contextual::compute_verify_flags;
+use super::ResolvedUtxoView;
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
 };
@@ -30,16 +26,20 @@ use super::scratch::ApplyScratch;
 use super::window::{PendingBlockCommit, PublishMode};
 use crate::apply::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_mempool::AdmissionOrigin;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Tx;
+use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_primitives::consensus_bytes;
 use bitcoin_rs_storage::CommitRecords;
 use bitcoin_rs_utxo::connect::BlockChangeError;
 use bitcoin_rs_utxo::connect::build_block_changes;
+use bitcoin_rs_utxo::is_coinbase_tx;
+use hashbrown::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -161,16 +161,21 @@ pub(super) fn apply_block_admitted<'b>(
     // (verifying the declared target matches the network's expected
     // difficulty at this height) requires `BlockTree` state — deferred.
     let pow_self_started = quanta::Instant::now();
-    let pow_self_result = if compact_is_met_by(block.header.bits, block_hash) {
-        Ok(())
-    } else {
-        Err(())
-    };
+    let pow_self_result =
+        bitcoin_rs_chain::header_sync::validate_pow(&block.header, block_hash, handles.network);
     let pow_self_dur = pow_self_started.elapsed();
     metrics::histogram!("node.apply_block.pow_self_consistency_seconds")
         .record(pow_self_dur.as_secs_f64());
-    if intent == ApplyIntent::Commit && pow_self_result.is_err() {
-        return Err(ApplyError::ProofOfWork { hash: block_hash });
+    match pow_self_result {
+        // Declared target above the network limit is refused for proposals too.
+        Err(bitcoin_rs_chain::ChainError::TargetExceedsLimit { .. }) => {
+            return Err(ApplyError::TargetAboveLimit);
+        }
+        // Proposals carry an unsolved header, so only commits refuse an unmet target.
+        Err(_) if intent == ApplyIntent::Commit => {
+            return Err(ApplyError::ProofOfWork { hash: block_hash });
+        }
+        _ => {}
     }
 
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
@@ -193,7 +198,8 @@ pub(super) fn apply_block_admitted<'b>(
         prev_median_time_past,
         block.header.time,
     );
-    let verify_flags = compute_verify_flags(handles.network, height, block_hash, softfork_state);
+    let verify_flags =
+        bitcoin_rs_consensus::verify_flags(handles.network, height, block_hash, softfork_state);
     let validation_context = BlockValidationContext {
         hash: block_hash,
         parent: prev_hash,
@@ -230,7 +236,19 @@ pub(super) fn apply_block_admitted<'b>(
     // sync's timestamp rules entirely, so this gate applies them itself; the
     // header insert in `applied_header_tip` below is part of the same
     // fallible preparation phase and still precedes the first write.
-    check_unseen_header_timestamp(handles, block, block_hash)?;
+    // Unseen headers bypass header-sync timestamp checks, so validate them before mutation.
+    // Headers already in the tree were checked by header sync and need no second walk.
+    {
+        let tree = handles.block_tree.read();
+        if tree.lookup(block_hash).is_none() {
+            bitcoin_rs_chain::validate_header_timestamp(
+                &tree,
+                &block.header,
+                block_hash,
+                bitcoin_rs_chain::current_unix_seconds(),
+            )?;
+        }
+    }
 
     let block_rules_started = quanta::Instant::now();
     // Witness IDs are needed only for a witness-carrying block under active
@@ -264,7 +282,36 @@ pub(super) fn apply_block_admitted<'b>(
     bip30_bip34_result?;
     // PoW limit + DAA non-retarget continuity.
     let pow_limit_started = quanta::Instant::now();
-    let pow_limit_result = check_pow_limit_and_continuity(handles, prior.as_deref(), block, height);
+    let pow_limit_result = if height == 0 {
+        Ok(())
+    } else {
+        let tree = handles.block_tree.read();
+        let Some(parent_id) = prior.as_deref().map(|tip| tip.tip_id) else {
+            // Non-genesis block applied with no admitted tip.
+            let prev_hash = block.header.prev_blockhash.0;
+            return Err(ApplyError::Chain(
+                bitcoin_rs_chain::ChainError::MissingParent { prev_hash },
+            ));
+        };
+        bitcoin_rs_chain::header_sync::validate_header_nbits(
+            &tree,
+            parent_id,
+            &block.header,
+            handles.network,
+        )
+        .map_err(|error| match error {
+            bitcoin_rs_chain::ChainError::NbitsMismatch {
+                actual,
+                expected,
+                height,
+            } => ApplyError::NbitsNonRetargetMismatch {
+                actual,
+                expected,
+                height,
+            },
+            error => ApplyError::Chain(error),
+        })
+    };
     let pow_limit_dur = pow_limit_started.elapsed();
     metrics::histogram!("node.apply_block.pow_limit_continuity_seconds")
         .record(pow_limit_dur.as_secs_f64());
@@ -304,14 +351,8 @@ pub(super) fn apply_block_admitted<'b>(
     script_verify_result?;
 
     let coinbase_maturity_started = quanta::Instant::now();
-    let coinbase_maturity_result = check_coinbase_maturity_with_tx_plan(
-        handles,
-        block,
-        &tx_plan,
-        view.txids(),
-        Arc::clone(&resolved),
-        height,
-    );
+    let coinbase_maturity_result =
+        check_coinbase_maturity(block, &tx_plan, view.txids(), Arc::clone(&resolved), height);
     let coinbase_maturity_dur = coinbase_maturity_started.elapsed();
     metrics::histogram!("node.apply_block.coinbase_maturity_seconds")
         .record(coinbase_maturity_dur.as_secs_f64());
@@ -636,6 +677,180 @@ pub(super) fn apply_block_admitted<'b>(
         }
     }
     Ok(ApplyFinish::Committed(outcome))
+}
+
+pub(super) fn check_coinbase_maturity(
+    block: &Block,
+    tx_plan: &BlockTxPlan,
+    txids: &[Txid],
+    resolved: Arc<ResolvedUtxoView>,
+    height: u32,
+) -> core::result::Result<(), ApplyError> {
+    debug_assert_eq!(block.txs.len(), txids.len());
+    if tx_plan.only_coinbase {
+        return Ok(());
+    }
+    if !tx_plan.needs_local_utxo_overlay {
+        for tx in block.txs.iter().filter(|tx| !is_coinbase_tx(tx)) {
+            for input in &tx.inputs {
+                let Some(entry) = resolved.lookup_meta(&input.previous_output) else {
+                    continue;
+                };
+                bitcoin_rs_consensus::check_coinbase_maturity(
+                    entry.coinbase,
+                    entry.height,
+                    height,
+                )?;
+            }
+        }
+        return Ok(());
+    }
+
+    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
+    for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+        if is_coinbase_tx(tx) {
+            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            continue;
+        }
+        for input in &tx.inputs {
+            let Some(entry) = view.lookup_meta(&input.previous_output) else {
+                continue;
+            };
+            bitcoin_rs_consensus::check_coinbase_maturity(entry.coinbase, entry.height, height)?;
+        }
+        view.spend_inputs(tx);
+        view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+    }
+    Ok(())
+}
+
+pub(super) fn check_bip68_sequence_locks(
+    handles: &Chainstate,
+    block: &Block,
+    tx_plan: &BlockTxPlan,
+    txids: &[Txid],
+    resolved: Arc<ResolvedUtxoView>,
+    context: Bip68Context<'_>,
+) -> core::result::Result<(), ApplyError> {
+    if !context.softfork_state.csv_active
+        || tx_plan.only_coinbase
+        || !tx_plan.has_bip68_sequence_locks
+    {
+        return Ok(());
+    }
+    let height = context.validation.height;
+    let mtp = context.median_time_past;
+    debug_assert_eq!(block.txs.len(), txids.len());
+    let mut view = BlockLocalUtxoView::new(resolved, &block.txs, height, tx_plan.overlay_capacity);
+    let mut prevout_mtp_by_height = HashMap::new();
+    for (tx_index, (tx, txid)) in (0_u32..).zip(block.txs.iter().zip(txids)) {
+        if is_coinbase_tx(tx) {
+            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            continue;
+        }
+        if tx.version < 2 {
+            view.spend_inputs(tx);
+            view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+            continue;
+        }
+        for tx_input in &tx.inputs {
+            let sequence = tx_input.sequence;
+            if sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+                continue;
+            }
+            let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {
+                continue;
+            };
+            let prevout_mtp = if sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_TYPE_FLAG
+                != 0
+            {
+                if entry.height == height {
+                    // A same-block prevout uses the MTP before the block being connected.
+                    mtp
+                } else if let Some(cached) = prevout_mtp_by_height.get(&entry.height) {
+                    *cached
+                } else {
+                    let Some(previous_tip_id) = context.previous_tip_id else {
+                        // Time-based lock evaluated with no admitted tip to walk.
+                        return Err(ApplyError::Consensus(
+                            bitcoin_rs_consensus::ConsensusError::Bip {
+                                bip: "BIP68",
+                                reason: "missing previous tip for time-based sequence lock"
+                                    .to_owned(),
+                            },
+                        ));
+                    };
+                    let tree = handles.block_tree.read();
+                    let Some(prevout_mtp) =
+                        tree.median_time_past_before_height(previous_tip_id, entry.height)
+                    else {
+                        // Prevout's ancestor is not on the previous tip's chain.
+                        return Err(ApplyError::Consensus(
+                            bitcoin_rs_consensus::ConsensusError::Bip {
+                                bip: "BIP68",
+                                reason: format!(
+                                    "missing prevout ancestry at height {} for time-based sequence lock",
+                                    entry.height.saturating_sub(1)
+                                ),
+                            },
+                        ));
+                    };
+                    prevout_mtp_by_height.insert(entry.height, prevout_mtp);
+                    prevout_mtp
+                }
+            } else {
+                0
+            };
+            bitcoin_rs_consensus::bip68::check_sequence_lock(
+                tx.version,
+                sequence.to_consensus(),
+                entry.height,
+                prevout_mtp,
+                height,
+                mtp,
+            )?;
+        }
+        view.spend_inputs(tx);
+        view.add_outputs(tx_index, *txid, tx.outputs.len())?;
+    }
+    Ok(())
+}
+
+pub(super) fn check_bip30_and_bip34(
+    handles: &Chainstate,
+    block: &Block,
+    height: u32,
+    txids: &[Txid],
+    previous_tip_id: Option<NodeId>,
+) -> core::result::Result<(), ApplyError> {
+    let mut has_duplicate = false;
+    if bitcoin_rs_chain::bip30_duplicate_scan_required(
+        &handles.block_tree.read(),
+        handles.network,
+        height,
+        previous_tip_id,
+    ) {
+        for txid in txids {
+            if handles.utxo.has_live_outputs_for_txid(&txid.0) {
+                has_duplicate = true;
+                break;
+            }
+        }
+    }
+    let block_hash = block.block_hash().0;
+    bitcoin_rs_consensus::bip30::check_bip30(height, block_hash, has_duplicate)?;
+    if handles.network.is_bip34_active(height) {
+        let coinbase = block
+            .txs
+            .first()
+            .ok_or(bitcoin_rs_consensus::ConsensusError::EmptyBlock)?;
+        let coinbase_input = coinbase
+            .inputs
+            .first()
+            .ok_or(bitcoin_rs_consensus::ConsensusError::MissingCoinbase)?;
+        bitcoin_rs_consensus::bip34::check_bip34(height, &coinbase_input.script_sig)?;
+    }
+    Ok(())
 }
 
 pub(super) fn applied_predecessor(

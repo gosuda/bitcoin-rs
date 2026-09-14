@@ -508,6 +508,13 @@ impl BlockTree {
         (active.hash == hash).then_some(active.height)
     }
 
+    /// Median-time-past of the block *before* `height` on the chain ending at `tip`; `None` when that ancestor is missing.
+    #[must_use]
+    pub fn median_time_past_before_height(&self, tip: NodeId, height: u32) -> Option<u32> {
+        let node = self.node_at_height_from(tip, height.saturating_sub(1))?;
+        self.median_time_past_at(node, bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW)
+    }
+
     /// Returns the median time of the most recent `window` blocks, inclusive
     /// of `start_id`, walking backward via parent pointers.
     ///

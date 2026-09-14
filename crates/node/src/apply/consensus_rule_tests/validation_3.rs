@@ -6,8 +6,11 @@ fn bip68_time_lock_rejects_delayed_same_block_prevout() -> Result<(), Box<dyn st
     let previous_tip_id = seed_block_tree_for_bip68_time_at_height(&handles, 100)?;
     let funding_tx = transaction(0x6d);
     let funding_outpoint = OutPoint::new(funding_tx.txid(), 0);
-    let same_block_spend =
-        spending_transaction_to_script(funding_outpoint, BIP68_TYPE_FLAG | 1, op_true_script());
+    let same_block_spend = spending_transaction_to_script(
+        funding_outpoint,
+        bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_TYPE_FLAG | 1,
+        op_true_script(),
+    );
     let block = block_with_transactions(vec![funding_tx, same_block_spend]);
 
     let error = match check_bip68_sequence_locks(
@@ -42,7 +45,7 @@ fn bip68_time_lock_rejects_missing_previous_tip_context() -> Result<(), Box<dyn 
     let previous_output = OutPoint::new(fixture_txid(0x6a), 0);
     let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
     let handles = apply_handles(utxo);
-    let sequence = BIP68_TYPE_FLAG | 1;
+    let sequence = bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_TYPE_FLAG | 1;
     let block = block_with_transaction(spending_transaction_to_script(
         previous_output,
         sequence,
@@ -62,7 +65,8 @@ fn bip68_time_lock_rejects_missing_previous_tip_context() -> Result<(), Box<dyn 
         )),
         Bip68Context {
             validation: &validation_context(&block, 0, 0, bitcoin_rs_script::VerifyFlags::NONE),
-            median_time_past: BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
+            median_time_past: BIP68_TEST_PREVOUT_MTP
+                + bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_GRANULARITY_SECONDS,
             softfork_state: active,
             previous_tip_id: None,
         },
@@ -81,7 +85,7 @@ fn bip68_time_lock_rejects_missing_prevout_ancestor_context()
     let utxo = utxo_with_output(previous_output, BIP68_TEST_PREVOUT_HEIGHT)?;
     let handles = apply_handles(utxo);
     let previous_tip_id = seed_block_tree_for_bip68_time_at_height(&handles, 0)?;
-    let sequence = BIP68_TYPE_FLAG | 1;
+    let sequence = bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_TYPE_FLAG | 1;
     let block = block_with_transaction(spending_transaction_to_script(
         previous_output,
         sequence,
@@ -101,7 +105,8 @@ fn bip68_time_lock_rejects_missing_prevout_ancestor_context()
         )),
         Bip68Context {
             validation: &validation_context(&block, 0, 0, bitcoin_rs_script::VerifyFlags::NONE),
-            median_time_past: BIP68_TEST_PREVOUT_MTP + BIP68_TIME_GRANULARITY_SECONDS,
+            median_time_past: BIP68_TEST_PREVOUT_MTP
+                + bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_GRANULARITY_SECONDS,
             softfork_state: active,
             previous_tip_id: Some(previous_tip_id),
         },
@@ -189,7 +194,7 @@ fn bip68_ignores_version_one_and_disabled_sequences() -> Result<(), Box<dyn std:
 
     let disabled_block = block_with_transaction(spending_transaction_to_script(
         previous_output,
-        BIP68_DISABLE_FLAG | 2,
+        bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG | 2,
         op_true_script(),
     ));
     assert!(
@@ -262,172 +267,4 @@ fn bip30_rejects_duplicate_txid_when_only_higher_vout_is_live()
         ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
     ));
     Ok(())
-}
-
-#[test]
-#[allow(clippy::arc_with_non_send_sync)]
-fn bip30_skips_duplicate_scan_after_known_bip34_activation()
--> Result<(), Box<dyn std::error::Error>> {
-    let height = Network::Testnet3
-        .bip34_activation_height()
-        .checked_add(1)
-        .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
-    let duplicate_tx = coinbase_transaction_with_height(height);
-    let duplicate_txid = duplicate_tx.txid();
-    let utxo = Arc::new(UtxoSet::new());
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(duplicate_txid, 0),
-        TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: Script::new(),
-        },
-        false,
-        0,
-    ));
-    utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
-
-    let handles = apply_handles_for_network(Network::Testnet3, utxo);
-    let previous_tip_id = seed_known_bip34_activation_chain(&handles, Network::Testnet3)?;
-    let block = block_with_transaction(duplicate_tx);
-    let txids = [duplicate_txid];
-
-    check_bip30_and_bip34(&handles, &block, height, &txids, Some(previous_tip_id))?;
-    Ok(())
-}
-
-#[test]
-#[allow(clippy::arc_with_non_send_sync)]
-fn bip30_duplicate_scan_runs_without_known_bip34_activation_hash()
--> Result<(), Box<dyn std::error::Error>> {
-    let height = Network::Regtest
-        .bip34_activation_height()
-        .checked_add(1)
-        .ok_or_else(|| std::io::Error::other("activation height overflow"))?;
-    let duplicate_tx = coinbase_transaction_with_height(height);
-    let duplicate_txid = duplicate_tx.txid();
-    let utxo = Arc::new(UtxoSet::new());
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(duplicate_txid, 0),
-        TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: Script::new(),
-        },
-        false,
-        0,
-    ));
-    utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
-
-    let handles = apply_handles_for_network(Network::Regtest, utxo);
-    let block = block_with_transaction(duplicate_tx);
-    let txids = [duplicate_txid];
-    let error = match check_bip30_and_bip34(&handles, &block, height, &txids, None) {
-        Ok(()) => panic!("regtest has no fixed BIP34 activation hash and must scan BIP30"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
-    ));
-    Ok(())
-}
-
-#[test]
-#[allow(clippy::arc_with_non_send_sync)]
-fn bip30_duplicate_scan_runs_at_core_recheck_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let duplicate_tx = coinbase_transaction_with_height(BIP34_IMPLIES_BIP30_LIMIT);
-    let duplicate_txid = duplicate_tx.txid();
-    let utxo = Arc::new(UtxoSet::new());
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(duplicate_txid, 0),
-        TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: Script::new(),
-        },
-        false,
-        0,
-    ));
-    utxo.commit_block(&changes, &Hash256::from_le_bytes(&[9; 32]))?;
-
-    let handles = apply_handles_for_network(Network::Mainnet, utxo);
-    let block = block_with_transaction(duplicate_tx);
-    let txids = [duplicate_txid];
-    let error =
-        match check_bip30_and_bip34(&handles, &block, BIP34_IMPLIES_BIP30_LIMIT, &txids, None) {
-            Ok(()) => panic!("Core recheck limit must keep BIP30 duplicate scanning enabled"),
-            Err(error) => error,
-        };
-
-    assert!(matches!(
-        error,
-        ApplyError::Consensus(bitcoin_rs_consensus::ConsensusError::Bip { bip: "BIP30", .. })
-    ));
-    Ok(())
-}
-
-#[test]
-fn daa_retarget_caps_slow_timespan_at_pow_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let handles = empty_apply_handles();
-    let interval = handles.network.retarget_interval();
-    let expected_timespan = interval * 600;
-    let parent_hash = seed_pow_chain(
-        &handles,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + (expected_timespan * 4) + 1,
-        interval - 1,
-    )?;
-    let block = block_with_pow_header(
-        parent_hash,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME + (expected_timespan * 4) + 600,
-        interval,
-    );
-
-    assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
-    Ok(())
-}
-
-/// A coinbase may not pay itself more than the subsidy plus the fees.
-///
-/// Nothing else in the node bounds this. Block rules check structure, and
-/// per-transaction verification exempts the coinbase because it has no
-/// inputs to weigh its outputs against -- so without this rule a miner can
-/// simply write any amount into the coinbase and the block is accepted.
-/// That is inflation, and it is what this test would have demonstrated
-/// before the rule existed.
-///
-/// The paired accept is the point: the same block, one satoshi lower, must
-/// apply. Otherwise a rejection for any unrelated reason would read as
-/// success here.
-#[test]
-#[allow(clippy::arc_with_non_send_sync)]
-fn apply_rejects_a_coinbase_that_pays_more_than_the_subsidy() {
-    let subsidy =
-        bitcoin_rs_consensus::block_subsidy(1, Network::Regtest.subsidy_halving_interval());
-    assert_eq!(
-        subsidy,
-        50 * 100_000_000,
-        "regtest height 1 pays the full subsidy"
-    );
-
-    let over = apply_coinbase_only_block(subsidy + 1);
-    assert!(
-        matches!(
-            &over,
-            Err(ApplyError::Consensus(
-                bitcoin_rs_consensus::ConsensusError::CoinbaseAmount { paid, allowed }
-            )) if *paid == subsidy + 1 && *allowed == subsidy
-        ),
-        "a coinbase claiming one satoshi too much must be refused, got {over:?}"
-    );
-
-    let exact = apply_coinbase_only_block(subsidy);
-    assert!(
-        exact.is_ok(),
-        "the same block claiming exactly the subsidy must apply, got {exact:?}"
-    );
 }

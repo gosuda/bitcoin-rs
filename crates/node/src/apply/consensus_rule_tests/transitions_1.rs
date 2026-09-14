@@ -72,33 +72,6 @@ fn applied_header_tip_reuses_preaccepted_header() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-#[test]
-fn testnet4_retarget_uses_first_period_bits_after_min_difficulty_tip()
--> Result<(), Box<dyn std::error::Error>> {
-    let handles = empty_apply_handles_for_network(Network::Testnet4);
-    let interval = handles.network.retarget_interval();
-    let expected_timespan = interval * 600;
-    let first_period_bits = scaled_pow_limit_bits(&handles, 16);
-    let pow_limit_bits = pow_limit_bits(&handles);
-    let parent_hash = seed_pow_period_with_tip_bits(
-        &handles,
-        first_period_bits,
-        pow_limit_bits,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan,
-        interval - 1,
-    )?;
-    let block = block_with_pow_header(
-        parent_hash,
-        first_period_bits,
-        DAA_ANCHOR_TIME + expected_timespan + 600,
-        interval,
-    );
-
-    assert!(check_pow_limit_and_continuity_for_seeded_tip(&handles, &block, interval).is_ok());
-    Ok(())
-}
-
 /// The window's two caps, and which one binds.
 ///
 /// Count alone is wrong at the tip and bytes alone is wrong at genesis, so

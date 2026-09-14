@@ -26,10 +26,12 @@ pub use bitcoin_rs_consensus::SoftforkState;
 pub use bitcoin_rs_primitives::Network;
 pub use block_body::{BlockBodyMetadata, BlockBodySource};
 pub use deployment::{
-    SignallingDeployment, candidate_version, signalling_deployments, softfork_state,
+    SignallingDeployment, bip30_duplicate_scan_required, candidate_version, signalling_deployments,
+    softfork_state,
 };
 pub use header_sync::{
     accept_headers, compact_is_met_by, current_unix_seconds, validate_header_timestamp,
+    validate_pow,
 };
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use reorg::{ReorgPlan, plan_reorg};
