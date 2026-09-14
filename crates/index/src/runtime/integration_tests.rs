@@ -6,6 +6,7 @@
     reason = "test: integration tests use expect for clarity"
 )]
 
+use super::namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
 use super::*;
 use crate::block_log::BlockLog;
 use arc_swap::ArcSwap;

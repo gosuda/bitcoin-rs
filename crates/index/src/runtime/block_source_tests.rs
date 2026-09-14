@@ -10,6 +10,7 @@ use crate::block_log::BlockRecord;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::{Network, consensus_bytes};
 use std::error::Error;
+use std::sync::atomic::AtomicUsize;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -56,43 +57,17 @@ fn block_at_height_returns_some_after_record_added() {
     assert_eq!(decoded.block_hash(), genesis.block_hash());
 }
 
-/// Body source that can slice, backed by one in-memory body.
-struct RangedBody {
-    height: u32,
-    hash: BlockHash,
-    bytes: Vec<u8>,
-}
-
-impl BlockBodySource for RangedBody {
-    fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-        (self.height == height && self.hash == hash).then(|| self.bytes.clone())
-    }
-
-    fn block_body_range(
-        &self,
-        height: u32,
-        hash: BlockHash,
-        offset: u32,
-        len: u32,
-    ) -> Option<Vec<u8>> {
-        if self.height != height || self.hash != hash {
-            return None;
-        }
-        let start = usize::try_from(offset).ok()?;
-        let end = start.checked_add(usize::try_from(len).ok()?)?;
-        self.bytes.get(start..end).map(<[u8]>::to_vec)
-    }
-}
-
 #[test]
 fn block_bytes_at_height_agrees_with_slicing_the_whole_block() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let bytes = consensus_bytes(&genesis);
     let record = BlockRecord::from_block(0, &genesis);
-    let body_source = Arc::new(RangedBody {
+    let body_source = Arc::new(super::query_tests::SingleBlockBody {
         height: record.height,
         hash: record.hash,
-        bytes: bytes.clone(),
+        body: bytes.clone(),
+        full_reads: AtomicUsize::new(0),
+        range_reads: AtomicUsize::new(0),
     });
     let blocks = Arc::new(RwLock::new(BlockLog::from_iter([record])));
     let source = IndexBlockSource::new(blocks).with_block_body_source(body_source);

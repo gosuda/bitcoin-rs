@@ -48,13 +48,13 @@ use std::sync::atomic::AtomicU64;
 
 use crossbeam_channel::{Receiver, Sender};
 
-#[cfg(test)]
-use namespace::{NAMESPACE_REGISTRY, NamespaceRegistry};
-
 use parking_lot::{Mutex, RwLock};
 
 #[cfg(test)]
-use startup::{fail_worker, open_derived_index_with_timeout};
+use startup::fail_worker;
+
+#[cfg(all(test, feature = "fjall"))]
+use startup::open_derived_index_with_timeout;
 
 use std::path::Path;
 use std::{
@@ -466,10 +466,10 @@ impl crate::SpentCoinScripts for UndoScripts {
 }
 
 /// Test cursor source anchored at an empty tip for worker construction.
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) struct TestChainCursor;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 impl crate::reconcile::ChainCursorSource for TestChainCursor {
     fn cursor(&self) -> crate::reconcile::ConsumerCursor {
         crate::reconcile::ConsumerCursor {
@@ -483,7 +483,7 @@ impl crate::reconcile::ChainCursorSource for TestChainCursor {
 
 /// Test double standing in for node's `RecoveryReporter`; construction returns
 /// the sink handle plus the recording the test asserts against.
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) struct RecordedIndexAhead {
     /// One entry per call: `(capability, index_height, tip_height,
     /// tip_hash_be, index_hash_be, depth, unix_secs)`.
@@ -491,7 +491,7 @@ pub(crate) struct RecordedIndexAhead {
     pub(crate) calls: Mutex<Vec<(String, u32, u32, String, String, u32, u64)>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 impl RecordedIndexAhead {
     /// An empty recording sink.
     pub(crate) fn new() -> Arc<Self> {
@@ -501,7 +501,7 @@ impl RecordedIndexAhead {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 impl IndexAheadSink for RecordedIndexAhead {
     fn report_index_ahead(
         &self,
@@ -700,7 +700,7 @@ mod query_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 mod integration_tests;
 
 #[cfg(all(test, feature = "fjall"))]

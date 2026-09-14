@@ -222,12 +222,12 @@ struct QueryFixture {
     body: Option<Arc<SingleBlockBody>>,
 }
 
-struct SingleBlockBody {
-    height: u32,
-    hash: BlockHash,
-    body: Vec<u8>,
-    full_reads: AtomicUsize,
-    range_reads: AtomicUsize,
+pub(super) struct SingleBlockBody {
+    pub(super) height: u32,
+    pub(super) hash: BlockHash,
+    pub(super) body: Vec<u8>,
+    pub(super) full_reads: AtomicUsize,
+    pub(super) range_reads: AtomicUsize,
 }
 
 impl BlockBodySource for SingleBlockBody {
