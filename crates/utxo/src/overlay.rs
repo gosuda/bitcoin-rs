@@ -171,9 +171,9 @@ mod tests {
 
     use super::{OutputSource, WindowOverlay};
 
-    /// Test-local script-size limit; the overlay treats it as an opaque bound
-    /// and the apply path supplies the consensus value.
-    const MAX_SCRIPT_SIZE: usize = 64;
+    // Deliberately test-local: this exercises the overlay's configured limit
+      // without duplicating a consensus constant owned by the caller.
+      const TEST_SCRIPT_SIZE: usize = 128;
 
     fn none() -> hashbrown::HashSet<OutPoint> {
         hashbrown::HashSet::new()
@@ -185,7 +185,7 @@ mod tests {
     fn an_output_created_by_a_window_block_becomes_visible()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 500);
         let txid = tx.txid();
         let block = block_of(vec![tx]);
@@ -211,7 +211,7 @@ mod tests {
         let utxo = UtxoSet::new();
         let funded = OutPoint::new(txid_of(0x31), 0);
         seed(&utxo, funded, 900)?;
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         assert!(
             overlay.get_entry(&funded).is_some(),
             "the committed output must be visible before the spend"
@@ -237,7 +237,7 @@ mod tests {
     fn an_outpoint_recreated_after_being_spent_is_live_again()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 100);
         let txid = tx.txid();
         let created = OutPoint::new(txid, 0);
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn unspendable_outputs_never_enter_the_view() -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         let tx = paying_tx(vec![0x6a], 0);
         let txid = tx.txid();
 
@@ -284,11 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn script_size_boundary_is_inclusive() -> Result<(), Box<dyn std::error::Error>> {
+    fn script_size_boundary_matches_the_committed_utxo_set()
+    -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
-        let accepted = paying_tx(vec![0x51; MAX_SCRIPT_SIZE], 1);
-        let rejected = paying_tx(vec![0x51; MAX_SCRIPT_SIZE + 1], 1);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
+        let accepted = paying_tx(vec![0x51; TEST_SCRIPT_SIZE], 1);
+        let rejected = paying_tx(vec![0x51; TEST_SCRIPT_SIZE + 1], 1);
         let accepted_txid = accepted.txid();
         let rejected_txid = rejected.txid();
 
@@ -304,13 +305,13 @@ mod tests {
             overlay
                 .get_entry(&OutPoint::new(accepted_txid, 0))
                 .is_some(),
-            "a script at the limit must remain spendable"
+            "TEST_SCRIPT_SIZE must remain spendable"
         );
         assert!(
             overlay
                 .get_entry(&OutPoint::new(rejected_txid, 0))
                 .is_none(),
-            "a script over the limit must remain absent"
+            "TEST_SCRIPT_SIZE + 1 must remain absent"
         );
         Ok(())
     }
@@ -318,7 +319,7 @@ mod tests {
     #[test]
     fn genesis_contributes_nothing() -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 5_000_000_000);
         let txid = tx.txid();
 
@@ -337,7 +338,7 @@ mod tests {
     #[test]
     fn a_txid_list_that_misses_transactions_is_refused() {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         let block = block_of(vec![coinbase(), spending_tx(OutPoint::new(txid_of(5), 0))]);
 
         let outcome = overlay.advance(&block, &[txid_of(6)], HEIGHT, &none());
@@ -359,7 +360,7 @@ mod tests {
     fn an_output_created_and_spent_in_one_block_is_skipped_on_both_sides()
     -> Result<(), Box<dyn std::error::Error>> {
         let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
+        let mut overlay = WindowOverlay::new(&utxo, TEST_SCRIPT_SIZE);
         let tx = paying_tx(op_true(), 400);
         let txid = tx.txid();
         let created = OutPoint::new(txid, 0);
