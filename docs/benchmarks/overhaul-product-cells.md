@@ -4,7 +4,7 @@ This document is the T02 product cell catalogue: the cells the collector in `cra
 
 ## Schema
 
-Schema version string: `bitcoin-rs-hot-path-ledger-v2`, owned by `bitcoin_rs_node::metrics::Ledger` and shared with `hot-path-ledger.toml`. The T02 gate `bin/bitcoin-rs/tests/overhaul_evidence.rs` rejects a record that lacks a required identity, sums nested or concurrent intervals, or collapses repeated samples or empty cells. Schema validity never establishes a product result; only an executed scenario with observable state transition does.
+Schema version string: `bitcoin-rs-hot-path-ledger-v2`, owned by `Ledger` (`crates/node/benches/evidence.rs`) and shared with `hot-path-ledger.toml`. The T02 gate `bin/bitcoin-rs/tests/overhaul_evidence.rs` rejects a record that lacks a required identity, sums nested or concurrent intervals, or collapses repeated samples or empty cells. Schema validity never establishes a product result; only an executed scenario with observable state transition does.
 
 ## Identity fields
 

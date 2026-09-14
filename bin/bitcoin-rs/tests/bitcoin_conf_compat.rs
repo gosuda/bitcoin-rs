@@ -24,7 +24,8 @@ fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Mainnet)?;
-    let config = resolve(&[&layer])?;
+    let layer_refs: Vec<_> = layer.iter().collect();
+    let config = resolve(&layer_refs)?;
 
     assert_eq!(config.storage.prune_target_mb, 550);
     assert_auth(&config.rpc.auth, "foo", "bar");
@@ -50,7 +51,8 @@ fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Resu
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Regtest)?;
-    let config = resolve(&[&layer])?;
+    let layer_refs: Vec<_> = layer.iter().collect();
+    let config = resolve(&layer_refs)?;
 
     assert_eq!(config.storage.prune_target_mb, 900);
     assert_auth(&config.rpc.auth, "regtest-user", "regtest-pass");
@@ -76,7 +78,8 @@ fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<()> {
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Regtest)?;
-    let config = resolve(&[&layer])?;
+    let layer_refs: Vec<_> = layer.iter().collect();
+    let config = resolve(&layer_refs)?;
 
     assert!(config.notifications.zmq.is_empty());
     Ok(())
@@ -94,7 +97,8 @@ assumevalid=0000000000000000000000000000000000000000000000000000000000000000
     )?;
 
     let layer = bitcoin_conf::load_file(&conf_path, Network::Mainnet)?;
-    let config = resolve(&[&layer])?;
+    let layer_refs: Vec<_> = layer.iter().collect();
+    let config = resolve(&layer_refs)?;
 
     assert_eq!(
         config.validation.assume_valid_height,

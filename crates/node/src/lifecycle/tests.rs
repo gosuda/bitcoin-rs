@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::config::{NodeConfig, RuntimeInputs};
-use crate::lifecycle::startup::start_node;
+use crate::lifecycle::start_node;
 use crate::run::run;
 
 fn isolated_config(data_dir: &Path) -> NodeConfig {

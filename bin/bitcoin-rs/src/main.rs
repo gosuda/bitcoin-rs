@@ -36,7 +36,7 @@ fn config_from(
     let cli_layer = cli.into_user_config();
     if let Some(path) = bitcoin_conf_path {
         let network = network_from_layers(layers.iter().chain([&env_layer, &cli_layer]));
-        layers.push(bitcoin_conf::load_file(&path, network)?);
+        layers.extend(bitcoin_conf::load_file(&path, network)?);
     }
     layers.push(env_layer);
     layers.push(cli_layer);

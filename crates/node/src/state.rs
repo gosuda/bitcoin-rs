@@ -445,15 +445,6 @@ impl NodeState {
         let outcome = self.followers.apply_connect(&self.apply_handles, block)?;
         Ok(outcome.tip)
     }
-
-    #[cfg(test)]
-    pub(crate) fn check_coinbase_maturity(
-        &self,
-        block: &Block,
-        height: u32,
-    ) -> core::result::Result<(), ApplyError> {
-        crate::apply::check_coinbase_maturity(&self.apply_handles, block, height)
-    }
 }
 
 #[cfg(test)]

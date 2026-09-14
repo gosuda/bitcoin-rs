@@ -7,6 +7,8 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "bitcoin-rs :: node"
+# benches/evidence.rs is a shared module, not a bench target.
+autobenches = false
 
 [lints]
 workspace = true

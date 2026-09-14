@@ -111,6 +111,37 @@ pub struct NetworkState {
     pub timestamp: u64,
 }
 
+/// Typed synchronization progress behind `getblockchaininfo`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SyncProgress {
+    /// Consensus network the node follows.
+    pub network: Network,
+    /// Blocks fully applied to chainstate.
+    pub blocks: u32,
+    /// Validated headers known to the node (may lead `blocks` during sync).
+    pub headers: u32,
+    /// Hash of the best fully applied block.
+    pub best_block_hash: Hash256,
+    /// Difficulty at the applied tip (Core `GetDifficulty`).
+    pub difficulty: f64,
+    /// Applied tip header timestamp, UNIX seconds.
+    pub time: u64,
+    /// Median time past of the last eleven applied blocks.
+    pub median_time: u64,
+    /// Core `GuessVerificationProgress` in the inclusive range `[0, 1]`.
+    pub verification_progress: f64,
+    /// Whether the node is still in initial block download.
+    pub initial_block_download: bool,
+    /// Applied chain work, big-endian hex (`"00"` before the first tip).
+    pub chain_work: String,
+    /// Bytes the block store occupies on disk.
+    pub size_on_disk: u64,
+    /// Whether pruning is enabled.
+    pub pruned: bool,
+    /// Prune floor height, present only on a pruned node.
+    pub prune_height: Option<u32>,
+}
+
 /// Current pruning state reported by chain RPCs.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PruneStatus {
@@ -732,6 +763,83 @@ impl Context {
         self.prune_service
             .as_ref()
             .map_or_else(PruneStatus::default, |service| service.status())
+    }
+
+    /// Typed synchronization progress: the `getblockchaininfo` facts without
+    /// RPC JSON. Chainwork is the applied tip's when one exists.
+    #[must_use]
+    pub fn sync_progress(&self) -> SyncProgress {
+        let applied_tip = self.applied_tip.load_full();
+        let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
+        let headers = self.height();
+        let (difficulty, time, median_time) =
+            applied_tip.as_ref().map_or((0.0, 0_u64, 0_u64), |tip| {
+                let tree = self.block_tree.read();
+                tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
+                    (
+                        self.difficulty_for_bits(node.header.bits),
+                        u64::from(node.header.time),
+                        u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
+                    )
+                })
+            });
+        let now = crate::handlers::chain::unix_now();
+        // Core's estimate when the verified-transaction count is known, the
+        // height ratio when it is not; `None` is a pre-tracking datadir and
+        // means unknown, never zero.
+        let verification_progress = self.chain_tx_count().map_or_else(
+            || {
+                if headers > 0 {
+                    (f64::from(applied) / f64::from(headers)).min(1.0)
+                } else {
+                    0.0
+                }
+            },
+            |chain_tx_count| {
+                crate::handlers::chain::verification_progress(
+                    self.chain_network,
+                    chain_tx_count,
+                    applied,
+                    headers,
+                    time,
+                    now,
+                )
+            },
+        );
+        let prune_status = self.prune_status();
+        SyncProgress {
+            network: self.chain_network,
+            blocks: applied,
+            headers,
+            best_block_hash: applied_tip
+                .as_ref()
+                .map_or_else(Hash256::default, |tip| tip.hash),
+            difficulty,
+            time,
+            median_time,
+            verification_progress,
+            initial_block_download: self.is_initial_block_download(now),
+            chain_work: applied_tip
+                .as_deref()
+                .map_or_else(|| self.chainwork_hex(), Self::tip_chainwork_hex),
+            size_on_disk: self
+                .block_storage_disk_usage()
+                .unwrap_or_else(|| self.blocks.read().size_on_disk()),
+            pruned: prune_status.pruned,
+            prune_height: prune_status.pruneheight,
+        }
+    }
+
+    /// Big-endian hex of one tip snapshot's chainwork.
+    fn tip_chainwork_hex(tip: &TipSnapshot) -> String {
+        let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            use core::fmt::Write as _;
+
+            let _: fmt::Result = write!(&mut out, "{byte:02x}");
+        }
+        out
     }
 
     /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.

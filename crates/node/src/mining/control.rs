@@ -12,7 +12,6 @@ use bitcoin_rs_mining::MiningControlError;
 use bitcoin_rs_mining::MiningInfo;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Header;
-use compact_str::CompactString;
 
 impl MiningCoordinator {
     pub(super) fn mining_info_snapshot(&self) -> Result<MiningInfo, MiningControlError> {
@@ -28,11 +27,7 @@ impl MiningCoordinator {
                 )
             })
         };
-        let warnings = crate::metrics::node_warnings()
-            .messages()
-            .into_iter()
-            .map(CompactString::from)
-            .collect();
+        let warnings = Vec::new();
         self.service
             .mining_info(network_hashes_per_second, warnings, tip.as_deref())
     }

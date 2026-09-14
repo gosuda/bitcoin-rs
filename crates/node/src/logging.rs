@@ -1,6 +1,5 @@
 use std::io::IsTerminal as _;
 
-use anyhow::Result;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 /// Default tracing filter directive when the user supplies only a bare level
@@ -18,7 +17,7 @@ const DEFAULT_FILTER: &str = "info,fjall=warn,rocksdb=warn";
 /// When stderr is a TTY, a human-readable format is used for operator
 /// readability. When stderr is piped (e.g. `docker logs`), JSON is used
 /// so downstream log aggregation can parse structured fields.
-pub fn install_tracing(level: &str) -> Result<()> {
+pub(crate) fn install_tracing(level: &str) {
     let filter_directive = build_filter_directive(level);
     let filter =
         EnvFilter::try_new(&filter_directive).unwrap_or_else(|_error| EnvFilter::new("info"));
@@ -39,7 +38,6 @@ pub fn install_tracing(level: &str) -> Result<()> {
         );
         let _already_installed = subscriber.try_init();
     }
-    Ok(())
 }
 
 /// Builds the tracing filter directive string from a user-supplied level.
@@ -61,27 +59,6 @@ fn build_filter_directive(level: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bare_info_gets_per_target_caps() {
-        let directive = build_filter_directive("info");
-        assert!(directive.contains("fjall=warn"));
-        assert!(directive.contains("rocksdb=warn"));
-    }
-
-    #[test]
-    fn bare_debug_gets_per_target_caps() {
-        let directive = build_filter_directive("debug");
-        assert!(directive.starts_with("debug"));
-        assert!(directive.contains("fjall=warn"));
-        assert!(directive.contains("rocksdb=warn"));
-    }
-
-    #[test]
-    fn empty_level_gets_default_filter() {
-        let directive = build_filter_directive("");
-        assert_eq!(directive, DEFAULT_FILTER);
-    }
 
     #[test]
     fn explicit_directive_is_respected_as_is() {

@@ -1,22 +1,22 @@
 //! Bitcoin Core `bitcoin.conf` as a process-input source.
 //!
 //! Reads the file, selects the network section against the already-resolved
-//! network, and produces one [`UserConfig`] layer. `node` never opens this
-//! file.
+//! network, and produces the global and selected-section [`UserConfig`]
+//! layers, in precedence order. `node` never opens this file.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use bitcoin_rs_node::{Network, UserConfig};
 
-/// Parses `path` into one user-config layer for `network`.
-pub fn load_file(path: &Path, network: Network) -> Result<UserConfig> {
+/// Parses `path` into user-config layers for `network`, lowest precedence first.
+pub fn load_file(path: &Path, network: Network) -> Result<Vec<UserConfig>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read bitcoin.conf {}", path.display()))?;
     Ok(parse_for_network(&text, network))
 }
 
-fn parse_for_network(text: &str, network: Network) -> UserConfig {
+fn parse_for_network(text: &str, network: Network) -> Vec<UserConfig> {
     let mut global = UserConfig::default();
     let mut selected = UserConfig::default();
     let mut current_section_selected = None;
@@ -42,8 +42,7 @@ fn parse_for_network(text: &str, network: Network) -> UserConfig {
         }
     }
 
-    global.overlay(&selected);
-    global
+    vec![global, selected]
 }
 
 fn apply_core_key(layer: &mut UserConfig, key: &str, value: &str) {
@@ -110,7 +109,7 @@ mod tests {
 
     #[test]
     fn network_section_overrides_globals() {
-        let layer = parse_for_network(
+        let layers = parse_for_network(
             "
 -prune=550
 [regtest]
@@ -120,7 +119,8 @@ mod tests {
 ",
             Network::Regtest,
         );
-        let config = resolve(&[&layer]).unwrap_or_else(|error| panic!("layer resolves: {error}"));
+        let layer_refs: Vec<_> = layers.iter().collect();
+        let config = resolve(&layer_refs).unwrap_or_else(|error| panic!("layer resolves: {error}"));
         assert_eq!(config.storage.prune_target_mb, 900);
     }
 }

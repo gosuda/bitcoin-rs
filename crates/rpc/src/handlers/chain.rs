@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 use core::str::FromStr as _;
 use core::{fmt, fmt::Write as _};
 
-use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
@@ -26,87 +26,42 @@ use bitcoin_rs_index::block_log::{BlockRecord, cumulative_tx_count_through};
 
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let applied_tip = ctx.applied_tip.load_full();
-    let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
-    let headers = ctx.height();
-    let (difficulty, time, mediantime, tip_bits) = applied_tip.as_ref().map_or(
-        (0.0, 0_u64, 0_u64, CompactTarget::from_consensus(0)),
-        |tip| {
-            let tree = ctx.block_tree.read();
-            tree.node(tip.tip_id)
-                .map_or((0.0, 0, 0, CompactTarget::from_consensus(0)), |node| {
-                    (
-                        ctx.difficulty_for_bits(node.header.bits),
-                        u64::from(node.header.time),
-                        u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
-                        node.header.bits,
-                    )
-                })
-        },
-    );
-    // Core's estimate when this node knows how many transactions it has
-    // verified, and the old height ratio when it does not.
-    //
-    // The count is unknown only for a datadir written before the node tracked
-    // it: nothing short of re-reading every block body could recover it, so
-    // those chains keep the answer they have always had rather than being told
-    // a confident 0.0. A node that syncs, or resyncs, after that change always
-    // takes the first branch.
-    let now = unix_now();
-    let verification_progress = ctx.chain_tx_count().map_or_else(
-        || {
-            if headers > 0 {
-                (f64::from(applied) / f64::from(headers)).min(1.0)
-            } else {
-                0.0
-            }
-        },
-        |chain_tx_count| {
-            verification_progress(
-                ctx.chain_network,
-                chain_tx_count,
-                applied,
-                headers,
-                time,
-                now,
-            )
-        },
-    );
-    let initialblockdownload = ctx.is_initial_block_download(now);
-    let chain = match ctx.chain_network {
+    let progress = ctx.sync_progress();
+    // `sync_progress` owns the shared facts; only the wire-only bits/target
+    // pair, the chain string, and warnings are added on top here.
+    let tip_bits =
+        ctx.applied_tip
+            .load_full()
+            .as_deref()
+            .map_or(CompactTarget::from_consensus(0), |tip| {
+                ctx.block_tree
+                    .read()
+                    .node(tip.tip_id)
+                    .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
+            });
+    let chain = match progress.network {
         Network::Mainnet => "main",
         Network::Testnet3 => "test",
         Network::Testnet4 => "testnet4",
         Network::Signet => "signet",
         Network::Regtest => "regtest",
     };
-    let size_on_disk = ctx
-        .block_storage_disk_usage()
-        .unwrap_or_else(|| ctx.blocks.read().size_on_disk());
-    let prune_status = ctx.prune_status();
-    let bestblockhash = applied_tip
-        .as_ref()
-        .map_or_else(Hash256::default, |tip| tip.hash)
-        .to_string_be();
-    let chainwork = applied_tip
-        .as_deref()
-        .map_or_else(|| ctx.chainwork_hex(), chainwork_hex);
     let response = v31::GetBlockchainInfo {
         chain: chain.to_owned(),
-        blocks: i64::from(applied),
-        headers: i64::from(headers),
-        best_block_hash: bestblockhash,
+        blocks: i64::from(progress.blocks),
+        headers: i64::from(progress.headers),
+        best_block_hash: progress.best_block_hash.to_string_be(),
         bits: format!("{tip_bits:08x}"),
         target: compact_target_hex(tip_bits),
-        difficulty,
-        time: i64_saturated(time),
-        median_time: i64_saturated(mediantime),
-        verification_progress,
-        initial_block_download: initialblockdownload,
-        chain_work: chainwork,
-        size_on_disk,
-        pruned: prune_status.pruned,
-        prune_height: prune_status.pruneheight.map(i64::from),
+        difficulty: progress.difficulty,
+        time: i64_saturated(progress.time),
+        median_time: i64_saturated(progress.median_time),
+        verification_progress: progress.verification_progress,
+        initial_block_download: progress.initial_block_download,
+        chain_work: progress.chain_work,
+        size_on_disk: progress.size_on_disk,
+        pruned: progress.pruned,
+        prune_height: progress.prune_height.map(i64::from),
         automatic_pruning: None,
         prune_target_size: None,
         signet_challenge: None,
@@ -120,7 +75,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
 }
 
 /// UNIX seconds now.
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
@@ -142,7 +97,7 @@ fn unix_now() -> u64 {
 /// hours of `now`, Core stops trusting that miner-set timestamp and estimates
 /// the tip's age from how many blocks the header chain is ahead instead — which
 /// also quantizes the answer near 1.0, where people expect to see it settle.
-fn verification_progress(
+pub(crate) fn verification_progress(
     network: bitcoin_rs_primitives::Network,
     chain_tx_count: u64,
     applied_height: u32,
@@ -203,14 +158,6 @@ fn i64_to_f64(value: i64) -> f64 {
     if value < 0 { -magnitude } else { magnitude }
 }
 
-fn chainwork_hex(tip: &TipSnapshot) -> String {
-    let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _: fmt::Result = write!(&mut out, "{byte:02x}");
-    }
-    out
-}
 /// Lowercase hex encoding for arbitrary byte slices.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -4404,7 +4351,7 @@ mod chaintxstats_durability_tests {
 mod chaintxstats_window_tests {
     use alloc::sync::Arc;
 
-    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
     use sonic_rs::{JsonValueTrait, json};
 
     use super::*;

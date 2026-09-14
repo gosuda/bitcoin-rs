@@ -8,10 +8,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use bitcoin_rs_node::metrics::{
-    CorpusIdentity, EvidenceIdentity, Interval, IntervalKind, Ledger as RuntimeLedger, Sample,
-    Sha256Hex,
-};
+#[path = "../../../../crates/node/benches/evidence.rs"]
+pub mod evidence;
+
+use bitcoin_rs_node::metrics::{CorpusIdentity, EvidenceIdentity, Sha256Hex};
+use evidence::{Interval, IntervalKind, Ledger as RuntimeLedger, Sample};
 use serde::Deserialize;
 
 const SCHEMA: &str = "bitcoin-rs-hot-path-ledger-v2";

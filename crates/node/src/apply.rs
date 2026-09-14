@@ -1353,22 +1353,6 @@ impl UtxoView for BlockLocalUtxoView<'_> {
 }
 
 #[cfg(test)]
-pub(crate) fn check_coinbase_maturity(
-    handles: &Chainstate,
-    block: &Block,
-    height: u32,
-) -> core::result::Result<(), ApplyError> {
-    let tx_plan = plan_block_transactions(block, &block_txids(block));
-    let resolved = Arc::new(ResolvedUtxoView::resolve(
-        handles.utxo.as_ref(),
-        block,
-        &tx_plan,
-    ));
-    let txids = block_txids(block);
-    check_coinbase_maturity_with_tx_plan(handles, block, &tx_plan, &txids, resolved, height)
-}
-
-#[cfg(test)]
 mod consensus_rule_tests;
 
 #[cfg(test)]

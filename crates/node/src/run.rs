@@ -29,8 +29,8 @@ fn wait_for_shutdown(shutdown: &AtomicBool, delay: Duration) -> bool {
 /// The event loop owns the shutdown decision; this daemon wrapper observes
 /// that decision and consumes the node through its explicit shutdown path.
 pub fn run(config: NodeConfig, runtime: RuntimeInputs) -> Result<()> {
-    logging::install_tracing(&config.observability.log_level)?;
-    let node = crate::lifecycle::startup::start_node(config, runtime, true)?;
+    logging::install_tracing(&config.observability.log_level);
+    let node = crate::lifecycle::start_node(config, runtime, true)?;
     let shutdown = node.state.shutdown();
     while !wait_for_shutdown(&shutdown, Duration::from_secs(DAEMON_SIGNAL_WAIT_SECS)) {}
     node.shutdown_blocking()

@@ -379,7 +379,7 @@ evidence = "No product-safe skip of checksum/decode. Diagnostic bench: crates/p2
 #     so custody is available, but the campaign is out of this wave's budget and
 #     #650 defers final product measurements to #629/#625. Per-cell samples stay
 #     empty and the noise floor stays unobserved until those runs append through
-#     bitcoin_rs_node::metrics::Ledger with the six-way identity (HPA-12).
+#     `Ledger` (`crates/node/benches/evidence.rs`) with the six-way identity (HPA-12).
 
 [[paths]]
 id = "p2p.channels"
@@ -831,7 +831,7 @@ reason = "Weakens the product lifecycle."
 
 # ---------------------------------------------------------------------------
 # Cell histories. One entry per matrix cell; a run appends samples through
-# bitcoin_rs_node::metrics::Ledger and never edits or removes an earlier one.
+# `Ledger` (`crates/node/benches/evidence.rs`) and never edits or removes an earlier one.
 # An empty history is an unmeasured cell.
 # ---------------------------------------------------------------------------
 

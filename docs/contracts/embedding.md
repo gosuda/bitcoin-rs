@@ -7,11 +7,11 @@ the first embedder — there is one lifecycle implementation, not two.
 ## Invariants
 
 - **EMB-01 — One owned lifecycle.** `run()` and `Node::start` both boot
-  through `crates/node/src/lifecycle/startup.rs::start_node`. Startup returns
+  through `crates/node/src/lifecycle.rs::start_node`. Startup returns
   an owned `Node`; it does not export detached state, worker handles, and
   an RPC context for a caller to assemble. `StartupGuard::finish` transfers
   ownership only after every service has started. Both callers stop through
-  `lifecycle/services.rs::NodeServices::teardown`: request shutdown and wake
+  `lifecycle.rs::NodeServices::teardown`: request shutdown and wake
   the event loop; join the event loop and RPC listener; stop metrics; join
   P2P core, ingress, and relay workers; drain subsystems; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
@@ -30,10 +30,10 @@ the first embedder — there is one lifecycle implementation, not two.
 - **EMB-04 — Typed reads mirror the RPC facts.** `snapshot()` returns the
   coherent `ChainSnapshot`; `sync_progress()` derives the
   `getblockchaininfo` fields from the same handles without RPC JSON. The
-  calculation in `embed/progress.rs` remains op-for-op with the RPC
-  verification-progress calculation. `capabilities()` returns the node's
-  concrete-service `CapabilitySnapshot`. Owners: `crates/node/src/embed.rs`
-  and `crates/node/src/embed/progress.rs`; wire types:
+  calculation is `Context::sync_progress` in `crates/rpc/src/context.rs`, the
+  identical computation `getblockchaininfo` runs. `capabilities()` returns
+  the node's concrete-service `CapabilitySnapshot`. Owners:
+  `crates/node/src/embed.rs` and `crates/rpc/src/context.rs`; wire types:
   `crates/rpc/src/capabilities.rs`.
 - **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
   `Context::admit_transaction` (`crates/rpc/src/context.rs`) — the identical
@@ -68,7 +68,7 @@ the first embedder — there is one lifecycle implementation, not two.
   channel already contains the required notification. Teardown attempts a
   nonblocking send and continues to the joins whether the channel accepted
   the wake, was already full, or has no receiver. The authoritative shutdown
-  flag is raised first. Owner: `lifecycle/services.rs::NodeServices::teardown`.
+  flag is raised first. Owner: `lifecycle.rs::NodeServices::teardown`.
 
 ## Startup failure and cancellation
 
@@ -102,10 +102,10 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
 - `crates/node/tests/embed.rs::dropped_node_releases_services_and_datadir_for_reopen`
   and `startup_failure_after_state_open_rolls_back_releases_state` exercise
   abandoned-run cleanup and startup rollback.
-- `crates/node/src/lifecycle/services/tests.rs` contains checkpoint failure,
+- `crates/node/src/lifecycle/tests.rs` contains checkpoint failure,
   worker join failure, daemon/embedded identity, repeated teardown, rollback,
   queued-wake, and owned-startup-result regressions.
-- `crates/node/src/embed/tests.rs::broadcast_publishes_one_ordered_a_event_through_the_shared_gateway`
+- `crates/node/src/embed.rs::tests::broadcast_publishes_one_ordered_a_event_through_the_shared_gateway`
   retains the gateway publication test and its direct-insertion control.
 - `crates/node/tests/shutdown.rs::run_exits_cleanly_after_fast_shutdown_signal`
   exercises the daemon path.

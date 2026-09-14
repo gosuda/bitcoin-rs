@@ -25,12 +25,10 @@ pub mod embed;
 /// Central synchronous event loop.
 pub mod event_loop;
 
-/// Block import pipeline.
-pub mod import;
 /// Owned startup, rollback, and ordered service shutdown.
 mod lifecycle;
 /// Tracing initialization.
-pub mod logging;
+mod logging;
 /// Metrics instrumentation and optional exposition.
 pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.
@@ -43,9 +41,9 @@ pub mod reorg;
 /// Top-level node runner.
 pub mod run;
 /// Graceful shutdown.
-pub mod shutdown;
+mod shutdown;
 /// Signal handling.
-pub mod signal;
+mod signal;
 /// Shared node state.
 pub mod state;
 mod storage_backend;

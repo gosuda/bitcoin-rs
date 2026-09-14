@@ -11,10 +11,11 @@
     reason = "fixtures assert typed rejections by construction"
 )]
 
-use bitcoin_rs_node::metrics::{
-    Cell, CorpusIdentity, EvidenceError, EvidenceIdentity, Interval, IntervalKind, LEDGER_SCHEMA,
-    Ledger, Sample, Sha256Hex,
-};
+#[path = "../../../crates/node/benches/evidence.rs"]
+pub mod evidence;
+
+use bitcoin_rs_node::metrics::{CorpusIdentity, EvidenceIdentity, Sha256Hex};
+use evidence::{Cell, EvidenceError, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample};
 
 const LEDGER_TOML: &str = include_str!("../../../docs/benchmarks/hot-path-ledger.toml");
 const CELL: &str = "offline.c150.x86_64.fjall";

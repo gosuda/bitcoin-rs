@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
@@ -28,7 +28,9 @@ impl ShutdownHandler {
         let handle = signals.handle();
         let thread = thread::spawn(move || {
             for _signal in signals.forever() {
-                crate::shutdown::trigger_shutdown(&shutdown);
+                // First signal flips the flag; later ones only re-wake.
+                let _ =
+                    shutdown.compare_exchange(false, true, Ordering::Release, Ordering::Acquire);
                 if shutdown_tx.try_send(()).is_err() {
                     break;
                 }
@@ -67,17 +69,6 @@ impl Drop for ShutdownHandler {
     fn drop(&mut self) {
         let _ = self.close_and_join();
     }
-}
-
-/// Installs SIGINT/SIGTERM handling on a dedicated forwarding thread.
-///
-/// The returned owner must remain alive until shutdown. Its drop closes the
-/// signal iterator and joins the forwarding thread.
-pub(crate) fn install_shutdown_handler(
-    shutdown: Arc<AtomicBool>,
-    shutdown_tx: Sender<()>,
-) -> Result<ShutdownHandler> {
-    ShutdownHandler::install(shutdown, shutdown_tx)
 }
 
 /// Per-thread install/close counters for the lifecycle regressions.

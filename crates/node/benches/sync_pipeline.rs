@@ -61,10 +61,9 @@ use bitcoin::{
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
 use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_node::metrics::{
-    Cell, CorpusIdentity, EvidenceIdentity, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample,
-    Sha256Hex,
-};
+pub mod evidence;
+
+use bitcoin_rs_node::metrics::{CorpusIdentity, EvidenceIdentity, Sha256Hex};
 use bitcoin_rs_node::{
     BlockSync, DerivedIndexRuntime, Network, NodeConfig, apply::Chainstate, state::NodeState,
     sync::default_sync_budget,
@@ -75,6 +74,7 @@ use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
+use evidence::{Cell, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample};
 use parking_lot::Mutex as ParkingMutex;
 use parking_lot::{Mutex, RwLock};
 use tempfile::TempDir;

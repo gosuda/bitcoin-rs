@@ -49,6 +49,47 @@ pub enum CapabilityState {
     ShutdownAbandoned,
 }
 
+impl CapabilityState {
+    /// Every lifecycle outcome, in report order.
+    pub const ALL: [Self; 8] = [
+        Self::Ready,
+        Self::CatchingUp {
+            processed_height: 0,
+            target_height: 0,
+        },
+        Self::RollingBack {
+            from_height: 0,
+            to_height: 0,
+        },
+        Self::Rebuilding {
+            processed_height: 0,
+            target_height: 0,
+        },
+        Self::Failed {
+            reason: String::new(),
+        },
+        Self::Disabled,
+        Self::Opening,
+        Self::ShutdownAbandoned,
+    ];
+
+    /// The `getcapabilities` wire spelling of this state: the serde tag, so a
+    /// metrics label and the RPC row for one poll are the same token.
+    #[must_use]
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::CatchingUp { .. } => "CatchingUp",
+            Self::RollingBack { .. } => "RollingBack",
+            Self::Rebuilding { .. } => "Rebuilding",
+            Self::Failed { .. } => "Failed",
+            Self::Disabled => "Disabled",
+            Self::Opening => "Opening",
+            Self::ShutdownAbandoned => "ShutdownAbandoned",
+        }
+    }
+}
+
 /// Status of one concrete node capability exposed through RPC.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityStatus {
@@ -119,6 +160,39 @@ mod tests {
     fn missing_source_is_the_disabled_txindex_row() {
         let snapshot = txindex_snapshot(None);
         assert_eq!(snapshot.capabilities, vec![disabled_txindex()]);
+    }
+
+    /// Extracts the serde tag of a rendered `CapabilityState`: a bare string
+    /// for unit outcomes, the object key for payload outcomes.
+    fn wire_tag(rendered: &str) -> &str {
+        if let Some(rest) = rendered.strip_prefix("{\"") {
+            rest.split('"').next().unwrap_or(rest)
+        } else {
+            rendered.trim_matches('"')
+        }
+    }
+
+    #[test]
+    // CONTRACT: docs/contracts/indexing.md#IDX-02
+    fn wire_names_match_the_serde_spelling() {
+        for state in &CapabilityState::ALL {
+            let rendered = serde_json::to_string(state)
+                .unwrap_or_else(|error| panic!("serialize {state:?}: {error}"));
+            assert_eq!(
+                wire_tag(&rendered),
+                state.wire_name(),
+                "label and getcapabilities row must be one vocabulary"
+            );
+        }
+        let distinct: std::collections::BTreeSet<_> = CapabilityState::ALL
+            .iter()
+            .map(CapabilityState::wire_name)
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            CapabilityState::ALL.len(),
+            "distinct outcomes must keep distinct labels"
+        );
     }
 
     #[test]
