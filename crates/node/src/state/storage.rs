@@ -27,7 +27,7 @@ pub(super) struct NodeStorage {
     undo_store: Arc<dyn crate::apply::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
-    deferred: Arc<dyn DeferredChainstateServices>,
+    pub(super) deferred: Arc<dyn DeferredChainstateServices>,
     #[cfg(test)]
     test_store: Arc<dyn TestStoreAccess>,
 }
@@ -97,27 +97,6 @@ impl NodeStorage {
         self.backend.as_str()
     }
 
-    pub(super) fn prune_service(
-        &self,
-        block_files: &Arc<FlatFileBlockStore>,
-        block_body_store: &Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
-        blocks: Arc<RwLock<BlockLog>>,
-        transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-        authority: crate::apply::PruneAuthority,
-        durable_tip_height: &Arc<AtomicU32>,
-        retention: &Arc<bitcoin_rs_storage::RetentionRegistry>,
-    ) -> Result<Arc<dyn PruneService>> {
-        self.deferred.prune_service(
-            Arc::clone(block_files),
-            Arc::clone(block_body_store),
-            blocks,
-            transactions,
-            authority,
-            Arc::clone(durable_tip_height),
-            Arc::clone(retention),
-        )
-    }
-
     pub(super) fn block_body_store(
         &self,
     ) -> Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore> {
@@ -137,44 +116,9 @@ impl NodeStorage {
         Arc::clone(&self.durable_head)
     }
 
-    pub(super) fn journal_writer(
-        &self,
-        dir: cap_std::fs::Dir,
-        bootstrap: JournalBootstrap,
-    ) -> Result<crate::chainstate_journal::SharedJournalWriter> {
-        self.deferred.journal_writer(dir, bootstrap)
-    }
-
-    #[cfg(test)]
-    pub(super) fn stored_prune_body(
-        &self,
-        height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<Vec<u8>>> {
-        let key = bitcoin_rs_storage::pruning::block_body_key(height, hash);
-        Ok(self
-            .test_store
-            .get(bitcoin_rs_storage::pruning::BLOCK_DATA_CF, &key)?)
-    }
-
-    #[cfg(test)]
-    pub(super) fn stored_prune_undo(
-        &self,
-        height: u32,
-        hash: bitcoin_rs_primitives::Hash256,
-    ) -> Result<Option<Vec<u8>>> {
-        let key = bitcoin_rs_storage::pruning::block_undo_key(height, hash);
-        Ok(self.test_store.get(ColumnFamily::UndoData, &key)?)
-    }
-
     #[cfg(test)]
     pub(super) fn write_test_rows(&self, rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)]) -> Result<()> {
         self.test_store.write_rows(rows).map_err(anyhow::Error::new)
-    }
-
-    #[cfg(test)]
-    pub(super) fn read_test_row(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        self.test_store.get(cf, key).map_err(anyhow::Error::new)
     }
 }
 
@@ -192,7 +136,7 @@ pub(super) struct JournalBootstrap {
 /// Capabilities whose inputs become available after the chainstate store is
 /// opened. This is a composition seam, not a storage API: concrete reads,
 /// batches, and durability remain generic over `KvStore` below it.
-trait DeferredChainstateServices: Send + Sync {
+pub(super) trait DeferredChainstateServices: Send + Sync {
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,
@@ -248,12 +192,6 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
 
 #[cfg(test)]
 trait TestStoreAccess: Send + Sync {
-    fn get(
-        &self,
-        cf: ColumnFamily,
-        key: &[u8],
-    ) -> core::result::Result<Option<Vec<u8>>, bitcoin_rs_storage::StorageError>;
-
     fn write_rows(
         &self,
         rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)],
@@ -267,14 +205,6 @@ struct TestStore<S> {
 
 #[cfg(test)]
 impl<S: KvStore> TestStoreAccess for TestStore<S> {
-    fn get(
-        &self,
-        cf: ColumnFamily,
-        key: &[u8],
-    ) -> core::result::Result<Option<Vec<u8>>, bitcoin_rs_storage::StorageError> {
-        self.store.get(cf, key)
-    }
-
     fn write_rows(
         &self,
         rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)],

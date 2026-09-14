@@ -85,128 +85,23 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> anyhow::Resu
 }
 
 #[test]
-fn record_publishes_snapshot_and_hints_in_commit_order() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = dir.path().join("node");
-    config.p2p.listen.clear();
-
-    let state = NodeState::open(config, None)?;
-    let publisher = state.chain_event_publisher();
-    let epoch = publisher.epoch();
+fn record_advances_sequence_and_replaces_snapshot() {
+    let publisher = ChainEventPublisher::detached(7);
     let hash_a = Hash256::from_le_bytes(&[0xAA; 32]);
     let hash_b = Hash256::from_le_bytes(&[0xBB; 32]);
 
-    let first = publisher.record(HintKind::Connected, 1, hash_a);
-    let second = publisher.record(HintKind::Disconnected, 0, hash_b);
-
-    let expected_first = ChainEventHint {
-        kind: HintKind::Connected,
-        height: 1,
-        hash: hash_a,
-        epoch,
-        sequence: 1,
-    };
-    let expected_second = ChainEventHint {
-        kind: HintKind::Disconnected,
-        height: 0,
-        hash: hash_b,
-        epoch,
-        sequence: 2,
-    };
-    assert_eq!(first, expected_first);
-    assert_eq!(second, expected_second);
+    publisher.record(1, hash_a);
+    publisher.record(0, hash_b);
     assert_eq!(
         publisher.snapshot(),
-        state.active_chain_snapshot(),
-        "node and publisher expose one snapshot view"
-    );
-    assert_eq!(
-        state.active_chain_snapshot(),
         ChainSnapshot {
-            epoch,
+            epoch: 7,
             sequence: 2,
             tip_hash: hash_b,
             tip_height: 0,
         },
         "the last committed event wins the snapshot cell"
     );
-
-    let rx = state.chain_event_hints();
-    let mut hints = Vec::new();
-    let hint_rx = rx.lock();
-    while let Ok(hint) = hint_rx.try_recv() {
-        hints.push(hint);
-    }
-    assert_eq!(
-        hints,
-        vec![expected_first, expected_second],
-        "one hint per committed event, in commit order"
-    );
-    Ok(())
-}
-
-#[test]
-fn record_drops_hints_when_channel_full() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = dir.path().join("node");
-    config.p2p.listen.clear();
-
-    let state = NodeState::open(config, None)?;
-    let publisher = state.chain_event_publisher();
-    let rx = state.chain_event_hints();
-    for sequence in 1..=super::CHAIN_HINT_CHANNEL_LIMIT {
-        let sequence = u64::try_from(sequence)?;
-        let mut tip = [0_u8; 32];
-        tip[..8].copy_from_slice(&sequence.to_le_bytes());
-        publisher.record(
-            HintKind::Connected,
-            u32::try_from(sequence)?,
-            Hash256::from_le_bytes(&tip),
-        );
-    }
-
-    // The next record finds a full channel: the hint is dropped by
-    // design, while the commit itself still lands and the snapshot
-    // still advances. Dropping never blocks or fails the commit path.
-    let overflow = publisher.record(
-        HintKind::Connected,
-        u32::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)?,
-        Hash256::from_le_bytes(&[0xFF; 32]),
-    );
-    assert_eq!(
-        overflow.sequence,
-        u64::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)? + 1,
-        "the record itself is sequenced even when its hint is dropped"
-    );
-    assert_eq!(
-        state.active_chain_snapshot(),
-        ChainSnapshot {
-            epoch: publisher.epoch(),
-            sequence: overflow.sequence,
-            tip_hash: Hash256::from_le_bytes(&[0xFF; 32]),
-            tip_height: u32::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)?,
-        },
-    );
-
-    let mut drained = Vec::new();
-    let drain_rx = rx.lock();
-    while let Ok(hint) = drain_rx.try_recv() {
-        drained.push(hint.sequence);
-    }
-    assert_eq!(
-        drained.len(),
-        super::CHAIN_HINT_CHANNEL_LIMIT,
-        "exactly the bounded hints are queued"
-    );
-    assert_eq!(drained[0], 1, "the oldest hint survives at the front");
-    assert_eq!(
-        drained.last().copied(),
-        Some(u64::try_from(super::CHAIN_HINT_CHANNEL_LIMIT)?),
-        "the overflow hint is the one that was dropped"
-    );
-    Ok(())
 }
 
 #[test]

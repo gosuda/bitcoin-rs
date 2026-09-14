@@ -31,6 +31,9 @@
 //! through them on the ordinary path. That is the sharper reason this is a
 //! storage module: the schema was living in the crate that deletes rows.
 
+use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
+use core::mem::size_of;
+
 /// Block-body pruning over persisted block rows.
 pub mod block_pruner;
 /// Retention leases that keep required history against pruning.
@@ -47,6 +50,24 @@ pub use undo_pruner::{UndoPruner, block_undo_key};
 
 use crate::{StorageError, WriteBatch as _};
 use thiserror::Error;
+
+const PRUNEHEIGHT_METADATA_KEY: &[u8] = b"node:pruneheight";
+
+/// Loads the persisted manual-prune line.
+pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
+    let Some(bytes) = store.get(crate::ColumnFamily::UtxoMeta, PRUNEHEIGHT_METADATA_KEY)? else {
+        return Ok(None);
+    };
+    if bytes.len() != size_of::<u32>() {
+        return Err(StorageError::IncompatibleData(format!(
+            "invalid persisted pruneheight length {}",
+            bytes.len()
+        )));
+    }
+    let mut encoded = [0_u8; size_of::<u32>()];
+    encoded.copy_from_slice(&bytes);
+    Ok(Some(u32::from_be_bytes(encoded)))
+}
 
 /// What one pruning pass staged for its caller's atomic batch.
 ///
@@ -67,6 +88,56 @@ pub struct StagedPrune {
     /// [`RetentionRegistry::record_pruned_below`]: floors at or below it
     /// may name deleted rows, floors above it name rows the pass left.
     pub pruned_below: u32,
+}
+
+/// One manual prune pass: clamps the line under the Core reorg margin, stages
+/// rows, persists the prune height in the same batch, commits, records the
+/// line, and reclaims files.
+pub fn prune_to_height<S: crate::KvStore>(
+    store: &S,
+    block_files: &crate::FlatFileBlockStore,
+    retention: &RetentionRegistry,
+    applied_tip_height: u32,
+    durable_tip_height: u32,
+    pruneheight: u32,
+    before_commit: impl FnOnce(u32) -> Result<(), StorageError>,
+) -> Result<StagedPrune, PruneError> {
+    let safe_prune_height = applied_tip_height.saturating_sub(CORE_REORG_SAFETY_MARGIN);
+    if pruneheight > safe_prune_height {
+        // The requested line would delete blocks still inside Core's reorg margin.
+        return Err(
+            StorageError::InvalidOperation("prune height is within reorg safety margin").into(),
+        );
+    }
+    let pruner_tip = pruneheight + CORE_REORG_SAFETY_MARGIN;
+
+    let mut batch = store.new_batch();
+    let staged = stage_block_and_undo_prune(
+        store,
+        &mut batch,
+        block_files,
+        pruner_tip,
+        durable_tip_height,
+        PrunePolicy {
+            target_size_mb: 0,
+            keep_below_tip: CORE_REORG_SAFETY_MARGIN,
+        },
+        retention,
+    )?;
+    before_commit(staged.pruned_below)?;
+    batch.put(
+        crate::ColumnFamily::UtxoMeta,
+        PRUNEHEIGHT_METADATA_KEY,
+        &pruneheight.to_be_bytes(),
+    );
+    store.write(batch)?;
+    // Record before reclaim: acquiring a lease takes no transition lock,
+    // so a lease granted between the committing write and this record
+    // could otherwise pin rows the batch already deleted. Reclaim only
+    // ever deletes files this recorded line already covers.
+    retention.record_pruned_below(staged.pruned_below);
+    reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
+    Ok(staged)
 }
 
 /// Stages block-body and undo-row pruning into a caller-owned atomic batch.
@@ -133,7 +204,6 @@ pub fn stage_block_and_undo_prune<S: crate::KvStore>(
 }
 
 /// Deletes staged flat block files after their block-index rows are committed.
-#[doc(hidden)]
 pub fn reclaim_staged_flat_block_files<S: crate::KvStore>(
     store: &S,
     block_files: &crate::FlatFileBlockStore,

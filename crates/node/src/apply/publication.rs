@@ -15,9 +15,7 @@ use std::sync::atomic::Ordering;
 pub(super) fn publish_connect(handles: &Chainstate, tip: &TipSnapshot, tx_count_delta: u64) {
     let _publication = begin_applied_publication(handles);
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
-    handles
-        .chain_events
-        .record(crate::state::HintKind::Connected, tip.height, tip.hash);
+    handles.chain_events.record(tip.height, tip.hash);
     advance_chain_tx_count(handles, tip.height, tx_count_delta);
 }
 

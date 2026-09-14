@@ -45,6 +45,7 @@ fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
     config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
 
+    assert!(state.chain_followers().effects().derived_index().is_none());
     assert!(
         state.derived_index_query().is_none(),
         "txindex disabled by default"
@@ -57,32 +58,6 @@ fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
 }
 
 #[test]
-fn open_constructs_tx_index_when_enabled() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = dir.path().join("node");
-    config.p2p.listen.clear();
-    config.indexes.txindex = true;
-    let mut state = NodeState::open(config, None)?;
-    state.start_index_workers()?;
-    let (Some(a), Some(b)) = (state.derived_index_query(), state.derived_index_query()) else {
-        panic!("txindex query engine missing when enabled");
-    };
-    assert!(Arc::ptr_eq(&a, &b), "txindex query handle must be stable");
-    // The worker opens the store asynchronously; the directory appears
-    // once its open completes, not during NodeState::open.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !state.data_dir().join("txindex").exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "enabled txindex worker did not create storage within 30s"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    Ok(())
-}
-
-#[test]
 fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -91,6 +66,7 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     config.indexes.txindex = true;
     let mut state = NodeState::open(config, None)?;
 
+    assert!(state.chain_followers().effects().derived_index().is_some());
     assert!(
         state
             .derived_index_lifecycle
@@ -305,24 +281,5 @@ fn open_rejects_txindex_with_pruning() -> anyhow::Result<()> {
             .contains("transaction and script indexing are not compatible with -prune"),
         "unexpected error: {error:#}"
     );
-    Ok(())
-}
-
-#[test]
-fn apply_handles_follow_txindex_availability() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = dir.path().join("without-txindex");
-    config.p2p.listen.clear();
-    config.indexes.txindex = false;
-    let state = NodeState::open(config, None)?;
-    assert!(state.chain_followers().effects().derived_index().is_none());
-
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = dir.path().join("with-txindex");
-    config.p2p.listen.clear();
-    config.indexes.txindex = true;
-    let state = NodeState::open(config, None)?;
-    assert!(state.chain_followers().effects().derived_index().is_some());
     Ok(())
 }

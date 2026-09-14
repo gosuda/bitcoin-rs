@@ -574,7 +574,7 @@ pub(super) fn apply_handles_without_tx_index(network: Network, utxo: Arc<UtxoSet
         )),
         mempool,
         mempool_gateway,
-        Arc::new(crate::state::ChainEventPublisher::detached(0).0),
+        Arc::new(crate::state::ChainEventPublisher::detached(0)),
     )
 }
 

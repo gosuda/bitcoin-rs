@@ -483,8 +483,6 @@ const KNOWN_P2P_FORWARDING_WRAPPERS: &[&str] = &[
     "banned_subnets",
     "network_active",
     "p2p_outbound_sender",
-    "p2p_outbound_receiver",
-    "inbound_blocks_rx_handle",
     "inbound_tx_rx_handle",
     "added_nodes",
 ];

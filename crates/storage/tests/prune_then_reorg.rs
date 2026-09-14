@@ -5,13 +5,15 @@ use alloc::sync::Arc;
 use std::collections::BTreeMap;
 
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
-    BLOCK_DATA_CF, BlockPruner, PrunePolicy, RetentionRegistry, block_body_key,
-    reclaim_staged_flat_block_files, stage_block_and_undo_prune,
+    BLOCK_DATA_CF, BlockPruner, PrunePolicy, RetentionRegistry, block_body_key, load_pruneheight,
+    prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
-    BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, StorageError,
-    WriteBatch, WriteCondition, block_file_max_height_key, encode_block_file_max_height,
+    BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, KvUndoStore,
+    StorageError, UndoStore, WriteBatch, WriteCondition, block_file_max_height_key,
+    encode_block_file_max_height,
 };
 use parking_lot::RwLock;
 use tempfile::tempdir;
@@ -60,6 +62,152 @@ fn write_body_rows(
     }
     store.write(batch)?;
     Ok(appended)
+}
+
+#[test]
+fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let undo_store = KvUndoStore::new(Arc::clone(&store));
+    for height in 10_u32..=12 {
+        undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
+    }
+    let retention = RetentionRegistry::new();
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        0,
+        11,
+        |_| Ok(()),
+    )?;
+
+    assert_eq!(
+        staged.undo.blocks_removed, 0,
+        "no undo record may go while a crash would restore below all of them"
+    );
+    assert!(
+        undo_store.load_undo(10, fake_hash(10))?.is_some(),
+        "the record a restore would need must survive"
+    );
+    Ok(())
+}
+
+#[test]
+fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let undo_store = KvUndoStore::new(Arc::clone(&store));
+    for height in 10_u32..=12 {
+        undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
+    }
+    let retention = RetentionRegistry::new();
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+
+    assert_eq!(staged.blocks.blocks_removed, 1);
+    assert_eq!(staged.undo.blocks_removed, 1);
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert!(row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert!(row_stored(&store, &block_body_key(12, fake_hash(12)))?);
+    assert!(undo_store.load_undo(10, fake_hash(10))?.is_none());
+    assert!(undo_store.load_undo(11, fake_hash(11))?.is_some());
+    assert!(undo_store.load_undo(12, fake_hash(12))?.is_some());
+    assert_eq!(load_pruneheight(&*store)?, Some(11));
+    Ok(())
+}
+
+/// A live retention lease clamps the manual prune line: rows the lease
+/// pins survive a prune that would otherwise delete them, the recorded
+/// line only names what actually went, a floor the line crossed is
+/// refused as gone, and releasing the lease hands the authority back
+/// exactly once (`RCV-08`, #655).
+#[test]
+fn prune_to_height_respects_an_active_retention_lease() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let undo_store = KvUndoStore::new(Arc::clone(&store));
+    for height in 10_u32..=12 {
+        undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
+    }
+    let retention = Arc::new(RetentionRegistry::new());
+    let lease = retention.acquire(10)?;
+
+    let pinned = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(pinned.blocks.blocks_removed, 0);
+    assert_eq!(pinned.undo.blocks_removed, 0);
+    assert!(row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert_eq!(retention.pruned_below(), 0);
+    assert!(
+        retention.acquire(9).is_ok(),
+        "a pass that deleted nothing must not mark any height gone"
+    );
+
+    lease.release();
+    assert_eq!(retention.active_leases(), 0);
+    let released = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(released.blocks.blocks_removed, 1);
+    assert_eq!(released.undo.blocks_removed, 1);
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert!(row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert_eq!(retention.pruned_below(), 11);
+    Ok(())
 }
 
 #[test]

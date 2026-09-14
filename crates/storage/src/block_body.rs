@@ -494,6 +494,30 @@ mod body_position_prefetch_tests {
     }
 
     #[test]
+    fn persisting_same_block_body_twice_appends_once() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
+        let store = IndexedBlockBodyStore::new(index, files);
+        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
+        let body = b"idempotent block body";
+
+        store.persist_block_body(42, hash, body)?;
+        let block_file = temp.path().join("blocks").join("blk00000.dat");
+        let first_len = std::fs::metadata(&block_file)?.len();
+        store.persist_block_body(42, hash, body)?;
+        let second_len = std::fs::metadata(block_file)?.len();
+
+        assert_eq!(second_len, first_len);
+        assert_eq!(
+            store.load_block_body(42, hash)?.as_deref(),
+            Some(body.as_slice())
+        );
+        assert!(store.block_position(42, hash)?.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn malformed_body_row_is_incompatible_not_missing() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);

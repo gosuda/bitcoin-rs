@@ -207,11 +207,9 @@ pub(super) fn disconnect_block_admitted(
         handles
             .applied_tip
             .store(Some(Arc::new(parent_tip.clone())));
-        handles.chain_events.record(
-            crate::state::HintKind::Disconnected,
-            parent_tip.height,
-            parent_tip.hash,
-        );
+        handles
+            .chain_events
+            .record(parent_tip.height, parent_tip.hash);
         rewind_chain_tx_count(handles, tx_count_delta);
     }
     if journal_rewound {

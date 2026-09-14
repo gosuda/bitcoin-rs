@@ -36,7 +36,7 @@ fn txindex_worker_failure_makes_queries_unavailable_without_blocking_apply()
         None,
         bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS,
         bitcoin_rs_index::IndexCapabilities::HISTORICAL,
-        Arc::new(crate::state::ChainEventPublisher::detached(0).0),
+        Arc::new(crate::state::ChainEventPublisher::detached(0)),
         test_recovery_reporter(evidence_dir.path()).0,
         u32::MAX,
         wake_rx,

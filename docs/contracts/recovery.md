@@ -101,8 +101,8 @@ For one block, or a bounded fully verified prefix during IBD:
    update the fee estimator, and reconcile projections.
 7. Publish the stable coherent generation only after mempool and projection
    alignment.
-8. Dispatch notifications, relay, and index wake hints in the declared
-   observable order outside all domain locks.
+8. Dispatch notifications and relay in the declared observable order outside
+   all domain locks.
 
 A failure before stable publication leaves the fence closed until explicit
 recovery. A guard destructor must never quietly reopen the fence after an

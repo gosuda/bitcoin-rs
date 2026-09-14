@@ -59,37 +59,30 @@ pub(super) fn open_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
     crate::checkpoint::fs::open_data_dir(&path).with_context(|| format!("open {}", path.display()))
 }
 
-fn checkpoint_bootstrap(
-    restored: &crate::checkpoint::RestoredChainstate,
-    config: crate::config::ChainstateJournalConfig,
-    open_existing: bool,
-) -> Result<JournalBootstrap> {
-    let node = restored.tree.node(restored.applied_tip.tip_id)?;
-    let prev_hash = match node.parent {
-        Some(parent) => restored.tree.node(parent)?.hash.to_le_bytes(),
-        None => [0_u8; 32],
-    };
-    Ok(JournalBootstrap {
-        open_existing,
-        base_generation: restored.generation,
-        height: restored.applied_tip.height,
-        block_hash: restored.applied_tip.hash.to_le_bytes(),
-        prev_hash,
-        chain_tx_count: restored.chain_tx_count,
-        config,
-    })
-}
-
 fn restored_initial(
     restored: crate::checkpoint::RestoredChainstate,
     config: crate::config::ChainstateJournalConfig,
     open_existing: bool,
     resume_source: ResumeSource,
 ) -> Result<InitialChainstate> {
-    let journal_bootstrap = config
-        .enabled
-        .then(|| checkpoint_bootstrap(&restored, config, open_existing))
-        .transpose()?;
+    let journal_bootstrap = if config.enabled {
+        let node = restored.tree.node(restored.applied_tip.tip_id)?;
+        let prev_hash = match node.parent {
+            Some(parent) => restored.tree.node(parent)?.hash.to_le_bytes(),
+            None => [0_u8; 32],
+        };
+        Some(JournalBootstrap {
+            open_existing,
+            base_generation: restored.generation,
+            height: restored.applied_tip.height,
+            block_hash: restored.applied_tip.hash.to_le_bytes(),
+            prev_hash,
+            chain_tx_count: restored.chain_tx_count,
+            config,
+        })
+    } else {
+        None
+    };
     Ok(InitialChainstate {
         utxo: restored.utxo,
         coin_stats: restored.coin_stats,
@@ -128,6 +121,7 @@ fn cold_initial_chainstate(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn prepare_initial_chainstate(
     checkpoint_load: crate::checkpoint::CheckpointLoad,
     checkpoint_data_dir: &cap_std::fs::Dir,
@@ -176,22 +170,6 @@ pub(super) fn prepare_initial_chainstate(
         return restored_initial(restored, journal_config, false, ResumeSource::Checkpoint);
     }
 
-    replay_checkpoint_journal(
-        restored,
-        checkpoint_data_dir,
-        checkpoint_config,
-        config,
-        journal_config,
-    )
-}
-
-fn replay_checkpoint_journal(
-    restored: crate::checkpoint::RestoredChainstate,
-    checkpoint_data_dir: &cap_std::fs::Dir,
-    checkpoint_config: crate::checkpoint::headers::HeaderCheckpointConfig,
-    config: &NodeConfig,
-    journal_config: crate::config::ChainstateJournalConfig,
-) -> Result<InitialChainstate> {
     let base_generation = restored.generation;
     let base_height = restored.applied_tip.height;
     let journal_dir = open_journal_dir(&config.data_dir)?;

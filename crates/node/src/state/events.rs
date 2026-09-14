@@ -1,12 +1,9 @@
 //! Coherent chain-event publication and durable process epoch allocation.
 
-use super::CHAIN_HINT_CHANNEL_LIMIT;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
 use bitcoin_rs_primitives::Hash256;
-use crossbeam_channel::Receiver;
-use crossbeam_channel::Sender;
 use parking_lot::RwLock;
 use std::io;
 use std::io::Write as _;
@@ -33,50 +30,15 @@ pub struct ChainSnapshot {
     pub tip_height: u32,
 }
 
-/// Which committed chain event a [`ChainEventHint`] describes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HintKind {
-    /// A block was committed onto the tip.
-    Connected,
-    /// The tip moved back to its parent during a disconnect/reorg.
-    Disconnected,
-}
-
-/// Wake-up for reconciliation consumers: one committed connect or disconnect.
+/// Single write path for chain events.
 ///
-/// Hints are not a replay log and carry no payload to apply. A dropped hint is
-/// not a bug — it loses only the wake-up, and the consumer recovers by
-/// reconciling a fresh [`ChainSnapshot`] against its own cursor using the
-/// chain itself: ancestry via `BlockTree::active_node_at_height` and
-/// `BlockTree::find_common_ancestor` (crates/chain), bodies via
-/// `BlockBodyStore::load_block_body` (`crate::apply`). The `epoch` field is
-/// what makes a persisted consumer cursor `(epoch, sequence)` stale on
-/// restart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ChainEventHint {
-    /// Whether the block was added to or removed from the tip.
-    pub kind: HintKind,
-    /// Height of the block the event committed.
-    pub height: u32,
-    /// Hash of the block the event committed.
-    pub hash: Hash256,
-    /// Process epoch the event belongs to.
-    pub epoch: u64,
-    /// Commit-counter value assigned to this event.
-    pub sequence: u64,
-}
-
-/// Single write path for chain events: [`Self::record`] advances the commit
-/// sequence, replaces the snapshot cell, then emits the hint, in that order.
-///
-/// A consumer woken by a hint therefore always reads a snapshot at least as
-/// fresh as the hint. Production wiring goes through `NodeState::open`;
-/// [`Self::detached`] exists for `Chainstate` composition in tests.
+/// [`Self::record`] advances the commit sequence and replaces the snapshot
+/// cell. Production wiring goes through `NodeState::open`; [`Self::detached`]
+/// exists for `Chainstate` composition in tests.
 pub struct ChainEventPublisher {
     epoch: u64,
     sequence: AtomicU64,
     snapshot: RwLock<ChainSnapshot>,
-    hints: Sender<ChainEventHint>,
 }
 
 impl bitcoin_rs_index::reconcile::ChainCursorSource for ChainEventPublisher {
@@ -92,23 +54,18 @@ impl bitcoin_rs_index::reconcile::ChainCursorSource for ChainEventPublisher {
 }
 
 impl ChainEventPublisher {
-    pub(super) fn new(epoch: u64, initial: ChainSnapshot) -> (Self, Receiver<ChainEventHint>) {
-        let (hints, receiver) = crossbeam_channel::bounded(CHAIN_HINT_CHANNEL_LIMIT);
-        (
-            Self {
-                epoch,
-                sequence: AtomicU64::new(0),
-                snapshot: RwLock::new(initial),
-                hints,
-            },
-            receiver,
-        )
+    pub(super) fn new(epoch: u64, initial: ChainSnapshot) -> Self {
+        Self {
+            epoch,
+            sequence: AtomicU64::new(0),
+            snapshot: RwLock::new(initial),
+        }
     }
 
     /// Publisher detached from any node, for test handle composition only.
     /// Anchors at an empty tip; records still sequence and publish normally.
     #[must_use]
-    pub fn detached(epoch: u64) -> (Self, Receiver<ChainEventHint>) {
+    pub fn detached(epoch: u64) -> Self {
         Self::new(
             epoch,
             ChainSnapshot {
@@ -134,12 +91,10 @@ impl ChainEventPublisher {
 
     /// Records one committed connect or disconnect.
     ///
-    /// Publication order is fixed: advance the sequence, replace the snapshot
-    /// cell, then `try_send` the hint. A full hint channel drops the hint and
-    /// never blocks or fails the commit path — consumers reconcile from the
-    /// chain, so only the wake-up is lost. Sequence values start at `1`; a
-    /// snapshot with sequence `0` means no committed event yet.
-    pub fn record(&self, kind: HintKind, height: u32, hash: Hash256) -> ChainEventHint {
+    /// Publication order is fixed: advance the sequence, then replace the
+    /// snapshot cell. Sequence values start at `1`; a snapshot with sequence
+    /// `0` means no committed event yet.
+    pub fn record(&self, height: u32, hash: Hash256) {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         *self.snapshot.write() = ChainSnapshot {
             epoch: self.epoch,
@@ -147,15 +102,6 @@ impl ChainEventPublisher {
             tip_hash: hash,
             tip_height: height,
         };
-        let hint = ChainEventHint {
-            kind,
-            height,
-            hash,
-            epoch: self.epoch,
-            sequence,
-        };
-        let _ = self.hints.try_send(hint);
-        hint
     }
 }
 

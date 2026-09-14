@@ -260,7 +260,7 @@ fn apply_handles_with_coin_stats_and_utxo(
     let utxo = Arc::new(utxo);
     let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
     let mempool_gateway = MempoolGateway::shared(Arc::clone(&mempool));
-    let (chain_events, _chain_events_rx) = bitcoin_rs_node::state::ChainEventPublisher::detached(0);
+    let chain_events = bitcoin_rs_node::state::ChainEventPublisher::detached(0);
     let handles = Chainstate::new(
         network,
         chain_tip,

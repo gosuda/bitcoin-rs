@@ -44,8 +44,8 @@ Owners:
      remove mined conflicts and descendants, update graph and fee-delta state,
      and update the fee estimator.
   7. Publish the stable coherent generation only after mempool alignment.
-  8. Dispatch notifications, relay, and index wake hints in the declared
-     observable order outside all domain locks.
+  8. Dispatch notifications and relay in the declared observable order
+     outside all domain locks.
 - A failure before stable publication leaves the fence closed until explicit
   recovery. A guard destructor must never quietly reopen the fence after an
   error.

@@ -246,9 +246,11 @@ impl NodeState {
             bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
         utxo_set.set_listener(Box::new(coin_stats_listener.clone()));
         let journal = match journal_bootstrap {
-            Some(bootstrap) => {
-                Some(storage.journal_writer(open_journal_dir(&config.data_dir)?, bootstrap)?)
-            }
+            Some(bootstrap) => Some(
+                storage
+                    .deferred
+                    .journal_writer(open_journal_dir(&config.data_dir)?, bootstrap)?,
+            ),
             None => None,
         };
         let utxo = Arc::new(utxo_set);
@@ -269,8 +271,7 @@ impl NodeState {
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         // Created before the txindex worker spawn: the worker mirrors this
         // publisher's snapshot into its persisted consumer cursor.
-        let (chain_events_raw, chain_event_hints_rx_raw) =
-            ChainEventPublisher::new(epoch, initial_snapshot);
+        let chain_events_raw = ChainEventPublisher::new(epoch, initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
         let chain_transition = Arc::new(parking_lot::Mutex::new(()));
@@ -357,15 +358,12 @@ impl NodeState {
         let banned = p2p.banned_handle();
         let peer_table = p2p.table();
         let p2p_outbound_tx = p2p.outbound_sender();
-        let p2p_outbound_rx = p2p.outbound_receiver();
-        let inbound_headers_tx = p2p.inbound_headers_sender();
         let inbound_headers_rx = p2p.inbound_headers_receiver();
         let inbound_blocks_tx = p2p.inbound_blocks_sender();
         let inbound_blocks_rx = p2p.inbound_blocks_receiver();
         let (inbound_tx_tx, inbound_tx_rx_raw) =
             crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundTx>(INBOUND_TX_CHANNEL_LIMIT);
         let inbound_tx_rx = Arc::new(Mutex::new(inbound_tx_rx_raw));
-        let chain_event_hints_rx = Arc::new(Mutex::new(chain_event_hints_rx_raw));
         // The template-coordinator wake exists from node birth so the apply
         // path and the gateway can fire it before `run` builds the
         // coordinator; the coordinator attaches itself once constructed.
@@ -482,14 +480,14 @@ impl NodeState {
             sync.install_budget(fast_sync_budget());
         }
         let prune_service = if config.storage.prune_target_mb > 0 {
-            Some(storage.prune_service(
-                &block_files,
-                &block_body_store,
+            Some(storage.deferred.prune_service(
+                Arc::clone(&block_files),
+                Arc::clone(&block_body_store),
                 Arc::clone(&blocks),
                 Arc::clone(&transactions),
                 apply_handles.prune_authority(),
-                &durable_tip_height,
-                &retention,
+                Arc::clone(&durable_tip_height),
+                Arc::clone(&retention),
             )?)
         } else {
             None
@@ -536,15 +534,10 @@ impl NodeState {
             peer_table,
             banned,
             p2p_outbound_tx,
-            p2p_outbound_rx,
-            inbound_headers_tx,
-            inbound_headers_rx,
             inbound_blocks_tx,
-            inbound_blocks_rx,
             inbound_tx_tx,
             inbound_tx_rx,
             chain_events: Arc::clone(&chain_events),
-            chain_event_hints_rx,
             apply_handles,
             followers,
             sync,
