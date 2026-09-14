@@ -494,6 +494,7 @@ mod body_position_prefetch_tests {
     }
 
     #[test]
+    // Contract: `crates/storage/README.md`, “Immutable block-body persistence contract”.
     fn persisting_same_block_body_twice_appends_once() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
