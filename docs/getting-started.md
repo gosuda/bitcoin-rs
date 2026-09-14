@@ -1,9 +1,5 @@
 # Getting started
 
-For a bounded first visit, follow the [local regtest evaluation](local-evaluation.md).
-It covers build, public reads, shutdown, and same-directory reopen without
-reusing a production datadir. Its runtime verification status is stated there.
-
 ## Prerequisites
 
 The repository development toolchain is `stable`; the workspace MSRV is Rust `1.95.0`. See [policies/source-compatibility.md](policies/source-compatibility.md).
@@ -133,7 +129,7 @@ ZMQ endpoint groups are configured with `[[notifications.zmq]]` (`endpoint`, `to
 
 Follow [policies/db-migration.md](policies/db-migration.md) for authoritative and owner-local format changes. Never treat a schema mismatch as permission to rewrite or delete an operator datadir implicitly.
 
-The target durable-root recovery model and its current evidence status are summarized in [chainstate-recovery.md](chainstate-recovery.md) and owned normatively by [contracts/recovery.md](contracts/recovery.md).
+The durable-root recovery model and its evidence status are owned by [contracts/recovery.md](contracts/recovery.md).
 
 ## Measure storage
 

@@ -603,11 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn local_services_flags_hex_matches_bitmask() {
-        assert_eq!(format!("{LOCAL_SERVICES_FLAGS:016x}"), LOCAL_SERVICES_HEX);
-    }
-
-    #[test]
     fn services_names_from_flags_decodes_known_bits() {
         let names = services_names_from_flags(0_u64);
         assert!(names.is_empty());

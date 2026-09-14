@@ -104,8 +104,7 @@ nodes. None of these can be started from the current tree:
 - The P2P lane's product form (live loopback IBD between real nodes) is
   not shipped: `tools/benchmark-campaign/p2p_loopback.py` is a fixture
   harness with a scripted peer, and the historical `mainnet_prefix_replay`
-  tool used for the June 150k processing-bound comparison was retired
-  (`docs/solutions/best-practices/small-window-benchmarks-do-not-predict-at-scale-throughput.md`).
+  tool used for the June 150k processing-bound comparison was retired.
   A real `bitcoin-rs --connect <Core>` loopback IBD is possible in
   principle but has no stop-at-height, so it cannot stop exactly at
   C150/Cmodern tip, and the comparator also requires RPC-ready within

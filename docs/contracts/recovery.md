@@ -136,7 +136,7 @@ recovery contract.
 
 ### `RCV-04`: Crash matrix
 
-The crash and error points in `docs/contracts/chainstate-recovery.md` and
+The crash and error points in this contract and
 `docs/policies/db-migration.md` produce exactly these results:
 
 | Crash or error point | Recovery result |

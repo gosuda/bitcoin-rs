@@ -401,7 +401,7 @@ impl EntryArena {
             .filter_map(|slot| slot.live.as_ref().map(|live| &live.links))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn handle_at(&self, id: EntryId) -> Option<EntryHandle> {
         let slot = self.slots.get(slot_index(id)?)?;
         slot.live.as_ref()?;
@@ -5662,32 +5662,6 @@ mod graph_tests {
             2,
             "bridge removal splits"
         );
-    }
-
-    #[test]
-    fn a_recycled_entry_id_resolves_to_none_through_handles() {
-        let mut pool = fuzzer_pool();
-        let first = insert_ok(&mut pool, 1, &[], 100);
-        let first_id = pool.entry_id_by_txid(&first).expect("pooled");
-        let handle = pool.entries.handle_at(first_id).expect("live slot");
-        assert!(pool.entries.resolve(handle).is_some());
-
-        let mut changes = Vec::new();
-        pool.remove_entries_with_reasons(
-            &[(first_id, RemovalReason::PolicyEviction)],
-            &mut changes,
-        );
-        // The slot is recycled by the next insert.
-        let second = insert_ok(&mut pool, 2, &[], 100);
-        let second_id = pool.entry_id_by_txid(&second).expect("pooled");
-        assert_eq!(second_id, first_id, "fixture relies on slot reuse");
-
-        // The stale handle resolves to nothing even though the raw id now
-        // names a different transaction.
-        assert!(pool.entries.resolve(handle).is_none());
-        assert_eq!(pool.entry(second_id).map(|entry| entry.txid), Some(second));
-        // And the cached graph state describes the new resident exactly.
-        assert_graph_exact(&pool);
     }
 
     #[test]

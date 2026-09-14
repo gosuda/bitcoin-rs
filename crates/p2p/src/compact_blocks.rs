@@ -532,7 +532,8 @@ mod tests {
     }
 
     /// A `blocktxn` whose size does not match the outstanding request falls
-    /// back to the full block instead of guessing.
+    /// back to the full block instead of guessing. A late retry for the same
+    /// block after fallback is ignored.
     #[test]
     fn mismatched_blocktxn_falls_back() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x77);
@@ -555,6 +556,17 @@ mod tests {
         };
         let outcome = reconstruction.receive_blocktxn(&wrong_size, now());
         assert!(matches!(outcome, Outcome::Fallback(_)));
+
+        let late = BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: request.txs_request.block_hash,
+                transactions: vec![],
+            },
+        };
+        assert!(matches!(
+            reconstruction.receive_blocktxn(&late, now()),
+            Outcome::Idle
+        ));
     }
 
     /// A `blocktxn` for an unknown (or expired) block does nothing, and the

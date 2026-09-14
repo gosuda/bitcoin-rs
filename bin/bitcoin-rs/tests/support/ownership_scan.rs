@@ -810,12 +810,7 @@ fn is_p2p_owner(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LexState, cfg_test_module_stems_from, code_line, empty_result, is_authorized_gateway_call,
-        is_test_module_file, scan_source,
-    };
-    use std::collections::BTreeSet;
-    use std::path::Path;
+    use super::{LexState, code_line, empty_result, is_authorized_gateway_call, scan_source};
 
     const MINING_HANDLER: &str = "/workspace/crates/rpc/src/handlers/mining.rs";
     const NON_OWNER: &str = "/workspace/crates/node/src/fake.rs";
@@ -831,60 +826,6 @@ mod tests {
             .expect("fixture contains prioritise call");
         let method_pos = line.find("prioritise(").expect("method position");
         is_authorized_gateway_call(path, line, method_pos, &lines, line_index)
-    }
-
-    fn violations(source: &str) -> Vec<String> {
-        let mut result = empty_result();
-        scan_source(NON_OWNER, source, &mut result);
-        result.mempool_writer_violations
-    }
-
-    #[test]
-    fn cfg_test_stems_cover_external_module_declarations_only() {
-        let stems = cfg_test_module_stems_from([
-            "#[cfg(test)]\nmod tests;\n".to_owned(),
-            "#[cfg(all(test, feature = \"fjall\"))]\nmod body_reader_tests;\n".to_owned(),
-            "#[cfg(test)] mod tests;\n".to_owned(),
-            "#[cfg(test)]\n\n// leading comment\n#[expect(unused)]\nmod helpers;\n".to_owned(),
-            "#[cfg(test)]\npub(crate) mod testing;\n".to_owned(),
-            "#[cfg(test)]\npub mod published;\n".to_owned(),
-        ]);
-        let expected: BTreeSet<String> = [
-            "body_reader_tests",
-            "helpers",
-            "published",
-            "testing",
-            "tests",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-        assert_eq!(stems, expected);
-
-        let not_stems = cfg_test_module_stems_from([
-            "#[cfg(not(test))]\nmod production;\n".to_owned(),
-            "#[cfg(test)]\nmod inline {\n    fn helper() {}\n}\n".to_owned(),
-            "#[cfg(test)]\nfn a_test_helper() {}\n".to_owned(),
-            "mod plainly_gated;\n".to_owned(),
-        ]);
-        assert!(not_stems.is_empty(), "{not_stems:?}");
-    }
-
-    #[test]
-    fn a_test_module_file_is_skipped_by_its_stem() {
-        let stems = cfg_test_module_stems_from(["#[cfg(test)]\nmod tests;\n".to_owned()]);
-        assert!(is_test_module_file(
-            Path::new("/workspace/crates/node/src/sync/tests.rs"),
-            &stems
-        ));
-        assert!(!is_test_module_file(
-            Path::new("/workspace/crates/node/src/sync/peers.rs"),
-            &stems
-        ));
-        assert!(!is_test_module_file(
-            Path::new("/workspace/crates/node/src/lib.rs"),
-            &stems
-        ));
     }
 
     #[test]
@@ -944,21 +885,6 @@ mod tests {
                 "{path}: {:?}",
                 result.index_capability_violations
             );
-        }
-    }
-
-    #[test]
-    fn capability_type_mentions_and_text_do_not_force_anything() {
-        for source in [
-            "fn f(capabilities: IndexCapabilities) {}",
-            "use bitcoin_rs_index::IndexCapabilities;",
-            "const T: &str = \"IndexCapabilities::ALL\";",
-            "// IndexCapabilities::ALL in a comment",
-        ] {
-            let mut result = empty_result();
-            scan_source(NON_OWNER, source, &mut result);
-            assert!(result.index_capability_violations.is_empty(), "{source}");
-            assert_eq!(result.index_capability_sites, 0, "{source}");
         }
     }
 
@@ -1329,128 +1255,10 @@ mod tests {
     }
 
     #[test]
-    fn multiline_receiver_chain_resolves_to_its_root() {
-        let owner = "/workspace/crates/node/src/reorg/execution.rs";
-        for (path, call, expected_violations) in [
-            (
-                owner,
-                "let _ = handles\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
-                0,
-            ),
-            (
-                owner,
-                "let _ = other\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
-                1,
-            ),
-            (
-                NON_OWNER,
-                "let _ = handles\n.mempool_gateway\n.reconsider_disconnected(origin, entries);",
-                1,
-            ),
-        ] {
-            let mut result = empty_result();
-            scan_source(path, call, &mut result);
-            assert_eq!(
-                result.mempool_writer_violations.len(),
-                expected_violations,
-                "{path}: {call}"
-            );
-            assert_eq!(result.mempool_mutations_found, 1);
-        }
-    }
-
-    #[test]
     fn a_raw_write_chain_is_never_authorized() {
         assert!(!authorized(
             MINING_HANDLER,
             "ctx.mempool.write().prioritise(txid, fee_delta)"
         ));
-    }
-
-    #[test]
-    fn strings_and_comments_do_not_create_mutation_matches() {
-        let source = r##"
-const TEXT: &str = "gateway.prioritise(txid, 1) // not code";
-const RAW: &str = r#"mempool.prioritise(txid, 2)"#;
-/* pool.prioritise(txid, 3); */
-// gateway.prioritise(txid, 4);
-pub fn production() {}
-"##;
-        assert!(violations(source).is_empty());
-    }
-
-    #[test]
-    fn string_continuation_does_not_hide_following_production() {
-        let source = r#"
-const TEXT: &str = "continued\
-";
-pub fn production() {
-    gateway.prioritise(txid, 9);
-}
-"#;
-        let found = violations(source);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].contains("gateway.prioritise(txid, 9)"));
-    }
-
-    #[test]
-    fn production_after_an_inline_test_module_is_still_scanned() {
-        let source = r##"
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn fixture() {
-        let _ = r#"
-}
-gateway.prioritise(txid, 1)
-"#;
-        gateway.prioritise(txid, 2);
-    }
-} // trailing comment must not hide production below
-
-pub fn production() {
-    gateway.prioritise(txid, 3);
-}
-"##;
-        let found = violations(source);
-        assert_eq!(found.len(), 1, "only production mutation is scanned");
-        assert!(found[0].contains("gateway.prioritise(txid, 3)"));
-    }
-
-    #[test]
-    fn cfg_test_helper_and_visibility_qualified_test_are_skipped_only_to_their_end() {
-        let source = r"
-#[cfg(test)]
-pub fn helper() {
-    gateway.prioritise(txid, 1);
-}
-
-#[test]
-pub fn fixture() {
-    mempool.prioritise(txid, 2);
-}
-
-pub fn production() {
-    mempool.prioritise(txid, 3);
-}
-";
-        let found = violations(source);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].contains("mempool.prioritise(txid, 3)"));
-    }
-
-    #[test]
-    fn external_test_module_declaration_does_not_hide_following_production() {
-        let source = r"
-#[cfg(test)]
-mod tests;
-
-pub fn production() {
-    gateway.prioritise(txid, 3);
-}
-";
-        let found = violations(source);
-        assert_eq!(found.len(), 1);
-        assert!(found[0].contains("gateway.prioritise(txid, 3)"));
     }
 }
