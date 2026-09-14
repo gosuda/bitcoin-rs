@@ -335,6 +335,17 @@ pub struct OpenDerivedIndex {
     pub batch_limits: PreparedBatchLimits,
 }
 
+/// Error returned while persisting rollback evidence.
+#[derive(Debug, thiserror::Error)]
+pub enum IndexAheadError {
+    /// Evidence persistence failed while performing I/O.
+    #[error("rollback evidence I/O error: {0}")]
+    Io(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// Evidence could not be serialized.
+    #[error("rollback evidence serialization error: {0}")]
+    Serialization(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
 /// Sink for index-ahead rollback evidence.
 ///
 /// When a durable watermark sits above the restored applied tip, the worker
@@ -351,7 +362,7 @@ pub trait IndexAheadSink: Send + Sync {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    ) -> Result<(), IndexAheadError>;
 }
 
 /// Exact spent-coin script anchor decoded from one block's undo record.
@@ -446,7 +457,7 @@ impl IndexAheadSink for RecordedIndexAhead {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), IndexAheadError> {
         self.calls.lock().push((
             capability.to_owned(),
             index_height,
@@ -475,7 +486,7 @@ impl IndexAheadSink for NoopIndexAheadSink {
         _index_hash_be: &str,
         _depth: u32,
         _unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), IndexAheadError> {
         Ok(())
     }
 }
@@ -625,7 +636,7 @@ pub enum DerivedIndexWorkerError {
     },
     /// The rollback evidence sink failed to publish the index-ahead event.
     #[error("txindex worker: rollback evidence marker not written: {0}")]
-    RollbackEvidence(#[source] Box<dyn std::error::Error + Send + Sync>),
+    RollbackEvidence(#[source] IndexAheadError),
 }
 
 impl DerivedIndexWorkerError {

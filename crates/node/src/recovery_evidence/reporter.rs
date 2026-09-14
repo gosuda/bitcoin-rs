@@ -51,7 +51,7 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
         index_hash_be: &str,
         depth: u32,
         unix_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), bitcoin_rs_index::runtime::IndexAheadError> {
         Self::report_index_ahead(
             self,
             capability,
@@ -62,7 +62,14 @@ impl bitcoin_rs_index::runtime::IndexAheadSink for RecoveryReporter {
             depth,
             unix_secs,
         )
-        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })
+        .map_err(|error| match error {
+            EvidenceError::Io(error) => {
+                bitcoin_rs_index::runtime::IndexAheadError::Io(Box::new(error))
+            }
+            EvidenceError::Json(error) => {
+                bitcoin_rs_index::runtime::IndexAheadError::Serialization(Box::new(error))
+            }
+        })
     }
 }
 
