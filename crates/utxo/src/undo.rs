@@ -1,7 +1,7 @@
 //! Block undo persistence and the marker-fenced UTXO rollback.
 //!
-//! Node decides when a block disconnects and orders it against its other
-//! stores; this module owns the undo row and the rollback that consumes it.
+//! Node orders a disconnect against its other stores; this module owns the
+//! undo row and the rollback that consumes it.
 
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::{StorageError, UndoStore};
@@ -10,12 +10,12 @@ use crate::set::{UndoBatch, UtxoError, UtxoSet};
 use crate::stats::{CoinStatsListener, CoinStatsRewindError};
 use crate::undo_codec::{self, UndoCodecError};
 
-/// Encodes and persists a block's undo record, returning the encoded bytes so
-/// the caller can name them again in its durable head batch.
+/// Encodes and persists a block's undo record, returning the bytes so the
+/// caller can put the same row into its durable head batch.
 ///
 /// # Errors
 ///
-/// Propagates the store's write failure.
+/// The store's write failure.
 pub fn persist_block_undo(
     store: &dyn UndoStore,
     height: u32,
@@ -29,24 +29,15 @@ pub fn persist_block_undo(
 
 /// Why a stored undo record could not be turned back into an [`UndoBatch`].
 #[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
 pub enum UndoLoadError {
-    /// Reading the stored record failed.
     #[error("undo record read: {0}")]
     Read(#[source] StorageError),
-    /// No record is stored for the block.
     #[error("no undo record for block {hash} at height {height}")]
-    Missing {
-        /// Block whose record is absent.
-        hash: Hash256,
-        /// Height the block was applied at.
-        height: u32,
-    },
-    /// The stored record does not decode as this block's.
+    Missing { hash: Hash256, height: u32 },
     #[error("undo record for block {hash} is unreadable: {source}")]
     Unreadable {
-        /// Block whose record is unreadable.
         hash: Hash256,
-        /// Why the codec rejected it.
         #[source]
         source: UndoCodecError,
     },
@@ -56,8 +47,8 @@ pub enum UndoLoadError {
 ///
 /// # Errors
 ///
-/// [`UndoLoadError`] when the read fails, the record is absent, or it does not
-/// decode for this block.
+/// Read failure, absent record, or a record that does not decode as this
+/// block's.
 pub fn load_block_undo(
     store: &dyn UndoStore,
     height: u32,
@@ -72,46 +63,37 @@ pub fn load_block_undo(
 
 /// The block a rollback takes back out of the UTXO set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
 pub struct BlockRollback {
-    /// Hash of the block being disconnected.
     pub hash: Hash256,
-    /// Height it was connected at; keys the marker.
     pub height: u32,
-    /// Height the coinstats land on once the block is gone.
     pub parent_height: u32,
-    /// Transactions the block contributed to the coinstats count.
+    /// Transactions the block added to the coinstats count.
     pub tx_count_delta: u64,
 }
 
-/// A refused or failed block rollback. Only `Refused` leaves state untouched;
-/// every other variant fires after the marker is armed and may leave state
-/// torn for recovery to reconcile.
+/// Only `Refused` leaves state untouched; the rest fire after the marker is
+/// armed and may leave state torn for recovery to reconcile.
 #[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
 pub enum RollbackError {
-    /// The marker could not be read or armed; nothing was touched.
     #[error("rollback refused: {0}")]
     Refused(#[source] StorageError),
-    /// Applying the undo batch to the UTXO set failed part-way.
     #[error("utxo undo: {0}")]
     Utxo(#[source] UtxoError),
-    /// Rewinding the block-level coinstats failed.
     #[error("coinstats rewind: {0}")]
     CoinStats(#[source] CoinStatsRewindError),
-    /// Moving the marker to `RolledBack` failed.
     #[error("disconnect marker: {0}")]
     Marker(#[source] StorageError),
 }
 
 /// Rolls one block out of the UTXO set under a durable disconnect marker.
 ///
-/// The marker is armed before the first mutation and moved to `RolledBack`
-/// after the last, so it covers exactly the window a crash can tear. It is
-/// read first because arming overwrites an earlier disconnect's `RolledBack`
-/// debt, which a refusal would otherwise clear. On success the marker stays
-/// `RolledBack` until the caller has durably published the rolled-back state.
-///
-/// [`CoinStatsListener`] already follows [`UtxoSet::undo_block`] per coin;
-/// only the block-level height and transaction count are rewound here.
+/// The marker is read before arming because arming overwrites an earlier
+/// disconnect's `RolledBack` debt, which a refusal would otherwise clear. On
+/// success it stays `RolledBack` until the caller durably publishes the
+/// rolled-back state. Per-coin coinstats follow [`UtxoSet::undo_block`]
+/// through the listener; only height and transaction count are rewound here.
 ///
 /// # Errors
 ///
@@ -148,7 +130,9 @@ pub fn rollback_block(
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, Txid};
-    use bitcoin_rs_storage::{DisconnectPhase, InMemoryUndoStore, StorageError, UndoStore};
+    use bitcoin_rs_storage::{
+        DisconnectMarker, DisconnectPhase, InMemoryUndoStore, StorageError, UndoStore,
+    };
 
     use super::*;
     use crate::stats::CoinStats;
@@ -180,15 +164,10 @@ mod tests {
         }
     }
 
-    fn sample_undo() -> UndoBatch {
-        let mut undo = UndoBatch::default();
-        undo.restore(UtxoAdd::new(FUNDED, coin(900), true, 1));
-        undo.remove(CREATED);
-        undo
-    }
-
-    /// A set holding `FUNDED` at height 1 with coinstats listening.
-    fn seeded() -> Result<(UtxoSet, CoinStatsListener), Box<dyn std::error::Error>> {
+    /// `FUNDED` at height 1, then the block at `HEIGHT` spending it and
+    /// creating `CREATED`; returns the set, its listener, the observable state
+    /// before that block, and the block's undo.
+    fn connected() -> Result<(UtxoSet, CoinStatsListener, State, UndoBatch), UtxoError> {
         let mut utxo = UtxoSet::new();
         let coin_stats = CoinStatsListener::new(CoinStats::new());
         utxo.set_listener(Box::new(coin_stats.clone()));
@@ -196,12 +175,8 @@ mod tests {
         seed.add(UtxoAdd::new(FUNDED, coin(900), false, 1));
         utxo.commit_block(&seed, &Hash256::from_le_bytes(&[0x01; 32]))?;
         coin_stats.finish_block(1, 1);
-        Ok((utxo, coin_stats))
-    }
+        let before = observe(&utxo, &coin_stats)?;
 
-    /// Connects the block at `HEIGHT` that spends `FUNDED` and creates
-    /// `CREATED`; returns its undo.
-    fn connect(utxo: &UtxoSet, coin_stats: &CoinStatsListener) -> Result<UndoBatch, UtxoError> {
         let mut changes = BlockChanges::default();
         changes.remove(FUNDED);
         changes.add(UtxoAdd::new(CREATED, coin(850), false, HEIGHT));
@@ -210,21 +185,14 @@ mod tests {
         let mut undo = UndoBatch::default();
         undo.restore(UtxoAdd::new(FUNDED, coin(900), false, 1));
         undo.remove(CREATED);
-        Ok(undo)
-    }
-
-    fn connected() -> Result<(UtxoSet, CoinStatsListener, UndoBatch), Box<dyn std::error::Error>> {
-        let (utxo, coin_stats) = seeded()?;
-        let undo = connect(&utxo, &coin_stats)?;
-        Ok((utxo, coin_stats, undo))
+        Ok((utxo, coin_stats, before, undo))
     }
 
     /// UTXO digest, coinstats digest (`MuHash` limbs are representation, not
     /// state) and the coinstats scalars.
-    fn observe(
-        utxo: &UtxoSet,
-        coin_stats: &CoinStatsListener,
-    ) -> Result<(Hash256, Hash256, [u64; 5]), Box<dyn std::error::Error>> {
+    type State = (Hash256, Hash256, [u64; 5]);
+
+    fn observe(utxo: &UtxoSet, coin_stats: &CoinStatsListener) -> Result<State, UtxoError> {
         let s = coin_stats.snapshot();
         Ok((
             aggregate_hash(utxo)?,
@@ -239,16 +207,6 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn persisted_record_round_trips() -> TestResult {
-        let store = InMemoryUndoStore::default();
-        let undo = sample_undo();
-        let record = persist_block_undo(&store, HEIGHT, HASH, &undo)?;
-        assert_eq!(store.load_undo(HEIGHT, HASH)?, Some(record));
-        assert_eq!(load_block_undo(&store, HEIGHT, HASH)?, undo);
-        Ok(())
-    }
-
     #[cfg(feature = "fjall")]
     #[test]
     fn persisted_record_survives_reopening_the_store() -> TestResult {
@@ -257,7 +215,7 @@ mod tests {
         use bitcoin_rs_storage::{FjallStore, KvUndoStore};
 
         let dir = tempfile::tempdir()?;
-        let undo = sample_undo();
+        let (.., undo) = connected()?;
         persist_block_undo(
             &KvUndoStore::new(Arc::new(FjallStore::open(dir.path())?)),
             HEIGHT,
@@ -270,17 +228,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_record_is_missing_not_empty() {
-        let outcome = load_block_undo(&InMemoryUndoStore::default(), HEIGHT, HASH);
+    fn missing_and_foreign_records_are_refused() -> TestResult {
+        let store = InMemoryUndoStore::default();
+        let outcome = load_block_undo(&store, HEIGHT, HASH);
         assert!(
             matches!(outcome, Err(UndoLoadError::Missing { hash, height }) if hash == HASH && height == HEIGHT),
             "{outcome:?}"
         );
-    }
 
-    #[test]
-    fn record_stored_under_another_block_is_unreadable() -> TestResult {
-        let store = InMemoryUndoStore::default();
         let other = Hash256::from_le_bytes(&[0xab; 32]);
         let record = persist_block_undo(&store, HEIGHT, other, &UndoBatch::default())?;
         store.persist_undo(HEIGHT, HASH, &record)?;
@@ -294,9 +249,7 @@ mod tests {
 
     #[test]
     fn rollback_restores_the_exact_prior_state() -> TestResult {
-        let (utxo, coin_stats) = seeded()?;
-        let before = observe(&utxo, &coin_stats)?;
-        let undo = connect(&utxo, &coin_stats)?;
+        let (utxo, coin_stats, before, undo) = connected()?;
         let store = InMemoryUndoStore::default();
 
         rollback_block(&store, &utxo, &coin_stats, &ROLLBACK, &undo)?;
@@ -315,15 +268,14 @@ mod tests {
         Ok(())
     }
 
-    /// A store whose marker writes fail in a chosen phase.
+    /// Marker writes fail in the chosen phase.
     #[derive(Default)]
-    struct MarkerFailsStore {
+    struct MarkerFails {
         inner: InMemoryUndoStore,
-        fail_arm: bool,
-        fail_complete: bool,
+        at: Option<DisconnectPhase>,
     }
 
-    impl UndoStore for MarkerFailsStore {
+    impl UndoStore for MarkerFails {
         fn persist_undo(&self, h: u32, hash: Hash256, r: &[u8]) -> Result<(), StorageError> {
             self.inner.persist_undo(h, hash, r)
         }
@@ -331,13 +283,13 @@ mod tests {
             self.inner.load_undo(h, hash)
         }
         fn arm_disconnect(&self, h: u32, hash: Hash256) -> Result<(), StorageError> {
-            if self.fail_arm {
+            if self.at == Some(DisconnectPhase::InFlight) {
                 return Err(StorageError::Backend("injected".into()));
             }
             self.inner.arm_disconnect(h, hash)
         }
         fn complete_disconnect(&self, h: u32, hash: Hash256) -> Result<(), StorageError> {
-            if self.fail_complete {
+            if self.at == Some(DisconnectPhase::RolledBack) {
                 return Err(StorageError::Backend("injected".into()));
             }
             self.inner.complete_disconnect(h, hash)
@@ -345,37 +297,35 @@ mod tests {
         fn disarm_disconnect(&self) -> Result<(), StorageError> {
             self.inner.disarm_disconnect()
         }
-        fn load_disconnect_marker(
-            &self,
-        ) -> Result<Option<bitcoin_rs_storage::DisconnectMarker>, StorageError> {
+        fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
             self.inner.load_disconnect_marker()
         }
     }
 
     #[test]
     fn arm_failure_refuses_before_any_mutation() -> TestResult {
-        let (utxo, coin_stats, undo) = connected()?;
-        let before = observe(&utxo, &coin_stats)?;
-        let store = MarkerFailsStore {
-            fail_arm: true,
-            ..MarkerFailsStore::default()
+        let (utxo, coin_stats, _, undo) = connected()?;
+        let connected_state = observe(&utxo, &coin_stats)?;
+        let store = MarkerFails {
+            at: Some(DisconnectPhase::InFlight),
+            ..MarkerFails::default()
         };
         let outcome = rollback_block(&store, &utxo, &coin_stats, &ROLLBACK, &undo);
         assert!(
             matches!(outcome, Err(RollbackError::Refused(_))),
             "{outcome:?}"
         );
-        assert_eq!(observe(&utxo, &coin_stats)?, before);
+        assert_eq!(observe(&utxo, &coin_stats)?, connected_state);
         assert_eq!(store.load_disconnect_marker()?, None);
         Ok(())
     }
 
     #[test]
     fn completion_failure_is_fatal_and_leaves_the_marker_in_flight() -> TestResult {
-        let (utxo, coin_stats, undo) = connected()?;
-        let store = MarkerFailsStore {
-            fail_complete: true,
-            ..MarkerFailsStore::default()
+        let (utxo, coin_stats, _, undo) = connected()?;
+        let store = MarkerFails {
+            at: Some(DisconnectPhase::RolledBack),
+            ..MarkerFails::default()
         };
         let outcome = rollback_block(&store, &utxo, &coin_stats, &ROLLBACK, &undo);
         assert!(
@@ -389,7 +339,7 @@ mod tests {
 
     #[test]
     fn coinstats_refusal_after_the_undo_is_fatal() -> TestResult {
-        let (utxo, coin_stats, undo) = connected()?;
+        let (utxo, coin_stats, _, undo) = connected()?;
         let wrong_height = BlockRollback {
             height: HEIGHT + 1,
             ..ROLLBACK

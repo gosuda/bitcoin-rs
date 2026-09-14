@@ -20,10 +20,8 @@ impl OutputSource for UtxoSet {
 }
 
 /// The committed UTXO set plus the net effect of window blocks already prepared.
-///
 /// Spends are tombstoned rather than removed so a later window block can
-/// recreate an outpoint; two separate sets would answer that wrongly in either
-/// consultation order.
+/// recreate an outpoint.
 pub struct WindowOverlay<'u> {
     base: &'u UtxoSet,
     max_script_size: usize,
@@ -32,8 +30,8 @@ pub struct WindowOverlay<'u> {
 }
 
 impl<'u> WindowOverlay<'u> {
-    /// Starts an empty view over `base`; `max_script_size` is the limit the
-    /// committed set applies when it skips oversized outputs.
+    /// `max_script_size` is the limit the committed set applies when it skips
+    /// oversized outputs.
     pub fn new(base: &'u UtxoSet, max_script_size: usize) -> Self {
         Self {
             base,
@@ -42,17 +40,15 @@ impl<'u> WindowOverlay<'u> {
         }
     }
 
-    /// Folds one block's net effect into the view.
-    ///
-    /// `same_block_spent` outpoints are skipped on both sides, exactly as
-    /// [`build_block_changes`](crate::connect::build_block_changes) does: they
-    /// never reach the committed set. Genesis is a no-op for the same reason
-    /// it is in the apply path.
+    /// Folds one block's net effect into the view. `same_block_spent`
+    /// outpoints are skipped on both sides, as in
+    /// [`build_block_changes`](crate::connect::build_block_changes). Genesis is
+    /// a no-op, as in the apply path.
     ///
     /// # Errors
     ///
-    /// Refuses a `txids` slice that does not cover every transaction; zipping
-    /// would silently drop the trailing ones.
+    /// A `txids` slice that does not cover every transaction; zipping would
+    /// silently drop the trailing ones.
     pub fn advance(
         &mut self,
         block: &Block,
@@ -105,15 +101,10 @@ impl<'u> WindowOverlay<'u> {
 
 /// Why the view refused to fold in a block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[allow(missing_docs)]
 pub enum WindowOverlayError {
-    /// The caller's txid list does not cover the block's transactions.
     #[error("block has {transactions} transactions but {txids} txids were supplied")]
-    TxidCountMismatch {
-        /// Transactions in the block.
-        transactions: usize,
-        /// Txids the caller supplied.
-        txids: usize,
-    },
+    TxidCountMismatch { transactions: usize, txids: usize },
 }
 
 impl OutputSource for WindowOverlay<'_> {
@@ -140,18 +131,7 @@ mod tests {
     const HEIGHT: u32 = 7;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn txid_of(byte: u8) -> Txid {
-        Txid(Hash256::from_le_bytes(&[byte; 32]))
-    }
-
-    fn out(script_pubkey: Vec<u8>, value: u64) -> TxOut {
-        TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: script_pubkey.into(),
-        }
-    }
-
-    fn tx(previous_output: OutPoint, output: TxOut) -> Tx {
+    fn tx(previous_output: OutPoint, script_pubkey: Vec<u8>, value: u64) -> Tx {
         Tx {
             version: 1,
             lock_time: LockTime::ZERO,
@@ -161,7 +141,10 @@ mod tests {
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
-            outputs: vec![output],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: script_pubkey.into(),
+            }],
         }
     }
 
@@ -169,12 +152,13 @@ mod tests {
     fn paying(script_pubkey: Vec<u8>, value: u64) -> Tx {
         tx(
             OutPoint::new(Txid::default(), u32::MAX),
-            out(script_pubkey, value),
+            script_pubkey,
+            value,
         )
     }
 
     fn spending(previous_output: OutPoint) -> Tx {
-        let mut tx = tx(previous_output, out(vec![0x51], 1));
+        let mut tx = tx(previous_output, vec![0x51], 1);
         tx.version = 2;
         tx
     }
@@ -201,60 +185,40 @@ mod tests {
     }
 
     #[test]
-    fn a_created_output_becomes_visible() -> TestResult {
+    fn create_spend_and_recreate_shadow_the_committed_set() -> TestResult {
         let utxo = UtxoSet::new();
+        let funded = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x31; 32])), 0);
+        let mut seed = UndoBatch::default();
+        seed.restore(UtxoAdd::new(
+            funded,
+            paying(vec![0x51], 900).outputs.remove(0),
+            false,
+            1,
+        ));
+        utxo.undo_block(&seed)?;
         let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying(vec![0x51], 500);
         let created = OutPoint::new(tx.txid(), 0);
-
+        assert!(overlay.get_entry(&funded).is_some());
         assert!(overlay.get_entry(&created).is_none());
-        advance(&mut overlay, vec![tx], HEIGHT)?;
 
+        advance(&mut overlay, vec![tx.clone(), spending(funded)], HEIGHT)?;
+        assert!(overlay.get_entry(&funded).is_none());
         assert_eq!(
             overlay
                 .get_entry(&created)
                 .map(|e| (e.height, e.coinbase, e.txout.value)),
             Some((HEIGHT, true, Amount::from_sat(500)))
         );
-        Ok(())
-    }
 
-    #[test]
-    fn a_spend_tombstones_rather_than_falling_through() -> TestResult {
-        let utxo = UtxoSet::new();
-        let funded = OutPoint::new(txid_of(0x31), 0);
-        let mut seed = UndoBatch::default();
-        seed.restore(UtxoAdd::new(funded, out(vec![0x51], 900), false, 1));
-        utxo.undo_block(&seed)?;
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
-        assert!(overlay.get_entry(&funded).is_some());
-
-        advance(
-            &mut overlay,
-            vec![paying(vec![0x51], 1), spending(funded)],
-            HEIGHT,
-        )?;
-
-        assert!(overlay.get_entry(&funded).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn a_recreated_outpoint_is_live_again() -> TestResult {
-        let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
-        let tx = paying(vec![0x51], 100);
-        let created = OutPoint::new(tx.txid(), 0);
-
-        advance(&mut overlay, vec![tx.clone()], HEIGHT)?;
         advance(
             &mut overlay,
             vec![paying(vec![0x51], 1), spending(created)],
             HEIGHT + 1,
         )?;
         assert!(overlay.get_entry(&created).is_none());
-        advance(&mut overlay, vec![tx], HEIGHT + 2)?;
 
+        advance(&mut overlay, vec![tx], HEIGHT + 2)?;
         assert_eq!(
             overlay.get_entry(&created).map(|e| e.height),
             Some(HEIGHT + 2)
@@ -263,34 +227,37 @@ mod tests {
     }
 
     #[test]
-    fn unspendable_outputs_never_enter_the_view() -> TestResult {
+    fn unspendable_genesis_and_same_block_outputs_never_enter_the_view() -> TestResult {
         let utxo = UtxoSet::new();
         let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let op_return = paying(vec![0x6a], 0);
         let at_limit = paying(vec![0x51; MAX_SCRIPT_SIZE], 1);
         let over_limit = paying(vec![0x51; MAX_SCRIPT_SIZE + 1], 1);
-        let ids = [op_return.txid(), at_limit.txid(), over_limit.txid()];
+        let genesis = paying(vec![0x51], 5_000_000_000);
+        let netted = paying(vec![0x51], 400);
+        let netted_out = OutPoint::new(netted.txid(), 0);
+        let spend = spending(netted_out);
+        let ids = [
+            op_return.txid(),
+            at_limit.txid(),
+            over_limit.txid(),
+            genesis.txid(),
+        ];
 
-        advance(&mut overlay, vec![op_return], HEIGHT)?;
-        advance(&mut overlay, vec![at_limit], HEIGHT + 1)?;
-        advance(&mut overlay, vec![over_limit], HEIGHT + 2)?;
+        advance(&mut overlay, vec![genesis], 0)?;
+        advance(&mut overlay, vec![op_return, at_limit, over_limit], HEIGHT)?;
+        overlay.advance(
+            &block(vec![netted.clone(), spend.clone()]),
+            &[netted.txid(), spend.txid()],
+            HEIGHT + 1,
+            &HashSet::from([netted_out]),
+        )?;
 
         assert!(overlay.get_entry(&OutPoint::new(ids[0], 0)).is_none());
         assert!(overlay.get_entry(&OutPoint::new(ids[1], 0)).is_some());
         assert!(overlay.get_entry(&OutPoint::new(ids[2], 0)).is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn genesis_contributes_nothing() -> TestResult {
-        let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
-        let tx = paying(vec![0x51], 5_000_000_000);
-        let created = OutPoint::new(tx.txid(), 0);
-
-        advance(&mut overlay, vec![tx], 0)?;
-
-        assert!(overlay.get_entry(&created).is_none());
+        assert!(overlay.get_entry(&OutPoint::new(ids[3], 0)).is_none());
+        assert!(!overlay.changed.contains_key(&netted_out));
         Ok(())
     }
 
@@ -298,12 +265,9 @@ mod tests {
     fn a_short_txid_list_is_refused_untouched() {
         let utxo = UtxoSet::new();
         let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
-        let txs = vec![
-            paying(vec![0x51], 1),
-            spending(OutPoint::new(txid_of(5), 0)),
-        ];
+        let txs = vec![paying(vec![0x51], 1), paying(vec![0x52], 2)];
 
-        let outcome = overlay.advance(&block(txs), &[txid_of(6)], HEIGHT, &HashSet::new());
+        let outcome = overlay.advance(&block(txs), &[Txid::default()], HEIGHT, &HashSet::new());
 
         assert_eq!(
             outcome,
@@ -313,25 +277,5 @@ mod tests {
             })
         );
         assert!(overlay.changed.is_empty());
-    }
-
-    #[test]
-    fn an_output_created_and_spent_in_one_block_is_skipped_on_both_sides() -> TestResult {
-        let utxo = UtxoSet::new();
-        let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
-        let tx = paying(vec![0x51], 400);
-        let created = OutPoint::new(tx.txid(), 0);
-        let spend = spending(created);
-        let txids = [tx.txid(), spend.txid()];
-
-        overlay.advance(
-            &block(vec![tx, spend]),
-            &txids,
-            HEIGHT,
-            &HashSet::from([created]),
-        )?;
-
-        assert!(!overlay.changed.contains_key(&created));
-        Ok(())
     }
 }
