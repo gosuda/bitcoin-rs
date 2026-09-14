@@ -16,6 +16,7 @@ use super::restore::STALE_RESTORE_ERROR_THRESHOLD;
 use super::restore::open_journal_dir;
 use super::restore::prepare_initial_chainstate;
 use super::restore::requires_full_revalidation;
+use super::storage::DeferredChainstateServices;
 use super::storage::NodeStorage;
 use super::storage::StoredBlockBodySource;
 use crate::NodeConfig;
