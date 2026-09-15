@@ -190,6 +190,9 @@ fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Err
         entries: vec![child, parent],
     };
     let candidate = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
+    // Contract: docs/contracts/mempool-policy.md#pol-05 makes dependency
+    // links authoritative and requires dependency-closed chunk selection;
+    // an unmet BIP68 finality condition therefore rejects the whole chunk.
     assert!(
         candidate.transactions.is_empty(),
         "the high-fee child and parent are one chunk"
