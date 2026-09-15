@@ -235,6 +235,7 @@ fn launch(
                     "-connect=0",
                     "-dnsseed=0",
                     "-disablewallet",
+                      "-deprecatedrpc=fullrbf",
                     "-rpcuser=parity",
                     "-rpcpassword=parity",
                 ])
