@@ -1,6 +1,6 @@
 use super::*;
 
-fn values(rows: &[(i64, u32)]) -> Vec<FeeWeight> {
+fn values(rows: &[(i128, u32)]) -> Vec<FeeWeight> {
     rows.iter()
         .map(|&(fee, weight)| FeeWeight { fee, weight })
         .collect()

@@ -81,7 +81,7 @@ impl PolicyGraph {
     }
     pub(crate) fn check_limits(&self, limits: MempoolLimits) -> Result<(), RbfError> {
         for members in fee_diagram::components(&self.parents)? {
-            if u32::try_from(members.len()).map_or(true, |count| count > limits.cluster_count) {
+            if !u32::try_from(members.len()).is_ok_and(|count| count <= limits.cluster_count) {
                 return Err(PolicyError::ClusterCountLimit.into());
             }
             let weight = members.iter().try_fold(0_u64, |sum, &node| {
@@ -123,9 +123,9 @@ pub(crate) fn policy_weight(wire_weight: u64, vsize: u32, sigops: u32) -> Result
 }
 
 impl Mempool {
-    pub(crate) fn modified_fee_for(&self, txid: Txid, base_fee: u64) -> Result<i64, RbfError> {
-        let base = i64::try_from(base_fee).map_err(|_| RbfError::ArithmeticOverflow)?;
-        base.checked_add(self.fee_deltas.get(&txid).copied().unwrap_or(0))
+    pub(crate) fn modified_fee_for(&self, txid: Txid, base_fee: u64) -> Result<i128, RbfError> {
+        let base = i128::from(base_fee);
+        base.checked_add(i128::from(self.fee_deltas.get(&txid).copied().unwrap_or(0)))
             .ok_or(RbfError::ArithmeticOverflow)
     }
     pub(crate) fn policy_stamp(&self) -> PolicyStamp {

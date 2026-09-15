@@ -565,7 +565,7 @@ pub struct MempoolChunk {
     /// Snapshot entry positions, in dependency order.
     pub indices: Vec<usize>,
     /// Modified fees used for ordering, including local prioritisation.
-    pub modified_fee: i64,
+    pub modified_fee: i128,
     /// Exact policy weight used in the fee-rate denominator.
     pub policy_weight: u32,
 }
@@ -582,7 +582,7 @@ impl MempoolMiningSnapshot {
                 let weight =
                     crate::accounting::charged_weight(entry.weight, entry.vsize, entry.sigop_cost);
                 Ok(crate::fee_diagram::FeeWeight {
-                    fee: i64::try_from(fee).map_err(|_| crate::FeeDiagramError::Arithmetic)?,
+                    fee,
                     weight: u32::try_from(weight).map_err(|_| crate::FeeDiagramError::Weight)?,
                 })
             })
@@ -5931,6 +5931,11 @@ mod graph_tests {
                     );
                 }
                 assert_graph_exact(&pool);
+            }
+        }
+    }
+}
+      assert_graph_exact(&pool);
             }
         }
     }

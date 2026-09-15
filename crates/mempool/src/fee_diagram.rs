@@ -27,7 +27,7 @@ pub enum FeeDiagramError {
 /// to virtual bytes; using rounded vsize changes comparisons for witnesses.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct FeeWeight {
-    pub fee: i64,
+    pub fee: i128,
     pub weight: u32,
 }
 
