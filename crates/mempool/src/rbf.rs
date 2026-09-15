@@ -293,8 +293,8 @@ impl Mempool {
         incremental_fee_rate: u64,
         sibling_eviction: bool,
     ) -> Result<ReplacementInputs, RbfError> {
-        if u32::try_from(self.conflicting_cluster_count(&conflicts)?)
-            .map_or(true, |count| count > self.limits.max_replacement_clusters)
+        if !u32::try_from(self.conflicting_cluster_count(&conflicts)?)
+            .is_ok_and(|count| count <= self.limits.max_replacement_clusters)
         {
             return Err(if sibling_eviction {
                 RbfError::TooManySiblingConflictingClusters
