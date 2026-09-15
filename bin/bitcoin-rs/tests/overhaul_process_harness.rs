@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
+use bitcoin_rs_mempool::RbfError;
 use serde_json::{Value, json};
 use support::process_node::{
     ClockControl, HarnessError, NodeBinary, ProcessNode, START_TIMEOUT, compare_reply, compare_rpc,
@@ -69,7 +70,7 @@ fn replacement_signaling_differs_from_pinned_core() {
     use bitcoin::Sequence;
     use bitcoin::consensus::encode::serialize_hex;
 
-    const REJECTION: &str = "BIP125 rule 1: an original transaction does not opt in";
+    let rejection = RbfError::Rule1NoOptIn.to_string();
 
     for signals in [false, true] {
         let mut core = start(NodeBinary::ReferenceCore);
@@ -145,9 +146,9 @@ fn replacement_signaling_differs_from_pinned_core() {
                     after["mempool_sequence"].as_u64().expect("pool sequence") > sequence_before
                 );
             } else {
-                assert_eq!(preview[0]["reject-reason"], json!(REJECTION));
+                assert_eq!(preview[0]["reject-reason"], json!(rejection));
                 assert!(
-                    matches!(submitted, Err(HarnessError::Rpc { code: -26, ref message, .. }) if message.contains(REJECTION)),
+                    matches!(submitted, Err(HarnessError::Rpc { code: -26, ref message, .. }) if message.contains(&rejection)),
                     "submission must reject the same policy class: {submitted:?}",
                 );
                 assert_eq!(
