@@ -724,30 +724,6 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
 }
 
 #[test]
-fn sendrawtransaction_rejects_nonsignaling_replacements_with_rule1() -> Result<(), Box<dyn Error>> {
-    let ctx = Arc::new(Context::new());
-    let original = insert_original(&ctx, 0x61, 0xffff_ffff, 4_000, 8_000)?;
-    let replacement = tx(confirmed_outpoint(0x61), 90_000, 0xffff_ffff);
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    let message = reject_message(
-        &handler
-            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))
-            .err()
-            .ok_or("expected rule 1 rejection")?,
-    );
-    assert!(
-        message.contains("BIP125 rule 1"),
-        "unexpected message: {message}"
-    );
-    assert!(
-        ctx.mempool.read().contains_txid(&rpc_txid(&original)),
-        "a rejected replacement leaves the originals pooled"
-    );
-    Ok(())
-}
-
-#[test]
 fn sendrawtransaction_rejects_rule2_replacements_adding_unconfirmed_inputs()
 -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
@@ -923,7 +899,7 @@ fn sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate()
 }
 
 // ---------------------------------------------------------------------------
-// BIP125 both-RPC coverage (rules 1, 4, 5)
+// Signal-independent replacement and retained BIP125 both-RPC coverage
 // ---------------------------------------------------------------------------
 
 /// Asserts that `sendrawtransaction` and `testmempoolaccept` agree on the
@@ -971,7 +947,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
     );
 
     // Direct pool cross-check: the exact RbfError variant must match so a
-    // rule-1 fixture cannot pass on a rule-6 rejection.
+    // fee-increment fixture cannot pass on an eviction-limit rejection.
     let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
     let fee = {
         // WHY: the fee is the input value minus output value; for a
@@ -995,23 +971,31 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
 }
 
 #[test]
-fn bip125_rule1_nonsignaling_originals_reject_on_both_rpcs() -> Result<(), Box<dyn Error>> {
+fn nonsignaling_replacements_agree_on_both_rpcs() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0xa1, 0xffff_ffff, 4_000, 8_000)?;
     let replacement = tx(confirmed_outpoint(0xa1), 90_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
-    let _row = assert_both_rpcs_agree_on_replacement_rejection(
-        &handler,
-        &raw_tx_hex(&replacement),
-        &replacement,
-        "BIP125 rule 1",
-        RbfError::Rule1NoOptIn,
-        &ctx.mempool,
-    )?;
-
-    // A rejected replacement leaves the original pooled.
+    let sequence = ctx.mempool.read().sequence_number();
+    let rows = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(&replacement)]]))?;
+    let row = rows
+        .as_array()
+        .and_then(|rows| rows.first())
+        .ok_or("expected preview row")?;
+    assert_eq!(
+        row.get("allowed").and_then(JsonValueTrait::as_bool),
+        Some(true)
+    );
+    assert_eq!(ctx.mempool.read().sequence_number(), sequence);
     assert!(ctx.mempool.read().contains_txid(&rpc_txid(&original)));
+    let result = handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
+    assert_eq!(result, json!(rpc_txid(&replacement).to_string()));
+    let pool = ctx.mempool.read();
+    assert!(!pool.contains_txid(&rpc_txid(&original)));
+    assert!(pool.contains_txid(&rpc_txid(&replacement)));
+    assert_eq!(pool.len(), 1);
+    assert!(pool.sequence_number() > sequence);
     Ok(())
 }
 

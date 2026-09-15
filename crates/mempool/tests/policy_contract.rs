@@ -188,8 +188,8 @@ fn conflict_pool(signaling: bool) -> Result<ConflictFixture, Box<dyn Error>> {
 }
 
 #[test]
-fn rbf_opt_in_replacement_sweeps_conflicts_and_descendants() -> Result<(), Box<dyn Error>> {
-    let fixture = conflict_pool(true)?;
+fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(), Box<dyn Error>> {
+    let fixture = conflict_pool(false)?;
     let mut pool = fixture.pool;
     // Pays the 12 000 sat evicted package (rule 3), at least its own vsize
     // more (rule 4: 16 000 - 12 000 >= 4 000), and outranks the originals'
@@ -225,26 +225,6 @@ fn rbf_opt_in_replacement_sweeps_conflicts_and_descendants() -> Result<(), Box<d
     );
     assert_eq!(pool.len(), 1);
     assert!(pool.contains_txid(&replacement.txid()));
-    Ok(())
-}
-
-#[test]
-fn rbf_rule1_nonsignaling_originals_reject_on_both_surfaces() -> Result<(), Box<dyn Error>> {
-    let fixture = conflict_pool(false)?;
-    let mut pool = fixture.pool;
-    let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
-
-    let err = pool
-        .replace_transaction(
-            ReplacementCandidate::new(Arc::new(replacement), 4_000, 16_000, 1_000),
-            0,
-            1,
-            0,
-        )
-        .err()
-        .ok_or("expected rule 1 rejection")?;
-    assert_eq!(err, RbfError::Rule1NoOptIn);
-    assert_eq!(pool.len(), 2, "rejection must leave the pool untouched");
     Ok(())
 }
 

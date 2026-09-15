@@ -116,9 +116,8 @@ pub struct MempoolPolicySnapshot {
     /// Fee-rate increment the eviction-floor projection and BIP125 rule 4
     /// (`RbfError::Rule4InsufficientIncrementalFee`) quote, in sat/kvB.
     pub incremental_relay_fee_sat_per_kvb: u64,
-    /// Historical BIP125 rule 1 requires every direct conflict to signal
-    /// replaceability, directly or through an ancestor. The pool has no
-    /// full-RBF mode, so this is always `false`; Core 31.1 differs (#639).
+    /// Replacements do not require BIP125 signaling, so this is always
+    /// `true`. Other replacement policy differences remain under #639.
     pub full_rbf: bool,
     /// The pool rewrites its fee-rate index in the same critical section as
     /// every mutation, so no stale-ordering window exists and the v31
@@ -138,7 +137,7 @@ impl MempoolPolicySnapshot {
             cluster_count: limits.cluster_count,
             cluster_size_vbytes: limits.cluster_size_vbytes,
             incremental_relay_fee_sat_per_kvb: DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB,
-            full_rbf: false,
+            full_rbf: true,
             optimal: true,
         }
     }
@@ -170,9 +169,7 @@ mod tests {
         assert_eq!(snapshot.cluster_count, 64);
         assert_eq!(snapshot.cluster_size_vbytes, 101_000);
         assert_eq!(snapshot.incremental_relay_fee_sat_per_kvb, 1_000);
-        // BIP125 rule 1 (opt-in signaling) is enforced: the pool is not
-        // full-rbf, so the projection must not fabricate `true`.
-        assert!(!snapshot.full_rbf);
+        assert!(snapshot.full_rbf);
         assert!(snapshot.optimal);
     }
 

@@ -468,11 +468,10 @@ mod tests {
             panic!("incrementalrelayfee missing: {result:?}");
         };
         assert!((incremental - 0.00001).abs() < 1e-12);
-        // fullrbf is the real replacement policy — BIP125 rule 1 signaling is
-        // enforced — not the unconditional `true` this handler once emitted.
+        // The projection follows the pool's signal-independent replacement policy.
         assert_eq!(
             result.get("fullrbf").and_then(JsonValueTrait::as_bool),
-            Some(false)
+            Some(true)
         );
     }
 
@@ -505,7 +504,7 @@ mod tests {
         );
         assert_eq!(
             result.get("fullrbf").and_then(JsonValueTrait::as_bool),
-            Some(false)
+            Some(true)
         );
     }
 

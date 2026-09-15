@@ -1079,11 +1079,10 @@ impl Mempool {
         self.entries.iter().map(|(_id, entry)| entry.txid).collect()
     }
 
-    /// Returns txids of mempool entries signalling BIP-125 RBF eligibility.
+    /// Returns txids with explicit BIP125 sequence signaling.
     ///
-    /// An entry is replaceable when ANY of its inputs has `sequence < 0xFFFFFFFE`
-    /// (the BIP-125 opt-in convention). Used by fee-bumping and replacement-eligibility
-    /// queries.
+    /// This reports transaction metadata. Full-RBF admission also considers
+    /// replacements of entries without that signal.
     #[must_use]
     pub fn iter_replaceable_txids(&self) -> Vec<Txid> {
         self.entries
@@ -1743,14 +1742,6 @@ impl Mempool {
         ids.sort_unstable();
         ids.dedup();
         ids
-    }
-
-    pub(crate) fn signals_rbf_including_ancestors(&self, id: EntryId) -> bool {
-        self.entry_signals_rbf(id)
-            || self
-                .ancestor_ids_for_entry(id)
-                .into_iter()
-                .any(|ancestor| self.entry_signals_rbf(ancestor))
     }
 
     pub(crate) fn is_unconfirmed_outpoint(&self, outpoint: OutPoint) -> bool {
@@ -2471,16 +2462,6 @@ impl Mempool {
 
     fn entry_mut(&mut self, id: EntryId) -> Option<&mut MempoolEntry> {
         self.entries.get_mut(id)
-    }
-
-    fn entry_signals_rbf(&self, id: EntryId) -> bool {
-        self.entry(id).is_some_and(|entry| {
-            entry
-                .tx
-                .inputs
-                .iter()
-                .any(|input| input.sequence.to_consensus() < 0xFFFF_FFFE)
-        })
     }
 }
 

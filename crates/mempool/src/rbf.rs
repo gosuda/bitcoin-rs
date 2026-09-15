@@ -65,10 +65,6 @@ pub struct ReplacementPlan {
 /// BIP125 replacement rejection reason.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RbfError {
-    /// Some directly conflicting transaction does not signal replaceability,
-    /// itself or through an ancestor.
-    #[error("BIP125 rule 1: an original transaction does not opt in")]
-    Rule1NoOptIn,
     /// Replacement spends a new unconfirmed input not spent by the originals.
     #[error("BIP125 rule 2: replacement adds a new unconfirmed input")]
     Rule2NewUnconfirmedInput,
@@ -100,17 +96,6 @@ impl Mempool {
             return Ok(ReplacementPlan {
                 evicted: Vec::new(),
             });
-        }
-
-        // Rule 1 is a condition on *every* original the replacement would
-        // evict, not on the set containing one willing member. A candidate
-        // conflicting with an opt-in transaction and a final one would
-        // otherwise evict both -- and the final one never agreed to that.
-        if !direct_conflicts
-            .iter()
-            .all(|id| self.signals_rbf_including_ancestors(*id))
-        {
-            return Err(RbfError::Rule1NoOptIn);
         }
 
         let original_parent_txids = direct_conflicts

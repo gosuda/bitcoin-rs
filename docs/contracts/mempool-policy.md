@@ -103,12 +103,12 @@ holds a second admission evaluator.
 
 ### `POL-05`: Replacement, cluster, and package policy
 
-- The target replacement policy follows the pinned Core 31.1
-  feerate-diagram profile. The current `Mempool::check_replacement`
-  retains historical BIP125 rules, including opt-in signaling. These
-  differences remain recorded under #639 in the policy matrix and
-  deviation ledger; existing BIP125 fixtures prove the current behavior,
-  not Core 31.1 parity.
+- Replacement does not require BIP125 signaling from originals or their
+  ancestors. `Mempool::check_replacement` owns that decision, and the
+  policy snapshot reports `full_rbf = true` for `getmempoolinfo`.
+  The complete Core 31.1 feerate-diagram profile remains the target:
+  current new-input, eviction-count, and direct-fee-rate rules differ
+  as recorded under #639 in the policy matrix and deviation ledger.
 - The pool models each cluster as a dependency DAG with revision-tagged
   membership and cached deterministic linearization chunks. Fee and size
   comparisons use widened checked integer cross products, never floating
@@ -147,13 +147,13 @@ holds a second admission evaluator.
 
 ## Proven by
 
-- `bin/bitcoin-rs/tests/overhaul_process_harness.rs::replacement_signaling_differs_from_pinned_core`:
+- `bin/bitcoin-rs/tests/overhaul_process_harness.rs::replacement_signaling_matches_pinned_core`:
   real Core 31.1 and bitcoin-rs processes receive identical signed
-  transactions. A higher-fee replacement of a nonsignaling original
-  succeeds only on Core; the opt-in control succeeds on both. Preview
-  and submission agree, previews preserve membership and sequence, and
-  rejected submission leaves the original in place. This is signaling
-  deviation evidence, not completion of POL-05 or #639.
+  transactions. Higher-fee replacements of nonsignaling and opt-in
+  originals succeed on both; underpaying replacements reject on both.
+  Preview preserves membership and sequence, rejection leaves the original
+  in place, and `fullrbf` reports true. This proves the signaling rule,
+  not completion of POL-05 or #639.
 - `crates/mempool/tests/admission.rs`: stale-context retry
   (`stale_policy_verdict_becomes_retryable`), sigop boundary enforcement
   (`p2sh_sigop_cost_exceeds_standard_limit`,

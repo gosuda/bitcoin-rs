@@ -116,12 +116,8 @@ fn mempool_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::
     assert_eq!(info.limit_cluster_count, 64);
     assert_eq!(info.limit_cluster_size, 101_000);
     assert_eq!(info.max_mempool, 300_000_000);
-    // fullrbf reports the real replacement policy: BIP125 rule 1 signaling
-    // is enforced, so the pool is not full-rbf (the handler used to emit an
-    // unconditional `true`). Core 31.1 only emits the field under
-    // -deprecatedrpc=fullrbf; the always-present `false` is the recorded
-    // manifest deviation.
-    assert!(!info.full_rbf);
+    // Core 31.1 and the pool both allow replacements without opt-in signaling.
+    assert!(info.full_rbf);
 
     let raw: corepc_types::v31::GetRawMempool =
         typed(&handler.dispatch("getrawmempool", &json!([]))?)?;

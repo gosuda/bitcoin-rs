@@ -270,13 +270,13 @@ status = "implemented_unverified"
 method = "sendrawtransaction"
 group = "rawtransactions"
 status = "deviation"
-deviation = "Replacement still requires BIP125 opt-in signaling from conflicting originals. Core 31.1 permits nonsignaling originals. The production-process signaling comparison is recorded by replacement_signaling_differs_from_pinned_core; complete replacement/package alignment remains #639."
+deviation = "Replacement allows nonsignaling originals, as verified against Core 31.1 by replacement_signaling_matches_pinned_core. Remaining #639 differences include the historical restriction on new unconfirmed inputs, transaction-count eviction limit, and direct-conflict fee-rate comparison instead of the complete feerate diagram."
 
 [[rpc]]
 method = "testmempoolaccept"
 group = "rawtransactions"
 status = "deviation"
-deviation = "Replacement preview rejects nonsignaling originals under historical BIP125 rule 1, while Core 31.1 allows the tested replacement. Preview and submission agree on this known difference, covered by replacement_signaling_differs_from_pinned_core. Complete replacement/package alignment remains #639."
+deviation = "Replacement preview and submission allow nonsignaling originals and reject underpaying replacements in replacement_signaling_matches_pinned_core. The shared evaluator still differs from Core 31.1 on new unconfirmed inputs, the eviction-count unit, and feerate-diagram comparison; complete replacement/package alignment remains #639."
 
 [[rpc]]
 method = "decoderawtransaction"

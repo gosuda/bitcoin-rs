@@ -165,10 +165,10 @@ This is an evidence tool pin. No checker run is claimed by this page.
   deliberate reply difference, early exit, malformed response, and total
   request-deadline controls (REF-07a–d). The RPC scenario verifies through
   `getindexinfo` that txindex is disabled on both nodes before confirmed lookup.
-  `replacement_signaling_differs_from_pinned_core` records the historical
-  BIP125 signaling deviation and a shared opt-in acceptance control through
-  real-process preview/submission, with unchanged membership and sequence
-  after preview or rejected submission.
+  `replacement_signaling_matches_pinned_core` verifies signal-independent
+  replacement and insufficient-fee rejection through real-process preview
+  and submission, with unchanged membership and sequence after preview or
+  rejected submission and truthful `fullrbf` reporting.
 - `bin/bitcoin-rs/tests/overhaul_process_p2p.rs`: the same signed transaction
   enters each real binary through its loopback P2P listener, is observed in
   its public mempool, and is confirmed by identical Core-mined block bytes.
