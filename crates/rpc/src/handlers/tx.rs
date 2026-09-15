@@ -505,12 +505,31 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     }
 }
 
+// corepc-types 0.15's v31 alias only describes completed rows. Core 31.1
+// rpc/mempool.cpp also emits these identity-only or package-error rows.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum AcceptanceRow {
+    Complete(v31::MempoolAcceptance),
+    Unfinished {
+        txid: String,
+        wtxid: String,
+        #[serde(rename = "package-error", skip_serializing_if = "Option::is_none")]
+        package_error: Option<String>,
+    },
+}
+
 pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let array = params_array(params)?;
     let raw_txs = array
         .first()
         .and_then(|value| value.as_array())
         .ok_or(RpcError::InvalidParams("raw transaction array is required"))?;
+    if raw_txs.is_empty() || raw_txs.len() > bitcoin_rs_mempool::standardness::MAX_PACKAGE_COUNT {
+        return Err(RpcError::InvalidParams(
+            "Array must contain between 1 and 25 transactions.",
+        ));
+    }
     let max_feerate = optional_max_feerate(params, 1)?;
 
     let mut txs = Vec::with_capacity(raw_txs.len());
@@ -536,22 +555,34 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
     let mut rows = Vec::with_capacity(facts.results.len());
     for fact in &facts.results {
-        let fees = fact.base_fee.map(|fee| v31::MempoolAcceptanceFees {
-            base: sat_to_btc(fee),
-            effective_fee_rate: None,
-            effective_includes: Vec::new(),
-        });
-        rows.push(v31::MempoolAcceptance {
+        let Some(allowed) = fact.allowed else {
+            rows.push(AcceptanceRow::Unfinished {
+                txid: fact.txid.to_string(),
+                wtxid: fact.wtxid.to_string(),
+                package_error: facts.package_error.map(reject_reason_to_frozen_string),
+            });
+            continue;
+        };
+        let fees = if allowed {
+            fact.base_fee.map(|fee| v31::MempoolAcceptanceFees {
+                base: sat_to_btc(fee),
+                effective_fee_rate: fact.effective_fee_rate.map(sat_to_btc),
+                effective_includes: vec![fact.wtxid.to_string()],
+            })
+        } else {
+            None
+        };
+        rows.push(AcceptanceRow::Complete(v31::MempoolAcceptance {
             txid: fact.txid.to_string(),
             wtxid: fact.wtxid.to_string(),
-            allowed: fact.allowed.unwrap_or(false),
-            vsize: fact.allowed.unwrap_or(false).then(|| i64::from(fact.vsize)),
+            allowed,
+            vsize: allowed.then(|| i64::from(fact.vsize)),
             fees,
             reject_reason: fact.reject_reason.map(reject_reason_to_frozen_string),
             reject_details: None,
-        });
+        }));
     }
-    typed_to_sonic_omitting_nulls(&v31::TestMempoolAccept(rows))
+    typed_to_sonic_omitting_nulls(&rows)
 }
 
 pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -756,9 +787,8 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
 /// `MaxFeeExceeded` is a parameter error (`-32602`), pinned by the
 /// policy-contract integration test. All other admission rejections are
 /// transaction rejections (`-26`), matching Bitcoin Core's
-/// `RPC_VERIFY_REJECTED` code. The string for `MinRelayFeeNotMet` uses
-/// the frozen hyphenated form `min-relay-fee-not-met`, not the mempool's
-/// Display.
+/// `RPC_VERIFY_REJECTED` code. Both typed cluster-limit failures map to
+/// Core's public `too-large-cluster` reason.
 fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
@@ -767,11 +797,14 @@ fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
 }
 
 /// Maps an [`AcceptanceRejectReason`] to the frozen RPC reject-reason string.
-/// Every variant matches the mempool's `Display` except `MinRelayFeeNotMet`,
-/// which uses the frozen hyphenated form.
+/// Cluster count and weight failures share Core's `too-large-cluster` reason;
+/// other variants use the mempool owner's public policy reason.
 fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
     match reason {
-        AcceptanceRejectReason::MinRelayFeeNotMet => "min-relay-fee-not-met".to_owned(),
+        AcceptanceRejectReason::PackageLimit(
+            bitcoin_rs_mempool::PolicyError::ClusterCountLimit
+            | bitcoin_rs_mempool::PolicyError::ClusterSizeLimit,
+        ) => "too-large-cluster".to_owned(),
         other => other.to_string(),
     }
 }

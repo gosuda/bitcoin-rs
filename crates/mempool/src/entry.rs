@@ -63,6 +63,10 @@ pub struct MempoolEntry {
 }
 
 impl MempoolEntry {
+    pub(crate) fn policy_weight(&self) -> u64 {
+        crate::accounting::charged_weight(self.weight, self.vsize, self.sigop_cost)
+    }
+
     /// Builds an entry and derives all metadata available from the transaction.
     ///
     /// The default sigop count includes legacy sigops. Admission code that has

@@ -20,6 +20,8 @@ use crate::{
 };
 use core::sync::atomic::{AtomicU64, Ordering};
 
+pub(crate) mod fee_policy;
+
 /// Script-index key for funding index range scans.
 #[derive(
     Clone,
@@ -61,6 +63,12 @@ impl ScriptHash {
 /// Mempool insertion, mutation, and query-consistency errors.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum MempoolError {
+    /// The fee-policy graph could not be represented or validated.
+    #[error(transparent)]
+    FeeDiagram(#[from] crate::FeeDiagramError),
+    /// A prepared mutation no longer matches membership or fee metadata.
+    #[error("mempool changed during policy preparation")]
+    StalePolicy,
     /// The transaction id already exists in the pool.
     #[error("transaction already exists in mempool")]
     DuplicateTransaction,
@@ -68,17 +76,14 @@ pub enum MempoolError {
     #[error("mempool entry id space exhausted")]
     TooManyEntries,
     /// The transaction spends an output created by an entry scheduled for eviction.
-    #[error("transaction spends an output of an evicted mempool entry")]
+    #[error("bad-txns-spends-conflicting-tx")]
     EvictedParent,
     /// The transaction violates mempool policy limits.
     #[error(transparent)]
     Policy(#[from] PolicyError),
-    /// The pool was over its size limit and this transaction was what it shed.
-    ///
-    /// Bitcoin Core's `mempool full`: it adds the transaction, trims the pool,
-    /// and then checks whether what it added is still there. A transaction that
-    /// was trimmed away was never accepted, however briefly it was indexed.
-    #[error("mempool full: the transaction was evicted by the size limit")]
+    /// The candidate would be evicted under the configured capacity bound.
+    /// Its entire admission is refused before changing any pool state.
+    #[error("mempool full")]
     Full,
     /// The spending index names an entry that is missing from the pool, or an
     /// entry whose transaction does not spend the indexed outpoint.
@@ -170,6 +175,9 @@ pub struct Mempool {
     /// transaction is mined (see [`Mempool::remove_for_block`]). It adjusts
     /// modified package ordering only — never an actual fee.
     fee_deltas: HashMap<Txid, i64>,
+    /// Token for metadata-only fee changes, separate from the public
+    /// membership sequence. Prepared policy work captures both tokens.
+    fee_delta_sequence: u64,
     /// Fee-rate history this pool owns and feeds from its own mutations:
     /// admissions record arrivals, non-mined removals record departures, and
     /// `remove_for_block` records confirmations.
@@ -250,7 +258,7 @@ struct GraphLinks {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ComponentSummary {
     member_count: u32,
-    vsize: u64,
+    weight: u64,
 }
 
 /// A generation-stamped reference to one arena slot.
@@ -471,7 +479,7 @@ impl VisitSet {
 }
 
 pub(crate) struct PreparedInsert {
-    entry: MempoolEntry,
+    pub(crate) entry: MempoolEntry,
 }
 
 /// The in-pool spender of one outpoint, resolved through the spending index.
@@ -551,6 +559,58 @@ pub struct MempoolMiningSnapshot {
     pub entries: Vec<SnapshotEntry>,
 }
 
+/// A dependency-closed fee chunk supplied by the mempool's graph owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MempoolChunk {
+    /// Snapshot entry positions, in dependency order.
+    pub indices: Vec<usize>,
+    /// Modified fees used for ordering, including local prioritisation.
+    pub modified_fee: i128,
+    /// Exact policy weight used in the fee-rate denominator.
+    pub policy_weight: u32,
+}
+
+impl MempoolMiningSnapshot {
+    /// Derives ordered chunks from this immutable view, after the pool guard
+    /// has been released. Mining and replacement share the same graph solver.
+    pub fn fee_chunks(&self) -> Result<Vec<MempoolChunk>, crate::FeeDiagramError> {
+        let fees = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let fee = i128::from(entry.fee) + i128::from(entry.fee_delta);
+                let weight =
+                    crate::accounting::charged_weight(entry.weight, entry.vsize, entry.sigop_cost);
+                Ok(crate::fee_diagram::FeeWeight {
+                    fee,
+                    weight: u32::try_from(weight).map_err(|_| crate::FeeDiagramError::Weight)?,
+                })
+            })
+            .collect::<Result<Vec<_>, crate::FeeDiagramError>>()?;
+        let parents = self
+            .entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .ancestors
+                    .iter()
+                    .map(|&parent| {
+                        usize::try_from(parent).map_err(|_| crate::FeeDiagramError::Dependencies)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::fee_diagram::ordered_chunks(&fees, &parents)?
+            .into_iter()
+            .map(|chunk| MempoolChunk {
+                indices: chunk.members,
+                modified_fee: chunk.total.fee,
+                policy_weight: chunk.total.weight,
+            })
+            .collect())
+    }
+}
+
 impl Mempool {
     /// Creates an empty mempool with the supplied limits.
     #[must_use]
@@ -571,6 +631,7 @@ impl Mempool {
             fee_rate_counts: std::collections::BTreeMap::new(),
             fee_rate_floor: None,
             fee_deltas: HashMap::new(),
+            fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
         }
@@ -604,7 +665,10 @@ impl Mempool {
         self.total_fee = 0;
         self.fee_rate_counts.clear();
         self.fee_rate_floor = None;
-        self.fee_deltas.clear();
+        if !self.fee_deltas.is_empty() {
+            self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
+            self.fee_deltas.clear();
+        }
         self.estimator = FeeEstimator::new();
         let mut changes = Vec::with_capacity(txids.len());
         for txid in txids {
@@ -656,33 +720,18 @@ impl Mempool {
         }
     }
 
-    /// Inserts an entry after applying ancestor and descendant policy checks.
-    /// On success the outcome carries the `Accepted` change followed by any
-    /// post-insert size-limit evictions as `Removed(PolicyEviction)`, in
-    /// commit order. When the trim sheds the entry itself the mutation is
-    /// still committed; it reports as
-    /// [`InsertionOutcome::ShedAfterCommit`] carrying that record, and only
-    /// an `Err` means nothing was committed.
+    /// Inserts trusted entry facts after preflighting cluster and capacity
+    /// constraints. A refused insert leaves membership and history unchanged.
     pub fn insert_entry(
         &mut self,
         entry: MempoolEntry,
-    ) -> Result<crate::mutation::InsertionOutcome, MempoolError> {
-        let prepared = self.validate_insert(entry, &HashSet::new())?;
-        let txid = prepared.entry.txid;
-        let result = self.commit_insert(prepared);
-        // The trim evicts the worst-paying entries, and the arrival can be
-        // one of them. The mutation already committed -- the sequence moved
-        // and any eviction is durable -- so the outcome carries the record;
-        // reporting plain success would hand the caller a receipt for a
-        // transaction that is not in the pool, which `sendrawtransaction`
-        // would turn into a success the sender acts on. Core makes the
-        // same check for the same reason (`validation.cpp`:
-        // `LimitMempoolSize`).
-        Ok(if self.contains_txid(&txid) {
-            crate::mutation::InsertionOutcome::Accepted(result)
-        } else {
-            crate::mutation::InsertionOutcome::ShedAfterCommit(result)
-        })
+    ) -> Result<crate::mutation::MutationResult, MempoolError> {
+        let inputs = self
+            .capture_insertion(entry)
+            .map_err(crate::RbfError::into_pool_error)?;
+        let plan = inputs.verify().map_err(crate::RbfError::into_pool_error)?;
+        self.commit_pool_change(plan)
+            .map_err(crate::RbfError::into_pool_error)
     }
 
     pub(crate) fn validate_insert(
@@ -692,9 +741,16 @@ impl Mempool {
     ) -> Result<PreparedInsert, MempoolError> {
         let txid = entry.txid;
         let min_rate = self.limits.min_relay_fee_sat_per_kvb;
-        if min_rate > 0 && entry.fee_rate < min_rate {
+        entry.fee_delta = self.fee_deltas.get(&txid).copied().unwrap_or(0);
+        if entry.vsize == 0 {
+            return Err(PolicyError::InvalidVirtualSize.into());
+        }
+        let required = crate::rbf::required_fee(min_rate, entry.vsize)
+            .map_err(|_| PolicyError::FeeArithmetic)?;
+        if entry.modified_fee() < required {
+            let modified_rate = entry.modified_fee() * 1_000 / i128::from(entry.vsize);
             return Err(PolicyError::BelowMinRelayFee {
-                tx_rate: entry.fee_rate,
+                tx_rate: u64::try_from(modified_rate).unwrap_or(0),
                 min_rate,
             }
             .into());
@@ -713,9 +769,7 @@ impl Mempool {
         }
 
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
-        self.check_ancestor_limits(&ancestors, &entry)?;
-        self.check_descendant_limits_excluding(&ancestors, excluded)?;
-        self.check_cluster_limits(&entry.tx, entry.vsize, excluded)?;
+        self.check_cluster_limits(&entry.tx, entry.policy_weight(), excluded)?;
 
         if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
             return Err(MempoolError::TooManyEntries);
@@ -730,11 +784,8 @@ impl Mempool {
         let ancestor_fee = ancestors.iter().fold(entry.fee, |total, id| {
             total.saturating_add(self.entry(*id).map_or(0, |ancestor| ancestor.fee))
         });
-        // A delta stored before admission applies from the moment the
-        // transaction arrives. It adjusts modified package ordering only;
-        // the actual fee and fee rate that policy and accounting read are
-        // exactly what the caller supplied.
-        entry.fee_delta = self.fee_deltas.get(&txid).copied().unwrap_or(0);
+        // Modified fees affect policy ordering; actual fees remain unchanged
+        // for accounting and coinbase construction.
         entry.ancestor_size = ancestor_size;
         entry.ancestor_fee = ancestor_fee;
         entry.ancestor_fee_delta = i128::from(entry.fee_delta);
@@ -745,9 +796,8 @@ impl Mempool {
         Ok(PreparedInsert { entry })
     }
 
-    /// Commits a validated insert. The result carries the `Accepted` change
-    /// first, then any post-insert size-limit evictions as
-    /// `Removed(PolicyEviction)` in eviction order.
+    /// Installs one prevalidated entry. The encompassing plan owns removals,
+    /// estimator updates and publication after every fallible check has passed.
     pub(crate) fn commit_insert(&mut self, prepared: PreparedInsert) -> MutationResult {
         let entry = prepared.entry;
         let txid = entry.txid;
@@ -815,21 +865,17 @@ impl Mempool {
         // become reachable once this entry is in the spend indexes.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
-        if self.limits.max_total_bytes > 0 && self.total_vsize() > self.limits.max_total_bytes {
-            changes.extend(crate::evict_lowest_fee_packages(
-                self,
-                self.limits.max_total_bytes,
-            ));
-        }
-        // Fed last, after size-limit eviction: an acceptance that eviction
-        // immediately removed must not linger in the estimator's pending set.
-        // The scalars are copied out so the entry borrow ends before the
-        // estimator is borrowed mutably.
-        if let Some((fee_rate, height)) = self.entry(id).map(|entry| (entry.fee_rate, entry.height))
+        self.finish_mutation(changes)
+    }
+
+    /// Record arrival only after the complete mutation's capacity decision.
+    pub(crate) fn record_entry_arrival(&mut self, txid: Txid) {
+        if let Some((fee_rate, height)) = self
+            .entry_by_txid(&txid)
+            .map(|entry| (entry.fee_rate, entry.height))
         {
             self.estimator.tx_entered(txid, fee_rate, height);
         }
-        self.finish_mutation(changes)
     }
 
     /// Resolved in-pool children — entries already spending an output of
@@ -883,7 +929,7 @@ impl Mempool {
     ) -> u32 {
         let mut summary = ComponentSummary {
             member_count: 1,
-            vsize: u64::from(entry.vsize),
+            weight: entry.policy_weight(),
         };
         let mut base: Option<u32> = None;
         let mut merged: Vec<u32> = Vec::new();
@@ -900,7 +946,7 @@ impl Mempool {
                 .copied()
                 .unwrap_or_default();
             summary.member_count = summary.member_count.saturating_add(absorbed.member_count);
-            summary.vsize = summary.vsize.saturating_add(absorbed.vsize);
+            summary.weight = summary.weight.saturating_add(absorbed.weight);
             let Some(base_component) = base else {
                 base = Some(neighbour_component);
                 continue;
@@ -1125,9 +1171,9 @@ impl Mempool {
     ///
     /// Delegates to the free-function `evict_lowest_fee_packages`, which
     /// removes through `remove_entry_and_descendants_into`.
-    pub fn enforce_size_limit(&mut self, max_bytes: u64) -> MutationResult {
-        let changes = crate::evict_lowest_fee_packages(self, max_bytes);
-        self.finish_mutation(changes)
+    pub fn enforce_size_limit(&mut self, max_bytes: u64) -> Result<MutationResult, MempoolError> {
+        let changes = crate::evict_lowest_fee_packages(self, max_bytes)?;
+        Ok(self.finish_mutation(changes))
     }
 
     /// Returns the sum of fees of all entries in the pool, in satoshis.
@@ -1527,6 +1573,9 @@ impl Mempool {
     /// change (only pool membership does), so template consumers are woken
     /// explicitly by the caller instead of through the sequence.
     pub fn prioritise(&mut self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
+        if fee_delta == 0 {
+            return Ok(());
+        }
         let accumulated = self
             .fee_deltas
             .get(&txid)
@@ -1534,6 +1583,7 @@ impl Mempool {
             .unwrap_or(0)
             .checked_add(fee_delta)
             .ok_or(PrioritiseError::FeeDeltaOverflow)?;
+        self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
         if accumulated == 0 {
             self.fee_deltas.remove(&txid);
         } else {
@@ -1657,7 +1707,9 @@ impl Mempool {
                     &mut changes,
                 );
             }
-            self.fee_deltas.remove(txid);
+            if self.fee_deltas.remove(txid).is_some() {
+                self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
+            }
         }
         self.finish_mutation(changes)
     }
@@ -1695,10 +1747,9 @@ impl Mempool {
         conflicts
     }
 
-    pub(crate) fn conflicts_with_descendants(&self, tx: &Tx) -> Vec<EntryId> {
-        let mut conflicts = self.conflicts_for(tx);
-        let direct = conflicts.clone();
-        for id in direct {
+    pub(crate) fn descendants_of_conflicts(&self, direct: &[EntryId]) -> Vec<EntryId> {
+        let mut conflicts = direct.to_vec();
+        for &id in direct {
             self.collect_descendants_exclusive(id, &mut conflicts);
         }
         conflicts.sort_unstable();
@@ -1744,10 +1795,6 @@ impl Mempool {
         ids
     }
 
-    pub(crate) fn is_unconfirmed_outpoint(&self, outpoint: OutPoint) -> bool {
-        self.by_txid.contains_key(&outpoint.txid)
-    }
-
     pub(crate) fn remove_entries_with_reasons(
         &mut self,
         removals: &[(EntryId, RemovalReason)],
@@ -1779,7 +1826,7 @@ impl Mempool {
             // every removal has been applied.
             if let Some(summary) = self.component_summary_mut(retired.component) {
                 summary.member_count = summary.member_count.saturating_sub(1);
-                summary.vsize = summary.vsize.saturating_sub(u64::from(entry.vsize));
+                summary.weight = summary.weight.saturating_sub(entry.policy_weight());
                 if !dirty_components.contains(&retired.component) {
                     dirty_components.push(retired.component);
                 }
@@ -1900,10 +1947,9 @@ impl Mempool {
                 }
                 let rebuilt = ComponentSummary {
                     member_count: u32::try_from(members.len()).unwrap_or(u32::MAX),
-                    vsize: members.iter().fold(0_u64, |total, member| {
+                    weight: members.iter().fold(0_u64, |total, member| {
                         total.saturating_add(
-                            self.entry(*member)
-                                .map_or(0, |entry| u64::from(entry.vsize)),
+                            self.entry(*member).map_or(0, MempoolEntry::policy_weight),
                         )
                     }),
                 };
@@ -2118,64 +2164,6 @@ impl Mempool {
         }
     }
 
-    fn check_ancestor_count_and_size(
-        &self,
-        ancestors: &[EntryId],
-        candidate_vsize: u32,
-    ) -> Result<(), PolicyError> {
-        let ancestor_count = u32::try_from(ancestors.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
-        if ancestor_count > self.limits.max_ancestors {
-            return Err(PolicyError::TooManyAncestors);
-        }
-        let ancestor_size = ancestors
-            .iter()
-            .fold(u64::from(candidate_vsize), |total, id| {
-                total.saturating_add(
-                    self.entry(*id)
-                        .map_or(0, |ancestor| u64::from(ancestor.vsize)),
-                )
-            });
-        if ancestor_size > self.limits.max_ancestor_size {
-            return Err(PolicyError::AncestorSizeLimit);
-        }
-        Ok(())
-    }
-
-    fn check_ancestor_limits(
-        &self,
-        ancestors: &[EntryId],
-        entry: &MempoolEntry,
-    ) -> Result<(), PolicyError> {
-        self.check_ancestor_count_and_size(ancestors, entry.vsize)
-    }
-
-    fn check_descendant_limits_excluding(
-        &self,
-        ancestors: &[EntryId],
-        excluded: &HashSet<EntryId>,
-    ) -> Result<(), PolicyError> {
-        for ancestor in ancestors {
-            if excluded.contains(ancestor) {
-                continue;
-            }
-            let mut descendants = Vec::new();
-            self.collect_descendants_inclusive(*ancestor, &mut descendants);
-            let remaining = descendants
-                .iter()
-                .filter(|id| !excluded.contains(*id))
-                .count();
-            let descendant_count = u32::try_from(remaining)
-                .unwrap_or(u32::MAX)
-                .saturating_add(1);
-            if descendant_count > self.limits.max_descendants {
-                return Err(PolicyError::TooManyDescendants);
-            }
-        }
-        Ok(())
-    }
-
     /// Returns every entry reachable from `seeds` through spend edges in
     /// either direction: the union of the connected components they sit in.
     ///
@@ -2241,30 +2229,30 @@ impl Mempool {
     fn check_cluster_limits(
         &self,
         tx: &Tx,
-        vsize: u32,
+        weight: u64,
         excluded: &HashSet<EntryId>,
     ) -> Result<(), PolicyError> {
         if excluded.is_empty() {
-            let cached = self.check_cluster_limits_cached(tx, vsize);
+            let cached = self.check_cluster_limits_cached(tx, weight);
             // The cache and the walk must agree while nothing is excluded;
             // running both under debug keeps a drift loud instead of latent.
             debug_assert_eq!(
-                self.check_cluster_limits_by_walk(tx, vsize, excluded),
+                self.check_cluster_limits_by_walk(tx, weight, excluded),
                 cached
             );
             cached
         } else {
-            self.check_cluster_limits_by_walk(tx, vsize, excluded)
+            self.check_cluster_limits_by_walk(tx, weight, excluded)
         }
     }
 
     /// The component-cache path: two numbers per joined component.
-    fn check_cluster_limits_cached(&self, tx: &Tx, vsize: u32) -> Result<(), PolicyError> {
+    fn check_cluster_limits_cached(&self, tx: &Tx, weight: u64) -> Result<(), PolicyError> {
         let txid = tx.txid();
         let parents = self.in_pool_parents(tx);
         let neighbours = parents.iter().copied().chain(self.in_pool_children(txid));
         let mut count = 1_u32;
-        let mut total = u64::from(vsize);
+        let mut total = weight;
         let mut merged: Vec<u32> = Vec::new();
         for neighbour in neighbours {
             let Some(component) = self.component_id(neighbour) else {
@@ -2279,7 +2267,7 @@ impl Mempool {
                 .copied()
                 .unwrap_or_default();
             count = count.saturating_add(summary.member_count);
-            total = total.saturating_add(summary.vsize);
+            total = total.saturating_add(summary.weight);
         }
         cluster_within_limits(count, total, &self.limits)
     }
@@ -2288,7 +2276,7 @@ impl Mempool {
     fn check_cluster_limits_by_walk(
         &self,
         tx: &Tx,
-        vsize: u32,
+        weight: u64,
         excluded: &HashSet<EntryId>,
     ) -> Result<(), PolicyError> {
         let txid = tx.txid();
@@ -2302,15 +2290,15 @@ impl Mempool {
         if cluster.is_empty() {
             // A cluster of one. Still checked, so a single oversized
             // transaction cannot pass a limit its cluster would fail.
-            return cluster_within_limits(1, u64::from(vsize), &self.limits);
+            return cluster_within_limits(1, weight, &self.limits);
         }
         let count = u32::try_from(cluster.len())
             .unwrap_or(u32::MAX)
             .saturating_add(1);
-        let cluster_vsize = cluster.iter().fold(u64::from(vsize), |total, id| {
-            total.saturating_add(self.entry(*id).map_or(0, |member| u64::from(member.vsize)))
+        let cluster_weight = cluster.iter().fold(weight, |total, id| {
+            total.saturating_add(self.entry(*id).map_or(0, MempoolEntry::policy_weight))
         });
-        cluster_within_limits(count, cluster_vsize, &self.limits)
+        cluster_within_limits(count, cluster_weight, &self.limits)
     }
 
     /// The cluster limits this pool enforces at admission.
@@ -2431,35 +2419,6 @@ impl Mempool {
             .saturating_add(1)
     }
 
-    /// Checks ancestor, descendant, and cluster limits for `tx` without
-    /// inserting it, mirroring the gates `validate_insert` applies.
-    ///
-    /// `excluded` is the set of entry ids that a replacement will evict;
-    /// those entries are skipped in the descendant-count and cluster checks
-    /// so a replacement that trims an over-large cluster is not falsely
-    /// rejected by the cluster it is about to clear. Pass an empty set for a
-    /// plain (non-replacement) admission preview.
-    ///
-    /// `vsize` is the candidate's own virtual size; it is folded into the
-    /// ancestor-size and cluster-size totals exactly as `validate_insert` does.
-    ///
-    /// WHY: the acceptance preview (`testmempoolaccept`) and the admission
-    /// gate (`sendrawtransaction` → `replace_transaction`) must quote the
-    /// same verdict; without these checks the preview reports `allowed` for a
-    /// transaction the admission gate then rejects on package or cluster limits.
-    pub fn check_package_limits(
-        &self,
-        tx: &Tx,
-        vsize: u32,
-        excluded: &HashSet<EntryId>,
-    ) -> Result<(), PolicyError> {
-        let ancestors = self.ancestor_ids_for_tx(tx);
-        self.check_ancestor_count_and_size(&ancestors, vsize)?;
-        self.check_descendant_limits_excluding(&ancestors, excluded)?;
-        self.check_cluster_limits(tx, vsize, excluded)?;
-        Ok(())
-    }
-
     fn entry_mut(&mut self, id: EntryId) -> Option<&mut MempoolEntry> {
         self.entries.get_mut(id)
     }
@@ -2493,13 +2452,16 @@ impl From<OutPoint> for SpendingKey {
 /// not the candidate has any in-pool neighbours.
 const fn cluster_within_limits(
     count: u32,
-    vsize: u64,
+    weight: u64,
     limits: &MempoolLimits,
 ) -> Result<(), PolicyError> {
     if count > limits.cluster_count {
         return Err(PolicyError::ClusterCountLimit);
     }
-    if vsize > limits.cluster_size_vbytes {
+    let Some(limit_weight) = limits.cluster_size_vbytes.checked_mul(4) else {
+        return Err(PolicyError::ClusterSizeLimit);
+    };
+    if weight > limit_weight {
         return Err(PolicyError::ClusterSizeLimit);
     }
     Ok(())
@@ -2989,7 +2951,7 @@ mod tests {
         let bulky_low = MempoolEntry::new(Arc::new(tx(5, Vec::new())), 5_000, 5_000, 1, 7);
         pool.insert_entry(bulky_low)?;
         assert_floor(&pool, Some(1_000), "insert eviction victim");
-        let evicted = pool.enforce_size_limit(5_000);
+        let evicted = pool.enforce_size_limit(5_000)?;
         assert_eq!(evicted.len(), 1);
         assert_floor(&pool, Some(5_000), "size-limit eviction of min");
 
@@ -4049,7 +4011,7 @@ mod tests {
         let high_txid = high.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7))?;
 
-        let evicted = pool.enforce_size_limit(600);
+        let evicted = pool.enforce_size_limit(600)?;
 
         assert_eq!(evicted.len(), 1);
         assert!(!pool.contains_txid(&low_txid));
@@ -4089,17 +4051,10 @@ mod tests {
         );
     }
 
-    /// A transaction the size limit sheds is never accepted.
-    ///
-    /// `insert_entry` indexes the arrival and only then trims the pool, so the
-    /// arrival can be what the trim takes. The mutation did commit — the
-    /// sequence moved and the trim eviction is durable — so the outcome
-    /// reports `ShedAfterCommit` carrying that record, not `Ok(Accepted)`;
-    /// a caller deriving success from `Accepted` would act on a transaction
-    /// that is not in the pool. The paired accept is the point: the same
-    /// pool, one better-paying transaction, must still be admitted.
+    /// A refused low-fee arrival leaves state intact, while a higher-fee
+    /// arrival can atomically evict the old entry and enter the pool.
     #[test]
-    fn a_transaction_the_size_limit_sheds_is_not_accepted() {
+    fn capacity_rejection_is_atomic_and_a_better_arrival_can_enter() {
         fn tx_paying(nonce: u8) -> Arc<Tx> {
             Arc::new(Tx {
                 version: 2,
@@ -4123,27 +4078,12 @@ mod tests {
         let seated = pool.insert_entry(MempoolEntry::new(tx_paying(1), 900, 90_000, 1, 7));
         assert!(seated.is_ok(), "the first transaction fits: {seated:?}");
 
-        // Pays far less per byte than what is seated, so the trim takes it.
-        let shed = pool.insert_entry(MempoolEntry::new(tx_paying(2), 900, 10, 2, 7));
-        let Ok(shed) = shed else {
-            panic!("the shed insert committed; Err means nothing did: {shed:?}");
-        };
-        assert!(
-            shed.is_shed(),
-            "a transaction evicted by the trim must not report Accepted: {shed:?}"
-        );
-        assert_eq!(
-            shed.mutation().changes,
-            vec![
-                crate::mutation::change(&tx_paying(2).txid(), MutationOutcome::Accepted),
-                crate::mutation::change(
-                    &tx_paying(2).txid(),
-                    MutationOutcome::Removed(RemovalReason::PolicyEviction),
-                ),
-            ],
-            "the shed insert's record carries its own acceptance and removal"
-        );
-        assert_eq!(pool.len(), 1, "the seated transaction stays");
+        let before = (pool.sequence_number(), pool.estimator_history());
+        let refused = pool.insert_entry(MempoolEntry::new(tx_paying(2), 900, 10, 2, 7));
+        assert!(matches!(refused, Err(MempoolError::Full)));
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.sequence_number(), before.0);
+        assert_eq!(pool.estimator_history(), before.1);
 
         // The paired accept: pays more, so the trim takes the other one.
         let admitted = pool.insert_entry(MempoolEntry::new(tx_paying(3), 900, 900_000, 3, 7));
@@ -4157,17 +4097,9 @@ mod tests {
         );
     }
 
-    /// A replacement the size limit sheds must not report plain success.
-    ///
-    /// `replace_transaction` evicts conflicting entries, inserts the
-    /// replacement, and then trims. If the replacement itself is the
-    /// worst-paying entry, the trim takes it — but the mutation already
-    /// committed, so the outcome reports `ShedAfterCommit` carrying the
-    /// committed record instead of `Ok(Accepted)`. A caller treating a
-    /// shed replacement as accepted would act on a transaction that is
-    /// no longer in the pool.
+    /// POL-05: capacity rejection cannot remove the original or alter history.
     #[test]
-    fn a_replacement_the_size_limit_sheds_is_not_accepted() {
+    fn a_replacement_that_would_be_shed_leaves_the_pool_unchanged() {
         let limits = MempoolLimits {
             max_total_bytes: 1_000,
             min_relay_fee_sat_per_kvb: 0,
@@ -4230,24 +4162,26 @@ mod tests {
             }],
         };
         let replacement_txid = replacement.txid();
+        let before = (
+            pool.mining_snapshot().entries,
+            pool.estimator_history(),
+            pool.policy_stamp(),
+        );
         let result = pool.replace_transaction(
             crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1),
             2,
             7,
             4,
         );
-        let Ok(result) = result else {
-            panic!("the shed replacement committed; Err means nothing did: {result:?}");
-        };
-        assert!(
-            result.is_shed(),
-            "a replacement evicted by the trim must not report Accepted: {result:?}"
-        );
-        assert_eq!(
-            result.mutation().removed_txids(),
-            vec![original_txid, replacement_txid],
-            "the record carries the conflict removal then the shed replacement"
-        );
+        assert!(matches!(
+            result,
+            Err(crate::RbfError::Mempool(MempoolError::Full))
+        ));
+        assert!(pool.contains_txid(&original_txid));
+        assert!(!pool.contains_txid(&replacement_txid));
+        assert_eq!(pool.mining_snapshot().entries, before.0);
+        assert_eq!(pool.estimator_history(), before.1);
+        assert_eq!(pool.policy_stamp(), before.2);
     }
 
     /// Every entry's four package totals, in entry-id order.
@@ -4955,11 +4889,12 @@ mod spend_index_tests {
         );
     }
 
-    /// Preview and admission must quote the same cluster-count verdict.
-    /// Ancestor and descendant limits are lifted so only the cluster check
-    /// can refuse.
+    /// POL-05/06 (`docs/contracts/mempool-policy.md`): preview and commit
+    /// enforce the same projected cluster bound. Core 31.1
+    /// `src/validation.cpp::ReplacementChecks` validates the change set's
+    /// cluster limits before accepting a replacement.
     #[test]
-    fn check_package_limits_rejects_a_cluster_only_violation() {
+    fn replacement_preview_rejects_a_cluster_only_violation() {
         let confirmed = OutPoint::new(txid_of([23_u8; 32]), 0);
         let root = tx_with(&[confirmed], 3, 1);
         let root_txid = root.txid();
@@ -4968,9 +4903,6 @@ mod spend_index_tests {
 
         let limits = MempoolLimits {
             cluster_count: 3,
-            max_ancestors: 100,
-            max_ancestor_size: 1_000_000,
-            max_descendants: 100,
             ..MempoolLimits::default()
         };
         let mut pool = Mempool::new(limits);
@@ -4982,10 +4914,19 @@ mod spend_index_tests {
         }
 
         let child_c = tx_with(&[OutPoint::new(root_txid, 2)], 1, 4);
-        let excluded: HashSet<EntryId> = HashSet::new();
-        let preview = pool.check_package_limits(&child_c, 100, &excluded);
+        let preview = pool.check_replacement(&crate::ReplacementCandidate::new(
+            Arc::new(child_c.clone()),
+            100,
+            10_000,
+            1_000,
+        ));
         assert!(
-            matches!(preview, Err(PolicyError::ClusterCountLimit)),
+            matches!(
+                preview,
+                Err(crate::RbfError::Mempool(MempoolError::Policy(
+                    PolicyError::ClusterCountLimit
+                )))
+            ),
             "the preview must reject a cluster-only violation: {preview:?}"
         );
 
@@ -4998,17 +4939,18 @@ mod spend_index_tests {
             "admission must reject on cluster count: {admission:?}"
         );
         assert_eq!(
-            preview.map_err(MempoolError::from).err(),
+            preview.map_err(crate::RbfError::into_pool_error).err(),
             admission.err(),
             "preview and admission must reject on the same error"
         );
     }
 
-    /// A replacement preview must exclude the evicted original the same way
-    /// admission does, or `testmempoolaccept` and `sendrawtransaction`
-    /// disagree on a replacement into a full cluster.
+    /// POL-05 (`docs/contracts/mempool-policy.md`): planned victims are
+    /// absent from the projected graph. Core 31.1
+    /// `src/validation.cpp::ReplacementChecks` stages removals before
+    /// `CheckMemPoolPolicyLimits`, so replacing a member does not grow a full cluster.
     #[test]
-    fn check_package_limits_excludes_a_replacement_s_evictions() {
+    fn replacement_preview_excludes_planned_evictions() {
         let confirmed = OutPoint::new(txid_of([27_u8; 32]), 0);
         let root = tx_with(&[confirmed], 2, 1);
         let root_txid = root.txid();
@@ -5033,18 +4975,21 @@ mod spend_index_tests {
             panic!("A must be in the pool");
         };
         let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
-        let mut excluded = HashSet::new();
-        excluded.insert(a_id);
-
-        let preview = pool.check_package_limits(&replacement, 100, &excluded);
-        assert!(
-            preview.is_ok(),
-            "preview must project the post-eviction cluster: {preview:?}"
-        );
+        let preview = pool
+            .check_replacement(&crate::ReplacementCandidate::new(
+                Arc::new(replacement.clone()),
+                100,
+                20_000,
+                1_000,
+            ))
+            .expect("replacement preview excludes its victim");
+        assert_eq!(preview.evicted, vec![a_id]);
+        assert_eq!(pool.tx_count(), 3, "preview does not mutate");
         assert_eq!(
-            pool.check_package_limits(&replacement, 100, &HashSet::new()),
-            Err(PolicyError::ClusterCountLimit),
-            "without the exclusion the same replacement is over the limit"
+            pool.insert_entry(MempoolEntry::new(Arc::new(replacement), 100, 20_000, 1, 7))
+                .err(),
+            Some(MempoolError::Policy(PolicyError::ClusterCountLimit)),
+            "ordinary insertion cannot grow this full cluster"
         );
     }
 
@@ -5464,9 +5409,6 @@ mod graph_tests {
 
     fn fuzzer_pool() -> Mempool {
         Mempool::new(MempoolLimits {
-            max_ancestors: 200,
-            max_ancestor_size: 10_000_000,
-            max_descendants: 200,
             max_total_bytes: 0,
             min_relay_fee_sat_per_kvb: 0,
             cluster_count: 64,
@@ -5477,13 +5419,8 @@ mod graph_tests {
     fn insert_ok(pool: &mut Mempool, nonce: u32, inputs: &[OutPoint], vsize: u32) -> Txid {
         let tx = graph_tx(nonce, inputs, false);
         let txid = tx.txid();
-        let outcome = pool
-            .insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 1_000, TIME, HEIGHT))
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 1_000, TIME, HEIGHT))
             .expect("fixture insert must pass validation");
-        assert!(
-            matches!(outcome, crate::mutation::InsertionOutcome::Accepted(_)),
-            "fixture {nonce} must survive the size trim"
-        );
         txid
     }
 
@@ -5568,7 +5505,8 @@ mod graph_tests {
                 u32::try_from(members.len()).unwrap_or(u32::MAX)
             );
             assert_eq!(
-                summary.vsize, vsize,
+                summary.weight,
+                vsize * 4,
                 "summary vsize for component {component}"
             );
         }
@@ -5730,10 +5668,16 @@ mod graph_tests {
         assert!(!pool.contains_txid(&joiner.txid()));
 
         // The acceptance preview quotes the same verdict.
-        let excluded: HashSet<EntryId> = HashSet::new();
         assert!(matches!(
-            pool.check_package_limits(&joiner, 100, &excluded),
-            Err(PolicyError::ClusterCountLimit)
+            pool.check_replacement(&crate::ReplacementCandidate::new(
+                Arc::new(joiner),
+                100,
+                1_000,
+                1_000
+            )),
+            Err(crate::RbfError::Mempool(MempoolError::Policy(
+                PolicyError::ClusterCountLimit
+            )))
         ));
 
         // A candidate inside the limit is admitted through the same path.
@@ -5787,8 +5731,6 @@ mod graph_tests {
             min_relay_fee_sat_per_kvb: 0,
             cluster_count: 64,
             cluster_size_vbytes: 1_000_000,
-            max_ancestors: 200,
-            max_descendants: 200,
             ..MempoolLimits::default()
         });
         // Forty chains of ten: 400 entries in forty small clusters.
@@ -5856,10 +5798,7 @@ mod graph_tests {
             TIME,
             HEIGHT,
         ));
-        let outcome = outcome.ok()?;
-        if !matches!(outcome, crate::mutation::InsertionOutcome::Accepted(_)) {
-            return None;
-        }
+        outcome.ok()?;
         txs.push(tx);
         let id = pool.entry_id_by_txid(&txid)?;
         history.push((pool.entries.handle_at(id)?, txid));
@@ -5945,7 +5884,8 @@ mod graph_tests {
                         };
                         let candidate = graph_tx(nonce, &[input.previous_output], true);
                         nonce += 1;
-                        let evicted = pool.conflicts_with_descendants(&candidate);
+                        let evicted =
+                            pool.descendants_of_conflicts(&pool.conflicts_for(&candidate));
                         if evicted.is_empty() {
                             continue;
                         }
@@ -5973,7 +5913,8 @@ mod graph_tests {
                     9 if pool.tx_count() > 8 => {
                         // Trim pressure.
                         let target = u64::try_from(rng.below(200) * 100).unwrap_or(0);
-                        crate::evict_lowest_fee_packages(&mut pool, target);
+                        crate::evict_lowest_fee_packages(&mut pool, target)
+                            .expect("valid graph eviction");
                     }
                     _ => {}
                 }

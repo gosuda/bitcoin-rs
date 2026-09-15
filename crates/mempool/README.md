@@ -1,15 +1,15 @@
 # bitcoin-rs-mempool
 
-The in-memory unconfirmed transaction pool: admission with ancestor and descendant
-policy checks, BIP125 replacement, package eviction, orphan parking, relay
-standardness, and the history-based fee-rate estimator.
+The in-memory unconfirmed transaction pool: cluster and replacement policy,
+package preview, TRUC and ephemeral dust, orphan parking, relay standardness,
+and the history-based fee-rate estimator.
 
 `Mempool` owns the entry arena plus the txid, funding (keyed by `ScriptHash`, the
 double-SHA256 of a script), spending, and fee-priority indexes; every accepted
 transaction becomes a `MempoolEntry` addressed by its slab-index `EntryId`.
 `insert_entry` enforces the `MempoolLimits` (including min-relay fee) and reports
 violations as `PolicyError` or `MempoolError`; `enforce_size_limit` delegates to
-`evict_lowest_fee_packages` over the `ParetoFront` ancestor-aware priority ordering;
+`evict_lowest_fee_packages` over the same dependency-closed chunks that mining and replacement consume;
 `prioritise` adjusts an entry's effective fee, and `evict_below_fee_rate` /
 `remove_for_block` handle removal. `MempoolStats` supplies the aggregate counters
 behind `getmempoolinfo` and Esplora fee estimates. The `rbf` module plans
@@ -24,7 +24,7 @@ rather than fabricating when history is thin.
 Mempool behavioral contracts are defined in `docs/contracts/`:
 
 - **Mutation gateway and ordering**: Gateway serialization, atomic `MutationResult` records, per-change sequence assignments, and generation-validated admission/retry follow [`docs/contracts/mempool-mutations.md`](../../docs/contracts/mempool-mutations.md) (`MPL-01`, `MPL-02`, `MPL-04`).
-- **Relay standardness and policy**: Admission checks, limits, BIP125 RBF rules, and eviction ranking follow [`docs/contracts/mempool-policy.md`](../../docs/contracts/mempool-policy.md) (`POL-01`).
+- **Relay standardness and policy**: Admission checks, limits, Core 31.1 replacement rules, and eviction ranking follow [`docs/contracts/mempool-policy.md`](../../docs/contracts/mempool-policy.md) (`POL-01`, `POL-05`).
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

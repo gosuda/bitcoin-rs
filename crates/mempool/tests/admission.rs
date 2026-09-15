@@ -204,6 +204,11 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
 /// P2SH sigops once the prevout is known.
 #[test]
 fn p2sh_sigop_cost_exceeds_standard_limit() {
+    assert_eq!(
+        bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_SIGOPS_COST,
+        16_000,
+        "POL-04/CL-15 and Core 31.1 policy.h"
+    );
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     )));

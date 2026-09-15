@@ -183,6 +183,36 @@ mod tests {
         );
     }
 
+    /// Admission policy claims have one textual owner in core-compat.toml.
+    /// The static dispatch registry and its generated reference project the
+    /// same status and rationale, so neither can hide a declared deviation.
+    #[test]
+    fn admission_registry_projects_manifest_status_and_rationale() {
+        let table = manifest();
+        let rpc_entries = entries(&table, "rpc");
+        for name in ["sendrawtransaction", "testmempoolaccept", "getmempoolinfo"] {
+            let source = rpc_entries
+                .iter()
+                .find(|entry| field(entry, "method") == name)
+                .unwrap_or_else(|| panic!("missing canonical policy row: {name}"));
+            let projected = crate::manifest::MANIFEST
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing registry projection: {name}"));
+            assert_eq!(status_of(source), Status::Deviation, "{name}");
+            assert_eq!(
+                projected.status,
+                crate::manifest::Status::Deviation,
+                "{name}"
+            );
+            assert_eq!(
+                projected.notes,
+                field(source, "deviation"),
+                "{name} rationale drifted"
+            );
+        }
+    }
+
     /// Nothing the manifest lists as live is missing, and nothing is refused
     /// as disabled at the method level.
     ///

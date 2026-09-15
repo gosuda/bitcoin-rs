@@ -179,6 +179,9 @@ fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+// POL-05/06: one fee chunk is indivisible, and its positive unconfirmed
+// BIP68 lock is not final at the next block. The valid parent cannot be
+// retried separately after the whole child-parent chunk is skipped.
 #[test]
 fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Error>> {
     let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
@@ -187,11 +190,13 @@ fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Err
     let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
     let snapshot = MempoolMiningSnapshot {
         sequence: 12,
-        entries: vec![child, parent.clone()],
+        entries: vec![child, parent],
     };
     let candidate = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
-    assert_eq!(candidate.transactions.len(), 1);
-    assert_eq!(candidate.transactions[0].txid, parent.txid);
+    assert!(
+        candidate.transactions.is_empty(),
+        "the high-fee child and parent are one chunk"
+    );
     Ok(())
 }
 
@@ -212,6 +217,10 @@ fn bip68_unmet_lock_is_ignored_when_csv_is_inactive() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+// POL-05: CandidateContext resource limits apply to a complete fee chunk.
+// Exact configured limits fit; one excess unit skips both child and parent.
+// Core 31.1 node/miner.cpp::addChunks likewise calls SkipBuilderChunk after
+// TestChunkBlockLimits, rather than extracting a parent from the failed chunk.
 #[test]
 fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dyn Error>> {
     let payout = vec![0x51];
@@ -273,7 +282,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
             .iter()
             .map(|transaction| transaction.txid)
             .collect::<Vec<_>>(),
-        vec![parent.txid]
+        vec![]
     );
 
     let mut oversized_child = child.clone();
@@ -292,7 +301,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
             .iter()
             .map(|transaction| transaction.txid)
             .collect::<Vec<_>>(),
-        vec![parent.txid]
+        vec![]
     );
 
     let mut excess_sigops_child = child;
@@ -301,7 +310,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
         &exact_limits,
         &MempoolMiningSnapshot {
             sequence: 8,
-            entries: vec![excess_sigops_child, parent.clone()],
+            entries: vec![excess_sigops_child, parent],
         },
         &payout,
     )?;
@@ -311,7 +320,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
             .iter()
             .map(|transaction| transaction.txid)
             .collect::<Vec<_>>(),
-        vec![parent.txid]
+        vec![]
     );
     Ok(())
 }
@@ -400,7 +409,7 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn missing_ancestors_fail_assembly_without_rechecking_the_dag() {
+fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
     let missing = MempoolMiningSnapshot {
         sequence: 1,
         entries: vec![snapshot_entry(
@@ -418,8 +427,10 @@ fn missing_ancestors_fail_assembly_without_rechecking_the_dag() {
         Err(MiningError::MissingAncestor { .. })
     ));
 
-    // Cyclic ancestor lists are a mempool snapshot defect. Mining orders by
-    // ancestor count and does not run a second DAG checker.
+    // POL-05 requires an admitted dependency DAG. This fixture bypasses
+    // admission: assemble_candidate calls MempoolMiningSnapshot::fee_chunks,
+    // whose mempool-owned fee-diagram validator rejects the forged cycle
+    // with Dependencies. Mining propagates that failure without making an order.
     let cyclic = MempoolMiningSnapshot {
         sequence: 2,
         entries: vec![
@@ -427,9 +438,12 @@ fn missing_ancestors_fail_assembly_without_rechecking_the_dag() {
             snapshot_entry(Arc::new(independent_tx(2)), 1_000, 0, 100, 100, 0, vec![0]),
         ],
     };
-    let assembled = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &cyclic, &[0x51])
-        .expect("mining does not re-validate snapshot topology");
-    assert_eq!(assembled.transactions.len(), 2);
+    assert!(matches!(
+        assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &cyclic, &[0x51]),
+        Err(MiningError::FeeDiagram(
+            bitcoin_rs_mempool::FeeDiagramError::Dependencies
+        ))
+    ));
 }
 
 #[test]

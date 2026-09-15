@@ -8,7 +8,9 @@ use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 // rust-bitcoin differential oracle: witness merkle root.
 use bitcoin::Wtxid as OracleWtxid;
 use bitcoin_rs_consensus::bip34::check_bip34;
-use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
+use bitcoin_rs_mempool::{
+    Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot, SnapshotEntry,
+};
 use bitcoin_rs_mining::{
     CandidateContext, MiningError, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
 };
@@ -144,6 +146,29 @@ fn fee_overflow_is_reported_instead_of_wrapping() {
     assert_eq!(err, MiningError::FeeOverflow);
 }
 
+/// POL-05 and API-28 preserve the i128 modified-fee overlay. A priority boost
+/// changes ordering; only the actual fee may increase the coinbase value.
+#[test]
+fn maximum_priority_delta_does_not_break_candidate_construction() -> Result<(), Box<dyn Error>> {
+    let mut pool = Mempool::new(MempoolLimits::default());
+    let tx = Arc::new(tx_with_witness(1, 1_000, None));
+    let txid = tx.txid();
+    let vsize = u32::try_from(tx.vsize())?;
+    pool.insert_entry(MempoolEntry::new(tx, vsize, 1_000, 0, 1))?;
+    pool.prioritise(txid, i64::MAX)?;
+    let snapshot = pool.mining_snapshot();
+    let chunks = snapshot.fee_chunks()?;
+    assert_eq!(chunks[0].modified_fee, i128::from(i64::MAX) + 1_000);
+    let candidate = assemble_candidate(&context(2, true), &snapshot, &[0x51])?;
+    assert_eq!(candidate.transactions.len(), 1);
+    assert_eq!(candidate.transactions[0].txid, txid);
+    assert_eq!(
+        candidate.fees, 1_000,
+        "priority deltas are never coinbase income"
+    );
+    Ok(())
+}
+
 /// The reserved reorg batch must store resolved BIP141 cost all the way
 /// through the real gateway and mining snapshot; template selection consumes it.
 #[test]
@@ -237,9 +262,15 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
     let mut limited = context(101, true);
     limited.max_sigops = 5;
     let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
-    assert_eq!(candidate.transactions.len(), 1);
-    assert_eq!(candidate.transactions[0].txid, parent.txid());
-    assert_eq!(candidate.sigop_cost, 4);
+    // POL-05: a dependency fee chunk is indivisible for mining. The child
+    // raises the pair's rate, so both entries share a chunk whose 4+2 sigops
+    // exceed 5. Core 31.1 node/miner.cpp addChunks uses SkipBuilderChunk
+    // when TestChunkBlockLimits fails; it does not retry this chunk's parent.
+    assert!(
+        candidate.transactions.is_empty(),
+        "the complete CPFP chunk exceeds the sigop budget"
+    );
+    assert_eq!(candidate.sigop_cost, 0);
     limited.max_sigops = 6;
     let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
     assert_eq!(candidate.transactions.len(), 2);

@@ -16,6 +16,9 @@ pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 /// Candidate assembly failure.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MiningError {
+    /// The mempool owner's fee graph could not be evaluated.
+    #[error(transparent)]
+    FeeDiagram(#[from] bitcoin_rs_mempool::FeeDiagramError),
     /// Coinbase subsidy plus fees exceeded the satoshi range.
     #[error("coinbase value overflows satoshi range")]
     CoinbaseValueOverflow,

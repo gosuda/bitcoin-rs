@@ -27,6 +27,7 @@ default = []
 
 
 [dev-dependencies]
+serde_json.workspace = true
 proptest.workspace = true
 bitcoin.workspace = true
 criterion.workspace = true

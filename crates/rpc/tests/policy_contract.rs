@@ -151,7 +151,7 @@ fn sendrawtransaction_rejects_below_min_relay_fee_and_agrees_with_the_pool()
             .ok_or("expected below-min-relay-fee rejection")?,
     );
     assert!(
-        message.contains("min-relay-fee-not-met"),
+        message.contains("min relay fee not met"),
         "unexpected rejection message: {message}"
     );
     assert!(
@@ -213,7 +213,7 @@ fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
             .ok_or("expected the floor to reject the both-predicates tx")?,
     );
     assert!(
-        message.contains("min-relay-fee-not-met"),
+        message.contains("min relay fee not met"),
         "the floor class must win: {message}"
     );
     assert!(
@@ -237,7 +237,7 @@ fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
             .ok_or("expected one row")?
             .get("reject-reason")
             .and_then(JsonValueTrait::as_str),
-        Some("min-relay-fee-not-met"),
+        Some("min relay fee not met"),
         "testmempoolaccept must report the floor class, not max-fee"
     );
     assert!(
@@ -311,7 +311,7 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
             .ok_or("expected the configured floor to reject")?,
     );
     assert!(
-        message.contains("min-relay-fee-not-met"),
+        message.contains("min relay fee not met"),
         "unexpected message: {message}"
     );
     let rows = handler
@@ -324,7 +324,7 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
             .ok_or("expected one row")?
             .get("reject-reason")
             .and_then(JsonValueTrait::as_str),
-        Some("min-relay-fee-not-met")
+        Some("min relay fee not met")
     );
 
     // Exactly at the floor admits.
@@ -399,7 +399,7 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
             .ok_or("expected the pressure floor to reject")?,
     );
     assert!(
-        message.contains("min-relay-fee-not-met"),
+        message.contains("min relay fee not met"),
         "unexpected message: {message}"
     );
     assert!(
@@ -416,7 +416,7 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
             .ok_or("expected one row")?
             .get("reject-reason")
             .and_then(JsonValueTrait::as_str),
-        Some("min-relay-fee-not-met")
+        Some("min relay fee not met")
     );
 
     // The raw insert gate checks only the configured floor, so the same tx
@@ -444,90 +444,33 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn testmempoolaccept_reports_a_policy_verdict_per_row() -> Result<(), Box<dyn Error>> {
+fn package_preview_leaves_other_rows_unfinished_after_a_precheck_failure()
+-> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
-    let funded = fund_utxo(&ctx, 0x51, 10_000);
-    let good = tx(funded, 9_000, 0xffff_ffff);
+    let good = tx(fund_utxo(&ctx, 0x51, 10_000), 9_000, 0xffff_ffff);
     let below_min = tx(fund_utxo(&ctx, 0x52, 10_000), 9_999, 0xffff_ffff);
-    let nonstandard = Tx {
-        outputs: vec![TxOut {
-            value: Amount::from_sat(9_000),
-            script_pubkey: Script::from_bytes(op_true_script()),
-        }],
-        ..tx(fund_utxo(&ctx, 0x53, 10_000), 9_000, 0xffff_ffff)
-    };
-    let dust = Tx {
-        outputs: vec![TxOut {
-            value: Amount::from_sat(100),
-            script_pubkey: Script::from_bytes(p2wpkh_script()),
-        }],
-        ..tx(fund_utxo(&ctx, 0x54, 10_000), 100, 0xffff_ffff)
-    };
-    // Core 31 accepts v3 under TRUC; bitcoin-rs rejects it at the version
-    // gate (deviation ledger, item 5).
-    let version_three = Tx {
-        version: 3,
-        ..tx(fund_utxo(&ctx, 0x5a, 10_000), 9_000, 0xffff_ffff)
-    };
-
+    let later = tx(fund_utxo(&ctx, 0x53, 10_000), 9_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
-    let rows = handler
-        .dispatch(
-            "testmempoolaccept",
-            &json!([[
-                raw_tx_hex(&good),
-                raw_tx_hex(&below_min),
-                raw_tx_hex(&nonstandard),
-                raw_tx_hex(&dust),
-                raw_tx_hex(&version_three),
-            ]]),
-        )?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
-
-    let allowed = |row: &sonic_rs::Value| row.get("allowed").and_then(JsonValueTrait::as_bool);
-    let reason = |row: &sonic_rs::Value| {
-        row.get("reject-reason")
-            .and_then(JsonValueTrait::as_str)
-            .map(ToString::to_string)
-    };
-
-    assert_eq!(rows.len(), 5, "one row per submitted tx");
-    assert_eq!(allowed(&rows[0]), Some(true));
-    assert_eq!(reason(&rows[0]), None);
-    // The typed wire contract serializes amounts as JSON numbers; parity is
-    // value parity (1000 sat == 0.00001 BTC), not decimal spelling.
-    let base = rows[0]
-        .get("fees")
-        .and_then(|fees| fees.get("base"))
-        .and_then(JsonValueTrait::as_f64)
-        .ok_or("accepted row must quote its base fee")?;
-    assert!((base - 0.00001).abs() < 1e-12);
-    assert_eq!(reason(&rows[1]).as_deref(), Some("min-relay-fee-not-met"));
-    assert_eq!(
-        reason(&rows[2]).as_deref(),
-        Some("non-standard output script")
-    );
-    assert_eq!(reason(&rows[3]).as_deref(), Some("dust output"));
-    assert_eq!(
-        reason(&rows[4]).as_deref(),
-        Some("non-standard transaction version")
-    );
-    for row in &rows {
-        let txid = row
-            .get("txid")
-            .and_then(JsonValueTrait::as_str)
-            .ok_or("row missing txid")?;
-        assert_eq!(txid.len(), 64, "txid renders as 64 hex characters");
+    let rows = handler.dispatch(
+        "testmempoolaccept",
+        &json!([[
+            raw_tx_hex(&good),
+            raw_tx_hex(&below_min),
+            raw_tx_hex(&later),
+        ]]),
+    )?;
+    for index in [0, 2] {
+        assert!(rows[index].get("allowed").is_none());
+        assert!(rows[index].get("fees").is_none());
+        assert!(rows[index].get("reject-reason").is_none());
     }
-
-    // Dry run: nothing may enter the pool.
+    assert_eq!(rows[1]["allowed"].as_bool(), Some(false));
     assert_eq!(
-        ctx.mempool.read().len(),
-        0,
-        "testmempoolaccept is a dry run"
+        rows[1]["reject-reason"].as_str(),
+        Some("min relay fee not met")
     );
+    assert!(rows[1].get("fees").is_none());
+    assert_eq!(ctx.mempool.read().len(), 0);
     Ok(())
 }
 
@@ -724,17 +667,18 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
 }
 
 #[test]
-fn sendrawtransaction_rejects_rule2_replacements_adding_unconfirmed_inputs()
--> Result<(), Box<dyn Error>> {
+fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let original = insert_original(&ctx, 0x98, 0xffff_fffd, 4_000, 8_000)?;
-    // An unrelated pooled tx whose output the replacement would add.
-    let unrelated = tx(fund_utxo(&ctx, 0x99, 10_000), 9_000, 0xffff_ffff);
-    let handler = Handler::new(Arc::clone(&ctx));
-    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&unrelated)]))?;
-
-    // Inputs 100 000 + 9 000 - 100 000 = 9 000 sat over ~150 vB: clears the
-    // floor and every other gate; only rule 2 can reject it.
+    let mut unrelated = tx(fund_utxo(&ctx, 0x99, 10_000), 9_000, 0xffff_ffff);
+    unrelated.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
+    ctx.mempool.pool().write().insert_entry(MempoolEntry::new(
+        Arc::new(unrelated.clone()),
+        100,
+        1_000,
+        0,
+        1,
+    ))?;
     let replacement = tx_spending(
         &[
             (confirmed_outpoint(0x98), 0xffff_ffff),
@@ -742,41 +686,23 @@ fn sendrawtransaction_rejects_rule2_replacements_adding_unconfirmed_inputs()
         ],
         100_000,
     );
-    let message = reject_message(
-        &handler
-            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))
-            .err()
-            .ok_or("expected rule 2 rejection")?,
+    let handler = Handler::new(Arc::clone(&ctx));
+    let before = ctx.mempool.read().sequence_number();
+    let rows = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(&replacement)]]))?;
+    assert_eq!(rows[0]["allowed"].as_bool(), Some(true), "{rows:?}");
+    assert_eq!(ctx.mempool.read().sequence_number(), before);
+    let candidate = ReplacementCandidate::new(
+        Arc::new(replacement.clone()),
+        u32::try_from(replacement.vsize())?,
+        9_000,
+        1_000,
     );
-    assert!(
-        message.contains("BIP125 rule 2"),
-        "unexpected message: {message}"
-    );
-    let rows = handler
-        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&replacement)]]))?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
-    assert_eq!(
-        rows.first()
-            .ok_or("expected one row")?
-            .get("reject-reason")
-            .and_then(JsonValueTrait::as_str),
-        Some("BIP125 rule 2: replacement adds a new unconfirmed input")
-    );
-    // A rejected replacement leaves both originals pooled.
+    ctx.mempool.read().check_replacement(&candidate)?;
+    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
     let pool = ctx.mempool.read();
-    assert!(pool.contains_txid(&rpc_txid(&original)));
+    assert!(!pool.contains_txid(&rpc_txid(&original)));
     assert!(pool.contains_txid(&rpc_txid(&unrelated)));
-
-    // Direct pool outcome: the same candidate fails check_replacement with
-    // the same rule.
-    let vsize = u32::try_from(replacement.vsize()).unwrap_or(u32::MAX);
-    let candidate = ReplacementCandidate::new(Arc::new(replacement), vsize, 9_000, 1_000);
-    assert_eq!(
-        pool.check_replacement(&candidate),
-        Err(RbfError::Rule2NewUnconfirmedInput)
-    );
+    assert!(pool.contains_txid(&rpc_txid(&replacement)));
     Ok(())
 }
 
@@ -796,7 +722,7 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
             .ok_or("expected rule 3 rejection")?,
     );
     assert!(
-        message.contains("BIP125 rule 3"),
+        message.contains("insufficient fee"),
         "unexpected message: {message}"
     );
     let rows = handler
@@ -809,7 +735,7 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
             .ok_or("expected one row")?
             .get("reject-reason")
             .and_then(JsonValueTrait::as_str),
-        Some("BIP125 rule 3: replacement fee does not pay evicted fees")
+        Some("insufficient fee")
     );
     assert!(
         ctx.mempool.read().contains_txid(&rpc_txid(&original)),
@@ -827,8 +753,7 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
 }
 
 #[test]
-fn sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate()
--> Result<(), Box<dyn Error>> {
+fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     // Original at 4 000 vsize / 8 000 sat fee = 2 000 sat/kvB stored rate,
     // funded at 200 000 so the replacement has fee headroom to tune.
@@ -867,7 +792,7 @@ fn sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate()
             .ok_or("expected rule 6 rejection")?,
     );
     assert!(
-        message.contains("BIP125 rule 6"),
+        message.contains("replacement-failed"),
         "unexpected message: {message}"
     );
     let rows = handler
@@ -880,7 +805,7 @@ fn sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate()
             .ok_or("expected one row")?
             .get("reject-reason")
             .and_then(JsonValueTrait::as_str),
-        Some("BIP125 rule 6: replacement fee rate is not higher than originals")
+        Some("replacement-failed")
     );
     assert!(
         ctx.mempool.read().contains_txid(&rpc_txid(&original)),
@@ -893,7 +818,7 @@ fn sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate()
     let candidate = ReplacementCandidate::new(Arc::new(replacement), vsize, fee, 1_000);
     assert_eq!(
         ctx.mempool.read().check_replacement(&candidate),
-        Err(RbfError::Rule6InsufficientFeeRate)
+        Err(RbfError::InsufficientFeerateDiagram)
     );
     Ok(())
 }
@@ -1015,7 +940,7 @@ fn bip125_rule4_replacement_must_pay_incremental_relay_fee_on_both_rpcs()
         &handler,
         &raw_tx_hex(&replacement),
         &replacement,
-        "BIP125 rule 4",
+        "insufficient fee",
         RbfError::Rule4InsufficientIncrementalFee,
         &ctx.mempool,
     )?;
@@ -1023,7 +948,7 @@ fn bip125_rule4_replacement_must_pay_incremental_relay_fee_on_both_rpcs()
 }
 
 #[test]
-fn bip125_rule5_too_many_evicted_descendants_reject_on_both_rpcs() -> Result<(), Box<dyn Error>> {
+fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     // Raise package limits so 100 descendants can be inserted; the
     // replacement evicts 101 (original + 100 descendants) > 100.
@@ -1034,8 +959,6 @@ fn bip125_rule5_too_many_evicted_descendants_reject_on_both_rpcs() -> Result<(),
     // BIP125, not cluster limits.
     {
         let mut pool = ctx.mempool.pool().write();
-        pool.limits.max_ancestors = 200;
-        pool.limits.max_descendants = 200;
         pool.limits.cluster_count = 400;
         pool.limits.cluster_size_vbytes = 1_000_000;
     }
@@ -1057,14 +980,12 @@ fn bip125_rule5_too_many_evicted_descendants_reject_on_both_rpcs() -> Result<(),
     let replacement = tx(confirmed_outpoint(0xa5), 80_000, 0xffff_ffff);
     let handler = Handler::new(Arc::clone(&ctx));
 
-    let _row = assert_both_rpcs_agree_on_replacement_rejection(
-        &handler,
-        &raw_tx_hex(&replacement),
-        &replacement,
-        "BIP125 rule 5",
-        RbfError::Rule5TooManyEvictions,
-        &ctx.mempool,
-    )?;
+    let rows = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(&replacement)]]))?;
+    assert_eq!(rows[0]["allowed"].as_bool(), Some(true), "{rows:?}");
+    assert_eq!(ctx.mempool.read().len(), 101);
+    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
+    assert_eq!(ctx.mempool.read().len(), 1);
+    assert!(ctx.mempool.read().contains_txid(&rpc_txid(&replacement)));
     Ok(())
 }
 
@@ -1082,7 +1003,8 @@ fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
         vout: 0,
     };
     for _ in 0..25 {
-        let next = tx(previous, 1_000, 0xffff_ffff);
+        let mut next = tx(previous, 1_000, 0xffff_ffff);
+        next.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
         previous = OutPoint::new(next.txid(), 0);
         pool.insert_entry(MempoolEntry::new(
             Arc::new(next.clone()),
@@ -1094,58 +1016,6 @@ fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
         txs.push(next);
     }
     Ok(txs)
-}
-
-#[test]
-fn sendrawtransaction_enforces_ancestor_count_limits_at_admission() -> Result<(), Box<dyn Error>> {
-    let ctx = Arc::new(Context::new());
-    let chain = chain_pool(&ctx)?;
-    // The 26th descendant funds itself richly enough to pass every other
-    // policy gate: only the package limit may reject it.
-    let tip = chain.last().ok_or("empty chain")?;
-    let follower = {
-        let funded = fund_utxo(&ctx, 0x63, 100_000);
-        tx_multi_child(&funded, tip)
-    };
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    let message = reject_message(
-        &handler
-            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))
-            .err()
-            .ok_or("expected TooManyAncestors rejection")?,
-    );
-    assert!(
-        message.contains("too many unconfirmed ancestors"),
-        "unexpected message: {message}"
-    );
-
-    // Pool-path agreement: the gate lives in the pool's insert path.
-    let mut pool = Mempool::new(MempoolLimits::default());
-    let mut previous = OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[0x62; 32])),
-        vout: 0,
-    };
-    for _ in 0..25 {
-        let next = tx(previous, 1_000, 0xffff_ffff);
-        previous = OutPoint::new(next.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(Arc::new(next), 4_000, 4_000, 0, 1))?;
-    }
-    let error = pool
-        .insert_entry(MempoolEntry::new(
-            Arc::new(tx(previous, 1_000, 0xffff_ffff)),
-            82,
-            10_000,
-            0,
-            1,
-        ))
-        .err()
-        .ok_or("pool path must also reject")?;
-    assert!(matches!(
-        error,
-        bitcoin_rs_mempool::MempoolError::Policy(PolicyError::TooManyAncestors)
-    ));
-    Ok(())
 }
 
 /// Builds the 26th chain member that also spends a funded confirmed outpoint,
@@ -1176,72 +1046,16 @@ fn tx_multi_child(funded: &OutPoint, tip: &Tx) -> Tx {
 }
 
 #[test]
-fn testmempoolaccept_and_sendrawtransaction_agree_on_ancestor_count_limits()
--> Result<(), Box<dyn Error>> {
-    // The preview and the admission gate must quote the same verdict for
-    // ancestor count limits. Core's testmempoolaccept enforces package
-    // limits up front; so must the preview.
+fn both_rpcs_allow_more_than_25_ancestors_within_cluster_limits() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
     let chain = chain_pool(&ctx)?;
     let tip = chain.last().ok_or("empty chain")?;
     let follower = tx_multi_child(&fund_utxo(&ctx, 0x64, 100_000), tip);
     let handler = Handler::new(Arc::clone(&ctx));
-
-    // Preview must reject — the 26th unconfirmed ancestor exceeds the limit.
-    let rows = handler
-        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&follower)]]))?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
-    let row = rows.first().ok_or("expected one row")?;
-    assert_eq!(
-        row.get("allowed").and_then(JsonValueTrait::as_bool),
-        Some(false),
-        "preview must surface ancestor count limits"
-    );
-    let reject_reason = row
-        .get("reject-reason")
-        .and_then(JsonValueTrait::as_str)
-        .ok_or("expected reject-reason")?;
-    assert!(
-        reject_reason.contains("too many unconfirmed ancestors"),
-        "unexpected reject-reason: {reject_reason}"
-    );
-
-    // Admission must reject with the same class.
-    let message = reject_message(
-        &handler
-            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))
-            .err()
-            .ok_or("expected admission to enforce the limit")?,
-    );
-    assert!(message.contains("too many unconfirmed ancestors"));
-
-    // Pool-path agreement: the direct insert gate rejects the same package.
-    let mut pool = Mempool::new(MempoolLimits::default());
-    let mut previous = OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[0x93; 32])),
-        vout: 0,
-    };
-    for _ in 0..25 {
-        let next = tx(previous, 1_000, 0xffff_ffff);
-        previous = OutPoint::new(next.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(Arc::new(next), 4_000, 4_000, 0, 1))?;
-    }
-    let error = pool
-        .insert_entry(MempoolEntry::new(
-            Arc::new(tx(previous, 1_000, 0xffff_ffff)),
-            4_000,
-            4_000,
-            0,
-            1,
-        ))
-        .err()
-        .ok_or("pool path must also reject")?;
-    assert_eq!(
-        error,
-        bitcoin_rs_mempool::MempoolError::Policy(PolicyError::TooManyAncestors)
-    );
+    let rows = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(&follower)]]))?;
+    assert_eq!(rows[0]["allowed"].as_bool(), Some(true), "{rows:?}");
+    handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))?;
+    assert_eq!(ctx.mempool.read().len(), 26);
     Ok(())
 }
 
@@ -1255,8 +1069,6 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
     let root = {
         let mut pool = ctx.mempool.pool().write();
         pool.limits.cluster_count = 1;
-        pool.limits.max_ancestors = 100;
-        pool.limits.max_descendants = 100;
         let root = tx(
             OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&[0xc1; 32])),
@@ -1287,7 +1099,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
         .and_then(JsonValueTrait::as_str)
         .ok_or("expected reject-reason")?;
     assert!(
-        reject_reason.contains("too many transactions in cluster"),
+        reject_reason.contains("too-large-cluster"),
         "unexpected reject-reason: {reject_reason}"
     );
 
@@ -1298,14 +1110,12 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
             .ok_or("expected admission to enforce the cluster count")?,
     );
     assert!(
-        message.contains("too many transactions in cluster"),
+        message.contains("too-large-cluster"),
         "unexpected message: {message}"
     );
 
     let mut pool = Mempool::new(MempoolLimits {
         cluster_count: 1,
-        max_ancestors: 100,
-        max_descendants: 100,
         ..MempoolLimits::default()
     });
     pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 10_000, 0, 1))?;
@@ -1328,9 +1138,6 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
         let mut pool = ctx.mempool.pool().write();
         pool.limits.cluster_count = 100;
         pool.limits.cluster_size_vbytes = 250;
-        pool.limits.max_ancestors = 100;
-        pool.limits.max_ancestor_size = 1_000_000;
-        pool.limits.max_descendants = 100;
         let root = tx(
             OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&[0xc3; 32])),
@@ -1361,7 +1168,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
         .and_then(JsonValueTrait::as_str)
         .ok_or("expected reject-reason")?;
     assert!(
-        reject_reason.contains("cluster is too large"),
+        reject_reason.contains("too-large-cluster"),
         "unexpected reject-reason: {reject_reason}"
     );
 
@@ -1372,7 +1179,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
             .ok_or("expected admission to enforce the cluster size")?,
     );
     assert!(
-        message.contains("cluster is too large"),
+        message.contains("too-large-cluster"),
         "unexpected message: {message}"
     );
     Ok(())
@@ -1473,27 +1280,6 @@ fn tx_spending(inputs: &[(OutPoint, u32)], output_value: u64) -> Tx {
     }
 }
 
-/// Multi-output variant of `tx`, used for the descendant-count parent.
-fn tx_outputs(prevout: OutPoint, sequence: u32, values: &[u64]) -> Tx {
-    Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(0),
-        inputs: vec![TxIn {
-            previous_output: prevout,
-            script_sig: Script::new(),
-            sequence: Sequence::from_consensus(sequence),
-            witness: Witness::new(),
-        }],
-        outputs: values
-            .iter()
-            .map(|value| TxOut {
-                value: Amount::from_sat(*value),
-                script_pubkey: Script::from_bytes(p2wpkh_script()),
-            })
-            .collect(),
-    }
-}
-
 /// One funded input and `count` identical P2WPKH outputs, used to tune a
 /// replacement's real vsize against its fee (the rule-6 shape).
 fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
@@ -1514,204 +1300,6 @@ fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
             count
         ],
     }
-}
-
-#[test]
-fn sendrawtransaction_enforces_ancestor_size_limits_at_admission() -> Result<(), Box<dyn Error>> {
-    let ctx = Arc::new(Context::new());
-    // Shrink -limitancestorsize so a 3 x 4 000 vB chain leaves the follower's
-    // real 82 vB as the only gate that can fail: 12 000 + 82 > 12 000.
-    ctx.mempool.pool().write().limits.max_ancestor_size = 12_000;
-    let tip = {
-        let mut pool = ctx.mempool.pool().write();
-        let mut previous = OutPoint {
-            txid: Txid(Hash256::from_le_bytes(&[0x94; 32])),
-            vout: 0,
-        };
-        let mut tip = None;
-        for _ in 0..3 {
-            let next = tx(previous, 1_000, 0xffff_ffff);
-            previous = OutPoint::new(next.txid(), 0);
-            pool.insert_entry(MempoolEntry::new(
-                Arc::new(next.clone()),
-                4_000,
-                4_000,
-                0,
-                1,
-            ))?;
-            tip = Some(next);
-        }
-        tip.ok_or("empty chain")?
-    };
-    let follower = tx_multi_child(&fund_utxo(&ctx, 0x95, 100_000), &tip);
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    // Preview must reject — ancestor size 12 000 + 82 > 12 000.
-    let rows = handler
-        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&follower)]]))?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
-    let row = rows.first().ok_or("expected one row")?;
-    assert_eq!(
-        row.get("allowed").and_then(JsonValueTrait::as_bool),
-        Some(false),
-        "preview must surface ancestor size limits"
-    );
-    let reject_reason = row
-        .get("reject-reason")
-        .and_then(JsonValueTrait::as_str)
-        .ok_or("expected reject-reason")?;
-    assert!(
-        reject_reason.contains("ancestor package is too large"),
-        "unexpected reject-reason: {reject_reason}"
-    );
-
-    let message = reject_message(
-        &handler
-            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&follower)]))
-            .err()
-            .ok_or("expected AncestorSizeLimit rejection")?,
-    );
-    assert!(
-        message.contains("ancestor package is too large"),
-        "unexpected message: {message}"
-    );
-    assert!(
-        !ctx.mempool.read().contains_txid(&rpc_txid(&follower)),
-        "rejected tx must not enter the pool"
-    );
-
-    // Pool-path agreement: the direct insert gate rejects the same package.
-    let mut pool = Mempool::new(MempoolLimits {
-        max_ancestor_size: 12_000,
-        ..MempoolLimits::default()
-    });
-    let mut previous = OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[0x94; 32])),
-        vout: 0,
-    };
-    for _ in 0..3 {
-        let next = tx(previous, 1_000, 0xffff_ffff);
-        previous = OutPoint::new(next.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(Arc::new(next), 4_000, 4_000, 0, 1))?;
-    }
-    let error = pool
-        .insert_entry(MempoolEntry::new(
-            Arc::new(tx(previous, 1_000, 0xffff_ffff)),
-            4_000,
-            4_000,
-            0,
-            1,
-        ))
-        .err()
-        .ok_or("pool path must also reject")?;
-    assert_eq!(
-        error,
-        bitcoin_rs_mempool::MempoolError::Policy(PolicyError::AncestorSizeLimit)
-    );
-    Ok(())
-}
-
-#[test]
-fn sendrawtransaction_enforces_descendant_count_limits_at_admission() -> Result<(), Box<dyn Error>>
-{
-    let ctx = Arc::new(Context::new());
-    // Parent with two outputs: out 0 fans out to the 24 in-pool children
-    // that fill the parent's descendant budget, out 1 is the RPC child's
-    // non-conflicting entry point.
-    let parent_txid = {
-        let mut pool = ctx.mempool.pool().write();
-        let parent = tx_outputs(
-            OutPoint {
-                txid: Txid(Hash256::from_le_bytes(&[0x96; 32])),
-                vout: 0,
-            },
-            0xffff_ffff,
-            &[1_000, 2_000],
-        );
-        let parent_txid = rpc_txid(&parent);
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 4_000, 4_000, 0, 1))?;
-        let parent_out = OutPoint::new(parent_txid, 0);
-        for value in 1_000_u64..1_024 {
-            let child = tx(parent_out, value, 0xffff_ffff);
-            pool.insert_entry(MempoolEntry::new(Arc::new(child), 4_000, 4_000, 0, 1))?;
-        }
-        parent_txid
-    };
-    // Inputs 2 000 + 100 000 - 91 000 = 11 000 sat over ~150 vB: clears
-    // every other gate; only the parent's descendant count can reject it.
-    let child = tx_spending(
-        &[
-            (OutPoint::new(parent_txid, 1), 0xffff_ffff),
-            (fund_utxo(&ctx, 0x97, 100_000), 0xffff_ffff),
-        ],
-        91_000,
-    );
-    let handler = Handler::new(Arc::clone(&ctx));
-
-    // Preview must reject — the parent's descendant count exceeds the limit.
-    let rows = handler
-        .dispatch("testmempoolaccept", &json!([[raw_tx_hex(&child)]]))?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
-    let row = rows.first().ok_or("expected one row")?;
-    assert_eq!(
-        row.get("allowed").and_then(JsonValueTrait::as_bool),
-        Some(false),
-        "preview must surface descendant count limits"
-    );
-    let reject_reason = row
-        .get("reject-reason")
-        .and_then(JsonValueTrait::as_str)
-        .ok_or("expected reject-reason")?;
-    assert!(
-        reject_reason.contains("too many unconfirmed descendants"),
-        "unexpected reject-reason: {reject_reason}"
-    );
-
-    let message = reject_message(
-        &handler
-            .dispatch("sendrawtransaction", &json!([raw_tx_hex(&child)]))
-            .err()
-            .ok_or("expected TooManyDescendants rejection")?,
-    );
-    assert!(
-        message.contains("too many unconfirmed descendants"),
-        "unexpected message: {message}"
-    );
-    assert!(!ctx.mempool.read().contains_txid(&rpc_txid(&child)));
-
-    // Pool-path agreement: the direct insert gate rejects the same package.
-    let mut pool = Mempool::new(MempoolLimits::default());
-    let root = OutPoint {
-        txid: Txid(Hash256::from_le_bytes(&[0x96; 32])),
-        vout: 0,
-    };
-    let parent = tx_outputs(root, 0xffff_ffff, &[1_000, 2_000]);
-    let parent_txid = parent.txid();
-    let parent_out = OutPoint::new(parent_txid, 0);
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 4_000, 4_000, 0, 1))?;
-    for value in 1_000_u64..1_024 {
-        let child = tx(parent_out, value, 0xffff_ffff);
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 4_000, 4_000, 0, 1))?;
-    }
-    let error = pool
-        .insert_entry(MempoolEntry::new(
-            Arc::new(tx(OutPoint::new(parent_txid, 1), 9_999, 0xffff_ffff)),
-            4_000,
-            4_000,
-            0,
-            1,
-        ))
-        .err()
-        .ok_or("pool path must also reject")?;
-    assert_eq!(
-        error,
-        bitcoin_rs_mempool::MempoolError::Policy(PolicyError::TooManyDescendants)
-    );
-    Ok(())
 }
 
 #[test]
@@ -1798,28 +1386,11 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_each_class() -> Result<(), 
     let txs = [&good, &below_min, &nonstandard, &dust];
 
     let handler = Handler::new(Arc::clone(&ctx));
-    let rows = handler
-        .dispatch(
-            "testmempoolaccept",
-            &json!([txs.iter().map(|tx| raw_tx_hex(tx)).collect::<Vec<_>>()]),
-        )?
-        .as_array()
-        .ok_or("expected an array of results")?
-        .clone();
-
-    for (index, tx) in txs.iter().enumerate() {
-        let row = rows.get(index).ok_or("missing row")?;
-        let preview_allowed = row
-            .get("allowed")
-            .and_then(JsonValueTrait::as_bool)
-            .ok_or("row missing allowed")?;
-        // The submission verdict must match the preview verdict per row.
+    for tx in txs {
+        let rows = handler.dispatch("testmempoolaccept", &json!([[raw_tx_hex(tx)]]))?;
+        let preview_allowed = rows[0]["allowed"].as_bool().ok_or("row missing allowed")?;
         let submitted = handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(tx)]));
-        assert_eq!(
-            submitted.is_ok(),
-            preview_allowed,
-            "row {index}: preview and submission must agree"
-        );
+        assert_eq!(submitted.is_ok(), preview_allowed, "{rows:?}");
     }
     Ok(())
 }

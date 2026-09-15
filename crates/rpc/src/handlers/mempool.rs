@@ -44,13 +44,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         full_rbf: policy.full_rbf,
         permit_bare_multisig: policy.permit_bare_multisig,
         max_data_carrier_size: policy.max_data_carrier_size(),
-        // Cluster limits the snapshot owns. These are not the ancestor
-        // caps: Core 31 deprecated `-limitancestorcount` /
-        // `-limitdescendantcount` and replaced them with cluster limits,
-        // keeping the old pair only for wallet coin selection, so the two
-        // describe different policies -- and `max_ancestor_size` happening
-        // to equal `101_000` as well is a coincidence of value, not of
-        // meaning.
+        // Both fields come from the cluster limits enforced by admission.
         limit_cluster_count: i64::from(policy.cluster_count),
         limit_cluster_size: i64_saturated(policy.cluster_size_vbytes),
         optimal: policy.optimal,

@@ -11,7 +11,7 @@ use crate::template::CandidateContext;
 
 #[cfg(test)]
 thread_local! {
-    static RESIDUAL_PACKAGE_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
+    static CHUNK_PACKAGE_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// One dependency-closed package selected for a candidate.
@@ -31,8 +31,8 @@ pub(crate) struct SelectedPackage {
 
 /// Selects dependency-closed packages under the candidate's resource limits.
 ///
-/// Packages are considered in the snapshot's modified-priority order. Each
-/// package is the still-unselected ancestor closure of the considered entry.
+/// Packages follow the mempool owner's dependency-closed fee chunks.
+/// Mining applies finality and block resource limits to each complete chunk.
 /// A package that fails finality or would overflow weight, serialized size, or
 /// sigop cost is skipped atomically; later packages may still fit.
 pub(crate) fn select_packages(
@@ -60,17 +60,30 @@ pub(crate) fn select_packages(
     let mut fees = 0_u64;
     let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
 
-    for index in 0..snapshot.entries.len() {
+    // Preserve the existing typed reference error before evaluating the graph.
+    for (entry, row) in snapshot.entries.iter().enumerate() {
+        for &ancestor in &row.ancestors {
+            if !usize::try_from(ancestor).is_ok_and(|index| index < snapshot.entries.len()) {
+                return Err(MiningError::MissingAncestor { entry, ancestor });
+            }
+        }
+    }
+    for chunk in snapshot.fee_chunks()? {
         if (context.max_weight > 0 && used_weight >= context.max_weight)
             || (context.max_size > 0 && used_size >= context.max_size)
         {
             break;
         }
-        if selected[index] {
+        // A skipped parent chunk makes dependent later chunks unavailable.
+        if chunk.indices.iter().any(|&index| {
+            snapshot.entries[index].ancestors.iter().any(|&ancestor| {
+                let ancestor = usize::try_from(ancestor).unwrap_or(usize::MAX);
+                !selected[ancestor] && !chunk.indices.contains(&ancestor)
+            })
+        }) {
             continue;
         }
-
-        let package = residual_package(snapshot, index, &selected)?;
+        let package = chunk_package(snapshot, chunk.indices)?;
         if !package_is_final(context, snapshot, &pooled, &package) {
             continue;
         }
@@ -113,41 +126,16 @@ pub(crate) fn select_packages(
     ))
 }
 
-fn residual_package(
+fn chunk_package(
     snapshot: &MempoolMiningSnapshot,
-    tip: usize,
-    selected: &[bool],
+    indices: Vec<usize>,
 ) -> Result<SelectedPackage, MiningError> {
     #[cfg(test)]
-    RESIDUAL_PACKAGE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
-    let tip_entry = &snapshot.entries[tip];
-    let mut indices = Vec::with_capacity(tip_entry.ancestors.len().saturating_add(1));
-
-    for &ancestor in &tip_entry.ancestors {
-        let ancestor = usize::try_from(ancestor).map_err(|_| MiningError::MissingAncestor {
-            entry: tip,
-            ancestor,
-        })?;
-        if ancestor >= snapshot.entries.len() {
-            return Err(MiningError::MissingAncestor {
-                entry: tip,
-                ancestor: u32::try_from(ancestor).unwrap_or(u32::MAX),
-            });
-        }
-        if !selected[ancestor] {
-            indices.push(ancestor);
-        }
+    CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+    if indices.len() == 1 {
+        let index = indices[0];
+        return Ok(single_entry_package(&snapshot.entries[index], index));
     }
-
-    // Snapshot ancestor lists are a mempool invariant. Mining does not re-check
-    // the DAG; parents have strictly fewer in-pool ancestors, so sorting by
-    // that count is topological. Equal counts break on snapshot position.
-    if indices.is_empty() {
-        return Ok(single_entry_package(tip_entry, tip));
-    }
-    indices.push(tip);
-    indices.sort_by_key(|&index| (snapshot.entries[index].ancestors.len(), index));
-
     let mut fee = 0_u64;
     let mut weight = 0_u64;
     let mut size = 0_u64;
@@ -244,44 +232,44 @@ mod tests {
         Txid, Witness,
     };
 
-    use super::{RESIDUAL_PACKAGE_CONSTRUCTIONS, select_packages};
+    use super::{CHUNK_PACKAGE_CONSTRUCTIONS, select_packages};
     use crate::template::CandidateContext;
 
     #[test]
-    fn stops_before_residual_construction_once_a_positive_dimension_is_full() {
-        let filler = snapshot_entry(independent_tx(1), 5_000, 1_000, 1_000, 0);
+    fn stops_candidate_package_construction_once_a_positive_dimension_is_full() {
+        let filler = snapshot_entry(independent_tx(1), 5_000_000, 1_000, 1_000, 0);
         let leftover = snapshot_entry(independent_tx(2), 4_000, 10, 10, 0);
         let snapshot = MempoolMiningSnapshot {
             sequence: 1,
             entries: vec![filler, leftover],
         };
 
-        RESIDUAL_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
+        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
         let weight_full = select_packages(&context(1_000, 4_000_000, 80_000), &snapshot, 0, 0, 0)
             .expect("weight-full selection");
         assert_eq!(weight_full.0, vec![0]);
-        assert_eq!(RESIDUAL_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
 
-        RESIDUAL_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
+        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
         let size_full = select_packages(&context(4_000_000, 1_000, 80_000), &snapshot, 0, 0, 0)
             .expect("size-full selection");
         assert_eq!(size_full.0, vec![0]);
-        assert_eq!(RESIDUAL_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
     }
 
     #[test]
-    fn zero_capacity_limits_do_not_stop_before_residual_construction() {
+    fn zero_capacity_limits_still_consider_zero_size_chunks() {
         let zero_size = snapshot_entry(independent_tx(1), 1_000, 10, 0, 0);
         let snapshot = MempoolMiningSnapshot {
             sequence: 2,
             entries: vec![zero_size],
         };
 
-        RESIDUAL_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
+        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
         let selected = select_packages(&context(4_000_000, 0, 80_000), &snapshot, 0, 0, 0)
             .expect("zero serialized-size limit still considers packages");
         assert_eq!(selected.0, vec![0]);
-        assert_eq!(RESIDUAL_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
     }
 
     fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext {

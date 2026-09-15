@@ -14,7 +14,7 @@ use bitcoin::consensus::encode::{
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin::opcodes::all::{OP_PUSHBYTES_36, OP_RETURN};
 use bitcoin::{Transaction as BitcoinTransaction, block, pow};
-use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
+use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot};
 use bitcoin_rs_mining::{
     CandidateContext, WITNESS_RESERVED_VALUE, assemble_candidate, witness_commitment_script,
 };
@@ -22,7 +22,6 @@ use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, consensus_bytes,
 };
-use bitcoin_rs_script::count_tx_legacy;
 
 /// Pinned commitment bytes for the vector below, derived by piping
 /// `witness_root || reserved_value` through `sha256sum` twice with coreutils,
@@ -35,7 +34,7 @@ const VECTOR_COMMITMENT: [u8; 32] = [
 fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<(), Box<dyn Error>> {
     let parent = witnessed_tx(1, 50_000, None);
     let child = witnessed_tx(2, 40_000, Some(parent.txid()));
-    let snapshot = snapshot_with(&[parent.clone(), child.clone()], &[2_000, 3_000]);
+    let snapshot = snapshot_with(&[parent.clone(), child.clone()], &[2_000, 3_000])?;
 
     let candidate = assemble_candidate(&vector_context(true), &snapshot, &payout())?;
     let commitment = candidate
@@ -115,7 +114,7 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     // Legacy fallback: no commitment anywhere when segwit is inactive.
     let legacy = assemble_candidate(
         &vector_context(false),
-        &snapshot_with(&[witnessed_tx(1, 50_000, None)], &[2_000]),
+        &snapshot_with(&[witnessed_tx(1, 50_000, None)], &[2_000])?,
         &payout(),
     )?;
     assert!(legacy.witness_commitment.is_none());
@@ -178,38 +177,22 @@ fn witnessed_tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
     }
 }
 
-fn snapshot_entry(tx: Tx, fee: u64) -> SnapshotEntry {
-    let tx = Arc::new(tx);
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    SnapshotEntry {
-        txid: tx.txid(),
-        wtxid: tx.wtxid(),
-        vsize,
-        bip141_vsize: vsize,
-        size: u32::try_from(tx.total_size()).unwrap_or(u32::MAX),
-        weight: tx.weight(),
-        sigop_cost: count_tx_legacy(&tx),
-        fee,
-        fee_delta: 0,
-        time: 0,
-        height: 0,
-        ancestor_size: u64::from(vsize),
-        ancestor_fee: fee,
-        ancestor_fee_delta: i128::from(fee),
-        ancestors: Vec::new(),
-        tx,
+// Build the snapshot through its owner so transitive ancestry and all
+// aggregate fields stay consistent. The witness-commitment oracle above
+// remains independent and its pinned expected bytes are unchanged.
+fn snapshot_with(txs: &[Tx], fees: &[u64]) -> Result<MempoolMiningSnapshot, Box<dyn Error>> {
+    assert_eq!(txs.len(), fees.len());
+    let mut pool = Mempool::new(MempoolLimits::default());
+    for (tx, &fee) in txs.iter().zip(fees) {
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx.clone()),
+            u32::try_from(tx.vsize())?,
+            fee,
+            0,
+            0,
+        ))?;
     }
-}
-
-fn snapshot_with(txs: &[Tx], fees: &[u64]) -> MempoolMiningSnapshot {
-    MempoolMiningSnapshot {
-        sequence: 7,
-        entries: txs
-            .iter()
-            .zip(fees.iter())
-            .map(|(tx, fee)| snapshot_entry(tx.clone(), *fee))
-            .collect(),
-    }
+    Ok(pool.mining_snapshot())
 }
 
 /// Decodes native consensus bytes into the rust-bitcoin oracle type so the

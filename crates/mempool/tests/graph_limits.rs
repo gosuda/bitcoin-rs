@@ -1,4 +1,4 @@
-//! Ancestor package policy limit coverage.
+//! Cluster limits and retained ancestor/descendant query metadata.
 // A failed pool or fixture invariant is a test failure, and panicking reports
 // it with the offending call site. `expect` is deliberate.
 #![allow(clippy::expect_used)]
@@ -14,34 +14,80 @@ use bitcoin_rs_primitives::{
 };
 
 #[test]
-fn chain_of_twenty_six_unconfirmed_transactions_rejects_twenty_sixth() -> Result<(), Box<dyn Error>>
+fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), Box<dyn Error>>
 {
+    fn weighted(mut tx: Tx, target: u64) -> Tx {
+        // One short witness item adds two marker/flag bytes, one stack count
+        // and one item length. The independent codec checks the final weight.
+        let padding = usize::try_from(target - tx.weight() - 4).expect("small padding");
+        assert!(padding < 253);
+        tx.inputs[0].witness = Witness::from_stack(vec![vec![0; padding]]);
+        tx
+    }
+    for child_weight in [403, 404] {
+        let mut pool = Mempool::new(MempoolLimits {
+            cluster_size_vbytes: 201,
+            ..MempoolLimits::default()
+        });
+        let parent = weighted(chained_tx(2, outpoint(1, 0)), 401);
+        let child = weighted(chained_tx(3, OutPoint::new(parent.txid(), 0)), child_weight);
+        for (tx, weight) in [(&parent, 401), (&child, child_weight)] {
+            let oracle: bitcoin::Transaction =
+                bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(tx))?;
+            assert_eq!(oracle.weight().to_wu(), weight);
+            assert_eq!(oracle.vsize(), 101);
+        }
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 101, 1_000, 0, 1))?;
+        let before = pool.sequence_number();
+        let result = pool.insert_entry(MempoolEntry::new(Arc::new(child), 101, 1_000, 0, 1));
+        if child_weight == 403 {
+            result?;
+            assert_eq!(
+                pool.total_vsize(),
+                202,
+                "rounded entry sizes exceed the exact 201-vB component weight"
+            );
+            assert_eq!(pool.len(), 2);
+        } else {
+            assert_eq!(
+                result.err(),
+                Some(MempoolError::Policy(PolicyError::ClusterSizeLimit))
+            );
+            assert_eq!(pool.sequence_number(), before);
+            assert_eq!(pool.len(), 1);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn chain_accepts_sixty_four_and_rejects_the_next_cluster_member() -> Result<(), Box<dyn Error>> {
     let mut pool = Mempool::new(MempoolLimits::default());
     let mut previous = outpoint(1, 0);
 
-    for height in 0_u32..25 {
+    for height in 0_u32..64 {
         let label = u8::try_from(height + 2)?;
         let tx = chained_tx(label, previous);
         previous = OutPoint::new(tx.txid(), 0);
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx),
-            4_000,
+            1_000,
             4_000,
             u64::from(height),
             1,
         ))?;
     }
 
-    let rejected = chained_tx(40, previous);
+    let rejected = chained_tx(100, previous);
     let err = pool
-        .insert_entry(MempoolEntry::new(Arc::new(rejected), 4_000, 4_000, 26, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(rejected), 1_000, 4_000, 65, 1))
         .err();
 
     assert_eq!(
         err,
-        Some(MempoolError::Policy(PolicyError::TooManyAncestors))
+        Some(MempoolError::Policy(PolicyError::ClusterCountLimit))
     );
-    assert_eq!(pool.len(), 25);
+    assert_eq!(pool.len(), 64);
 
     Ok(())
 }
@@ -102,14 +148,14 @@ fn rpc_graph_facts_are_transitive_and_aggregates_are_inclusive() -> Result<(), B
 }
 
 #[test]
-fn descendant_count_limit_rejects_the_twenty_sixth_member() -> Result<(), Box<dyn Error>> {
-    // Parent plus 24 children = 25 inclusive. The next child would make 26.
+fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn Error>> {
+    // Parent plus 63 children = 64; the next sibling exceeds the cluster limit.
     let mut pool = Mempool::new(MempoolLimits::default());
-    let parent_tx = multi_output_tx(70, 25);
+    let parent_tx = multi_output_tx(70, 64);
     let parent_txid = parent_tx.txid();
     pool.insert_entry(MempoolEntry::new(Arc::new(parent_tx), 100, 1_000, 1, 1))?;
 
-    for vout in 0_u32..24 {
+    for vout in 0_u32..63 {
         let child = chained_tx(u8::try_from(vout + 71)?, OutPoint::new(parent_txid, vout));
         pool.insert_entry(MempoolEntry::new(
             Arc::new(child),
@@ -119,15 +165,15 @@ fn descendant_count_limit_rejects_the_twenty_sixth_member() -> Result<(), Box<dy
             1,
         ))?;
     }
-    assert_eq!(pool.len(), 25);
+    assert_eq!(pool.len(), 64);
 
-    let rejected = chained_tx(100, OutPoint::new(parent_txid, 24));
+    let rejected = chained_tx(200, OutPoint::new(parent_txid, 63));
     let err = pool
         .insert_entry(MempoolEntry::new(Arc::new(rejected), 100, 1_000, 30, 1))
         .err();
     assert_eq!(
         err,
-        Some(MempoolError::Policy(PolicyError::TooManyDescendants))
+        Some(MempoolError::Policy(PolicyError::ClusterCountLimit))
     );
     Ok(())
 }

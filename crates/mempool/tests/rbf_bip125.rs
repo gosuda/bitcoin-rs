@@ -88,7 +88,7 @@ const CASES: [Case; 9] = [
         expected: Ok(()),
     },
     Case {
-        name: "rule 2 rejects new unconfirmed input",
+        name: "cannot spend an evicted parent",
         original: OriginalSpec {
             sequence: 0xFFFF_FFFD,
             fee: 1_000,
@@ -101,7 +101,7 @@ const CASES: [Case; 9] = [
             new_unconfirmed_input: true,
             extra_descendants: 0,
         },
-        expected: Err(RbfError::Rule2NewUnconfirmedInput),
+        expected: Err(RbfError::Mempool(MempoolError::EvictedParent)),
     },
     Case {
         name: "rule 3 requires replacement to pay original absolute fees",
@@ -136,7 +136,7 @@ const CASES: [Case; 9] = [
         expected: Err(RbfError::Rule4InsufficientIncrementalFee),
     },
     Case {
-        name: "rule 5 rejects too many evictions",
+        name: "many victims in one conflicting cluster are allowed",
         original: OriginalSpec {
             sequence: 0xFFFF_FFFD,
             fee: 1_000,
@@ -149,10 +149,10 @@ const CASES: [Case; 9] = [
             new_unconfirmed_input: false,
             extra_descendants: 100,
         },
-        expected: Err(RbfError::Rule5TooManyEvictions),
+        expected: Ok(()),
     },
     Case {
-        name: "rule 6 requires replacement fee rate to improve",
+        name: "fee diagram must strictly improve",
         original: OriginalSpec {
             sequence: 0xFFFF_FFFD,
             fee: 2_000,
@@ -165,7 +165,7 @@ const CASES: [Case; 9] = [
             new_unconfirmed_input: false,
             extra_descendants: 0,
         },
-        expected: Err(RbfError::Rule6InsufficientFeeRate),
+        expected: Err(RbfError::InsufficientFeerateDiagram),
     },
     Case {
         name: "accepts an original with an unconfirmed parent",
@@ -249,10 +249,6 @@ fn pool_with_conflict(
         MempoolLimits::default()
     } else {
         MempoolLimits {
-            max_ancestors: 200,
-            max_ancestor_size: 1_000_000,
-            max_descendants: 200,
-            max_replacement_evictions: 100,
             // A chain this long is one cluster this long, so the cluster caps
             // have to be lifted alongside the ancestor caps or admission
             // refuses the fixture before the replacement rules are reached.
@@ -447,7 +443,7 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         assert_eq!(pool_fingerprint(&pool), before);
     }
 
-    // (c) Rule 1/3/4/5/6 rejections leave the pool fingerprint untouched.
+    // (c) Policy rejections leave the pool fingerprint untouched.
     for case in CASES.iter().filter(|case| case.expected.is_err()) {
         let (mut pool, replacement_tx) =
             pool_with_conflict(case.original, case.replacement, false)?;
@@ -472,13 +468,11 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
 }
 
 #[test]
-fn replace_transaction_descendant_limits_use_post_eviction_projection() -> Result<(), Box<dyn Error>>
-{
+fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(), Box<dyn Error>> {
     // P + 23 retained children + conflict C = 25 inclusive. Excluding C leaves
     // room for the replacement that re-spends P; counting C would over-reject.
     let mut pool = Mempool::new(MempoolLimits {
-        max_descendants: 25,
-        max_replacement_evictions: 100,
+        cluster_count: 25,
         ..MempoolLimits::default()
     });
     let parent = tx_from_inputs(10, &[(outpoint(1, 0), 0xFFFF_FFFD)], 24);

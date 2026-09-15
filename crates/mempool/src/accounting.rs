@@ -10,6 +10,26 @@ use bitcoin_rs_script::VerifyFlags;
 
 use crate::standardness::PackageTxContext;
 
+pub(crate) const BYTES_PER_SIGOP: u64 = 20;
+
+pub(crate) fn adjusted_weight(wire_weight: u64, sigop_cost: u32) -> u64 {
+    wire_weight.max(u64::from(sigop_cost) * BYTES_PER_SIGOP)
+}
+
+pub(crate) fn charged_weight(wire_weight: u64, vsize: u32, sigop_cost: u32) -> u64 {
+    let exact = adjusted_weight(wire_weight, sigop_cost);
+    if exact.div_ceil(4) == u64::from(vsize) {
+        exact
+    } else {
+        u64::from(vsize) * 4
+    }
+}
+
+pub(crate) fn policy_vsize(tx: &Tx, sigop_cost: u32) -> u32 {
+    let weight = adjusted_weight(tx.weight(), sigop_cost);
+    u32::try_from(weight.div_ceil(4)).unwrap_or(u32::MAX)
+}
+
 /// Derives admission accounting from the resolved input outputs.
 ///
 /// `prevouts` contains one entry per resolved transaction input, in any order.
@@ -28,10 +48,11 @@ pub fn prepared_context(
     let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
         sum.saturating_add(output.value.to_sat())
     });
+    let sigop_cost = transaction_sigop_cost(tx, prevouts, VerifyFlags::STANDARD);
     PackageTxContext {
         fee: input_value.saturating_sub(output_value),
-        vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
-        sigop_cost: transaction_sigop_cost(tx, prevouts, VerifyFlags::STANDARD),
+        vsize: policy_vsize(tx, sigop_cost),
+        sigop_cost,
         missing_inputs,
     }
 }

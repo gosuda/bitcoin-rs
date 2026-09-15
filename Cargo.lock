@@ -350,6 +350,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "parking_lot",
  "proptest",
+ "serde_json",
  "thiserror",
 ]
 

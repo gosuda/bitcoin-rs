@@ -18,7 +18,7 @@ Input count and bytes are recorded per run from the actual corpus or request str
 |---|---|---|---|---|---|---|
 | `replay.offline_full_validation` | `chainstate` (target), `consensus` | blocks and serialized block bytes of the pinned corpus | process wall from spawn to durable clean exit | validation workers (T08 bounded window) | window bytes, inputs, retained coin bytes, CPU jobs, age; RSS guard | `UNMEASURED` |
 | `replay.live_ibd_loopback` | `p2p`, `chainstate` | blocks and bytes delivered by the loopback peer set | process wall from start to pinned stop | download window plus validation workers | `DownloadWindow` byte and height budget; RSS guard | `UNMEASURED` |
-| `admission.live` | `mempool` | transactions and serialized bytes admitted through `MempoolGateway` | request wall from ingress accept to typed verdict | admission workers; writer held once per attempt | `MempoolLimits` (cluster count 64, cluster size 101_000 vB, max ancestors 25); four attempts then `Busy`; `MAX_STANDARD_TX_SIGOPS_COST` 16_000 | `UNMEASURED` |
+| `admission.live` | `mempool` | transactions and serialized bytes admitted through `MempoolGateway` | request wall from ingress accept to typed verdict | admission workers; writer held once per attempt | `MempoolLimits` (cluster count 64, cluster size 101_000 vB, max_replacement_clusters 100); four attempts then `RetryExhausted`; `MAX_STANDARD_TX_SIGOPS_COST` 16_000 | `UNMEASURED` |
 | `propagation.block` | `p2p` | blocks and bytes announced, including compact-block reconstruction and full-block fallback | announce at source to validated body publication on the receiving node | one `P2pService` session per peer | per-command and global payload bounds in `wire.rs`; `TX_RELAY_QUEUE_CAPACITY` for tx relay | `UNMEASURED` |
 | `api.query` | `rpc` | requests and response bytes per manifest row (RPC, REST, Esplora public, backend dialect) | request wall from parsed request to response flush | handler pool; coherent read fence per request | request body, batch size, response assembly, scan rows, in-flight work bounds | `UNMEASURED` |
 | `mining.template` | `mining` | admitted-pool snapshot entry count and bytes | GBT request wall from coherent capture to rendered template | one template job per generation key | coinbase reservation; bounded oversize-chunk subset work budget; bounded long-poll clients | `UNMEASURED` |
@@ -71,3 +71,35 @@ Every sample in this cell records six identities. The T02 collector rejects a sa
 ## Status
 
 `planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+
+## CL-14 supporting mempool-policy capture
+
+`cargo test --locked -p bitcoin-rs-mining --test overhaul_resource_bounds -- --nocapture`
+exercises the changed policy owners with 100 count-bound dependency chains:
+6,400 admitted entries for mining, replacement and eviction; package preview
+offers 25 children to 63-member chains and checks the projected 64-member bound.
+It verifies membership/vsize, package, mutation-response and block resource
+bounds. Verified P2WSH scripts add 15,920 sigops to a parent whose policy
+weight is 318,400 WU; fractional witness descendants put its cluster at
+404,000 and 404,001 WU. An independent rust-bitcoin oracle checks sigops and
+wire weight, and preview/commit must accept only the exact-boundary case.
+The accepted cluster's rounded entry sizes sum to 101,001 vB, so a rounded-size
+implementation cannot pass this check.
+
+Linux process RSS high-water is recorded; other platforms retain the same
+policy checks and report RSS as unavailable. Retained bytes are capacity-based
+estimates before and after each operation. Their maximum is explicitly an
+endpoint maximum, not the peak of temporary allocations inside the operation.
+
+The raw admitted-graph fixture isolates graph costs. Signed process custody
+belongs to `overhaul_process_harness`. These supporting JSON captures are not
+the T02 product ledger above and do not replace its missing baseline or establish
+comparative latency/throughput. RSS has no configured mempool-specific cap;
+the virtual-size bound must not be presented as a physical-memory limit.
+
+Each run writes source/harness/lockfile digests and samples to
+`target/process-harness/resource-bounds-*.json`, preserved by the existing CI
+process-evidence artifact step. The [#1068 validation record](https://github.com/gosuda/bitcoin-rs/pull/1068)
+contains the initial local measurements. Unchanged product cells and the full
+CL-19/CL-20 promotion matrix remain `UNMEASURED`.

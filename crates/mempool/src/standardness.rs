@@ -4,7 +4,6 @@
 //! that fails these checks may still be valid; it simply will not be accepted
 //! to the mempool or relayed by default.
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use hashbrown::{HashMap, HashSet};
@@ -20,7 +19,7 @@ use bitcoin_rs_script::{
 };
 use thiserror::Error;
 
-use crate::{EntryId, Mempool, PolicyError, PrevoutMeta, RbfError, ReplacementCandidate};
+use crate::{Mempool, PolicyError, PrevoutMeta, RbfError};
 
 /// Maximum weight of a standard transaction (400 000 weight units).
 const MAX_STANDARD_TX_WEIGHT: u64 = 400_000;
@@ -52,19 +51,8 @@ impl Default for StandardnessPolicy {
 /// Minimum transaction version considered standard.
 const TX_VERSION_MIN: i32 = 1;
 
-/// Maximum transaction version considered standard.
-///
-/// Current Bitcoin Core accepts version 3 at the `IsStandardTx` gate and
-/// enforces TRUC's extra restrictions — the ancestor and descendant limits,
-/// the sibling rules, the size cap — at the transaction and package policy
-/// layers.
-///
-/// This node has no such layer. Accepting v3 here would copy the permissive
-/// half of Core's design without the half that constrains it, so whoever wires
-/// this gate to mempool admission would be relaying v3 transactions Core
-/// rejects. Raise this to 3 in the same change that adds TRUC policy, not
-/// before.
-const TX_VERSION_MAX: i32 = 2;
+/// Core 31.1 accepts version 3 with the additional BIP431 admission checks.
+const TX_VERSION_MAX: i32 = 3;
 
 /// Standardness policy rejection reason for a single transaction.
 ///
@@ -72,7 +60,7 @@ const TX_VERSION_MAX: i32 = 2;
 /// failure in Bitcoin Core's mempool policy.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum StandardnessError {
-    /// Transaction version is outside the standard range (1 or 2).
+    /// Transaction version is outside the standard range (1 through 3).
     #[error("non-standard transaction version")]
     Version,
     /// Transaction weight exceeds `MAX_STANDARD_TX_WEIGHT` (400 000).
@@ -99,8 +87,8 @@ pub enum StandardnessError {
     /// Non-witness serialization is below the relay minimum.
     #[error("transaction non-witness size is below the relay minimum")]
     TransactionTooSmall,
-    /// A non-`OP_RETURN` output value is below the dust threshold.
-    #[error("dust output")]
+    /// Ephemeral dust violates the output-count or zero-fee requirement.
+    #[error("dust")]
     DustOutput,
 }
 
@@ -163,6 +151,8 @@ pub struct TxAcceptanceFact {
     pub sigop_cost: u32,
     /// Base fee when acceptance accounting succeeded far enough to know it.
     pub base_fee: Option<u64>,
+    /// Modified fee rate in sat/kvB from the captured policy state.
+    pub effective_fee_rate: Option<u64>,
     /// Rejection reason when `allowed` is false.
     pub reject_reason: Option<AcceptanceRejectReason>,
 }
@@ -206,8 +196,32 @@ pub const MAX_STANDARD_TX_SIGOPS_COST: u32 = 16_000;
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum AcceptanceRejectReason {
     /// Package length is outside `1..=MAX_PACKAGE_COUNT`.
+    #[error("package-too-many-transactions")]
+    PackageCount,
+    /// Multiple transactions exceed 404,000 aggregate wire weight units.
     #[error("package-too-large")]
     PackageTooLarge,
+    /// Repeated txids, including differing witness bodies.
+    #[error("package-contains-duplicates")]
+    PackageDuplicates,
+    /// A parent follows its child in the offered package.
+    #[error("package-not-sorted")]
+    PackageOrder,
+    /// Two package transactions spend the same outpoint.
+    #[error("conflict-in-package")]
+    PackageConflict,
+    /// Multi-transaction testmempoolaccept cannot replace a resident member.
+    #[error("bip125-replacement-disallowed")]
+    MempoolConflict,
+    /// Combined package additions exceed a cluster bound.
+    #[error("too-large-cluster")]
+    PackageCluster,
+    /// Version-3 ancestry or size violates BIP431.
+    #[error(transparent)]
+    Truc(#[from] crate::TrucError),
+    /// A child leaves a dust output of its unconfirmed parent unspent.
+    #[error("missing-ephemeral-spends")]
+    MissingEphemeralSpends,
     /// Transaction is already present in the mempool.
     #[error("txn-already-in-mempool")]
     AlreadyInMempool,
@@ -241,10 +255,14 @@ pub enum AcceptanceRejectReason {
 }
 
 /// Caller fee guard shared by policy-only evaluation and verified admission.
-/// Callers choose its place in their contract; the rate arithmetic remains
-/// owned by the same helper that computes mempool entry fee rates.
+/// Core compares the actual fee to `CFeeRate::GetFee(vsize)`, not to a
+/// rounded per-kvB quote. Zero disables the guard. The relay-charge helper
+/// owns the rounding and minimum-one-satoshi rule for both boundaries.
 pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) -> bool {
-    maximum.is_some_and(|max| crate::entry::fee_rate(fee, u64::from(vsize)) > max)
+    maximum.is_some_and(|max| {
+        crate::rbf::required_fee(max, vsize)
+            .is_ok_and(|limit| limit != 0 && i128::from(fee) > limit)
+    })
 }
 /// Returns true when `tx`'s BIP68 sequence locks are satisfied at the next block.
 ///
@@ -296,14 +314,23 @@ pub(crate) fn evaluate_one(
     context: PackageTxContext,
     max_feerate_sat_per_kvb: Option<u64>,
     mempool_min_fee_sat_per_kvb: u64,
-    incremental_relay_fee_sat_per_kvb: u64,
     finality: &Bip68Admission<'_>,
 ) -> TxAcceptanceFact {
     let txid = tx.txid();
     let wtxid = tx.wtxid();
     let weight = tx.weight();
     let vsize = context.vsize;
-    let fee_rate = crate::entry::fee_rate(context.fee, u64::from(vsize));
+    let fee_rejection = match (
+        pool.modified_fee_for(txid, context.fee),
+        crate::rbf::required_fee(mempool_min_fee_sat_per_kvb, vsize),
+    ) {
+        (Ok(fee), Ok(required)) => {
+            (fee < required).then_some(AcceptanceRejectReason::MinRelayFeeNotMet)
+        }
+        _ => Some(AcceptanceRejectReason::Replacement(
+            RbfError::ArithmeticOverflow,
+        )),
+    };
 
     let reject = if pool.contains_txid(&txid) {
         Some(AcceptanceRejectReason::AlreadyInMempool)
@@ -311,29 +338,22 @@ pub(crate) fn evaluate_one(
         Some(AcceptanceRejectReason::MissingInputs)
     } else if let Err(err) = is_standard_tx(tx, policy) {
         Some(AcceptanceRejectReason::NonStandard(err))
-    } else if fee_rate < mempool_min_fee_sat_per_kvb {
-        Some(AcceptanceRejectReason::MinRelayFeeNotMet)
+    } else if tx_has_dust_outputs(tx, policy.dust_relay_fee)
+        && (context.fee != 0 || pool.modified_fee_for(txid, context.fee) != Ok(0))
+    {
+        Some(AcceptanceRejectReason::NonStandard(
+            StandardnessError::DustOutput,
+        ))
+    } else if context.sigop_cost > MAX_STANDARD_TX_SIGOPS_COST {
+        Some(AcceptanceRejectReason::TooManySigops)
+    } else if let Some(reason) = fee_rejection {
+        Some(reason)
     } else if exceeds_max_feerate(context.fee, vsize, max_feerate_sat_per_kvb) {
         Some(AcceptanceRejectReason::MaxFeeExceeded)
     } else if !bip68_final(pool, tx, finality) {
         Some(AcceptanceRejectReason::NonBip68Final)
     } else {
-        let candidate = ReplacementCandidate::new(
-            Arc::new(tx.clone()),
-            vsize,
-            context.fee,
-            incremental_relay_fee_sat_per_kvb,
-        );
-        match pool.check_replacement(&candidate) {
-            Err(err) => Some(AcceptanceRejectReason::Replacement(err)),
-            Ok(plan) => {
-                let excluded: HashSet<EntryId> = plan.evicted.iter().copied().collect();
-                match pool.check_package_limits(tx, vsize, &excluded) {
-                    Err(err) => Some(AcceptanceRejectReason::PackageLimit(err)),
-                    Ok(()) => None,
-                }
-            }
-        }
+        None
     };
 
     TxAcceptanceFact {
@@ -344,6 +364,11 @@ pub(crate) fn evaluate_one(
         weight,
         sigop_cost: context.sigop_cost,
         base_fee: Some(context.fee),
+        effective_fee_rate: pool
+            .modified_fee_for(txid, context.fee)
+            .ok()
+            .and_then(|fee| (vsize != 0).then(|| fee * 1_000 / i128::from(vsize)))
+            .and_then(|rate| u64::try_from(rate).ok()),
         reject_reason: reject,
     }
 }
@@ -402,6 +427,7 @@ fn check_script_sigs(tx: &Tx) -> Result<(), StandardnessError> {
 
 fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), StandardnessError> {
     let mut datacarrier_bytes = 0_usize;
+    let mut dust_outputs = 0_usize;
     for output in &tx.outputs {
         let script = &output.script_pubkey;
         if is_op_return(script) {
@@ -425,9 +451,10 @@ fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standardnes
         if !is_standard_output_script(script) {
             return Err(StandardnessError::NonStandardOutput);
         }
-        if is_dust(output, policy.dust_relay_fee) {
-            return Err(StandardnessError::DustOutput);
-        }
+        dust_outputs += usize::from(is_dust(output, policy.dust_relay_fee));
+    }
+    if dust_outputs > 1 {
+        return Err(StandardnessError::DustOutput);
     }
     Ok(())
 }
@@ -483,7 +510,7 @@ fn multisig_key_count(script: &[u8]) -> Option<u8> {
 }
 
 /// Returns `true` if a non-`OP_RETURN` output is dust.
-fn is_dust(output: &TxOut, dust_relay_fee: u64) -> bool {
+pub(crate) fn is_dust(output: &TxOut, dust_relay_fee: u64) -> bool {
     output.value.to_sat() < minimal_non_dust(&output.script_pubkey, dust_relay_fee)
 }
 
@@ -546,6 +573,23 @@ fn is_standard_nulldata(script: &[u8]) -> bool {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximum_fee_uses_core_amount_rounding_including_one_satoshi_boundaries() {
+        // Core feerate.cpp GetFee: truncation, minimum one sat, zero disables.
+        for (fee, vsize, rate, rejects) in [
+            (2_000, 2_000, 1_000, false),
+            (2_001, 2_000, 1_000, true),
+            (u64::MAX, 1_000, u64::MAX - 1, true),
+            (1, 999, 1, false),
+            (2, 999, 1, true),
+            (10_000, 200, 0, false),
+            (1, 0, 1_000, false),
+            (2_100_000_000_000_000, u32::MAX, u64::MAX, false),
+        ] {
+            assert_eq!(exceeds_max_feerate(fee, vsize, Some(rate)), rejects);
+        }
+    }
     use bitcoin_rs_primitives::{OutPoint, Tx, TxIn, TxOut};
     use bitcoin_rs_script::{is_multisig, minimal_non_dust, opcode, push_data};
 
@@ -608,16 +652,9 @@ mod tests {
         );
     }
 
-    /// Rejected until a TRUC policy layer exists to carry its restrictions.
-    /// Core accepts v3 here and constrains it elsewhere; this node has only
-    /// the "here".
     #[test]
-    fn rejects_version_three_while_truc_policy_is_absent() {
-        let tx = standard_tx(3);
-        assert_eq!(
-            is_standard_tx(&tx, &policy()),
-            Err(StandardnessError::Version)
-        );
+    fn version_three_passes_standardness_for_truc_admission() {
+        assert_eq!(is_standard_tx(&standard_tx(3), &policy()), Ok(()));
     }
 
     #[test]
@@ -840,10 +877,7 @@ mod tests {
         let threshold = minimal_non_dust(&tx.outputs[0].script_pubkey, DUST_RELAY_FEE_SAT_PER_KVB);
         tx.outputs[0].value = Amount::from_sat(threshold - 1);
 
-        assert_eq!(
-            is_standard_tx(&tx, &policy()),
-            Err(StandardnessError::DustOutput)
-        );
+        assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
         let lower_fee = StandardnessPolicy {
             dust_relay_fee: BROADCAST_MIN_FEE_SAT_PER_KVB,
             ..policy()
@@ -865,10 +899,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dust_output() {
+    fn only_one_ephemeral_dust_output_is_standard() {
         let mut tx = standard_tx(1);
-        // 1 sat to a P2PKH output is dust.
+        // Core IsStandardTx permits one dust output; admission checks its fees.
         tx.outputs[0].value = Amount::from_sat(1);
+        assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
+        tx.outputs.push(tx.outputs[0].clone());
         assert_eq!(
             is_standard_tx(&tx, &policy()),
             Err(StandardnessError::DustOutput)

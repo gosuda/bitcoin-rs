@@ -2,22 +2,17 @@ use crate::standardness::StandardnessPolicy;
 
 use thiserror::Error;
 
-/// Mempool ancestor, descendant, cluster, and replacement limits.
+/// Mempool cluster, replacement, and capacity limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MempoolLimits {
-    /// Maximum number of transactions in an ancestor package, including the transaction itself.
-    pub max_ancestors: u32,
-    /// Maximum ancestor package virtual size in vbytes.
-    pub max_ancestor_size: u64,
-    /// Maximum number of transactions in a descendant package, including the transaction itself.
-    pub max_descendants: u32,
-    /// Maximum number of transactions a single BIP125 replacement may evict.
-    pub max_replacement_evictions: u32,
-    /// Maximum total mempool size in vbytes. Default 300 MB (Bitcoin Core default).
+    /// Maximum distinct clusters containing direct replacement conflicts.
+    pub max_replacement_clusters: u32,
+    /// Maximum total mempool size in vbytes. The selected limit is 300,000,000;
+    /// Core limits allocator usage rather than this virtual-size sum.
     /// Set to 0 to disable size-bound eviction.
     pub max_total_bytes: u64,
     /// Minimum relay fee rate in sat/kvB. Transactions with lower `fee_rate` are
-    /// not relayed. Default 1000 sat/kvB = 1 sat/vB (Bitcoin Core default).
+    /// not relayed. Selected default: 1000 sat/kvB = 1 sat/vB.
     pub min_relay_fee_sat_per_kvb: u64,
     /// Maximum number of transactions in one cluster, including the candidate.
     ///
@@ -38,18 +33,10 @@ pub struct MempoolLimits {
 impl Default for MempoolLimits {
     fn default() -> Self {
         Self {
-            max_ancestors: 25,
-            max_ancestor_size: 101_000,
-            max_descendants: 25,
-            max_replacement_evictions: 100,
+            max_replacement_clusters: 100,
             max_total_bytes: 300_000_000,
             min_relay_fee_sat_per_kvb: 1_000,
             cluster_count: 64,
-            // 101 kvB, the same number `max_ancestor_size` carries. The
-            // coincidence is why ancestor limits look like a stand-in for
-            // cluster limits and are not one: Core 31 deprecated
-            // `-limitancestorcount`/`-limitdescendantcount` and replaced them
-            // with these, keeping the old ones only for wallet coin selection.
             cluster_size_vbytes: 101_000,
         }
     }
@@ -58,9 +45,12 @@ impl Default for MempoolLimits {
 /// Policy rejection reason for non-consensus mempool limits.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PolicyError {
-    /// The transaction would exceed the configured ancestor count limit.
-    #[error("too many unconfirmed ancestors")]
-    TooManyAncestors,
+    /// The caller supplied no positive policy size.
+    #[error("invalid transaction virtual size")]
+    InvalidVirtualSize,
+    /// Fee-policy arithmetic exceeds the supported monetary representation.
+    #[error("fee policy arithmetic overflow")]
+    FeeArithmetic,
     /// Transaction's `fee_rate` is below the configured min-relay-fee floor.
     #[error("fee rate {tx_rate} sat/kvB below min-relay-fee {min_rate} sat/kvB")]
     BelowMinRelayFee {
@@ -69,12 +59,6 @@ pub enum PolicyError {
         /// The configured min-relay-fee floor.
         min_rate: u64,
     },
-    /// The transaction would exceed the configured ancestor package size limit.
-    #[error("ancestor package is too large")]
-    AncestorSizeLimit,
-    /// The transaction would exceed a configured descendant count limit.
-    #[error("too many unconfirmed descendants")]
-    TooManyDescendants,
     /// The transaction would join a cluster holding too many transactions.
     #[error("too many transactions in cluster")]
     ClusterCountLimit,
@@ -84,8 +68,7 @@ pub enum PolicyError {
 }
 
 /// Fee-rate increment the eviction-floor projection and BIP125 rule 4 quote,
-/// in sat/kvB. Bitcoin Core's `-incrementalrelayfee` default:
-/// 1 000 sat/kvB = 1 sat/vB.
+/// in sat/kvB. The selected rate is 1,000 sat/kvB; Core 31.1's default is 100.
 pub const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
 
 /// Typed snapshot of the mempool relay-policy surface the RPC
@@ -119,10 +102,9 @@ pub struct MempoolPolicySnapshot {
     /// Replacements do not require BIP125 signaling, so this is always
     /// `true`. Other replacement policy differences remain under #639.
     pub full_rbf: bool,
-    /// The pool rewrites its fee-rate index in the same critical section as
-    /// every mutation, so no stale-ordering window exists and the v31
-    /// `optimal` field is always `true` — a recorded deviation from Core's
-    /// churn-sensitive cluster-linearization flag.
+    /// The graph owner computes exact optimal chunks for immutable snapshots.
+    /// This reports true rather than emulating Core's background SFL state;
+    /// that work-budget difference remains in the compatibility manifest.
     pub optimal: bool,
 }
 

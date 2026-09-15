@@ -468,7 +468,7 @@ mod tests {
             }),
         );
         let mut rejected = (*child).clone();
-        rejected.version = 3;
+        rejected.version = 4;
         let rejected_txid = rejected.txid();
         assert!(matches!(
             gateway.submit_transaction(

@@ -270,13 +270,13 @@ status = "implemented_unverified"
 method = "sendrawtransaction"
 group = "rawtransactions"
 status = "deviation"
-deviation = "Replacement allows nonsignaling originals, as verified against Core 31.1 by replacement_signaling_matches_pinned_core. Remaining #639 differences include the historical restriction on new unconfirmed inputs, transaction-count eviction limit, and direct-conflict fee-rate comparison instead of the complete feerate diagram."
+deviation = "Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported."
 
 [[rpc]]
 method = "testmempoolaccept"
 group = "rawtransactions"
 status = "deviation"
-deviation = "Replacement preview and submission allow nonsignaling originals and reject underpaying replacements in replacement_signaling_matches_pinned_core. The shared evaluator still differs from Core 31.1 on new unconfirmed inputs, the eviction-count unit, and feerate-diagram comparison; complete replacement/package alignment remains #639."
+deviation = "Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported."
 
 [[rpc]]
 method = "decoderawtransaction"
@@ -287,7 +287,7 @@ status = "implemented_unverified"
 method = "getmempoolinfo"
 group = "mempool"
 status = "deviation"
-deviation = "`usage` is an estimate of this node's own structures, as Core's is of boost's; the two are not the same number for the same mempool. `maxmempool` bounds the virtual-size sum rather than `usage`, so unlike Core the two fields are not in the same currency and `usage` may exceed `maxmempool`. The earlier shape gaps (five missing policy fields and extra `mempool_sequence`) are closed. Tracked in #160."
+deviation = "Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md."
 
 [[rpc]]
 method = "getmempoolentry"
@@ -595,3 +595,15 @@ status = "implemented_unverified"
 topic = "sequence"
 notifier = "pubsequence"
 status = "implemented_unverified"
+
+# Selected policy evidence and explicit non-parity cases for issue #639.
+[admission_profile]
+reference_settings = ["-acceptnonstdtxn=0", "-minrelaytxfee=0.00001000", "-incrementalrelayfee=0.00001000", "-dustrelayfee=0.00003000", "-datacarriersize=83"]
+process_gate = "overhaul_process_harness::policy_cases"
+unsupported = [
+  "Aggregate CPFP/package RBF submission: submitpackage returns -32601; Esplora /txs/package returns 404.",
+  "Core transient non-optimal SFL diagrams, its randomized work-budget decisions and tie ordering are not emulated by the exact closure solver; adversarial/churn parity remains unverified.",
+  "Core allocator-based capacity and rolling minimum fee with block/time decay are not implemented; capacity uses virtual size and the existing pressure heuristic.",
+  "Core speculative insert-and-trim failure side effects are not reproduced; candidate refusal is atomic.",
+  "Generic consensus/script details, missing-input/max-fee numeric codes and CompactSize-inclusive nulldata accounting retain local behavior."
+]

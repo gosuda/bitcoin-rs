@@ -1,191 +1,146 @@
-# Mempool policy contract
+# Mempool policy contracts
 
-This page is the target contract for transaction admission. It names one
-admission owner, the pin set it enforces, and the proof. The detailed
-Core 31.1 behavior matrix stays in
-[docs/policies/mempool-policy.md](../policies/mempool-policy.md). On
-conflict between code and either page, fix the code and amend both in the
-same changeset.
-
-Owner: `MempoolGateway` in `crates/mempool/src/gateway.rs`. The node
-constructs one `Arc<MempoolGateway>` and passes it to RPC, P2P ingress,
-Esplora broadcast, package evaluation, and reorg reconciliation. No crate
-holds a second admission evaluator.
+The mempool owner implements the selected Core 31.1 replacement and preview
+profile. [The policy matrix](../policies/mempool-policy.md) records behavior,
+reference evidence and intentional unsupported cases. Compatibility claims are
+owned by [core-compat.toml](../api/core-compat.toml); admission registry metadata
+is checked against its status and rationale.
 
 ## Clauses
 
 ### `POL-01`: Core 31.1 policy pin and versioned `AdmissionPolicy`
 
-- The pinned reference is released Bitcoin Core 31.1. The gateway
-  enforces this pin set. Pin values are Core truth and never edited
-  to match implementation progress; rows the implementation has not
-  yet reached are recorded as deviations in
-  `docs/policies/mempool-policy.md` (§3 status column and §5 ledger).
-
-  | Pin | Required value |
-  |---|---|
-  | Min-relay fee | 1_000 sat/kvB |
-  | Incremental relay fee | 1_000 sat/kvB |
-  | Dust rate | 3_000 sat/kvB |
-  | `datacarrier` payload | 83 bytes |
-  | Cluster count limit | 64 |
-  | Cluster size limit | 101_000 vB |
-  | Max package count | 25 |
-  | Max replacement evictions | 100 |
-  | Max fee | 0.1 BTC/kvB |
-  | Standard transaction sigops | 16_000 |
-| TRUC (v3) transactions | supported |
-
-- `crates/mempool/src/policy.rs` resolves one versioned `AdmissionPolicy`
-  from `NodeConfig` at startup. The gateway stamps every verdict with the
-  `policy_epoch` field of `ReadStamp`. A policy change advances the epoch
-  and invalidates prepared admission work.
-- The gateway never re-derives policy from pool limits on a read guard.
-  A deliberately different floor or datacarrier rule is machine-readable
-  in the policy document.
+- Core source and binary identities are pinned by the reference-set manifest.
+  Tests use the selected rates explicitly: minimum and incremental relay
+  1,000 sat/kvB, dust 3,000 sat/kvB and nulldata budget 83 bytes. Core 31.1
+  defaults to 100 sat/kvB for both relay rates; these selected settings are
+  not a claim about upstream defaults.
+- Implemented owners are `MempoolLimits` and `MempoolPolicySnapshot`.
+  Cluster count is 64, cluster weight is at most 404,000, and at most
+  100 distinct direct-conflict clusters participate in a replacement.
+  `MAX_PACKAGE_COUNT` is 25. Raw trusted insertion may supply a policy vsize;
+  production admission derives sigop-adjusted weight and size.
+- A dedicated resolved/versioned `AdmissionPolicy` startup object remains a
+  target design. The current preparation stamp copies the actual enforced
+  settings and rechecks them; no new configuration or persistence authority
+  is introduced by the replacement implementation.
 
 ### `POL-02`: One admission owner and admission mode
 
-- `MempoolGateway` is the only production admission path. RPC
-  `sendrawtransaction` and `testmempoolaccept`, P2P ingress, Esplora
-  `POST /tx`, package submissions, and reorg reconsideration all call it.
-- The operation accepts parsed transactions and request fee limits. An
-  `AdmissionMode::{Preview, Commit}` selector, `Esplora` and `Package`
-  origins, and per-transaction gateway verdicts are T18 work: no mode
-  selector, `Esplora`/`Package` variants, or verdict types exist today
-  (Esplora `POST /tx` dispatches as `Rpc`; previews live in the RPC
-  outlet). Committed changes occur only when a mutation occurred.
-- Peer ingress does not inherit RPC fee limits. Each origin declares its
-  own request limits. The node wires narrow chain and coin providers;
-  RPC and P2P do not resolve admission contexts themselves.
+- `MempoolGateway` owns RPC and peer submission, preview, reorg reconsideration,
+  typed policy verdicts and publication. RPC/P2P do not repeat replacement rules.
+- Single preview follows the same preparation, graph and script verification
+  as a single commit, stopping before mutation. Multi-transaction preview uses
+  Core's `PackageTestAccept` semantics: replacement and fee aggregation are
+  disabled. Unsupported aggregate package submission is explicit in the
+  manifest, not a hidden fallback to separate successful submissions.
+- Chain reads, script execution and fee-diagram solving run outside write locks.
+  Callbacks run after pool/lifecycle locks are released.
 
 ### `POL-03`: Admission pipeline, stamp, and precedence
 
-- The gateway runs one pipeline: cheap checks, coherent stamp capture,
-  one-pass input resolution, policy evaluation, script verification
-  outside the pool writer, then one writer-held recheck and atomic
-  commit.
-- Cheap checks, in order: canonical parse shape, duplicate inputs,
-  coinbase rejection, output range and sum checks, known identity, and
-  request and package count bounds.
-- Stamp capture records
-  `ReadStamp{process_epoch, chain_generation, chain_tip, mempool_sequence, policy_epoch}`
-  while the bounded read fence protects live UTXO resolution.
-  `chain_generation` is even while stable and odd during a coordinated
-  change. A caller never composes a view from a separately loaded tip
-  and mutable coins.
-- Input resolution runs once per input. It resolves from the
-  admitted-pool overlay over chain coins and retains full coin metadata:
-  value, exact script, origin height, coinbase flag, and MTP context.
-  No borrowed pointer survives into a replaceable record.
-- Script verification runs with `VerifyFlags::STANDARD` while no code
-  holds the pool writer. Mandatory and policy script failures stay
-  distinct typed classes. Shared per-transaction sighash facts feed the
-  run.
-- The commit step acquires the pool writer once, rechecks every stamp
-  field plus pool and policy context, and applies the atomic mutation.
-  Four stale attempts end in a typed `Busy` result. Callers map `Busy`
-  to their dialect; they never reuse stale evidence and never spin.
-- Error precedence: parse, missing input or coinbase, standardness, fee
-  floor, max fee, BIP68 and absolute finality, mandatory versus policy
-  script class, RBF and feerate diagram, package and cluster limits,
-  commit recheck. A transaction below the floor and above the max fee
-  quotes the floor class.
+- Preparation captures chain generation, membership sequence, enforced settings
+  and the owner's private fee-delta sequence. Any mismatch makes the result
+  retryable. Four attempts bound the shared producer; exhaustion is typed.
+- Fee-only prioritisation changes do not advance the public mempool sequence,
+  but invalidate prepared graphs and contextual rejection-cache entries.
+- Standardness, available inputs, sigop limits, modified fee floors, next-block
+  finality and graph policy precede scripts. The caller maximum fee guard runs
+  only after successful admission verification, comparing the base fee to
+  `CFeeRate::GetFee(vsize)` rather than a rounded rate quote. An invalid transaction cannot
+  select a more convenient maximum-fee error.
+- A verified plan carries prepared insertion and ordered removals. The writer
+  rechecks its stamp before any mutation. Capacity refusal, stale preparation
+  or a rejected replacement changes no pool membership, fee overlay, estimator
+  input or observer sequence. Successful mutations use the ordered gateway
+  publication seam in [MPL-01](mempool-mutations.md#mpl-01-single-mutation-gateway-ordering-invariant).
 
 ### `POL-04`: Owner-computed sigop cost
 
-- The gateway computes `total_sigop_cost` from resolved prevouts: legacy
-  and P2SH redeem script counting, plus witness program counting. It
-  enforces `MAX_STANDARD_TX_SIGOPS_COST` at 16_000 per transaction.
-- Ingress callers cannot supply a sigop count. A caller-supplied value
-  is ignored in favor of the owner's computation. A cost above 16_000 is
-  a typed sigop rejection.
+- The gateway computes BIP141 sigop cost against copied resolved outputs.
+  Caller-provided sigop counts do not reach stored entries. More than 16,000
+  is a typed rejection.
+- Exact policy weight is `max(wire_weight, sigop_cost * 20)`. Virtual size is
+  the ceiling of that weight divided by four. Cluster sums and fee diagrams
+  retain weight precision rather than summing rounded virtual sizes.
+- Confirmed inputs, admitted parents and earlier package outputs feed the same
+  accounting owner. Missing input facts are preserved.
 
 ### `POL-05`: Replacement, cluster, and package policy
 
-- Replacement does not require BIP125 signaling from originals or their
-  ancestors. `Mempool::check_replacement` owns that decision, and the
-  policy snapshot reports `full_rbf = true` for `getmempoolinfo`.
-  The complete Core 31.1 feerate-diagram profile remains the target:
-  current new-input, eviction-count, and direct-fee-rate rules differ
-  as recorded under #639 in the policy matrix and deviation ledger.
-- The pool models each cluster as a dependency DAG with revision-tagged
-  membership and cached deterministic linearization chunks. Fee and size
-  comparisons use widened checked integer cross products, never floating
-  point. A traversal that exceeds its work cap aborts as a typed
-  failure, never a silent oversize.
-- Replacement is all or nothing. Victims and their descendants are
-  computed before the commit. A rejected replacement leaves membership,
-  sequences, and estimator state unchanged. Tie and resource-budget
-  behavior follows the pinned observable rules. An independently more
-  optimal diagram is not parity.
-- Package submissions evaluate dependency-ordered rows with count bounds
-  and package RBF conditions. `submitpackage` stays `Unimplemented` in
-  the RPC registry and Esplora `/txs/package` stays 404 until separately
-  approved.
+- Signaling and the old new-unconfirmed-input restriction do not gate replacement.
+  At most 100 distinct direct-conflict clusters are considered. Victims include
+  every descendant, and the candidate must not spend an evicted dependency.
+- Modified fees retain the existing signed i128 representation of a u64 base
+  fee plus i64 prioritisation. Large legal priority overlays cannot disable
+  template construction, and only actual fees contribute to the coinbase.
+  Modified fees, including priority deltas, cover all victims plus the integer
+  incremental relay charge. Exact checked arithmetic rejects an unrepresentable
+  fee/weight. Equality or crossing of complete affected fee diagrams rejects;
+  surviving relatives and newly joined clusters participate in the comparison.
+- Existing entries and their dependency links are the graph authority. An
+  immutable projection supplies exact maximum-rate dependency closures to
+  replacement, mining and eviction. No mutable alternate graph or persistent
+  chunk representation is added. Solver work is bounded by the captured node
+  and edge counts; each cluster follows its configured count/weight bounds.
+- Mining treats every derived fee chunk as indivisible. If its finality,
+  weight, serialized-size or sigop check fails, all members are skipped and
+  dependent later chunks remain unavailable. The configured candidate limits
+  are inclusive. Invalid or cyclic snapshot references produce typed owner
+  errors, never a fabricated order. Core 31.1 `node/miner.cpp::addChunks`
+  supplies the independent reference for whole-chunk skipping; local configured
+  limits and BIP68 checks follow this contract and POL-06.
+- Core's bounded, history-dependent SFL work behavior is intentionally not
+  emulated. The exact solver and its independently checked arithmetic do not
+  prove Core parity in non-optimal transient states. This difference remains
+  in the compatibility manifest and prevents a whole-surface `supported` claim.
+- Combined package previews enforce count/weight, txid uniqueness, dependency
+  order, internal consistency and projected cluster bounds. First precheck
+  failure leaves other rows unfinished. Script failures preserve only earlier
+  script-success rows. `submitpackage` stays `Unimplemented` and Esplora
+  `/txs/package` stays 404; aggregate CPFP/package RBF is unsupported.
+- TRUC requires matching unconfirmed versions, at most one ancestor/descendant,
+  10,000 adjusted vB for a root and 1,000 for a child. An eligible sole sibling
+  joins single-transaction RBF and remains subject to its fees and diagrams.
+  Multi-transaction preview forbids sibling eviction.
+- At most one ephemeral dust output is standard, and both actual and modified
+  fees must be zero. Any child of that unconfirmed transaction must spend its
+  dust. The selected positive relay floor cannot admit such a parent alone.
 
 ### `POL-06`: Preview purity and finality
 
-- Preview runs the commit pipeline path and stops before mutation. It
-  changes no membership, no estimator state, no relay state, no
-  admission sequence, and no victims. It returns verdict rows with the
-  captured stamp; a stale stamp is visible to the caller. It may
-  populate safe verification caches. Preview/commit identical-pipeline
-  parity (including script verification in preview) is T18 work:
-  no `AdmissionMode::Preview` exists and the RPC preview does not run
-  `verify_transaction` (deviation ledger entries 1-2).
-- Absolute locktime evaluates at tip height + 1 from retained coin
-  metadata and MTP context. Relative (BIP68) sequence locks are
-  enforced at the next block from confirmed `PrevoutMeta` rows, with
-  pool and package parents encoded as the next block and the gate
-  closed while `csv_active` is false; a disabled sequence contributes
-  no lock. Coinbase spends under `COINBASE_MATURITY` (100) reject
-  before mutation on the same seam.
-- `testmempoolaccept` returns preview rows in the frozen Core 31.1
-  `TestMempoolAccept` / `MempoolAcceptance` shape with frozen
-  reject-reason strings.
+- Preview changes no membership, estimator state, fee overlay, relay state,
+  admission sequence or victims. It may populate safe verification caches.
+- Absolute locktime evaluates at tip+1. BIP68 evaluates confirmed height/MTP
+  metadata and treats unconfirmed parents as the next block. The CSV gate
+  controls these relative locks. Coinbase spends require depth at least 100.
+- Completed preview rows use the pinned v31 response type. Unfinished package
+  rows contain identities and optional package error, with no fabricated
+  `allowed` value or fee. Generic script-detail and numeric-error differences
+  are listed in the manifest.
 
 ## Proven by
 
-- `bin/bitcoin-rs/tests/overhaul_process_harness.rs::replacement_signaling_matches_pinned_core`:
-  real Core 31.1 and bitcoin-rs processes receive identical signed
-  transactions. Higher-fee replacements of nonsignaling and opt-in
-  originals succeed on both; underpaying replacements reject on both.
-  Preview preserves membership and sequence, rejection leaves the original
-  in place, and `fullrbf` reports true. This proves the signaling rule,
-  not completion of POL-05 or #639.
-- `crates/mempool/tests/admission.rs`: stale-context retry
-  (`stale_policy_verdict_becomes_retryable`), sigop boundary enforcement
-  (`p2sh_sigop_cost_exceeds_standard_limit`,
-  `p2wsh_sigop_cost_exceeds_standard_limit`), and owner-computed cost
-  overriding a caller-supplied count
-  (`caller_sigop_cost_is_ignored_in_stored_entry`).
-- `crates/mempool/tests/policy_contract.rs`: next-block BIP68 height
-  (`bip68_height_lock_boundary_enforces_at_admission`), unconfirmed
-  parent (`bip68_unconfirmed_parent_positive_relative_lock_fails`),
-  time lock (`bip68_time_lock_uses_the_confirmed_median_time_past`),
-  csv-inactive control (`bip68_check_is_inert_before_csv_activation`),
-  and coinbase maturity boundary
-  (`immature_coinbase_spend_rejects_before_100_confirmations`);
-  `crates/rpc/tests/policy_contract.rs` quotes the same classes
-  through both outlets
-  (`immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity`,
-  `bip68_locked_tx_admits_while_csv_is_inactive_on_the_rpc_surface`).
-- `crates/mempool/tests/overhaul_finality_policy.rs` (planned): policy
-  pins, epoch invalidation, CSV boundaries at `tip+1`, fee precedence,
-  pressure floor rise, and decay behavior.
-- `crates/mempool/tests/overhaul_cluster_graph.rs` (planned): cluster
-  revisions, deterministic chunk ordering, and overflow-typed integer
-  accounting.
-- `crates/mempool/tests/overhaul_replacement_profile.rs` (planned):
-  feerate-diagram accept and reject, all-or-nothing victims, tie rules,
-  and TRUC v3 sibling constraints.
-- Existing suites keep their verdicts:
-  `crates/mempool/tests/policy_contract.rs`,
-  `crates/mempool/tests/rbf_bip125.rs`,
-  `crates/mempool/tests/ancestor_limits.rs`,
-  `crates/rpc/tests/policy_contract.rs`,
-  `crates/rpc/tests/transaction_methods.rs`.
+- `overhaul_process_harness::replacement_signaling_matches_pinned_core` and
+  `policy_cases`: isolated Core/candidate processes, identical funding blocks,
+  real signatures, nonsignaling replacement, insufficient fees, graph merge/split,
+  100/101 conflicting clusters, 64/65 connected members, 1 sat incremental
+  boundaries, prioritisation, TRUC siblings/sizes and package verdict shapes.
+- `crates/mempool/src/fee_diagram/tests.rs`: pinned Core comparison vectors,
+  independent exhaustive small-DAG oracle and maximal 64-node topology.
+- `crates/mempool/tests/replacement_profile.rs`, `graph_limits.rs`,
+  `policy_contract.rs` and `admission.rs`: exact graph/TRUC bounds, atomic
+  failures, fee arithmetic, next-block finality and sigops.
+- `crates/mempool/src/package/tests.rs`: 25/26 and 404,000/404,001 package
+  boundaries, reference-checked weight, TRUC/cluster projections, zero-floor
+  ephemeral spending and fee-only invalidation.
+- Gateway tests: publication order under concurrency/reentrancy, stale verdicts
+  and rejected replacement preservation of estimator history and fee overlays.
+- Mining/RPC suites: shared chunks, block resource limits, witness commitment
+  oracle, both-RPC verdicts and manifest projection consistency.
+
+Performance, Core transient SFL/churn behavior and the project-wide formal
+model matrix remain unmeasured. Correctness tests do not promote defaults.
 
 ## Vocabulary
 

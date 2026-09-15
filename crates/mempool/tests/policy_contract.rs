@@ -196,14 +196,12 @@ fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(),
     // 2000 sat/kvB (rule 6).
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
 
-    let result = pool
-        .replace_transaction(
-            ReplacementCandidate::new(Arc::new(replacement.clone()), 4_000, 16_000, 1_000),
-            0,
-            1,
-            0,
-        )?
-        .into_mutation();
+    let result = pool.replace_transaction(
+        ReplacementCandidate::new(Arc::new(replacement.clone()), 4_000, 16_000, 1_000),
+        0,
+        1,
+        0,
+    )?;
     assert_eq!(
         result
             .changes
@@ -248,28 +246,25 @@ fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn rbf_rule6_replacement_rate_must_exceed_direct_conflicts() -> Result<(), Box<dyn Error>> {
+fn replacement_with_equal_direct_rate_can_improve_the_full_diagram() -> Result<(), Box<dyn Error>> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
     // Absolute fee 32 000 pays the 12 000 sat evicted package (rule 3) and
     // its own 16 000 vB of incremental fee (rule 4), but lands at exactly the
-    // originals' 2000 sat/kvB — rule 6 wants strictly higher.
+    // originals' 2000 sat/kvB. The complete diagram still improves.
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
-    let err = pool
-        .replace_transaction(
-            ReplacementCandidate::new(Arc::new(replacement), 16_000, 32_000, 1_000),
-            0,
-            1,
-            0,
-        )
-        .err()
-        .ok_or("expected rule 6 rejection")?;
-    assert_eq!(err, RbfError::Rule6InsufficientFeeRate);
+    pool.replace_transaction(
+        ReplacementCandidate::new(Arc::new(replacement), 16_000, 32_000, 1_000),
+        0,
+        1,
+        0,
+    )?;
+    assert_eq!(pool.len(), 1);
     Ok(())
 }
 
 #[test]
-fn rbf_rule2_replacement_may_not_add_unconfirmed_inputs() -> Result<(), Box<dyn Error>> {
+fn replacement_may_add_an_unconfirmed_input() -> Result<(), Box<dyn Error>> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
     let unrelated = tx(outpoint(9, 9), 1_000, 0xFF_FF_FF_FF);
@@ -283,103 +278,21 @@ fn rbf_rule2_replacement_may_not_add_unconfirmed_inputs() -> Result<(), Box<dyn 
         2_000,
         p2wpkh_script(),
     );
-    let err = pool
-        .replace_transaction(
-            ReplacementCandidate::new(Arc::new(replacement), 4_000, 16_000, 1_000),
-            0,
-            1,
-            0,
-        )
-        .err()
-        .ok_or("expected rule 2 rejection")?;
-    assert_eq!(err, RbfError::Rule2NewUnconfirmedInput);
+    let replacement_txid = replacement.txid();
+    pool.replace_transaction(
+        ReplacementCandidate::new(Arc::new(replacement), 4_000, 16_000, 1_000),
+        0,
+        1,
+        0,
+    )?;
+    assert!(pool.contains_txid(&replacement_txid));
+    assert!(pool.contains_txid(&unrelated.txid()));
+    assert!(!pool.contains_txid(&fixture.original.txid()));
+    assert!(!pool.contains_txid(&fixture.child.txid()));
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Ancestor / descendant package limits
-// ---------------------------------------------------------------------------
-
-fn chain_pool(depth: u32) -> Result<(Mempool, Vec<Tx>), Box<dyn Error>> {
-    let mut pool = Mempool::new(MempoolLimits::default());
-    let mut txs = Vec::new();
-    let mut previous = outpoint(1, 0);
-    for _ in 0..depth {
-        let next = tx(previous, 1_000, 0xFF_FF_FF_FF);
-        previous = OutPoint::new(next.txid(), 0);
-        pool.insert_entry(entry(next.clone(), 4_000, 4_000))?;
-        txs.push(next);
-    }
-    Ok((pool, txs))
-}
-
-#[test]
-fn ancestor_count_limit_rejects_the_26th_unconfirmed_tx() -> Result<(), Box<dyn Error>> {
-    let (mut pool, txs) = chain_pool(25)?;
-    let tip = txs.last().ok_or("empty chain")?;
-    let rejected = tx(OutPoint::new(tip.txid(), 0), 1_000, 0xFF_FF_FF_FF);
-    let err = pool
-        .insert_entry(entry(rejected, 4_000, 4_000))
-        .err()
-        .ok_or("expected TooManyAncestors rejection")?;
-    assert_eq!(err, MempoolError::Policy(PolicyError::TooManyAncestors));
-    Ok(())
-}
-
-#[test]
-fn ancestor_size_limit_rejects_an_oversized_package() -> Result<(), Box<dyn Error>> {
-    let mut pool = Mempool::new(MempoolLimits::default());
-    let mut previous = outpoint(1, 0);
-    // 3 x 26 000 vB = 78 000 vB chained; the 4th would reach 104 000 > 101 000.
-    for _ in 0..3 {
-        let next = tx(previous, 1_000, 0xFF_FF_FF_FF);
-        previous = OutPoint::new(next.txid(), 0);
-        pool.insert_entry(entry(next, 26_000, 26_000))?;
-    }
-    let rejected = tx(previous, 1_000, 0xFF_FF_FF_FF);
-    let err = pool
-        .insert_entry(entry(rejected, 26_000, 26_000))
-        .err()
-        .ok_or("expected AncestorSizeLimit rejection")?;
-    assert_eq!(err, MempoolError::Policy(PolicyError::AncestorSizeLimit));
-    Ok(())
-}
-
-#[test]
-fn descendant_count_limit_rejects_the_26th_child() -> Result<(), Box<dyn Error>> {
-    let mut pool = Mempool::new(MempoolLimits::default());
-    let parent = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
-    pool.insert_entry(entry(parent.clone(), 4_000, 4_000))?;
-    let parent_out = OutPoint::new(parent.txid(), 0);
-    for value in 1_000_u64..1_024 {
-        let child = tx(parent_out, value, 0xFF_FF_FF_FF);
-        pool.insert_entry(entry(child, 4_000, 4_000))?;
-    }
-    let rejected = tx(parent_out, 9_999, 0xFF_FF_FF_FF);
-    let err = pool
-        .insert_entry(entry(rejected, 4_000, 4_000))
-        .err()
-        .ok_or("expected TooManyDescendants rejection")?;
-    assert_eq!(err, MempoolError::Policy(PolicyError::TooManyDescendants));
-    Ok(())
-}
-
-#[test]
-fn acceptance_preview_surfaces_ancestor_limits() -> Result<(), Box<dyn Error>> {
-    // R4 closes the documented preview gap: the consolidated evaluator
-    // carries package limits, so testmempoolaccept and the admission gate
-    // now quote the same verdict.
-    let (pool, txs) = chain_pool(25)?;
-    let tip = txs.last().ok_or("empty chain")?;
-    let candidate = tx(OutPoint::new(tip.txid(), 0), 1_000, 0xFF_FF_FF_FF);
-    let mut pool = pool;
-    let err = pool
-        .insert_entry(entry(candidate, 4_000, 4_000))
-        .err()
-        .ok_or("expected admission to enforce the limit")?;
-    assert_eq!(err, MempoolError::Policy(PolicyError::TooManyAncestors));
-    Ok(())
-}
+// Cluster-limit boundaries are covered in graph_limits.rs.
 
 /// Builds a root with `output_count` outputs so siblings can share a cluster
 /// without being in each other's ancestor or descendant packages.
@@ -412,9 +325,6 @@ fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<
     // cluster walk can refuse.
     let limits = MempoolLimits {
         cluster_count: 2,
-        max_ancestors: 100,
-        max_ancestor_size: 1_000_000,
-        max_descendants: 100,
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
@@ -437,9 +347,6 @@ fn cluster_size_limit_rejects_on_both_surfaces() -> Result<(), Box<dyn Error>> {
     let limits = MempoolLimits {
         cluster_count: 100,
         cluster_size_vbytes: 250,
-        max_ancestors: 100,
-        max_ancestor_size: 1_000_000,
-        max_descendants: 100,
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
@@ -509,8 +416,10 @@ fn nonstandard_output_script_is_not_standard_on_both_surfaces() {
 }
 
 #[test]
-fn dust_output_is_not_standard_on_both_surfaces() {
-    let dust = tx_multi(&[(outpoint(1, 0), 0xFF_FF_FF_FF)], 100, p2wpkh_script());
+fn multiple_dust_outputs_are_not_standard() {
+    let mut dust = tx_multi(&[(outpoint(1, 0), 0xFF_FF_FF_FF)], 100, p2wpkh_script());
+    assert!(is_standard_tx(&dust, &policy()).is_ok());
+    dust.outputs.push(dust.outputs[0].clone());
     assert_eq!(
         is_standard_tx(&dust, &policy()).err(),
         Some(StandardnessError::DustOutput)
@@ -792,9 +701,7 @@ fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<
     pool.insert_entry(entry(mid, 1_000, 2_000))?;
 
     let overflow = tx(outpoint(4, 0), 1_000, 0xFF_FF_FF_FF);
-    let result = pool
-        .insert_entry(entry(overflow.clone(), 2_000, 6_000))?
-        .into_mutation();
+    let result = pool.insert_entry(entry(overflow.clone(), 2_000, 6_000))?;
     assert_eq!(
         result
             .changes

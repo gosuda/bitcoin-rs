@@ -14,7 +14,7 @@ use crate::{
     PeerToken,
 };
 
-const MAX_ADMISSION_RETRIES: usize = 4;
+pub(crate) const MAX_ADMISSION_RETRIES: usize = 4;
 
 /// Provisional applied-chain facts collected during one submission attempt.
 ///
@@ -186,8 +186,9 @@ fn combine_input_facts(
 impl MempoolGateway {
     /// Evaluates a bounded batch through the submission evaluator without
     /// changing membership, sequence, fee history, orphan state or observers.
-    /// Earlier offered outputs satisfy later rows, preserving the supported
-    /// independent-row preview contract. This is not atomic package admission.
+    /// Multi-transaction previews follow Core `PackageTestAccept`: structural
+    /// checks, all row prechecks, combined graph policy, then script checks.
+    /// Replacement and package fee aggregation are disabled in that mode.
     #[expect(
         clippy::too_many_lines,
         reason = "keep batch capture, verification and retry fencing in one auditable owner"
@@ -198,13 +199,23 @@ impl MempoolGateway {
         max_feerate_sat_per_kvb: Option<u64>,
         chain: &dyn AdmissionChain,
     ) -> Result<crate::standardness::PackageAcceptanceFacts, SubmitError> {
-        use crate::standardness::{MAX_PACKAGE_COUNT, PackageAcceptanceFacts};
-        if txs.is_empty() || txs.len() > MAX_PACKAGE_COUNT {
+        use crate::gateway::AdmissionMode;
+        use crate::standardness::PackageAcceptanceFacts;
+        if let Err(reason) = crate::package::check_structure(txs) {
             return Ok(PackageAcceptanceFacts {
-                package_error: Some(AcceptanceRejectReason::PackageTooLarge),
-                results: Vec::new(),
+                package_error: Some(reason),
+                results: if reason == AcceptanceRejectReason::PackageCount {
+                    Vec::new()
+                } else {
+                    txs.iter().map(crate::package::unfinished).collect()
+                },
             });
         }
+        let mode = if txs.len() == 1 {
+            AdmissionMode::Single
+        } else {
+            AdmissionMode::PackageTest
+        };
         'attempt: for _ in 0..MAX_ADMISSION_RETRIES {
             let Some(generation) = self.stable_generation() else {
                 continue;
@@ -269,7 +280,7 @@ impl MempoolGateway {
                     }
                 }
             }
-            let mut prepared = {
+            let (mut prepared, package_checks) = {
                 let pool = self.pool.read();
                 if self.stable_generation() != Some(generation)
                     || pool.sequence_number() != sequence
@@ -278,26 +289,29 @@ impl MempoolGateway {
                 {
                     continue;
                 }
-                requests
+                let prepared = requests
                     .iter()
-                    .map(|request| Self::prepare_admission(&pool, request))
-                    .collect::<Vec<_>>()
+                    .map(|request| Self::prepare_admission(&pool, request, mode))
+                    .collect::<Vec<_>>();
+                let checks = (mode == AdmissionMode::PackageTest
+                    && prepared.iter().all(|job| job.fact.reject_reason.is_none()))
+                .then(|| crate::package::capture_preview_checks(&pool, txs, &requests, &prepared));
+                (prepared, checks)
             };
-            for (prepared, request) in prepared.iter_mut().zip(&requests) {
-                prepared.verify(request);
-            }
+            let facts =
+                crate::package::finish_preview(txs, &requests, &mut prepared, package_checks);
             let pool = self.pool.read();
             if self.stable_generation() != Some(generation)
                 || pool.sequence_number() != sequence
                 || pool.limits != limits
                 || pool.policy_snapshot() != policy
+                || prepared
+                    .iter()
+                    .any(|prepared| !prepared.matches_pool(&pool))
             {
                 continue;
             }
-            return Ok(PackageAcceptanceFacts {
-                package_error: None,
-                results: prepared.into_iter().map(|prepared| prepared.fact).collect(),
-            });
+            return Ok(facts);
         }
         Err(SubmitError::RetryExhausted)
     }
@@ -1092,7 +1106,7 @@ mod tests {
         let gateway = gateway();
         let (parent, child) = parent_and_child();
         let mut rejected = (*child).clone();
-        rejected.version = 3;
+        rejected.version = 4;
         let rejected = Arc::new(rejected);
         assert!(
             gateway
@@ -1302,7 +1316,7 @@ mod tests {
         let gateway = gateway();
         let (_, child) = parent_and_child();
         let mut nonstandard = (*child).clone();
-        nonstandard.version = 3;
+        nonstandard.version = 4;
         let mut coinbase = (*child).clone();
         coinbase.inputs[0].previous_output = OutPoint::new(Txid::default(), u32::MAX);
         for tx in [nonstandard, coinbase] {
@@ -1535,6 +1549,10 @@ mod tests {
     /// POL-01 / BIP141: package prevouts retain the scripts used by accounting.
     /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the independent BIP141 oracle and offered-output boundary vectors together"
+    )]
     fn package_prevouts_preserve_sigops_without_mutating_the_pool()
     -> Result<(), Box<dyn std::error::Error>> {
         use bitcoin_rs_primitives::consensus_bytes;
@@ -1603,36 +1621,42 @@ mod tests {
                 4 + input_cost,
                 "independent rust-bitcoin oracle",
             );
-            let vsize = child.vsize();
-            let txs = [parent, child];
-            let contexts = gateway
-                .preview_transactions(&txs, None, &Coins(vec![]))?
-                .results;
-            assert_eq!(contexts.len(), 2);
+            let outpoint = child.inputs[0].previous_output;
+            let context = crate::accounting::prepared_context(
+                &child,
+                &[(outpoint, parent.outputs[1].clone())],
+                false,
+            );
+            assert_eq!(context.fee, 1_000);
+            assert_eq!(context.sigop_cost, 4 + input_cost);
             assert_eq!(
-                contexts[0].reject_reason,
+                context.vsize,
+                crate::accounting::policy_vsize(&child, 4 + input_cost)
+            );
+            let txs = [parent, child];
+            let facts = gateway.preview_transactions(&txs, None, &Coins(vec![]))?;
+            assert_eq!(
+                facts.results[0].reject_reason,
                 Some(AcceptanceRejectReason::MissingInputs)
             );
-            assert_ne!(
-                contexts[1].reject_reason,
-                Some(AcceptanceRejectReason::MissingInputs)
+            assert_eq!(
+                facts.results[1].allowed, None,
+                "Core stops before child validation"
             );
-            assert_eq!(contexts[1].base_fee, Some(1_000));
-            assert_eq!(u64::from(contexts[1].vsize), vsize);
-            // BIP141: the legacy output CHECKSIG adds four to the input cost.
-            assert_eq!(contexts[1].sigop_cost, 4 + input_cost);
+            assert_eq!(facts.results[1].base_fee, None);
             for vout in [2, u32::MAX] {
                 let mut missing = txs[1].clone();
                 missing.inputs[0].previous_output.vout = vout;
-                let contexts = gateway
-                    .preview_transactions(&[txs[0].clone(), missing], None, &Coins(vec![]))?
-                    .results;
-                assert_eq!(
-                    contexts[1].reject_reason,
-                    Some(AcceptanceRejectReason::MissingInputs)
-                );
-                assert_eq!(contexts[1].base_fee, Some(0));
-                assert_eq!(contexts[1].sigop_cost, 4);
+                let context = crate::accounting::prepared_context(&missing, &[], true);
+                assert!(context.missing_inputs);
+                assert_eq!(context.fee, 0);
+                assert_eq!(context.sigop_cost, 4);
+                let facts = gateway.preview_transactions(
+                    &[txs[0].clone(), missing],
+                    None,
+                    &Coins(vec![]),
+                )?;
+                assert_eq!(facts.results[1].allowed, None);
             }
             assert_eq!(gateway.read().sequence_number(), sequence);
             assert!(gateway.read().is_empty());
@@ -1822,7 +1846,11 @@ mod tests {
             gateway.preview_transactions(&[(*tx).clone()], None, &chain),
             Err(SubmitError::RetryExhausted)
         );
-        assert_eq!(chain.reads.load(Ordering::SeqCst), MAX_ADMISSION_RETRIES);
+        assert_eq!(
+            chain.reads.load(Ordering::SeqCst),
+            4,
+            "POL-03/CL-15 pins four attempts independently of the loop constant"
+        );
         assert!(gateway.read().is_empty());
         Ok(())
     }

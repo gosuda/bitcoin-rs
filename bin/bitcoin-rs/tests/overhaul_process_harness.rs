@@ -13,6 +13,9 @@
 
 mod support;
 
+#[path = "support/policy_cases.rs"]
+mod policy_cases;
+
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -123,10 +126,7 @@ fn replacement_signaling_matches_pinned_core() {
         // Independent public response expectations for the pinned fee-policy case.
         for (process, rejection) in [
             (&mut core, "insufficient fee"),
-            (
-                &mut node,
-                "BIP125 rule 3: replacement fee does not pay evicted fees",
-            ),
+            (&mut node, "insufficient fee"),
         ] {
             let before = process
                 .rpc("getrawmempool", &json!([false, true]))

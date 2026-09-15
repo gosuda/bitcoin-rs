@@ -1007,15 +1007,12 @@ mod tests {
                 4,
             )
             .expect("local replacement");
-        assert_eq!(outcome.mutation().len(), 2);
+        assert_eq!(outcome.len(), 2);
         assert!(matches!(
-            outcome.mutation().changes[0].outcome,
+            outcome.changes[0].outcome,
             MutationOutcome::Removed(_)
         ));
-        assert_eq!(
-            outcome.mutation().changes[1].outcome,
-            MutationOutcome::Accepted
-        );
+        assert_eq!(outcome.changes[1].outcome, MutationOutcome::Accepted);
         let request = rx
             .try_recv()
             .expect("accepted change after removal is announced");

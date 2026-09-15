@@ -13,6 +13,8 @@ pub mod admission;
 pub mod entry;
 /// Package eviction policy.
 pub mod eviction;
+/// Checked fee diagrams over immutable projections of the admitted graph.
+mod fee_diagram;
 /// Fee-rate history-based fee-rate estimator.
 pub mod fee_estimator;
 /// Fee-estimator history datadir persistence.
@@ -23,18 +25,22 @@ pub mod gateway;
 pub mod mutation;
 /// Orphan transaction pool for transactions with missing parents.
 mod orphan;
+/// Package shape and ephemeral-spend policy.
+mod package;
 /// Pareto-front transaction priority ordering.
 pub mod pareto;
 /// Mempool policy limits.
 pub mod policy;
 /// Mempool indexes and mutation API.
 pub mod pool;
-/// BIP125 replacement-by-fee checks.
+/// Core 31.1 replacement fee and graph policy.
 pub mod rbf;
 /// Preparation of disconnected transactions for the existing reorg batch.
 pub mod reconsider;
 /// Transaction relay standardness policy.
 pub mod standardness;
+/// BIP431 topology policy.
+mod truc;
 
 pub use accept::MempoolUtxoView;
 pub use admission::{
@@ -42,6 +48,7 @@ pub use admission::{
 };
 pub use entry::{EntryId, MempoolEntry};
 pub use eviction::evict_lowest_fee_packages;
+pub use fee_diagram::FeeDiagramError;
 pub use fee_estimator::{FeeEstimator, FeeRate, HistoryReject};
 pub use gateway::{
     AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, ChainChangeGuard,
@@ -50,16 +57,17 @@ pub use gateway::{
 #[cfg(any(test, feature = "test-seam"))]
 pub use gateway::{arm_admission_park, reset_admission_park};
 pub use mutation::{
-    AdmissionOrigin, InsertionOutcome, MutationChange, MutationEnvelope, MutationOutcome,
-    MutationResult, PeerToken, RemovalReason,
+    AdmissionOrigin, MutationChange, MutationEnvelope, MutationOutcome, MutationResult, PeerToken,
+    RemovalReason,
 };
 pub use pareto::ParetoFront;
 pub use policy::{MempoolLimits, MempoolPolicySnapshot, PolicyError};
 pub use pool::{
-    Mempool, MempoolError, MempoolMiningSnapshot, MempoolStats, PrioritiseError,
+    Mempool, MempoolChunk, MempoolError, MempoolMiningSnapshot, MempoolStats, PrioritiseError,
     PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
 pub use standardness::{
     StandardnessError, StandardnessPolicy, is_standard_tx, tx_has_dust_outputs,
 };
+pub use truc::TrucError;
