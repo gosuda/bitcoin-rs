@@ -196,6 +196,26 @@ fn notes_are_markdown_table_safe() {
     }
 }
 
+/// The compatibility inventory and the Rust registry must agree on the
+/// policy-owned rows; otherwise the two public descriptions can drift.
+#[test]
+fn compatibility_policy_rows_match_registry() {
+    let table: toml::Table = toml::from_str(bitcoin_rs_rpc::MANIFEST_TOML).expect("valid compatibility manifest");
+    let rows = table["rpc"].as_array().expect("rpc rows");
+    for name in ["sendrawtransaction", "testmempoolaccept"] {
+        let toml_row = rows
+            .iter()
+            .find(|row| row["method"].as_str() == Some(name))
+            .expect("policy row");
+        let registry_row = manifest::entries_of_kind(SurfaceKind::Rpc)
+            .find(|entry| entry.name == name)
+            .expect("registry row");
+        assert_eq!(toml_row["status"].as_str(), Some("deviation"));
+        assert_eq!(registry_row.status, Status::Deviation);
+        assert_eq!(toml_row["deviation"].as_str(), Some(registry_row.notes));
+    }
+}
+
 /// Invariant 3: the checked-in reference is byte-identical to a
 /// regeneration of the manifest. This test never writes; it fails when
 /// `REGEN_RPC_REFERENCE` is set so a regeneration run can never double as
