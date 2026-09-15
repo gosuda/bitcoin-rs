@@ -151,7 +151,11 @@ impl BlockSync {
             for inbound in blocks.drain(..) {
                 let hash = Hash256::from(inbound.block.block_hash());
                 let source = inbound.source;
-                // Issue #1070: a peer can strip witness data from a block body
+                if stager.contains(&hash) {
+                      staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
+                      continue;
+                  }
+                  // Issue #1070: a peer can strip witness data from a block body
                 // without changing the block hash (computed from the header
                 // only). The stager keeps the first body per hash, so a
                 // stripped body would permanently wedge sync. Reject it before
