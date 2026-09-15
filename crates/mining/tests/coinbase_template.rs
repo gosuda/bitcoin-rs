@@ -240,6 +240,9 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
     let mut limited = context(101, true);
     limited.max_sigops = 5;
     let candidate = assemble_candidate(&limited, &snapshot, &[0x51])?;
+    // Contract: docs/contracts/mempool-policy.md#pol-04 requires exact
+    // sigop-adjusted weight; a dependency-closed chunk is accepted atomically,
+    // so exceeding the budget rejects the whole chunk.
     assert!(
         candidate.transactions.is_empty(),
         "the complete CPFP chunk exceeds the sigop budget"
