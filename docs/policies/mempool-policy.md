@@ -55,6 +55,11 @@ Re-pinning to a newer Core version requires all of:
 
 Statuses: *implemented* (both admission outlets enforce it; fixture-cited), *deviation* (enforced with a recorded difference from Core, fixture-cited), *unimplemented* (§5 ledger; no fixture claims it).
 
+The RBF reference is Core's
+[replacement policy at the pinned release commit](https://github.com/bitcoin/bitcoin/blob/9be056a8a72b624dae9623b2f7bded92c2a21c91/doc/policy/mempool-replacements.md).
+Pool/RPC fixtures prove bitcoin-rs behavior; only an explicitly named
+Core process comparison supplies differential evidence.
+
 | Policy | Core 31.1 behavior | bitcoin-rs behavior | Status | Fixture |
 | :--- | :--- | :--- | :--- | :--- |
 | Min relay fee | ATMP `AreInputsStandard`-era floor: fee rate below `-minrelaytime` rejected `min relay fee not met`; configurable via `-minrelaytxfee` | Insert gate rejects below `limits.min_relay_fee_sat_per_kvb` with `BelowMinRelayFee`; the acceptance preview (and therefore both RPC outlets) quotes the same floor; exactly-at-floor admits | implemented | `below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor`, `sendrawtransaction_rejects_below_min_relay_fee_and_agrees_with_the_pool` |
@@ -66,12 +71,12 @@ Statuses: *implemented* (both admission outlets enforce it; fixture-cited), *dev
 | Standardness: output script types | P2PKH, P2SH, P2PK, P2WPKH, P2WSH, P2TR, bare multisig ≤ 3 keys, anchor; otherwise `scriptpubkey` non-standard | Same list (`is_standard_output_script`, `is_p2a`, `is_standard_multisig`) | implemented | `nonstandard_output_script_is_not_standard_on_both_surfaces` (pool-side `is_standard_tx`), `sendrawtransaction_rejects_oversized_and_nonstandard_txs`, `testmempoolaccept_reports_a_policy_verdict_per_row` (RPC preview row) |
 | Standardness: datacarrier (OP_RETURN) | ≤ 83 bytes aggregate, pushes only, `-datacarrier` gate | Same (`is_standard_nulldata`, `max_datacarrier_bytes = Some(83)`) | implemented | `standardness.rs` unit tests (`accepts_two_nulldata_outputs_within_the_aggregate_limit`) |
 | Standardness: dust | Output below `3 × dustRelayFee × size / 1000` non-standard | Same formula (`is_dust` via `minimal_non_dust_custom`) | implemented | `dust_output_is_not_standard_on_both_surfaces` (pool-side `is_standard_tx`), `testmempoolaccept_reports_a_policy_verdict_per_row` (RPC preview row) |
-| RBF signaling | Rule 0: a conflicting original must signal replaceability (BIP125 signal on an input, directly or via an unconfirmed ancestor) | Same (`signals_rbf_including_ancestors`) | implemented | `rbf_rule1_nonsignaling_originals_reject_on_both_surfaces`, `sendrawtransaction_rejects_nonsignaling_replacements_with_rule1`, `bip125_rule1_nonsignaling_originals_reject_on_both_rpcs` |
-| RBF rule 2 | Replacement must not spend new unconfirmed inputs | Same (`is_unconfirmed_outpoint` vs originals' parents) | implemented | `rbf_rule2_replacement_may_not_add_unconfirmed_inputs`, `sendrawtransaction_rejects_rule2_replacements_adding_unconfirmed_inputs` |
+| RBF signaling | No opt-in signaling requirement (full RBF) | Every direct conflict must signal, directly or through an unconfirmed ancestor (`signals_rbf_including_ancestors`) | deviation | `replacement_signaling_differs_from_pinned_core` (real-process difference and opt-in control), `rbf_rule1_nonsignaling_originals_reject_on_both_surfaces`, `bip125_rule1_nonsignaling_originals_reject_on_both_rpcs` |
+| RBF rule 2 | Historical prohibition on new unconfirmed inputs removed; other admission rules still apply | Rejects new unconfirmed inputs (`is_unconfirmed_outpoint` vs originals' parents) | deviation | `rbf_rule2_replacement_may_not_add_unconfirmed_inputs`, `sendrawtransaction_rejects_rule2_replacements_adding_unconfirmed_inputs` (current behavior; Core process comparison remains #639) |
 | RBF rule 3 | Replacement absolute fee ≥ evicted transactions' fees | Same | implemented | `rbf_rule3_replacement_must_pay_evicted_fees`, `sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees` |
 | RBF rule 4 | Replacement fee ≥ evicted fees + incremental relay fee × vsize | Same | implemented | `rbf_opt_in_replacement_sweeps_conflicts_and_descendants` (boundary), `bip125_rule4_replacement_must_pay_incremental_relay_fee_on_both_rpcs` |
-| RBF rule 5 | Replacement must not evict more than 100 transactions | Same (`max_replacement_evictions = 100`) | implemented | `rbf_bip125.rs::bip125_replacement_rules_are_enforced` (rule-5 case), `bip125_rule5_too_many_evicted_descendants_reject_on_both_rpcs` |
-| RBF rule 6 | Replacement fee rate strictly above the direct conflicts' | Same | implemented | `rbf_rule6_replacement_rate_must_exceed_direct_conflicts`, `sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate` |
+| RBF rule 5 | At most 100 distinct clusters containing direct conflicts | At most 100 evicted transactions, including descendants (`max_replacement_evictions = 100`) | deviation | `rbf_bip125.rs::bip125_replacement_rules_are_enforced` (rule-5 case), `bip125_rule5_too_many_evicted_descendants_reject_on_both_rpcs` (current behavior; Core process comparison remains #639) |
+| RBF rule 6 | Replacement must strictly improve the mempool's complete feerate diagram | Compares the replacement's fee rate only with each direct conflict's fee rate | deviation | `rbf_rule6_replacement_rate_must_exceed_direct_conflicts`, `sendrawtransaction_rejects_rule6_replacements_that_do_not_improve_the_rate` (current behavior; Core process comparison remains #639) |
 | RBF sweep on acceptance | Legal replacement evicts direct conflicts (reason: replaced) and their descendants (reason: descendant), parents first, then admits the replacement | Same commit order via `replace_transaction` → `MutationResult` | implemented | `rbf_opt_in_replacement_sweeps_conflicts_and_descendants`, `sendrawtransaction_applies_an_rbf_replacement_and_sweeps_the_conflicts` |
 | Ancestor count limit | 25 unconfirmed ancestors inclusive (`-limitancestorcount`). Core 31 deprecated this as mempool policy and keeps it only for wallet coin selection | Same (`max_ancestors = 25`). Retained as mempool policy; retiring it is #114, not this change | implemented | `ancestor_count_limit_rejects_the_26th_unconfirmed_tx`, `sendrawtransaction_enforces_ancestor_count_limits_at_admission`, `testmempoolaccept_and_sendrawtransaction_agree_on_ancestor_count_limits` |
 | Ancestor size limit | 101 000 vB ancestor package inclusive (`-limitancestorsize`). Same Core-31 deprecation as the ancestor count | Same (`max_ancestor_size = 101_000`). The equal default with `cluster_size_vbytes` is a coincidence of value, not of meaning | implemented | `ancestor_size_limit_rejects_an_oversized_package`, `sendrawtransaction_enforces_ancestor_size_limits_at_admission` |
@@ -94,7 +99,7 @@ Policy rejections reach callers with different envelopes per outlet; the class i
 | :--- | :--- | :--- | :--- | :--- |
 | Below min relay | `MinRelayFeeNotMet` | JSON-RPC internal error, message contains `min-relay-fee-not-met` | `reject-reason: "min-relay-fee-not-met"` | Core: `min relay fee not met` (ATMP) / `min-relay-fee-not-met` (package); code −1/−26 by lane |
 | Non-standard | `NonStandard(...)` | internal error, message is the standardness error text | `reject-reason` is the standardness error text (e.g. `non-standard output script`, `dust output`, `non-standard transaction version`) | Core: `version`, `dust`, `scriptpubkey`, `tx-size`; code −26/−27 by lane |
-| RBF rules | `Replacement(RbfError)` | `TxRejected` (−26), containing `BIP125 rule N` | `reject-reason` carries the same text | Core: `bad-txns-bip125-replacement-*` family |
+| RBF rules | `Replacement(RbfError)` | `TxRejected` (−26), containing `BIP125 rule N` | `reject-reason` carries the same text | Core no longer rejects on historical rules 1 or 2; its remaining replacement checks do not share these BIP125 error strings |
 | Missing inputs | `MissingInputs` | `TxRejected` (−26), containing `missing-inputs` | `reject-reason: "missing-inputs"` | Core: `missing-inputs` (−25) |
 | Non-BIP68-final | `NonBip68Final` | `TxRejected` (−26), containing `non-BIP68-final` | `reject-reason: "non-BIP68-final"` | Core: `non-BIP68-final` (ATMP), code −26 |
 | Package limits | `PackageLimit(PolicyError)` | internal error containing the pool policy text (e.g. `too many unconfirmed ancestors`, `ancestor package is too large`, `too many unconfirmed descendants`, `too many transactions in cluster`, `cluster is too large`) | `reject-reason` carries the same text | Core: `too-long-mempool-chain` / cluster-limit text, code −26 |
@@ -104,15 +109,34 @@ Code values are the node's transaction-rejected code (−26), except `MaxFeeExce
 
 ## 5. Deviation Ledger
 
-Explicit deltas from Core 31.1, each intentional and known:
+Explicit deltas from Core 31.1, including incomplete alignment tracked below:
 
 1. **Generic script rejection text.** Preview and submission both verify scripts, but render their shared rejection as `script-verify-flag-failed` and `consensus-verification-failed`, respectively. Core exposes finer script-failure detail. No exact Core script-error-string parity is claimed.
 2. **TRUC (v3) transactions are non-standard.** Core 31 accepts version-3 transactions under its TRUC package policy; bitcoin-rs rejects them at the version gate rather than copying the permissive half of the design without the constraining half. The §3 row is now classified `deviation` (not `implemented (stricter than Core)`). Pinned by `rejects_version_three_while_truc_policy_is_absent` and the RPC row in `testmempoolaccept_reports_a_policy_verdict_per_row`.
 3. **Error codes.** Policy rejections surface as JSON-RPC internal errors (−32603) or rejected errors (−26) with the class text in the message, not Core's transaction error codes (§4). Numeric-code alignment is owned by the RPC compatibility manifest.
 4. **Priorities (`prioritisetransaction`) affect only mining ordering**, never admission — matching Core's current posture, recorded so the fee-delta overlay is not mistaken for an admission lever.
+5. **Historical replacement policy (#639).** bitcoin-rs retains opt-in
+   signaling, the new-unconfirmed-input restriction, a transaction-count
+   eviction limit, and direct-conflict fee-rate comparison. Core 31.1 removes
+   the first two, counts conflicting clusters, and requires complete
+   feerate-diagram improvement. The real-process signaling fixture proves
+   the first difference and the shared opt-in acceptance control. The other
+   differences are source comparisons backed by current-behavior fixtures;
+   their independent process scenarios remain open. The RPC compatibility
+   manifest records preview and submission as `deviation`.
 
 ## 6. Verification
 
+- **Production RBF signaling comparison**:
+  `cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_process_harness replacement_signaling_differs_from_pinned_core -- --exact --nocapture`.
+  The existing process harness verifies the pinned Core binary hash, starts
+  isolated regtest nodes, and feeds both the same funding blocks and signed
+  transactions. It checks unconflicted validity first, then preview and
+  submission with nonsignaling and opt-in originals. Preview cannot change
+  public membership or sequence; rejected submission preserves both, while
+  successful replacement removes the original. Launch identities and RPC
+  replies remain in `target/process-harness/run-*/`. This fixture does not
+  establish complete replacement/package parity or change admission policy.
 - **Mempool-surface fixtures**: `cargo test -p bitcoin-rs-mempool --test policy_contract` — every §3 row's pool-side verdict plus the finality rows — next-block BIP68 height/time boundaries over confirmed metadata and unconfirmed parents, the csv-inactive gate control, and the coinbase maturity 99/100 boundary; the missing-inputs row also has a direct `MempoolGateway` preview fixture. The remaining preview-side verdicts are exercised through the RPC-surface fixtures below.
 - **RPC-surface fixtures**: `cargo test -p bitcoin-rs-rpc --test policy_contract` — the same policy classes through `sendrawtransaction` and `testmempoolaccept` over a real `Context`, each asserting the observable verdict (accept, or error code + message; per-row `reject-reason`) and its agreement with the direct pool outcome: the standardness classes, both fee floors (configured and pressure) and their precedence against `-maxfeerate`, the ancestor/descendant package limits and the cluster count/size limits (preview and admission agree, including a replacement that does not grow a full cluster), size-pressure eviction with post-submission pool membership/order, the coinbase-maturity 99/100 boundary and the csv-inactive BIP68 control through the real admission producer, and the full BIP125 rule set — opt-in accept + sweep, rules 1–6 each with a dedicated both-RPC fixture asserting verdict + error class on `sendrawtransaction` AND `testmempoolaccept` + direct-pool cross-check.
 - **Supplementary vectors**: `cargo test -p bitcoin-rs-mempool --test rbf_bip125` (per-rule RBF table incl. rule 5), `standardness.rs` unit tests (per-check standardness vectors), `gateway.rs` unit tests (`admit_transaction_rejects_a_script_invalid_input`, `admit_transaction_accepts_locktime_equal_to_tip_at_next_height`, `admit_transaction_rejects_locktime_one_past_tip`), and `cargo test -p bitcoin-rs-rpc --test transaction_methods` (POL-01 duplicate submission: in-mempool idempotency and policy-evicted resubmission).

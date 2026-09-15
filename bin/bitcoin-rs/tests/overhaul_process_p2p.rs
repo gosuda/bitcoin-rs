@@ -217,7 +217,9 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
     )
     .expect("candidate process with explorer transaction lookup enabled");
     let funds = mine_common_chain(&mut core, &mut node, 101).expect("identical mature funds");
-    let transaction = funds.signed_spend().expect("signed spend");
+    let transaction = funds
+        .signed_spend(10_000, bitcoin::Sequence::MAX)
+        .expect("signed spend");
     let txid = transaction.compute_txid().to_string();
     let raw = bitcoin::consensus::encode::serialize_hex(&transaction);
     assert_eq!(

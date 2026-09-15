@@ -41,8 +41,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `gettxout` | 0.4.0 |  |
 | `gettxoutproof` | 0.4.0 |  |
 | `verifytxoutproof` | 0.4.0 |  |
-| `sendrawtransaction` | 0.4.0 |  |
-| `testmempoolaccept` | 0.4.0 |  |
 | `decoderawtransaction` | 0.4.0 |  |
 | `createrawtransaction` | 0.4.0 |  |
 | `combinepsbt` | 0.4.0 |  |
@@ -84,6 +82,8 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | surface | since | notes |
 |---|---|---|
 | `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
+| `sendrawtransaction` | 0.4.0 | Replacement requires BIP125 opt-in signaling from conflicting originals, unlike Core 31.1 (crates/mempool/src/rbf.rs). See docs/policies/mempool-policy.md for the process evidence and remaining #639 differences. |
+| `testmempoolaccept` | 0.4.0 | Preview retains the same historical BIP125 signaling requirement as submission (crates/mempool/src/rbf.rs). See docs/policies/mempool-policy.md for the Core 31.1 process comparison and remaining #639 differences. |
 | `getmempoolinfo` | 0.4.0 | Policy fields project the enforced MempoolPolicySnapshot (crates/mempool/src/policy.rs): fullrbf always reports the enforced BIP125 signaling requirement (false) where Core 31.1 emits the field only under -deprecatedrpc=fullrbf; limitclustercount and limitclustersize project the cluster limits admission enforces; optimal is always true because the fee-rate index is rewritten under the pool write lock (crates/rpc/src/handlers/mempool.rs). |
 | `estimatesmartfee` | 0.4.0 | See docs/contracts/external-api.md#API-26 for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs). |
 | `getmemoryinfo` | 0.4.0 | mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). |
@@ -236,4 +236,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Implemented 71, Deviation 8, Extension 2, Unimplemented 93 - total 174.
+Row counts: Implemented 69, Deviation 10, Extension 2, Unimplemented 93 - total 174.

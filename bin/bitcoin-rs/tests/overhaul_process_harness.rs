@@ -62,6 +62,110 @@ fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
     }
 }
 
+/// POL-05/REF-07: retain the known signaling deviation until #639 replaces
+/// historical BIP125 policy. The opt-in control must succeed on both nodes.
+#[test]
+fn replacement_signaling_differs_from_pinned_core() {
+    use bitcoin::Sequence;
+    use bitcoin::consensus::encode::serialize_hex;
+
+    // Pin the public RPC text independently of RbfError::Display so an
+    // accidental wire-contract change remains observable in this process test.
+    const REJECTION: &str = "BIP125 rule 1: an original transaction does not opt in";
+
+    for signals in [false, true] {
+        let mut core = start(NodeBinary::ReferenceCore);
+        let mut node = start(NodeBinary::BitcoinRs);
+        let funds = mine_common_chain(&mut core, &mut node, COMMON_BLOCKS).expect("common chain");
+        let sequence = if signals {
+            Sequence::ENABLE_RBF_NO_LOCKTIME
+        } else {
+            Sequence::MAX
+        };
+        let original = funds.signed_spend(10_000, sequence).expect("original");
+        let replacement = funds
+            .signed_spend(20_000, Sequence::MAX)
+            .expect("higher-fee replacement");
+        let original_txid = original.compute_txid().to_string();
+        let replacement_txid = replacement.compute_txid().to_string();
+        let replacement_raw = serialize_hex(&replacement);
+
+        // The replacement is independently valid before there is a conflict.
+        // A script or funding failure must not masquerade as an RBF difference.
+        for process in [&mut core, &mut node] {
+            let preview = process
+                .rpc("testmempoolaccept", &json!([[replacement_raw]]))
+                .expect("unconflicted replacement preview");
+            assert_eq!(preview[0]["allowed"], json!(true), "{preview}");
+        }
+        assert_eq!(
+            compare_rpc(&mut core, &mut node, "getrawmempool", &json!([]))
+                .expect("unconflicted previews leave the pools empty"),
+            json!([]),
+        );
+        assert_eq!(
+            compare_rpc(
+                &mut core,
+                &mut node,
+                "sendrawtransaction",
+                &json!([serialize_hex(&original)]),
+            )
+            .expect("both nodes admit the same original"),
+            json!(original_txid),
+        );
+
+        for (process, allowed) in [(&mut core, true), (&mut node, signals)] {
+            let before = process
+                .rpc("getrawmempool", &json!([false, true]))
+                .expect("membership and sequence before preview");
+            assert_eq!(before["txids"], json!([original_txid]));
+            let sequence_before = before["mempool_sequence"].as_u64().expect("pool sequence");
+            let preview = process
+                .rpc("testmempoolaccept", &json!([[replacement_raw]]))
+                .expect("replacement preview");
+            assert_eq!(preview[0]["txid"], json!(replacement_txid));
+            assert_eq!(preview[0]["allowed"], json!(allowed), "{preview}");
+            assert_eq!(
+                process
+                    .rpc("getrawmempool", &json!([false, true]))
+                    .expect("after preview"),
+                before,
+                "preview must not evict the original or advance the sequence",
+            );
+
+            let submitted = process.rpc("sendrawtransaction", &json!([replacement_raw]));
+            let after = process
+                .rpc("getrawmempool", &json!([false, true]))
+                .expect("membership and sequence after submission");
+            if allowed {
+                assert_eq!(
+                    submitted.expect("replacement accepted"),
+                    json!(replacement_txid)
+                );
+                assert_eq!(after["txids"], json!([replacement_txid]));
+                assert!(
+                    after["mempool_sequence"].as_u64().expect("pool sequence") > sequence_before
+                );
+            } else {
+                assert_eq!(preview[0]["reject-reason"], json!(REJECTION));
+                assert!(
+                    matches!(submitted, Err(HarnessError::Rpc { code: -26, ref message, .. }) if message.contains(REJECTION)),
+                    "submission must reject the same policy class: {submitted:?}",
+                );
+                assert_eq!(
+                    after, before,
+                    "rejection must preserve membership and sequence"
+                );
+            }
+        }
+        let (core_pid, node_pid) = (core.pid(), node.pid());
+        core.stop().expect("stop reference");
+        node.stop().expect("stop candidate");
+        assert_reaped(core_pid);
+        assert_reaped(node_pid);
+    }
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -91,7 +195,9 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         json!([]),
     );
 
-    let spend = funds.signed_spend().expect("sign mature coinbase");
+    let spend = funds
+        .signed_spend(10_000, bitcoin::Sequence::MAX)
+        .expect("sign mature coinbase");
     let txid = spend.compute_txid().to_string();
     let raw = bitcoin::consensus::encode::serialize_hex(&spend);
     let mut invalid = spend.clone();

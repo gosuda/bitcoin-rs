@@ -102,8 +102,8 @@ declare_rows! {
     "gettxout", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout);
     "gettxoutproof", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof);
     "verifytxoutproof", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::verifytxoutproof);
-    "sendrawtransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::sendrawtransaction);
-    "testmempoolaccept", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::testmempoolaccept);
+    "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Replacement requires BIP125 opt-in signaling from conflicting originals, unlike Core 31.1 (crates/mempool/src/rbf.rs). See docs/policies/mempool-policy.md for the process evidence and remaining #639 differences.", "0.4.0", Some(tx::sendrawtransaction);
+    "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Preview retains the same historical BIP125 signaling requirement as submission (crates/mempool/src/rbf.rs). See docs/policies/mempool-policy.md for the Core 31.1 process comparison and remaining #639 differences.", "0.4.0", Some(tx::testmempoolaccept);
     "decoderawtransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction);
     "createrawtransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::createrawtransaction);
     "combinepsbt", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::combinepsbt);

@@ -848,14 +848,16 @@ fn funding_key() -> Result<PrivateKey, HarnessError> {
 
 impl CommonFunds {
     /// Sign only bytes returned by the independent Core process, with no node state access.
-    pub(crate) fn signed_spend(&self) -> Result<bitcoin::Transaction, HarnessError> {
+    pub(crate) fn signed_spend(
+        &self,
+        fee_sats: u64,
+        sequence: bitcoin::Sequence,
+    ) -> Result<bitcoin::Transaction, HarnessError> {
         use bitcoin::absolute::LockTime;
         use bitcoin::script::{Builder, PushBytesBuf};
         use bitcoin::secp256k1::{Message, Secp256k1};
         use bitcoin::sighash::{EcdsaSighashType, SighashCache};
-        use bitcoin::{
-            Amount, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness, transaction,
-        };
+        use bitcoin::{Amount, ScriptBuf, Transaction, TxIn, TxOut, Witness, transaction};
 
         let block: Block = bitcoin::consensus::deserialize(
             self.common_block_bytes
@@ -874,7 +876,7 @@ impl CommonFunds {
         let value = output
             .value
             .to_sat()
-            .checked_sub(10_000)
+            .checked_sub(fee_sats)
             .ok_or_else(|| HarnessError::Protocol("funding below fee".into()))?;
         let mut spend = Transaction {
             version: transaction::Version::TWO,
@@ -882,7 +884,7 @@ impl CommonFunds {
             input: vec![TxIn {
                 previous_output: OutPoint::new(coinbase.compute_txid(), 0),
                 script_sig: ScriptBuf::new(),
-                sequence: Sequence::MAX,
+                sequence,
                 witness: Witness::new(),
             }],
             output: vec![TxOut {

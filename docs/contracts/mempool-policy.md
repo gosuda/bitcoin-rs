@@ -103,9 +103,12 @@ holds a second admission evaluator.
 
 ### `POL-05`: Replacement, cluster, and package policy
 
-- Replacement follows the pinned Core 31.1 feerate-diagram profile. It
-  is not the unversioned historical BIP125 profile. BIP125 rules 1 to 6
-  keep their classes where they fire first under the pinned precedence.
+- The target replacement policy follows the pinned Core 31.1
+  feerate-diagram profile. The current `Mempool::check_replacement`
+  retains historical BIP125 rules, including opt-in signaling. These
+  differences remain recorded under #639 in the policy matrix and
+  deviation ledger; existing BIP125 fixtures prove the current behavior,
+  not Core 31.1 parity.
 - The pool models each cluster as a dependency DAG with revision-tagged
   membership and cached deterministic linearization chunks. Fee and size
   comparisons use widened checked integer cross products, never floating
@@ -144,6 +147,13 @@ holds a second admission evaluator.
 
 ## Proven by
 
+- `bin/bitcoin-rs/tests/overhaul_process_harness.rs::replacement_signaling_differs_from_pinned_core`:
+  real Core 31.1 and bitcoin-rs processes receive identical signed
+  transactions. A higher-fee replacement of a nonsignaling original
+  succeeds only on Core; the opt-in control succeeds on both. Preview
+  and submission agree, previews preserve membership and sequence, and
+  rejected submission leaves the original in place. This is signaling
+  deviation evidence, not completion of POL-05 or #639.
 - `crates/mempool/tests/admission.rs`: stale-context retry
   (`stale_policy_verdict_becomes_retryable`), sigop boundary enforcement
   (`p2sh_sigop_cost_exceeds_standard_limit`,
