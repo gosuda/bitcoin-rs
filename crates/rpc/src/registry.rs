@@ -102,8 +102,8 @@ declare_rows! {
     "gettxout", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxout);
     "gettxoutproof", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::gettxoutproof);
     "verifytxoutproof", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::verifytxoutproof);
-    "sendrawtransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::sendrawtransaction);
-    "testmempoolaccept", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::testmempoolaccept);
+    "sendrawtransaction", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Replacement still requires BIP125 opt-in signaling from conflicting originals. Core 31.1 permits nonsignaling originals. The production-process signaling comparison is recorded by replacement_signaling_differs_from_pinned_core; complete replacement/package alignment remains #639.", "0.4.0", Some(tx::sendrawtransaction);
+    "testmempoolaccept", SurfaceKind::Rpc, Status::Deviation, "", CORE_VERSION, "Replacement preview rejects nonsignaling originals under historical BIP125 rule 1, while Core 31.1 allows the tested replacement. Preview and submission agree on this known difference, covered by replacement_signaling_differs_from_pinned_core. Complete replacement/package alignment remains #639.", "0.4.0", Some(tx::testmempoolaccept);
     "decoderawtransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::decoderawtransaction);
     "createrawtransaction", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::createrawtransaction);
     "combinepsbt", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(tx::combinepsbt);
