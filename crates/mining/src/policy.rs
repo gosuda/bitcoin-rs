@@ -63,7 +63,7 @@ pub(crate) fn select_packages(
     // Preserve the existing typed reference error before evaluating the graph.
     for (entry, row) in snapshot.entries.iter().enumerate() {
         for &ancestor in &row.ancestors {
-            if usize::try_from(ancestor).map_or(true, |index| index >= snapshot.entries.len()) {
+            if !usize::try_from(ancestor).is_ok_and(|index| index < snapshot.entries.len()) {
                 return Err(MiningError::MissingAncestor { entry, ancestor });
             }
         }
