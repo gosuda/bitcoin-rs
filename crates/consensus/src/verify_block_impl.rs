@@ -346,9 +346,7 @@ pub fn check_witness_malleation(
             if input.witness.len() != 1 || input.witness[0].len() != 32 {
                 return Err(ConsensusError::WitnessNonceSize);
             }
-            if !witness_commitment_hash_matches(block, wtxids, commitment, &input.witness[0]) {
-                return Err(ConsensusError::WitnessCommitment);
-            }
+            check_witness_commitment(block, wtxids, commitment)?;
             return Ok(());
         }
     }
