@@ -277,9 +277,11 @@ exist (docs/contracts/storage-footprint.md:116).
 `metrics`: KEEP prometheus + readiness (live wiring startup.rs:50-66).
 DELETE uptime.rs (38 LOC — `record_process_start` has no production caller;
 the uptime clock is never set in a real process) **[verified]**. DELETE the
-`metrics/evidence/*` subtree (~420 LOC) once #1084 removes
-`overhaul_evidence`/`g18` — its remaining caller is one bench; fold
-`EvidenceIdentity::of_process` into prometheus.rs. `warnings.rs`: the
+`metrics/evidence/*` identity types are KEEP: startup.rs:50-53 constructs
+`EvidenceIdentity::of_process`, while prometheus.rs:77-100 installs its labels
+as process-global recorder labels (start_metrics/bind at :163-172). Any #1084
+cleanup must first migrate this live startup and label path; only code proven
+bench-only may be deleted. `warnings.rs`: the
 write-side (`set`/`unset`, `WarningKind` enum) has **no production writer** —
 the registry can never hold a warning today; the only reader is
 `getmininginfo` (mining/control.rs:31) **[verified]**. Either the write-side
@@ -303,8 +305,10 @@ coordinator owns the transition-lock header admission
 verifying the published tip (submission.rs:60-93), the BIP22 reject vocabulary
 (API-18/30), and the mempool→template wake seam (mining.rs:188-197);
 `bitcoin_rs_mining` provides none of these. `tx_ingress` KEEP (p2p→mempool
-routing + relay/mining dispatch). `import.rs` DELETE — 49-line skeleton whose
-only callers are its own tests **[verified]**. `event_loop`/`run`/`signal`/
+routing + relay/mining dispatch). `import.rs` KEEP — publicly exported block-import API (`lib.rs:28-29`) with
+implemented `import_block`; the absence of in-repository production callers
+ does not establish absence of downstream users. Removal requires a separately
+coordinated deprecation and semver migration, not an inventory deletion. `event_loop`/`run`/`signal`/
 `shutdown`/`logging` KEEP — distinct process-level roles (drain-flag pair
 between event_loop and services, signal forwarding thread, TTY-aware tracing).
 
@@ -355,7 +359,7 @@ adjust the assumptions carried in the #1076 thread:
 
 Confirmed, low-risk deletions (production LOC):
 
-- `import.rs` + its tests (49)
+- `import.rs` is retained as a public API; any removal requires coordinated deprecation and downstream migration
 - `embed/testing.rs` (15)
 - `metrics/uptime.rs` (38)
 - journal `BlockMeta` + accessor (~40)
@@ -377,7 +381,8 @@ Collapse candidates (net-negative, no ownership change):
 - `DeferredChainstateServices` seam (~-80)
 - prove_window/connect.rs prelude dedupe (~-150) **[hypothesis]**
 
-Contingent on #1084: `metrics/evidence/*` (~420), plus the shape-pinning test
+Contingent on #1084: only bench-only portions of `metrics/evidence/*` (after
+preserving production identity creation and recorder labels), plus the shape-pinning test
 files named per cluster (≈6 of 14 checkpoint tests, config/status shape tests,
 admission/internals tests in apply, ~30% of sync tests).
 
