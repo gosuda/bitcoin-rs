@@ -1,4 +1,7 @@
-//! Tests for failure records (REF-07d).
+//! Unit tests for the recorded wire peer's failure records (REF-07d).
+//!
+//! Included only by the `support_unit_tests` target so each assertion runs
+//! once per profile instead of once per embedding binary (issue #1083).
 
 use std::fs::File;
 use std::io::Write as _;
@@ -11,7 +14,8 @@ use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::ProcessPeer;
+use crate::support::process_node::HarnessError;
+use crate::support::process_peer::{ProcessPeer, read_exact};
 
 fn fixture() -> (ProcessPeer, TcpStream, TempDir) {
     let dir = tempfile::tempdir().expect("record directory");
@@ -34,7 +38,7 @@ fn fixture() -> (ProcessPeer, TcpStream, TempDir) {
     (peer, remote, dir)
 }
 
-fn assert_failure(dir: &TempDir, first_direction: &str, error: &super::HarnessError) {
+fn assert_failure(dir: &TempDir, first_direction: &str, error: &HarnessError) {
     let records: Vec<Value> = std::fs::read_to_string(dir.path().join("p2p.jsonl"))
         .expect("record text")
         .lines()
@@ -76,7 +80,7 @@ fn write_failure_keeps_the_attempt_and_error() {
             Instant::now() + Duration::from_secs(1),
         )
         .expect_err("write failure");
-    assert!(matches!(error, super::HarnessError::Io(_)));
+    assert!(matches!(error, HarnessError::Io(_)));
     assert_failure(&dir, "sending", &error);
 }
 
@@ -90,13 +94,13 @@ fn record_write_failure_does_not_replace_the_network_error() {
     let error = peer
         .receive(Instant::now() + Duration::from_secs(1))
         .expect_err("closed reader");
-    assert!(matches!(error, super::HarnessError::Protocol(_)));
+    assert!(matches!(error, HarnessError::Protocol(_)));
 }
 
 #[test]
 fn read_completion_fails_after_the_time_limit() {
     let (mut peer, _remote, _dir) = fixture();
-    let result = super::read_exact(&mut peer.stream, &mut [], Instant::now());
+    let result = read_exact(&mut peer.stream, &mut [], Instant::now());
     assert!(result.is_err(), "an expired operation must not succeed");
 }
 

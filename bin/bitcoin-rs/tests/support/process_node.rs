@@ -194,7 +194,7 @@ fn executable(binary: NodeBinary) -> Result<PathBuf, HarnessError> {
 }
 
 // Keep both ports during setup. The child binds them after release.
-fn loopback_addresses() -> Result<(TcpListener, TcpListener), HarnessError> {
+pub(crate) fn loopback_addresses() -> Result<(TcpListener, TcpListener), HarnessError> {
     let rpc = TcpListener::bind("127.0.0.1:0")?;
     let p2p = TcpListener::bind("127.0.0.1:0")?;
     Ok((rpc, p2p))
@@ -906,43 +906,5 @@ impl CommonFunds {
             .push_key(&private.public_key(&secp))
             .into_script();
         Ok(spend)
-    }
-}
-
-#[cfg(test)]
-mod port_tests {
-    use super::{TcpListener, loopback_addresses, remaining_time};
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn socket_time_limit_rejects_sub_microsecond_intervals() {
-        let now = Instant::now();
-        for nanos in [0, 1, 999] {
-            assert!(remaining_time(now + Duration::from_nanos(nanos), now, "expired").is_err());
-        }
-        for duration in [Duration::from_micros(1), Duration::from_secs(1)] {
-            assert_eq!(
-                remaining_time(now + duration, now, "expired").expect("valid time limit"),
-                duration
-            );
-        }
-    }
-
-    #[test]
-    fn selected_ports_stay_reserved() {
-        let ports = loopback_addresses().expect("select two ports");
-        let rpc = ports.0.local_addr().expect("RPC address");
-        let p2p = ports.1.local_addr().expect("P2P address");
-        assert_ne!(rpc, p2p);
-        for address in [rpc, p2p] {
-            let error =
-                TcpListener::bind(address).expect_err("the selected port must stay reserved");
-            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
-        }
-        drop(ports);
-        for address in [rpc, p2p] {
-            let listener = TcpListener::bind(address).expect("the released port must be available");
-            drop(listener);
-        }
     }
 }

@@ -1,4 +1,8 @@
 //! Shared verification support for integration tests and gates.
+//!
+//! Unit tests for these modules live in the sibling `*_tests.rs` files,
+//! included only by the `support_unit_tests` target: `#[cfg(test)]` code
+//! here would compile — and run — once per embedding binary (issue #1083).
 
 #![expect(
     clippy::expect_used,

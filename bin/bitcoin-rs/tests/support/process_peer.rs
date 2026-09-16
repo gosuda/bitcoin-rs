@@ -23,14 +23,11 @@ const MAX_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MESSAGES: usize = 128;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) struct ProcessPeer {
-    stream: TcpStream,
-    journal: File,
-    journal_bytes: u64,
-    started: Instant,
+    pub(crate) stream: TcpStream,
+    pub(crate) journal: File,
+    pub(crate) journal_bytes: u64,
+    pub(crate) started: Instant,
 }
 
 impl ProcessPeer {
@@ -118,7 +115,11 @@ impl ProcessPeer {
         )))
     }
 
-    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), HarnessError> {
+    pub(crate) fn send(
+        &mut self,
+        message: NetworkMessage,
+        deadline: Instant,
+    ) -> Result<(), HarnessError> {
         let result = (|| {
             let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
             // Check each frame before the peer sends it.
@@ -143,7 +144,7 @@ impl ProcessPeer {
         self.record_result(result)
     }
 
-    fn receive(&mut self, deadline: Instant) -> Result<NetworkMessage, HarnessError> {
+    pub(crate) fn receive(&mut self, deadline: Instant) -> Result<NetworkMessage, HarnessError> {
         let result = (|| {
             let frame = read_frame(&mut self.stream, deadline)?;
             let decoded = decode_frame(&frame);
@@ -237,7 +238,7 @@ fn remaining(deadline: Instant) -> Result<Duration, HarnessError> {
     remaining_time(deadline, Instant::now(), "P2P operation deadline")
 }
 
-fn read_exact(
+pub(crate) fn read_exact(
     stream: &mut TcpStream,
     mut bytes: &mut [u8],
     deadline: Instant,
