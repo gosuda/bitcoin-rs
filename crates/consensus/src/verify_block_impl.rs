@@ -367,6 +367,59 @@ pub fn check_witness_malleation(
 pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool {
     check_witness_malleation(block, true, wtxids).is_ok()
 }
+/// Checks that a block body is bound to its header before staging.
+///
+/// A peer can alter either transaction data or witness data without changing
+/// the block hash, which is computed from the header only. This gate verifies
+/// the transaction-ID Merkle root, Merkle mutation, and witness commitment
+/// rules before a body occupies the stager's single-body slot (issue #1070).
+///
+/// `segwit_active` must match the apply path's contextual derivation
+/// (`BlockRuleContext.segwit_active`) so the gate reproduces exact consensus
+/// semantics: pre-activation blocks with a commitment-like output are not
+/// required to carry a witness nonce, and witness data without a commitment
+/// is `unexpected-witness` only when segwit is active.
+///
+/// Merkle verification runs first, preserving the full block-rule error
+/// precedence. The witness verdict is delegated to
+/// [`check_witness_malleation`] to avoid duplicating consensus logic. Two
+/// cost-only fast paths are hoisted ahead of wtxid hashing without changing
+/// the delegated verdict:
+///
+/// 1. When neither a commitment nor any witness is present the block is
+///    trivially well-formed (the delegated check returns `Ok`).
+/// 2. When segwit is active and a commitment is present but the coinbase
+///    witness nonce shape is wrong (missing input or not exactly 1×32B), the
+///    delegated check's first branch returns [`ConsensusError::WitnessNonceSize`]
+///    without consulting `wtxids`, so the same error is returned before the
+///    expensive hashing. This is **not** done when segwit is inactive: the
+///    delegated check may return `Ok` for a commitment-like output pre-activation.
+pub fn check_block_body_binding(
+    block: &Block,
+    segwit_active: bool,
+) -> Result<(), ConsensusError> {
+    let txids: Vec<Txid> = block.txs.iter().map(Tx::txid).collect();
+    verify_merkle_root_with_txids(block, &txids)?;
+
+    let commitment = witness_commitment(block);
+    if commitment.is_none() && !block_has_witness(block) {
+        return Ok(());
+    }
+    // Early shape check: hoisted first branch of check_witness_malleation.
+    // When segwit is active and a commitment exists, a malformed coinbase
+    // witness nonce shape fails before wtxid hashing. The delegated check
+    // never consults wtxids in this branch, so the semantics are identical.
+    if segwit_active && commitment.is_some() {
+        let Some(input) = block.txs.first().and_then(|tx| tx.inputs.first()) else {
+            return Err(ConsensusError::WitnessNonceSize);
+        };
+        if input.witness.len() != 1 || input.witness[0].len() != 32 {
+            return Err(ConsensusError::WitnessNonceSize);
+        }
+    }
+    let wtxids: Vec<Wtxid> = block.txs.iter().map(Tx::wtxid).collect();
+    check_witness_malleation(block, segwit_active, &wtxids)
+}
 
 fn witness_commitment_hash_matches(
     block: &Block,

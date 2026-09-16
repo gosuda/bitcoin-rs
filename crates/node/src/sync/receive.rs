@@ -5,7 +5,11 @@ use alloc::vec::Vec;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::softfork_state;
+use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_consensus::check_block_body_binding;
 use bitcoin_rs_p2p::InboundBlock;
+use bitcoin_rs_p2p::RejectDelivery;
 use bitcoin_rs_p2p::StagedBlock;
 use bitcoin_rs_p2p::download_window::INBOUND_BLOCK_STAGE_CHUNK;
 use bitcoin_rs_primitives::Hash256;
@@ -118,6 +122,7 @@ impl BlockSync {
         .then_some(active_tip.tip_id)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn buffer_received_block_chunk(
         &self,
         blocks: &mut Vec<InboundBlock>,
@@ -143,13 +148,83 @@ impl BlockSync {
                     })
             });
         }
+
+        // Already-staged precheck: skip the expensive body-binding hashes for
+        // blocks whose hash is already in the stager. A correct body already
+        // staged must not be displaced by a late malformed duplicate (P2-3).
+        let already_staged: Vec<bool> = {
+            let stager = self.block_stager.lock();
+            blocks
+                .iter()
+                .map(|inbound| stager.contains(&Hash256::from(inbound.block.block_hash())))
+                .collect()
+        };
+
+        // For non-staged blocks, derive segwit_active from the tree (cheap
+        // lookups) then compute the body-binding gate without holding the tree
+        // lock. segwit_active uses the same canonical path as the apply path
+        // (softfork_state over the parent node) so the gate reproduces exact
+        // consensus semantics.
+        let binding_results: Vec<Result<(), ConsensusError>> = blocks
+            .iter()
+            .zip(&already_staged)
+            .map(|(inbound, already_staged)| {
+                if *already_staged {
+                    Ok(())
+                } else {
+                    let hash = Hash256::from(inbound.block.block_hash());
+                    let segwit_active = {
+                        let tree = self.handles.block_tree.read();
+                        tree.lookup(hash)
+                            .and_then(|node_id| tree.node(node_id).ok())
+                            .is_none_or(|node| {
+                                softfork_state(
+                                    &tree,
+                                    self.handles.network,
+                                    node.parent,
+                                    node.height,
+                                )
+                                .segwit_active
+                            })
+                    };
+                    check_block_body_binding(&inbound.block, segwit_active)
+                }
+            })
+            .collect();
+
+        // Stager lock: TOCTOU recheck + insert. Binding-failed blocks are
+        // tracked separately for the window's source-aware reject_delivery.
         let mut staged_blocks = Vec::with_capacity(blocks.len());
+        let mut reject_deliveries = Vec::new();
         let now = Instant::now();
         {
             let mut stager = self.block_stager.lock();
-            for inbound in blocks.drain(..) {
+            for (inbound, (already_staged, binding_result)) in blocks
+                .drain(..)
+                .zip(already_staged.into_iter().zip(binding_results))
+            {
                 let hash = Hash256::from(inbound.block.block_hash());
                 let source = inbound.source;
+                if already_staged {
+                    staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
+                    continue;
+                }
+                // Issue #1070: the header-derived block hash does not bind the
+                // delivered transaction or witness bytes by itself. The
+                // stager keeps the first body per hash, so reject any body
+                // whose txid Merkle tree or witness commitment does not bind
+                // to the header before it can occupy that slot.
+                if let Err(error) = binding_result {
+                    metrics::counter!("node.sync.body_binding_drops").increment(1);
+                    tracing::warn!(%hash, %error, "block sync: body/header binding failed; rejecting delivery");
+                    reject_deliveries.push((hash, source));
+                    continue;
+                }
+                // TOCTOU: recheck under the stager lock before inserting.
+                if stager.contains(&hash) {
+                    staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
+                    continue;
+                }
                 let staged = stager.insert(
                     hash,
                     next_expected_hash,
@@ -161,8 +236,12 @@ impl BlockSync {
             }
         }
 
+        // Window lock: process staged results and reject deliveries.
+        // reject_delivery is called under the window lock only (no stager
+        // lock) so the source-aware retry policy is owned entirely by the
+        // DownloadWindow.
         let mut retry_count = 0_u64;
-        let staged_count = staged_blocks.len();
+        let staged_count = staged_blocks.len() + reject_deliveries.len();
         {
             let mut window = self.download_window.lock();
             for (hash, source, staged) in staged_blocks {
@@ -188,6 +267,14 @@ impl BlockSync {
                         retry_count = retry_count.saturating_add(1);
                         tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
                     }
+                }
+            }
+            for (hash, source) in reject_deliveries {
+                let source_peer = source
+                    .filter(|source| self.peer_table.is_current(*source))
+                    .map(|source| source.addr);
+                if window.reject_delivery(hash, source_peer) == RejectDelivery::ReleasedPending {
+                    retry_count = retry_count.saturating_add(1);
                 }
             }
         }

@@ -1701,3 +1701,6 @@ mod validation_1;
 
 #[cfg(test)]
 mod persistence_1;
+
+#[cfg(test)]
+mod witness_staging_gate;

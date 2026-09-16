@@ -82,7 +82,7 @@ pub use wire::{Message, PeerError};
 
 pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
 pub use download_window::{
-    DownloadWindow, FanoutCandidate, SyncBudget, SyncPeer, SyncPeerSelection,
+    DownloadWindow, FanoutCandidate, RejectDelivery, SyncBudget, SyncPeer, SyncPeerSelection,
     configure_request_mode, default_sync_budget, statically_fanout_eligible,
 };
 pub use sync_planner::{ColdFrontHedge, SyncAction, SyncDisconnectReason, SyncPlanner};

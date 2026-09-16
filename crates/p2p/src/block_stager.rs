@@ -685,7 +685,6 @@ mod tests {
                 panic!("incoming block should fit after evicting staged blocks")
             }
         };
-
         assert_eq!(dropped.len(), 2);
         assert_eq!(dropped[0].hash, first);
         assert_eq!(dropped[1].hash, second);
@@ -951,7 +950,6 @@ mod tests {
                 panic!("incoming block should fit after evicting staged blocks")
             }
         };
-
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].hash, first);
         assert!(stager.contains(&second));

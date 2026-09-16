@@ -2019,6 +2019,63 @@ impl DownloadWindow {
         }
     }
 
+    /// Rejects a malformed block delivery, source-aware (issue #1070).
+    ///
+    /// When the delivering peer owns the pending request for `hash`, the
+    /// pending is released so the block becomes re-requestable from a
+    /// different peer. When a different peer delivers the malformed body
+    /// unsolicited, the body is discarded and any existing pending request is
+    /// preserved — the original owner may still supply the correct body.
+    ///
+    /// The malformed body was never staged, so no received state is touched.
+    pub fn reject_delivery(
+        &mut self,
+        hash: Hash256,
+        source_peer: Option<SocketAddr>,
+    ) -> RejectDelivery {
+        // A malformed response is still proof that this peer answered. Do not
+        // let a first-tick timeout observation disconnect it on the next tick.
+        if self.pending_timeout_observation.is_some_and(|observation| {
+            observation.hash == hash && Some(observation.peer_addr) == source_peer
+        }) {
+            self.pending_timeout_observation = None;
+        }
+
+        // A rejected race participant cannot remain eligible to complete the
+        // cold-front race. Clear the episode without electing a winner or
+        // blaming either peer; a later observation may arm another hedge.
+        if self.cold_front.is_some_and(|state| match state {
+            ColdFrontState::Waiting {
+                owner,
+                hash: waiting_hash,
+                ..
+            } => waiting_hash == hash && Some(owner) == source_peer,
+            ColdFrontState::Racing {
+                owner,
+                alternate,
+                hash: racing_hash,
+            } => {
+                racing_hash == hash
+                    && source_peer.is_some_and(|peer| peer == owner || peer == alternate)
+            }
+        }) {
+            self.cold_front = None;
+        }
+
+        let is_owner = self
+            .pending
+            .get(&hash)
+            .is_some_and(|pending| Some(pending.peer_addr) == source_peer);
+        if is_owner {
+            if let Some(pending) = self.remove_pending(&hash) {
+                self.next_request_height = self.next_request_height.min(pending.height);
+            }
+            RejectDelivery::ReleasedPending
+        } else {
+            RejectDelivery::DiscardedUnsolicited
+        }
+    }
+
     fn expire_pending(&mut self, now: Instant) -> Vec<PeerRequestEntry> {
         if self
             .next_pending_deadline
@@ -2067,6 +2124,25 @@ impl DownloadWindow {
     fn release_peer_block(&mut self, peer_addr: SocketAddr) {
         release_peer_block(&mut self.peer_inflight, peer_addr);
     }
+}
+
+/// Outcome of rejecting a malformed block delivery (issue #1070).
+///
+/// The window decides whether the delivering peer owned the pending request.
+/// Only the owner's malformed delivery releases the pending slot so the block
+/// becomes re-requestable; an unsolicited malformed body from a different peer
+/// is discarded without disturbing the in-flight request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectDelivery {
+    /// The pending owner delivered the malformed body. Its pending request was
+    /// released so the block can be re-requested from a different peer. Any
+    /// matching timeout observation and cold-front race participation are
+    /// cleared for a peer that demonstrably responded.
+    ReleasedPending,
+    /// A peer other than the pending owner delivered the malformed body
+    /// (or no pending existed). The body is discarded; any existing pending
+    /// request is preserved.
+    DiscardedUnsolicited,
 }
 
 fn release_peer_block(
@@ -4212,6 +4288,174 @@ mod tests {
         assert!(!window.peer_inflight.contains_key(&peer_addr));
         assert!(window.preferred_peer.is_none());
         assert!(window.peer_in_staller_cooldown(peer_addr, now));
+    }
+
+    /// (i) When the pending owner delivers a malformed body, `reject_delivery`
+    /// releases the pending request so the block becomes re-requestable from a
+    /// different peer. The pending slot and peer inflight are freed.
+    #[test]
+    fn reject_delivery_from_pending_owner_releases_pending() {
+        let now = Instant::now();
+        let owner = peer_addr(1);
+        let block_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+        insert_pending(&mut window, owner, block_hash, 100, now);
+        assert!(window.contains_pending(&block_hash));
+        assert_eq!(window.pending_len(), 1);
+
+        let outcome = window.reject_delivery(block_hash, Some(owner));
+
+        assert_eq!(outcome, super::RejectDelivery::ReleasedPending);
+        assert!(!window.contains_pending(&block_hash));
+        assert_eq!(window.pending_len(), 0);
+        // next_request_height lowered so the block is re-requestable.
+        assert!(window.next_request_height <= 100);
+    }
+
+    /// Rejecting the observed owner's response proves it was responsive, so a
+    /// stale first-tick timeout observation must not convict it later.
+    #[test]
+    fn reject_delivery_from_owner_clears_timeout_observation() {
+        let now = Instant::now();
+        let owner = peer_addr(1);
+        let block_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+        insert_pending(&mut window, owner, block_hash, 100, now);
+        window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
+            peer_addr: owner,
+            hash: block_hash,
+        });
+
+        assert_eq!(
+            window.reject_delivery(block_hash, Some(owner)),
+            super::RejectDelivery::ReleasedPending
+        );
+        assert!(window.pending_timeout_observation.is_none());
+        assert_eq!(window.observe_pending_timeout(false, now), None);
+        assert!(!window.peer_in_staller_cooldown(owner, now));
+    }
+
+    /// Either participant's malformed response terminates a cold-front race
+    /// without electing a winner. If both copies are malformed, no stale
+    /// `Racing` state remains and the owner's pending request is released.
+    #[test]
+    fn reject_delivery_cleans_cold_front_race_participants() {
+        let now = Instant::now();
+        let owner = peer_addr(1);
+        let alternate = peer_addr(2);
+        let block_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+        insert_pending(&mut window, owner, block_hash, 100, now);
+        window.cold_front = Some(super::ColdFrontState::Racing {
+            owner,
+            alternate,
+            hash: block_hash,
+        });
+
+        assert_eq!(
+            window.reject_delivery(block_hash, Some(alternate)),
+            super::RejectDelivery::DiscardedUnsolicited
+        );
+        assert!(window.cold_front.is_none());
+        assert!(window.contains_pending(&block_hash));
+        let retry_started = now + Duration::from_secs(3);
+        assert_eq!(window.observe_cold_front(100, false, retry_started), None);
+        assert_eq!(
+            window.observe_cold_front(100, false, retry_started + Duration::from_secs(2)),
+            Some((owner, block_hash))
+        );
+
+        assert_eq!(
+            window.reject_delivery(block_hash, Some(owner)),
+            super::RejectDelivery::ReleasedPending
+        );
+        assert!(window.cold_front.is_none());
+        assert!(!window.contains_pending(&block_hash));
+    }
+
+    /// An unrelated malformed delivery cannot cancel another peer's timeout
+    /// observation or cold-front race.
+    #[test]
+    fn reject_delivery_from_unrelated_peer_preserves_observations() {
+        let now = Instant::now();
+        let owner = peer_addr(1);
+        let alternate = peer_addr(2);
+        let unrelated = peer_addr(3);
+        let block_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+        insert_pending(&mut window, owner, block_hash, 100, now);
+        window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
+            peer_addr: owner,
+            hash: block_hash,
+        });
+        window.cold_front = Some(super::ColdFrontState::Racing {
+            owner,
+            alternate,
+            hash: block_hash,
+        });
+
+        assert_eq!(
+            window.reject_delivery(block_hash, Some(unrelated)),
+            super::RejectDelivery::DiscardedUnsolicited
+        );
+        assert!(window.pending_timeout_observation.is_some());
+        assert!(matches!(
+            window.cold_front,
+            Some(super::ColdFrontState::Racing { .. })
+        ));
+        assert!(window.contains_pending(&block_hash));
+    }
+
+    /// (ii) When a peer other than the pending owner delivers a malformed body
+    /// unsolicited, `reject_delivery` discards the body and preserves the
+    /// existing pending request — the original owner may still supply the
+    /// correct body.
+    #[test]
+    fn reject_delivery_from_different_peer_preserves_pending() {
+        let now = Instant::now();
+        let owner = peer_addr(1);
+        let other = peer_addr(2);
+        let block_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+        insert_pending(&mut window, owner, block_hash, 100, now);
+        assert!(window.contains_pending(&block_hash));
+        assert_eq!(window.pending_len(), 1);
+
+        let outcome = window.reject_delivery(block_hash, Some(other));
+
+        assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
+        assert!(window.contains_pending(&block_hash));
+        assert_eq!(window.pending_len(), 1);
+        // next_request_height unchanged — the pending is still in flight.
+        assert_eq!(window.next_request_height, 1);
+    }
+
+    /// `reject_delivery` with no source peer (local injection) preserves any
+    /// existing pending — a local injection cannot prove it was the owner.
+    #[test]
+    fn reject_delivery_with_no_source_preserves_pending() {
+        let now = Instant::now();
+        let owner = peer_addr(1);
+        let block_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+        insert_pending(&mut window, owner, block_hash, 100, now);
+
+        let outcome = window.reject_delivery(block_hash, None);
+
+        assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
+        assert!(window.contains_pending(&block_hash));
+    }
+
+    /// `reject_delivery` with no pending is a no-op (`DiscardedUnsolicited`).
+    #[test]
+    fn reject_delivery_with_no_pending_is_noop() {
+        let mut window = DownloadWindow::new(test_budget());
+        let block_hash = hash(0x99);
+
+        let outcome = window.reject_delivery(block_hash, Some(peer_addr(1)));
+
+        assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
+        assert_eq!(window.pending_len(), 0);
     }
 
     fn test_budget() -> SyncBudget {
