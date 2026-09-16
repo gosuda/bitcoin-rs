@@ -1,14 +1,12 @@
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    chain_constants::WITNESS_COMMITMENT_PREFIX,
 };
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
 
 const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
 const MIN_COINBASE_SCRIPT_SIG_LEN: usize = 2;
-const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
-/// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
-const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Consensus witness reserved value used when constructing a BIP141 commitment.
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
@@ -102,7 +100,7 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     let mut script = Vec::with_capacity(38);
     script.push(0x6a); // OP_RETURN
     script.push(36); // PUSH36
-    script.extend_from_slice(&WITNESS_COMMITMENT_TAG);
+    script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX[2..]);
     script.extend_from_slice(commitment.as_byte_array());
     script
 }
