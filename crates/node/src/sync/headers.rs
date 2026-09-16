@@ -214,27 +214,36 @@ impl BlockSync {
             locator_hashes,
             bitcoin::BlockHash::all_zeros(),
         ));
-        let tx = self.peer_table.lease(sync_peer_addr);
-        let Some(tx) = tx else {
+        let Some(tx) = self.peer_table.lease(sync_peer_addr) else {
             tracing::warn!(
                 peer_addr = %sync_peer_addr,
                 "block sync: target peer no longer has outbound channel"
             );
             return;
         };
-        if tx.send(msg).is_err() {
+        let source = tx.source(sync_peer_addr);
+        let mut send_ok = false;
+        let still_current = self.peer_table.with_current(source, || {
+            send_ok = tx.send(msg).is_ok();
+            if send_ok {
+                *self.pending_getheaders.lock() = Some(PendingHeaderRequest {
+                    peer_addr: sync_peer_addr,
+                    locator_tip_hash,
+                    target_height,
+                    requested_at: now,
+                });
+            }
+        });
+        if !still_current {
+            return;
+        }
+        if !send_ok {
             tracing::warn!(
                 peer_addr = %sync_peer_addr,
                 "block sync: outbound channel disconnected"
             );
             return;
         }
-        *self.pending_getheaders.lock() = Some(PendingHeaderRequest {
-            peer_addr: sync_peer_addr,
-            locator_tip_hash,
-            target_height,
-            requested_at: now,
-        });
         tracing::debug!(
             peer_addr = %sync_peer_addr,
             our_height,
