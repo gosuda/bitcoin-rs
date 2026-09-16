@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::support::process_node::{loopback_addresses, remaining_time};
 
+/// Contract: `docs/contracts/support-tests.md#SUP-02`.
 #[test]
 fn socket_time_limit_rejects_sub_microsecond_intervals() {
     let now = Instant::now();
@@ -22,6 +23,7 @@ fn socket_time_limit_rejects_sub_microsecond_intervals() {
     }
 }
 
+/// Contract: `docs/contracts/support-tests.md#SUP-03`.
 #[test]
 fn selected_ports_stay_reserved() {
     let ports = loopback_addresses().expect("select two ports");

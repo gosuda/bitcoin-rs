@@ -33,6 +33,7 @@ fn violations(source: &str) -> Vec<String> {
     result.mempool_writer_violations
 }
 
+/// Contract: `docs/contracts/support-tests.md#SUP-01`.
 #[test]
 fn cfg_test_stems_cover_external_module_declarations_only() {
     let stems = cfg_test_module_stems_from([
