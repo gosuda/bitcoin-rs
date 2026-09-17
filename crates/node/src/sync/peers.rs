@@ -266,7 +266,12 @@ impl BlockSync {
         let mut fired = false;
         let removed_peer = self.select_and_evict_window_peer(|window| {
             apply_side_escalation =
-                window.observe_apply_side_bound(next_apply_height, apply_side_busy, now);
+                window.observe_apply_side_bound(
+                    next_apply_height,
+                    self.next_expected_block_hash().unwrap_or_default(),
+                    apply_side_busy,
+                    now,
+                );
             cold_hedge = window.observe_cold_front(next_apply_height, apply_side_busy, now);
             let selected = window.observe_stall(next_apply_height, apply_side_busy, now);
             fired = selected.is_some();
@@ -281,7 +286,13 @@ impl BlockSync {
             // evict the stuck staged body for refetch and stand down for
             // this tick. No peer is convicted here; while the body is
             // absent the unsuppressed stall path applies as usual.
-            self.escalate_stuck_staged_body(next_apply_height, suppressed_for);
+            if let Some(frontier_hash) = self.next_expected_block_hash() {
+                  self.escalate_stuck_staged_body(
+                      next_apply_height,
+                      frontier_hash,
+                      suppressed_for,
+                  );
+              }
             return false;
         }
         if fired {
@@ -319,11 +330,19 @@ impl BlockSync {
     /// unsuppressed stall path engages. If a peer then fails to re-deliver,
     /// THAT is a peer fault and the existing conviction machinery handles
     /// it; the eviction itself carries no blame.
-    fn escalate_stuck_staged_body(&self, next_apply_height: u32, suppressed_for: Duration) {
+    fn escalate_stuck_staged_body(
+          &self,
+          next_apply_height: u32,
+          expected_frontier: Hash256,
+          suppressed_for: Duration,
+      ) {
         let Some(frontier) = self.next_expected_block_hash() else {
             return;
         };
-        let evicted = self.block_stager.lock().drain_expected_prefix(&[frontier]);
+        if frontier != expected_frontier {
+              return;
+          }
+          let evicted = self.block_stager.lock().drain_expected_prefix(&[frontier]);
         if evicted.is_empty() {
             // Raced: the body was applied or pruned between the window
             // observation and this eviction; nothing is stuck anymore.

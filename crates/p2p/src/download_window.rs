@@ -427,6 +427,7 @@ struct StallEpisode {
 #[derive(Clone, Copy, Debug)]
 struct ApplySideStuck {
     height: u32,
+    front_hash: Hash256,
     since: Instant,
 }
 #[derive(Clone, Copy, Debug)]
@@ -938,20 +939,29 @@ impl DownloadWindow {
     pub fn observe_apply_side_bound(
         &mut self,
         next_apply_height: u32,
+        front_hash: Hash256,
         apply_side_busy: bool,
         now: Instant,
     ) -> Option<Duration> {
+        if !apply_side_busy {
+            if self
+                .apply_side_stuck
+                .is_some_and(|stuck| stuck.height != next_apply_height || stuck.front_hash != front_hash)
+            {
+                self.apply_side_stuck = None;
+            }
+            return None;
+        }
         match self.apply_side_stuck {
-            Some(stuck) if stuck.height == next_apply_height => {}
+            Some(stuck)
+                if stuck.height == next_apply_height && stuck.front_hash == front_hash => {}
             _ => {
                 self.apply_side_stuck = Some(ApplySideStuck {
                     height: next_apply_height,
+                    front_hash,
                     since: now,
                 });
             }
-        }
-        if !apply_side_busy {
-            return None;
         }
         let suppressed_for = now.duration_since(self.apply_side_stuck.as_ref()?.since);
         let bound = self.budget.received_timeout.saturating_mul(2);
