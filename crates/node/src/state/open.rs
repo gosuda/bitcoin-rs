@@ -165,25 +165,17 @@ impl NodeState {
                 "restored chainstate checkpoint"
             );
         }
-        // A2: Create the process-wide rollback-evidence warning store before
-        // any detection or worker spawn. One ArcSwap holds the complete
-        // immutable snapshot; getblockchaininfo loads one per request.
-        let warning_store = Arc::new(crate::recovery_evidence::WarningStore::new());
-        // A2: Read the durable applied-tip witness and detect checkpoint
-        // fallback. Emit a structured WARN, update the warning snapshot, and
-        // durably publish the event marker — only after all conditions hold:
-        // valid format/bounds, matching genesis, older writer epoch, and
-        // strictly greater witness height than the restored tip.
-        let genesis_hex = config.network.genesis_block_hash().to_string_be();
-        // One reporter routes every rollback fact of this process — the
+        // A2: one reporter routes every rollback fact of this process — the
         // checkpoint fallback detected here and the index-ahead rewinds the
-        // txindex worker detects later — through the same warning store and
+        // txindex worker detects later — through one warning snapshot and one
         // event marker.
-        let recovery_reporter = Arc::new(crate::recovery_evidence::RecoveryReporter::new(
-            Arc::clone(&warning_store),
-            config.data_dir.clone(),
-            genesis_hex.clone(),
-            epoch,
+        let genesis_hex = config.network.genesis_block_hash().to_string_be();
+        let recovery_reporter = Arc::new(crate::recovery_reporter::RecoveryReporter(
+            bitcoin_rs_storage::recovery_evidence::RecoveryEvidencePublisher::new(
+                config.data_dir.clone(),
+                genesis_hex.clone(),
+                epoch,
+            ),
         ));
         let restored_height = restored_applied_tip.as_ref().map_or(0, |tip| tip.height);
         let restored_hash = restored_applied_tip
@@ -191,21 +183,22 @@ impl NodeState {
             .map_or_else(|| config.network.genesis_block_hash(), |tip| tip.hash)
             .to_string_be();
         if let Some(witness) =
-            crate::recovery_evidence::read_witness(&config.data_dir, &genesis_hex)
+            bitcoin_rs_storage::recovery_evidence::read_witness(&config.data_dir, &genesis_hex)
         {
-            if let Some((witness_height, _)) = crate::recovery_evidence::detect_checkpoint_fallback(
+            if bitcoin_rs_storage::recovery_evidence::checkpoint_fallback(
                 &witness,
                 epoch,
-                &genesis_hex,
                 restored_height,
             ) {
+                let witness_height = witness.height;
                 let source = match resume_source {
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
                     ResumeSource::Journal => "journal",
                 };
                 recovery_reporter
-                    .report_checkpoint_fallback(
+                    .0
+                    .publish_checkpoint_fallback(
                         witness_height,
                         restored_height,
                         &restored_hash,
@@ -541,7 +534,7 @@ impl NodeState {
             apply_handles,
             followers,
             sync,
-            warning_store,
+            recovery_reporter,
         })
     }
 }

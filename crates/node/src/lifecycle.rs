@@ -105,7 +105,7 @@ fn bind_rpc(
         }))
         .with_zmq_publisher(state.zmq_publisher())
         .with_debug_log_path(state.data_dir().join("debug.log"))
-        .with_rollback_warnings(state.warning_store());
+        .with_rollback_warnings(state.recovery_reporter());
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(

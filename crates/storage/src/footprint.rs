@@ -6,6 +6,9 @@
 //! physical attribution to a logical owner impossible; the physical ledger is
 //! the source of the data-directory budget.
 
+/// Storage-footprint evidence record format and budget verdict.
+pub mod evidence;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read};
@@ -84,7 +87,8 @@ impl From<Errno> for FootprintError {
 }
 
 /// How a physical observation relates to a create/allocate/delete peak.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PhysicalObservationKind {
     /// One consistent snapshot. A lower bound on the true peak.
     SnapshotLowerBound,
@@ -130,7 +134,7 @@ impl PhysicalCategory {
 }
 
 /// Exact serialized key and value bytes for one logical owner.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LogicalOwner {
     /// `{namespace}.{column_family}` or a named subsystem such as `blocks.flat_files`.
     pub name: String,
@@ -183,7 +187,7 @@ impl LogicalLedger {
 }
 
 /// Allocated bytes for one top-level storage namespace.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct PhysicalNamespace {
     /// Top-level directory name, or `residual` for data-directory root files.
     pub name: String,

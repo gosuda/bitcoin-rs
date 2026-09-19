@@ -275,7 +275,7 @@ Owners:
   body binding, window commit, branch switch, and genesis bootstrap.
   `crates/node` still carries leftover domain mechanics: direct backend
   construction and cache share dispatch (`state.rs`). `P2pService` no longer
-  holds a second download window. Relocating leftover node mechanics into
+  holds a second download window. Durable recovery evidence (witness/marker sidecars, warning snapshot) and the storage-footprint evidence format/budget verdict live in `crates/storage` (`recovery_evidence`, `footprint::evidence`); node keeps `RecoveryReporter` as the `IndexAheadSink`/`RollbackWarningSource` adapter and as the checkpoint-fallback publication path into the storage publisher, plus `measure_storage_footprint` orchestration. Relocating leftover node mechanics into
   `crates/utxo`, `crates/storage`, and `crates/p2p` remains tracked under #217
   (open). A
   dedicated `crates/chainstate` waits until journal,

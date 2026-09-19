@@ -111,9 +111,11 @@ pub mod durable_head;
 /// Storage error type.
 mod error;
 /// Custody-grade logical and physical storage-footprint ledgers.
-mod footprint;
+pub mod footprint;
 /// Retention and deletion of block bodies and undo rows.
 pub mod pruning;
+/// Durable rollback-evidence sidecars and the warning snapshot.
+pub mod recovery_evidence;
 /// Backend-neutral key-value store traits.
 mod trait_;
 /// Per-block UTXO undo records and the in-flight disconnect marker.

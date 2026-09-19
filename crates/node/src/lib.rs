@@ -33,8 +33,8 @@ mod logging;
 pub mod metrics;
 /// Node-owned mining candidate lifecycle coordinator.
 pub mod mining;
-/// Durable rollback evidence: witness and marker file protocol, warning snapshot.
-mod recovery_evidence;
+/// Node-owned adapter wiring recovery evidence into index and RPC sinks.
+mod recovery_reporter;
 
 /// Switching the applied chain from one branch to another.
 pub mod reorg;
@@ -81,8 +81,8 @@ pub use mining::MiningCoordinator;
 pub use run::run;
 
 pub use storage_footprint::{
-    DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES, EVIDENCE_FORMAT, MeasureStorageRequest,
-    StorageFootprintEvidence, measure_storage_footprint, storage_footprint_json,
+    MeasureStorageRequest, StorageFootprintEvidence, measure_storage_footprint,
+    storage_footprint_json,
 };
 
 pub use sync::BlockSync;

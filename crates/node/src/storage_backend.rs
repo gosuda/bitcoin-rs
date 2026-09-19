@@ -145,11 +145,6 @@ mod tests {
             None,
         ),
         (
-            "storage_footprint/budget.rs",
-            include_str!("storage_footprint/budget.rs"),
-            None,
-        ),
-        (
             "storage_footprint/identity.rs",
             include_str!("storage_footprint/identity.rs"),
             None,

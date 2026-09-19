@@ -29,7 +29,9 @@ pub(super) fn evidence_identity(
     let cache_budget = clamp_dbcache_bytes(config.storage.dbcache_mb);
     let shares = split_cache_budget(cache_budget, indexes_enabled);
     let genesis = config.network.genesis_block_hash().to_string_be();
-    let (witness_height, witness_hash) = read_witness_from_anchor(anchor, &genesis)?;
+    let (witness_height, witness_hash) =
+        bitcoin_rs_storage::recovery_evidence::read_witness_from_anchor(anchor, &genesis)
+            .map_err(|error| io_from_footprint(&error))?;
     let (stop_height, stop_hash, stop_pinned) =
         resolve_stop(request, witness_height, witness_hash)?;
     Ok(EvidenceIdentity {
@@ -81,27 +83,6 @@ pub(super) fn resolve_stop(
             Ok((height, parsed.to_string_be(), true))
         }
     }
-}
-
-pub(super) fn read_witness_from_anchor(
-    anchor: &DataDirAnchor,
-    genesis: &str,
-) -> Result<(u32, String)> {
-    const CURRENT: &str = "applied-tip-witness.json";
-    const PREV: &str = "applied-tip-witness.json.prev";
-    for name in [CURRENT, PREV] {
-        if let Some(bytes) = anchor
-            .read_child_file(name, crate::recovery_evidence::MAX_FILE_BYTES)
-            .map_err(|error| io_from_footprint(&error))?
-        {
-            if let Some(witness) =
-                crate::recovery_evidence::decode_applied_tip_witness(&bytes, genesis)
-            {
-                return Ok((witness.height, witness.block_hash));
-            }
-        }
-    }
-    Ok((0, genesis.to_owned()))
 }
 
 pub(super) fn index_lane(config: &NodeConfig) -> String {
