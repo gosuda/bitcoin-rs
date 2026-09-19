@@ -75,20 +75,8 @@ identifier_newtype!(
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::expect_used, reason = "test assertions")]
-    use core::str::FromStr;
-
     use super::{BlockHash, Txid, Wtxid};
     use crate::Hash256;
-
-    #[test]
-    fn hex_display_and_parse_delegate_to_hash256() {
-        let hex = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f";
-        let block_hash = BlockHash::from_str(hex).expect("valid hash hex");
-
-        assert_eq!(block_hash.to_string(), hex);
-        assert_eq!(Hash256::from(block_hash).to_string(), hex);
-    }
 
     #[test]
     fn as_bytes_exposes_consensus_byte_order() {

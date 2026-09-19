@@ -3,10 +3,8 @@
 This measurement controls the signed-spend performance gate for issue #213
 after the process-wide `secp256k1::SECP256K1` reuse in the native checker.
 
-It uses the same harness as
-[`overhaul-signed-spend-20260902.md`](overhaul-signed-spend-20260902.md).
-Those earlier numbers were taken on a different host and are not a paired
-control for this run.
+The 2026-09-02 pre-change baseline was taken on a different host and is not
+a paired control for this run.
 
 ## Configuration
 

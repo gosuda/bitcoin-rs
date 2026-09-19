@@ -109,7 +109,7 @@ The greatest height up to which every block has been validated and committed to 
 The bounded set of blocks in flight — requested but not yet received. Capped jointly by a block count and an estimated-bytes budget (see *Count-and-byte bound*) and refilled as blocks arrive.
 
 ### Staller
-A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block. See `docs/solutions/architecture-patterns/multi-peer-block-download-requires-core-stalling-disconnect.md`.
+A peer holding up the apply frontier by failing to deliver a frontier block it was assigned. Stalling detection identifies it by window-blocked detection (not raw `applied_tip+1` stagnation), does not blame a peer when local apply/stager backpressure is the bottleneck, and disconnects it so another peer can supply the block.
 
 ### Peer lifecycle ownership
 `P2pService` owns P2P control state and workers. Live sessions live in one
@@ -176,7 +176,7 @@ means preserving value and operation order, not forcing JSON text to match.
 Owners: `crates/rpc/tests/support/compare.rs` (bitwise numeric comparison) and `crates/rpc/tests/policy_contract.rs`.
 
 ### Provably unspendable outputs (UTXO admission)
-Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change. See `docs/solutions/logic-errors/exclude-provably-unspendable-utxos.md`.
+Outputs the UTXO set never admits: a `scriptPubKey` starting with `OP_RETURN`, or longer than `MAX_SCRIPT_SIZE`. Excluding them changes no consensus outcome, so the snapshot codec carries the version tag `bitcoin-rs-utxo-spendable-v1`; a change to admission semantics is a codec change.
 
 ### Notification configuration
 
@@ -195,13 +195,13 @@ are not part of node configuration, including CLI, environment, TOML, and
 
 ## Block apply
 ### Window script batching
-Verifying the ordered transaction unit of several consecutive blocks in one parallel dispatch. The window prepares each block against an ordered overlay, dispatches once, and issues a private, single-use `BlockValidationProof` that owns the `PreparedApply` it certifies and binds block hash, predecessor, height, flags, and locktime cutoff. Blocks then commit one at a time, in order; commit re-derives all five fields and on mismatch discards proof and prepared state and rebuilds from the live UTXO set. The proof bypasses only the transaction-validation slot: block rules and BIP30 stay before it, coinbase maturity and BIP68 after. Assume-valid produces a distinct `AssumeValidSkipped` state that never takes the bypass. See `docs/solutions/performance/script-batching-needs-a-split-apply-path.md`.
+Verifying the ordered transaction unit of several consecutive blocks in one parallel dispatch. The window prepares each block against an ordered overlay, dispatches once, and issues a private, single-use `BlockValidationProof` that owns the `PreparedApply` it certifies and binds block hash, predecessor, height, flags, and locktime cutoff. Blocks then commit one at a time, in order; commit re-derives all five fields and on mismatch discards proof and prepared state and rebuilds from the live UTXO set. The proof bypasses only the transaction-validation slot: block rules and BIP30 stay before it, coinbase maturity and BIP68 after. Assume-valid produces a distinct `AssumeValidSkipped` state that never takes the bypass.
 
 ### Front-half duplication
 The failure mode where a batched fast path recomputes the sequential path's preparation instead of replacing it, so the saving is paid straight back. The tell is that the accelerated stage shrinks by roughly what the new stage costs. The fix is splitting the sequential path into a prepare half and a commit half, never a cheaper second pass.
 
 ### Dispatch-bound parallelism
-A stage that is parallel in shape but serial in effect because each dispatch is too small to amortise waking the workers. Diagnose with a scaling sweep (1, 4, 32 threads), not a profiler. On the apply path, coarsening each dispatch (`with_min_len`) and bounded splits for small blocks both measured worse; issuing fewer, larger dispatches (*Window script batching*) is what fixed it. See `docs/solutions/performance/script-batching-needs-a-split-apply-path.md`.
+A stage that is parallel in shape but serial in effect because each dispatch is too small to amortise waking the workers. Diagnose with a scaling sweep (1, 4, 32 threads), not a profiler. On the apply path, coarsening each dispatch (`with_min_len`) and bounded splits for small blocks both measured worse; issuing fewer, larger dispatches (*Window script batching*) is what fixed it.
 
 ### Parallel granularity (per-item cost rule)
 Whether a fan-out pays is decided by per-item work against dispatch cost, not by how parallelizable the loop looks: ~100 µs script checks want more parallelism (`MIN_PARALLEL_SCRIPT_CHECKS` = 32, `crates/consensus/src/verify_tx.rs`), ~500 ns UTXO lookups want none, ~2.6 µs Merkle nodes gain from SIMD batching rather than task fan-out. Thresholds have an interior optimum in both directions. Gate on **elapsed**, never on the stage being targeted.
@@ -261,7 +261,7 @@ A window sized by whichever of a count cap and a byte cap binds first, because i
 Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip, loads every body the disconnect/connect plan needs, then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
 
 ### Commit point (multi-store mutation)
-The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/node/src/state.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start refuses). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down. See `docs/solutions/architecture-patterns/node-reorg-execution-design.md`.
+The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/node/src/state.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start refuses). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
 
 ### Disconnect marker phase
 The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the UTXO mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; a checkpoint must not clear it. `RolledBack`: UTXO set and applied tip moved together and need one clean checkpoint. Startup refuses either. Only the checkpoint that publishes the rolled-back state removes the marker.
@@ -295,7 +295,7 @@ Index row values carry transaction byte positions without a block tag. The reade
 The node accepts only complete native version-4 snapshots: exact magic and version, validated v4 records, the declared record count, a 384-byte MuHash trailer, and end-of-file. Versions 2 and 3 fail startup with a remove-and-resync instruction; there is no legacy reader.
 
 ### Deferred block-body index durability
-`KvStore::write_deferred` (`crates/storage/src/trait_.rs`) writes a batch without its own fsync and leaves durability to the next checkpoint flush. Block-body index rows use it because a lost row is rebuilt from the block file. Correctness rests on ordering: body bytes are durable before the index row pointing at them is published. Weaker durability is opt-in per call site, never backend-wide. See `docs/solutions/performance-issues/defer-redb-block-body-index-durability.md`.
+`KvStore::write_deferred` (`crates/storage/src/trait_.rs`) writes a batch without its own fsync and leaves durability to the next checkpoint flush. Block-body index rows use it because a lost row is rebuilt from the block file. Correctness rests on ordering: body bytes are durable before the index row pointing at them is published. Weaker durability is opt-in per call site, never backend-wide.
 
 ### Directory-layout record
 `UtxoRecord` v5: `txid || output_count || inline_len || widths || vout_dir || len_dir || payloads`, with per-item keys and lengths in fixed-width arrays ahead of the items so `find_output(vout)` touches about two bytes per output instead of walking every earlier script. Each directory entry uses the narrowest width the record needs; the script is whatever remains of its payload, so no length is stored twice. See `docs/benchmarks/utxo-memory.md`.
@@ -367,7 +367,7 @@ exclusive union is subtracted from whole-run wall. Owner:
 `docs/benchmarks/hot-path-ledger.toml`.
 
 ### Retained benchmark contract
-Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained, and the historical campaign JSON evidence is retired by #224 (`docs/benchmarks/hot-path-attribution.md`). The retained Criterion targets are the `benches/` directories of the owning crates (currently consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write). Which targets CI compiles is owned by the `bench-smoke` job in `.github/workflows/main.yml`, not by this glossary.
+Permanent benchmarks call the shipped production path, use a product-shaped workload, and protect a regression that still matters. A/B refactor harnesses, synthetic microbenchmarks, and future-work measuring tools are not retained, and the historical campaign JSON evidence is retired by #224 (`docs/contracts/hot-path-attribution.md`). The retained Criterion targets are the `benches/` directories of the owning crates (currently consensus Merkle, UTXO commit, node sync pipeline and chainstate journal replay, mempool priority index, real-file index resolver, and P2P message write). Which targets CI compiles is owned by the `bench-smoke` job in `.github/workflows/main.yml`, not by this glossary.
 
 ### C150
 The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH, pre-SegWit, pre-Taproot. Identities, census, and state are owned by `docs/contracts/campaign-corpora.md`.
@@ -376,7 +376,7 @@ The historical product corpus: mainnet genesis through height 150,000. Pre-P2SH,
 The modern product corpus: mainnet genesis through height 709,635, the first height with executed examples of every required post-P2SH script class. Identities, census, and oracle are owned by `docs/contracts/campaign-corpora.md`.
 
 ### Matched-harness comparison
-A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians. See `docs/solutions/performance/allocator-parity-changes-wall-not-cpu.md`.
+A cross-node benchmark matches every input that is not the thing under test — block source, validation posture, allocator, CPU pinning, time of measurement — before any ratio is quoted. Interleave both nodes back-to-back on an idle host and quote paired medians.
 
 ### Offline full-validation comparator
 The processing-bound cross-node oracle: Bitcoin Core 31.1 and bitcoin-rs both

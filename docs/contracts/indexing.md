@@ -167,7 +167,7 @@ remove another script's output.
   applicable output/input. The golden-row test is the retained contract test
   for these cardinalities.
 - `NodeState::open` restores the authenticated checkpoint and, when enabled,
-  replays the journal's committed suffix (`docs/chainstate-recovery.md`) before
+  replays the journal's committed suffix (`docs/contracts/recovery.md`) before
   `NodeState::start_index_workers()` spawns worker threads
   (`crates/node/src/run.rs`), so index workers reconcile against a restored
   active chainstate.

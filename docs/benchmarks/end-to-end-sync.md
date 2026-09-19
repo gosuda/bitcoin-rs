@@ -1,6 +1,6 @@
 # End-to-end synchronization lanes
 
-This document owns the two synchronization lanes of the target node: offline replay (blocks local, wall is validation plus durable commit) and live IBD over loopback peers (wall includes download scheduling under `P2pService`). Both lanes are product cells of [`overhaul-product-cells.md`](overhaul-product-cells.md): `replay.offline_full_validation` and `replay.live_ibd_loopback`. Historical live-network and bounded 0-150,000 results are retained below as candidate evidence; they describe superseded engines and are not end-state proof.
+This document owns the two synchronization lanes of the target node: offline replay (blocks local, wall is validation plus durable commit) and live IBD over loopback peers (wall includes download scheduling under `P2pService`). Both lanes are product cells under [`docs/contracts/hot-path-attribution.md`](../contracts/hot-path-attribution.md): `replay.offline_full_validation` and `replay.live_ibd_loopback`. Historical live-network and bounded 0-150,000 results are retained below as candidate evidence; they describe superseded engines and are not end-state proof.
 
 ## Lanes
 

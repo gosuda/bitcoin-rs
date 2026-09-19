@@ -150,6 +150,9 @@ posture.
 
 ### `HPA-12`: Evidence identity per sample
 
+- The evidence `Ledger` schema is implemented in
+  `crates/node/benches/evidence.rs` and shared by the gate and hot-path
+  ledger.
 - Every sample in the evidence ledger carries an identity tuple:
   artifact (binary or library hash), configuration (feature set,
   backend, network, cache budget), corpus (stop hash, block count,

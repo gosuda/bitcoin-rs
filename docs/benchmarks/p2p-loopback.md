@@ -17,7 +17,6 @@ Every lane runs the same artifact under both `--features fjall` and `--features 
 
 ```bash
 cargo test --locked -p bitcoin-rs-p2p --test overhaul_download_owner -- --nocapture
-cargo test --locked -p bitcoin-rs-p2p --test overhaul_compact_blocks -- --nocapture
 cargo test --locked -p bitcoin-rs-p2p --test overhaul_optional_protocols -- --nocapture
 ```
 

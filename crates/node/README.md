@@ -25,8 +25,8 @@ committed-result handoffs. The authoritative cross-crate ownership split is
 [ARCH-05](../../docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
 
 Crash recovery uses a checkpoint plus an authenticated, bounded chainstate journal.
-See [Chainstate crash recovery](../../docs/chainstate-recovery.md) for durability
-ordering, fallback and reorg behavior, configuration, metrics, and verification.
+See [contracts/recovery.md](../../docs/contracts/recovery.md) for durability
+ordering, fallback and reorg behavior, and verification.
 
 Data-directory storage evidence is an explicit command, not a node service:
 `bitcoin-rs --measure-storage` emits the logical and physical ledgers defined

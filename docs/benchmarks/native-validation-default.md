@@ -159,14 +159,6 @@ independent runs per arm after the `secp256k1::SECP256K1` reuse.
 Both arms stay within five percent of their own median. Native / kernel =
 1.092. Native does not win.
 
-The 2026-09-02 artifact
-([`data/overhaul-signed-spend-20260902.md`](data/overhaul-signed-spend-20260902.md))
-was a different host (80-core Xeon Gold 6138) and is not a paired control
-for these numbers. On that host native apply p50 was 486–639 ms; the
-context reuse is why this host sits near 50 ms, not a claim that the two
-hosts are comparable. The vacuous `OP_TRUE` apply-path numbers do not
-license promotion: that corpus verifies no signatures.
-
 #### Attributed lever
 
 Production CHECKSIG, Schnorr, and Taproot tweak checks constructed

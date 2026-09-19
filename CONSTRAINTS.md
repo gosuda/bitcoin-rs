@@ -163,9 +163,23 @@ use the txid as the wtxid, and produce a zero fee rate. The regression test is
 
 The current mempool command checks the affected policy surfaces, including
 sigop-adjusted weight, the 404,000-WU cluster boundary, 64-member clusters,
-25-row packages and 100 conflicting clusters. It captures Linux process RSS
-high-water when available and retained-byte **endpoint estimates**. Its report
+25-row packages and 100 conflicting clusters. Each mining, replacement and
+eviction fixture exercises 6,400 admitted entries; package preview offers 25
+children to
+63-member chains and checks the projected 64-member bound. The verified
+boundary fixture
+adds 15,920 sigops to a 318,400-WU parent and exercises fractional descendants
+at 404,000 and 404,001 WU; an independent rust-bitcoin oracle checks sigops
+and wire weight, and the accepted cluster's rounded entry sizes sum to 101,001
+vB. Preview and commit accept only the exact boundary. It captures Linux
+process RSS high-water when available and retained-byte **endpoint estimates**;
+the maximum is an endpoint maximum, not a peak of transient allocations. Its report
 explicitly leaves temporary retained-allocation peak and full CL-14 evidence
 unmeasured. A successful scoped collection does not mark the global CL-14 row
 or other owners' requirements complete; the product/performance matrix above
 remains authoritative.
+Each run writes source, harness and lockfile digests and samples to
+`target/process-harness/resource-bounds-*.json`, preserved by the existing CI
+process-evidence artifact step. The [#1068 validation record](https://github.com/gosuda/bitcoin-rs/pull/1068)
+contains the initial local measurements. Unchanged product cells and the full
+CL-19/CL-20 promotion matrix remain `UNMEASURED`.
