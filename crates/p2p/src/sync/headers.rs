@@ -203,11 +203,6 @@ impl BlockSync {
         ) else {
             return Ok(());
         };
-        if applied.hash == headers.hash
-            || self.apply_halted.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Ok(());
-        }
         // Body dispatch runs before this action. Revalidate the observed hash
         // so a successful getdata publication suppresses the recovery probe.
         {
@@ -300,21 +295,10 @@ impl BlockSync {
                 peer_addr = %source.addr,
                 "block sync: outbound channel disconnected"
             );
-            // The send failure means this connection is gone: evict it so the
-            // scheduler cannot re-pick a dead peer every tick. The identity
-            // check inside `disconnect_source` keeps a same-address
-            // replacement untouched, and only then is a pending request keyed
-            // to this address dropped so a fast reconnect does not inherit a
-            // stale deadline gate.
-            if self.peer_table.disconnect_source(source) {
-                let mut state = self.frontier_state.lock();
-                if state
-                    .header_request
-                    .is_some_and(|request| request.source == source)
-                {
-                    state.header_request = None;
-                }
-            }
+            // The send failure means this connection is gone: evict it so
+            // the scheduler cannot re-pick a dead peer every tick; session
+            // reconciliation retires any request it owned.
+            self.peer_table.disconnect_source(source);
             return false;
         }
         tracing::debug!(

@@ -1458,7 +1458,7 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
-    /// Returns the owner of the pending request for `hash`, if any.
+    /// Returns the address owning the pending request for `hash`. Test-only accessor.
     pub fn pending_owner(&self, hash: &Hash256) -> Option<SocketAddr> {
         self.pending.get(hash).map(|pending| pending.peer_addr)
     }

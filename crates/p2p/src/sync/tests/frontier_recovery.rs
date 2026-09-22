@@ -480,3 +480,68 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     );
     Ok(())
 }
+
+#[test]
+fn same_address_replacement_is_not_convicted_for_predecessor_timeout()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Identity reconciliation runs before conviction: a pending-timeout
+    // suspicion recorded against one connection must not convict the
+    // replacement that now owns its address.
+    let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
+    install_budget(
+        &sync,
+        super::super::SyncBudget {
+            max_pending_blocks: 2,
+            max_peer_inflight: 2,
+            getdata_batch_limit: 2,
+            pending_timeout: Duration::ZERO,
+            ..super::super::default_sync_budget()
+        },
+    );
+    let addr = test_addr(9768, 0)?;
+    let rx = connect_peer(&peers, eligible_peer(addr, 100));
+
+    // Tick 1: the first connection takes the front stripe.
+    sync.tick();
+    assert_applied_genesis(&applied_tip, &block_tree)?;
+    let Message::GetData(inventory) = rx.try_recv()? else {
+        return Err(std::io::Error::other("expected getdata").into());
+    };
+    assert_eq!(witness_block_inventory(inventory)?, expected[..2]);
+    // Header traffic is a plan detail; drain it without asserting shape.
+    while rx.try_recv().is_ok() {}
+
+    // Tick 2: the zero timeout records the suspicion; conviction waits for
+    // a second observation tick (suspicion -> conviction cadence).
+    sync.tick();
+    assert!(
+        peers.is_connected(addr),
+        "the suspicion tick must not convict yet"
+    );
+
+    // The predecessor is replaced at the same address before the
+    // conviction tick can run.
+    let _replacement_rx = connect_peer(&peers, eligible_peer(addr, 100));
+    let replacement = current_source(&peers, addr);
+
+    // Tick 3: the recorded timeout belonged to the predecessor's session
+    // and must die with it.
+    sync.tick();
+    assert!(
+        peers.is_current(replacement),
+        "the replacement must not be disconnected for its predecessor's timeout"
+    );
+    assert!(
+        peers.is_connected(addr),
+        "the table must still hold the address under the replacement"
+    );
+    assert!(
+        !sync
+            .frontier_state
+            .lock()
+            .window
+            .peer_in_staller_cooldown(addr, Instant::now()),
+        "the replacement must not inherit the predecessor's staller mark"
+    );
+    Ok(())
+}

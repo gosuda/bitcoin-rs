@@ -155,7 +155,11 @@ This page assigns ownership and cites proof under the
   Nonempty responses consume their matching request even when rejected.
 - Session validation and request publication hold the peer table before
   download or header-request state. A cancelled ready event does not wait for
-  the download writer or modify its replacement's state.
+  the download writer or modify its replacement's state. Tick reconciliation
+  retires address-scoped window ownership and the header request of any
+  replaced or disconnected connection before conviction observes the window,
+  and again after a conviction removes a connection; no other path retires
+  header ownership except the owner's own header reply.
 - Header request ownership and body-send publication carry `PeerSource`
   connection identity. Header and body selection consume the same
   handshake-complete, uncancelled peer-table snapshot; a cancelled lease is
@@ -163,7 +167,8 @@ This page assigns ownership and cites proof under the
 - When a known canonical body gap has no pending or staged owner, one
   reconciliation must either arm body/frontier recovery work or retain an
   explicit no-progress reason. Operator sync-progress logs expose the derived
-  next body, body ownership, header owner, and no-progress reason.
+  next body, body state (missing, in flight, or staged), header owner, and
+  no-progress reason.
 - Body/header binding failures reject the delivery, not the header branch.
   Rejection logs carry source, byte/transaction counts and coinbase witness
   shape. Compact reconstruction logs include the same block hash for joining

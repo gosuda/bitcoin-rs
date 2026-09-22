@@ -180,6 +180,7 @@ fn repeated_at_tip_extensions_keep_one_owned_frontier() -> Result<(), Box<dyn st
             Some(source.addr),
             "the current connection must own the frontier body request"
         );
+        assert!(peers.is_current(source));
         let mut inbound = crate::InboundBlock::from_decoded(block);
         inbound.source = Some(source);
         inbound_blocks.send(inbound)?;

@@ -140,12 +140,6 @@ impl BlockSync {
                 .is_some_and(|prev| prev != *id)
             {
                 state.window.forget_peer(*addr);
-                if state
-                    .header_request
-                    .is_some_and(|request| request.source.addr == *addr)
-                {
-                    state.header_request = None;
-                }
             }
         }
         state
@@ -455,23 +449,8 @@ impl BlockSync {
             let connection_id = state.known_sessions.get(&peer_addr).copied()?;
             (peer_addr, connection_id)
         };
-        if !self
-            .peer_table
+        self.peer_table
             .disconnect_connection(peer_addr, connection_id)
-        {
-            // The identity changed after selection. Do not leave the new
-            // connection carrying its predecessor's address-scoped cooldown
-            // or pending ownership; the next reconciliation rebuilds it from
-            // the current session snapshot.
-            self.frontier_state.lock().window.forget_peer(peer_addr);
-            return None;
-        }
-        let mut state = self.frontier_state.lock();
-        if state.header_request.is_some_and(|request| {
-            request.source.addr == peer_addr && request.source.connection_id() == connection_id
-        }) {
-            state.header_request = None;
-        }
-        Some(peer_addr)
+            .then_some(peer_addr)
     }
 }
