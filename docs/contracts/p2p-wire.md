@@ -138,6 +138,11 @@ This page assigns ownership and cites proof under the
   The download cursor is a scan hint. An unowned frontier behind that hint
   becomes requestable again, including an applied rollback with unchanged
   headers. Existing pending and staged bodies retain their ownership.
+- Request publication binds the exact `PeerSource` — address plus connection
+  identity — while the download window stays address-scoped policy state.
+  Body delivery, duplicate accounting, and malformed-body rejection preserve
+  that identity at the `PeerTable` boundary; a same-address replacement
+  cannot inherit its predecessor's pending ownership or peer blame.
 - A known-header gap whose apply-frontier block is neither in flight nor
   staged triggers a header probe from the applied chain; staged successors
   behind an unowned frontier are stuck inventory, not progress. Beyond the

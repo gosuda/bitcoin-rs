@@ -61,6 +61,8 @@ pub(super) struct SyncFrontier {
     pub(super) header_tip: Option<Arc<TipSnapshot>>,
     pub(super) next_required: Option<RequiredBody>,
     pub(super) body_state: Option<BodyState>,
+    /// Owner of the in-flight frontier body request, for operator telemetry.
+    pub(super) body_owner: Option<SocketAddr>,
     pub(super) header_request: Option<PendingHeaderRequest>,
     pub(super) usable_peers: Vec<UsablePeer>,
     pub(super) has_body_candidate: bool,
@@ -291,15 +293,18 @@ impl BlockSync {
             })
         });
         let state = self.frontier_state.lock();
-        let body_state = next_required.map(|required| {
-            if state.stager.contains(&required.hash) {
-                BodyState::Staged
-            } else if state.window.contains_pending(&required.hash) {
-                BodyState::InFlight
-            } else {
-                BodyState::Missing
-            }
-        });
+        let (body_state, body_owner) = next_required
+            .map(|required| {
+                if state.stager.contains(&required.hash) {
+                    (BodyState::Staged, None)
+                } else if let Some(owner) = state.window.pending_owner(&required.hash) {
+                    (BodyState::InFlight, Some(owner))
+                } else {
+                    (BodyState::Missing, None)
+                }
+            })
+            .unzip();
+        let body_owner = body_owner.flatten();
         // Preserve an expired request as the peer-rotation cursor. Session
         // reconciliation already removes ownership belonging to a replaced or
         // disconnected source.
@@ -309,6 +314,7 @@ impl BlockSync {
             header_tip,
             next_required,
             body_state,
+            body_owner,
             header_request,
             usable_peers,
             has_body_candidate,

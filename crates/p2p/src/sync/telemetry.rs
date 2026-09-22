@@ -22,6 +22,7 @@ impl BlockSync {
         let next_required_height = frontier.next_required.map(|body| body.height);
         let next_required_hash = frontier.next_required.map(|body| body.hash);
         let body_state = frontier.body_state;
+        let body_owner = frontier.body_owner;
         let header_request_peer = frontier.header_request.map(|request| request.source.addr);
         let header_request_locator = frontier
             .header_request
@@ -40,6 +41,7 @@ impl BlockSync {
                 ?next_required_height,
                 ?next_required_hash,
                 ?body_state,
+                ?body_owner,
                 ?header_request_peer,
                 ?header_request_locator,
                 ?header_request_target,
@@ -55,6 +57,7 @@ impl BlockSync {
                 ?next_required_height,
                 ?next_required_hash,
                 ?body_state,
+                ?body_owner,
                 ?header_request_peer,
                 ?header_request_locator,
                 ?header_request_target,

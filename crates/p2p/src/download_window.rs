@@ -1458,6 +1458,11 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
+    /// Returns the owner of the pending request for `hash`, if any.
+    pub fn pending_owner(&self, hash: &Hash256) -> Option<SocketAddr> {
+        self.pending.get(hash).map(|pending| pending.peer_addr)
+    }
+
     /// Returns the start time of the active prefix probe, if any. Test-only.
     pub fn active_prefix_probe_started_at(&self) -> Option<Instant> {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)

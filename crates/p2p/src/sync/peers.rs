@@ -467,10 +467,9 @@ impl BlockSync {
             return None;
         }
         let mut state = self.frontier_state.lock();
-        if state
-            .header_request
-            .is_some_and(|request| request.source.addr == peer_addr)
-        {
+        if state.header_request.is_some_and(|request| {
+            request.source.addr == peer_addr && request.source.connection_id() == connection_id
+        }) {
             state.header_request = None;
         }
         Some(peer_addr)
