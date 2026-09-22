@@ -253,7 +253,7 @@ impl BlockSync {
         };
         let target_height = u32::try_from(target_height).unwrap_or(0);
         let now = Instant::now();
-        if self.has_pending_getheaders(now) {
+        if self.has_pending_getheaders(locator_tip_hash, now) {
             tracing::trace!(
                 peer_addr = %source.addr,
                 our_height,
@@ -311,12 +311,16 @@ impl BlockSync {
         true
     }
 
-    pub(super) fn has_pending_getheaders(&self, now: Instant) -> bool {
+    /// A pending request is a question about one locator tip; accepted
+    /// header progress moves the tip and thereby supersedes it, so only a
+    /// repeat of the same question is suppressed.
+    pub(super) fn has_pending_getheaders(&self, locator_tip_hash: Hash256, now: Instant) -> bool {
         let pending = self.frontier_state.lock().header_request;
         let Some(pending) = pending else {
             return false;
         };
-        now.duration_since(pending.requested_at) < HEADER_REQUEST_TIMEOUT
+        pending.locator_tip_hash == locator_tip_hash
+            && now.duration_since(pending.requested_at) < HEADER_REQUEST_TIMEOUT
     }
 
     pub(super) fn build_locator(&self) -> Vec<Hash256> {

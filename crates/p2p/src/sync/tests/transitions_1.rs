@@ -368,3 +368,94 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
     );
     Ok(())
 }
+
+#[test]
+fn header_progress_from_another_peer_supersedes_pending_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    // A pending getheaders is a question about one locator tip: progress
+    // admitted from any peer moves the tip, so the pending gate must not
+    // suppress the follow-up question about the new tip.
+    let HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    } = header_sync_with_genesis()?;
+    let addr_a = test_addr(9_751, 0)?;
+    let addr_b = test_addr(9_751, 1)?;
+    let rx_a = connect_peer(&peers, eligible_peer(addr_a, 8));
+    let rx_b = connect_peer(&peers, eligible_peer(addr_b, 9));
+
+    // Tick 1: at tip, so the plan extends the header chain — one
+    // getheaders to the best candidate (B's higher demonstrated height).
+    sync.tick();
+    let drain_getheaders = |rx: &crossbeam_channel::Receiver<Message>| {
+        let mut requests = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            if let Message::GetHeaders(request) = message {
+                requests.push(request);
+            }
+        }
+        requests
+    };
+    let first: Vec<_> = [drain_getheaders(&rx_a), drain_getheaders(&rx_b)].concat();
+    assert_eq!(first.len(), 1, "exactly one getheaders must be armed");
+    assert!(
+        sync.frontier_state.lock().header_request.is_some(),
+        "the pending gate must be armed before progress lands"
+    );
+
+    // Header progress attributed to the OTHER peer (A, not the request
+    // owner) is admitted and moves the chain tip; B's pending survives
+    // (a nonempty batch retires only its own source's request).
+    let next_header = test_header(genesis.compute_hash(), 1);
+    let next_hash = next_header.compute_hash();
+    inbound_headers_tx.send(InboundHeaders {
+        headers: vec![next_header],
+        source: Some(current_source(&peers, addr_a)),
+    })?;
+    sync.tick();
+    assert!(
+        sync.frontier_state.lock().header_request.is_some(),
+        "the non-owner batch must leave the pending request armed"
+    );
+    let _ = drain_getheaders(&rx_a);
+    let _ = drain_getheaders(&rx_b);
+
+    // The node applies the admitted block, so the next tick extends the
+    // header chain (at tip) rather than probing a missing frontier.
+    let applied = {
+        let tree = sync.chain.block_tree().read();
+        let tip_id = tree
+            .lookup(next_hash.into())
+            .ok_or("admitted header missing from the block tree")?;
+        let node = tree.node(tip_id)?;
+        TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    sync.chain.applied_tip().store(Some(Arc::new(applied)));
+
+    // Tick 3: the follow-up question is about the NEW locator tip, so the
+    // still-live pending request for the old tip must not gate it.
+    sync.tick();
+    let second: Vec<_> = [drain_getheaders(&rx_a), drain_getheaders(&rx_b)].concat();
+    assert!(
+        !second.is_empty(),
+        "a getheaders for the new tip must not be gated by the old pending"
+    );
+    assert!(
+        second.iter().any(|request| {
+            request
+                .locator_hashes
+                .first()
+                .map(|hash| Hash256::from_le_bytes(hash.as_byte_array()))
+                == Some(next_hash.into())
+        }),
+        "the follow-up locator must be anchored at the new header tip"
+    );
+    Ok(())
+}

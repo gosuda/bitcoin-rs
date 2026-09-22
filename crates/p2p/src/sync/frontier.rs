@@ -157,13 +157,13 @@ impl SyncFrontier {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ChainView {
     Available,
     Unavailable,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum PeerAvailability {
     None,
     UsableOnly,
@@ -367,7 +367,15 @@ mod tests {
         #[test]
         fn missing_frontier_always_has_action_or_reason(
             chain_view_available in any::<bool>(),
-            has_usable_peers in any::<bool>(),
+            peers in prop_oneof![
+                Just(PeerAvailability::None),
+                Just(PeerAvailability::UsableOnly),
+                Just(PeerAvailability::BodyCandidate)
+            ],
+            missing_header_action in prop_oneof![
+                Just(None),
+                Just(Some(HeaderAction::AwaitPending))
+            ],
             apply_halted in any::<bool>(),
         ) {
             let plan = reconcile_facts(&ReconcileFacts {
@@ -377,18 +385,19 @@ mod tests {
                     ChainView::Unavailable
                 },
                 body_state: Some(BodyState::Missing),
-                peers: if has_usable_peers {
-                    PeerAvailability::BodyCandidate
-                } else {
-                    PeerAvailability::None
-                },
-                missing_header_action: has_usable_peers.then_some(HeaderAction::AwaitPending),
+                peers,
+                missing_header_action,
                 apply_halted,
             });
-            prop_assert!(
-                plan.schedule_bodies
-                    || plan.header_action == HeaderAction::AwaitPending
-                    || plan.no_progress_reason.is_some()
+            let armed = !apply_halted && chain_view_available;
+            prop_assert_eq!(
+                plan.schedule_bodies,
+                armed && matches!(peers, PeerAvailability::BodyCandidate)
+            );
+            prop_assert_eq!(
+                plan.no_progress_reason.is_some(),
+                !(plan.schedule_bodies
+                    || plan.header_action != HeaderAction::ExtendHeaderTip)
             );
         }
     }
