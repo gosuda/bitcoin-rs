@@ -58,7 +58,7 @@ fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::erro
         assert!(receiver.try_recv().is_err());
     }
     assert_eq!(
-        sync.body_sync.lock().window.pending_len(),
+        sync.scheduler.lock().window.pending_len(),
         super::super::PENDING_BUDGET
     );
     Ok(())
@@ -131,8 +131,8 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn s
     );
     let bad_hash = Hash256::from_le_bytes(bad.block_hash().as_bytes());
     let descendant_hash = Hash256::from_le_bytes(descendant.block_hash().as_bytes());
-    assert!(!sync.body_sync.lock().stager.contains(&bad_hash));
-    let descendant_staged = sync.body_sync.lock().stager.contains(&descendant_hash);
+    assert!(!sync.scheduler.lock().stager.contains(&bad_hash));
+    let descendant_staged = sync.scheduler.lock().stager.contains(&descendant_hash);
     assert!(
         descendant_staged,
         "valid descendant must remain staged for retry"

@@ -1,0 +1,282 @@
+//! Canonical sync-frontier reconciliation (issue #1128).
+//!
+//! The reconciler answers one question per tick: is the canonical
+//! next-required body owned by a live connection, staged, or applying — and
+//! when it is none of those, what concrete work unblocks it or what
+//! explicit reason makes progress impossible. All observation funnels
+//! through [`BlockSync::observe_frontier`] and every recovery decision
+//! through [`SyncFrontier::plan`], so exactly one place evaluates the
+//! frontier invariant; there is no second model of "is sync stuck".
+//!
+//! All work ownership is stamped with the requesting connection's
+//! [`PeerSource`]: a cancelled or same-address-replaced connection never
+//! inherits its predecessor's assignments, convictions, or deadlines.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use bitcoin::p2p::ServiceFlags;
+use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_primitives::Hash256;
+
+use crate::PeerInfo;
+use crate::connection::PeerSource;
+
+use super::HEADER_REQUEST_TIMEOUT;
+use super::PendingHeaderRequest;
+
+/// The canonical next-required body: the block the apply frontier commits
+/// next — the applied tip's successor on the active branch, or the first
+/// connect node of the reorg plan when the applied tip is off-branch. One
+/// value serves both recovery observation and request scheduling, so the
+/// two can never disagree about what the frontier needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RequiredBody {
+    /// Height of the required block on the active branch.
+    pub height: u32,
+    /// Hash of the required block.
+    pub hash: Hash256,
+}
+
+/// Where the canonical next-required body sits in the scheduler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BodyState {
+    /// In flight under a specific connection's ownership.
+    InFlight(PeerSource),
+    /// Staged and waiting for the apply path.
+    Staged,
+    /// Neither pending, staged, nor applying: unowned work the reconciler
+    /// must schedule this tick or account for in `no_progress`.
+    Unowned,
+}
+
+/// Chain-side frontier observation: both tips plus the resolved
+/// next-required body, taken from one consistent read of the tree.
+#[derive(Clone, Debug)]
+pub(crate) struct ChainFrontier {
+    /// The applied (validated) tip.
+    pub applied_tip: Option<Arc<TipSnapshot>>,
+    /// The heaviest header tip.
+    pub chain_tip: Option<Arc<TipSnapshot>>,
+    /// The canonical next-required body on the active branch, `None` at tip
+    /// or when the first connect node cannot be resolved.
+    pub next_required: Option<RequiredBody>,
+    /// Whether the apply path has latched a fatal settlement.
+    pub apply_halted: bool,
+}
+
+/// A handshake-complete, uncancelled connection eligible for sync work.
+#[derive(Clone, Debug)]
+pub(crate) struct UsablePeer {
+    /// Exact connection identity; every request sent to this peer is owned
+    /// by this source.
+    pub source: PeerSource,
+    /// Published peer metadata (services, best-known height, relay prefs).
+    pub info: PeerInfo,
+    /// Tip hashes this connection demonstrated by serving accepted headers.
+    pub demonstrated_tips: Vec<Hash256>,
+    /// The peer's demonstrated height resolved on the active chain, `None`
+    /// when its announced tips do not intersect it.
+    pub active_height: Option<u32>,
+}
+
+impl UsablePeer {
+    /// Demonstrated serving capability: the handshake best-known height
+    /// while the peer has no branch evidence, else only a tip on the active
+    /// chain counts (`body_capability_height` semantics, precomputed once
+    /// per observation instead of per request peer).
+    pub(crate) fn capability(&self) -> Option<u32> {
+        if self.demonstrated_tips.is_empty() {
+            return u32::try_from(self.info.best_known_height).ok();
+        }
+        self.active_height
+    }
+}
+
+/// Everything the reconciler needs for one tick, all observed consistently.
+#[derive(Debug)]
+pub(crate) struct SyncFrontier {
+    /// The chain-side frontier.
+    pub chain: ChainFrontier,
+    /// State of `chain.next_required`, `None` when none is required.
+    pub body_state: Option<BodyState>,
+    /// The outstanding header request, if any.
+    pub header_request: Option<PendingHeaderRequest>,
+    /// Whether `header_request` is unexpired and owned by a usable
+    /// connection — the identity-exact liveness the scheduler waits on.
+    pub header_request_live: bool,
+    /// Identity-bearing snapshot of the peers usable this tick. A
+    /// cancelled lease is not representable here.
+    pub usable_peers: Vec<UsablePeer>,
+}
+
+/// What the header side of the scheduler does this tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum HeaderAction {
+    /// No header work this tick.
+    #[default]
+    Idle,
+    /// An unexpired header request is owned by a usable connection; await
+    /// its answer.
+    AwaitPending,
+    /// The apply frontier is unowned: probe the capability frontier at the
+    /// applied anchor with this peer (the rotation pick).
+    Probe(PeerSource),
+    /// Request the next header page from the best demonstrated peer.
+    Extend,
+}
+
+/// Why the scheduler cannot advance the apply frontier this tick. Always
+/// `Some` when a next-required body exists and no recovery work was
+/// scheduled — progress is never silently impossible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoProgressReason {
+    /// The applied tip already equals the header tip.
+    AtTip,
+    /// A fatal apply settlement latched; recreation reopens admission.
+    ApplyHalted,
+    /// The applied or header tip could not be read.
+    ChainViewUnavailable,
+    /// The tips disagree but the first connect node cannot be resolved.
+    FrontierUnresolvable,
+    /// Work exists but no handshake-complete uncancelled peer is usable.
+    NoUsablePeers,
+    /// No usable peer demonstrates a chain reaching the required body.
+    NoCapablePeer,
+}
+
+/// The tick's scheduling decision.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FrontierPlan {
+    /// Whether the body-request loop runs this tick.
+    pub schedule_bodies: bool,
+    /// What the header side does.
+    pub header_action: HeaderAction,
+    /// Why no apply-frontier progress is possible, when nothing was
+    /// scheduled that can advance it.
+    pub no_progress: Option<NoProgressReason>,
+}
+
+impl SyncFrontier {
+    /// The canonical reconciliation: either concrete work is scheduled for
+    /// this tick or `no_progress` names why progress is impossible.
+    ///
+    /// The invariant: when the header tip is ahead of the applied tip and
+    /// the canonical next-required body is unowned, this either schedules
+    /// recovery work (`schedule_bodies` and/or a header action that can
+    /// discover capability) or produces an explicit reason.
+    pub(crate) fn plan(&self) -> FrontierPlan {
+        let peers_exist = !self.usable_peers.is_empty();
+        let body_owned_or_missing =
+            matches!(self.body_state, Some(BodyState::Unowned)) && !self.chain.apply_halted;
+        let header_action = if self.header_request_live {
+            HeaderAction::AwaitPending
+        } else if !peers_exist {
+            HeaderAction::Idle
+        } else if body_owned_or_missing {
+            self.probe_pick()
+                .map_or(HeaderAction::Extend, HeaderAction::Probe)
+        } else {
+            HeaderAction::Extend
+        };
+        let mut plan = FrontierPlan {
+            header_action,
+            ..FrontierPlan::default()
+        };
+
+        let Some(required) = self.chain.next_required else {
+            plan.no_progress = Some(if self.chain.apply_halted {
+                NoProgressReason::ApplyHalted
+            } else if self.chain.applied_tip.is_none() || self.chain.chain_tip.is_none() {
+                NoProgressReason::ChainViewUnavailable
+            } else if self.at_tip() {
+                NoProgressReason::AtTip
+            } else {
+                NoProgressReason::FrontierUnresolvable
+            });
+            return plan;
+        };
+
+        if self.chain.apply_halted {
+            plan.no_progress = Some(NoProgressReason::ApplyHalted);
+            return plan;
+        }
+
+        if !peers_exist {
+            plan.no_progress = Some(NoProgressReason::NoUsablePeers);
+            return plan;
+        }
+
+        plan.schedule_bodies = true;
+        let body_state = match self.body_state {
+            // A pending whose owner fell out of the usable set is unowned
+            // work; reconcile released it, and it must be re-requested.
+            Some(BodyState::InFlight(owner))
+                if !self.usable_peers.iter().any(|peer| peer.source == owner) =>
+            {
+                Some(BodyState::Unowned)
+            }
+            state => state,
+        };
+        match body_state {
+            Some(BodyState::Unowned) => {
+                if !self
+                    .usable_peers
+                    .iter()
+                    .any(|peer| peer.capability().is_some_and(|h| h >= required.height))
+                {
+                    plan.no_progress = Some(NoProgressReason::NoCapablePeer);
+                }
+            }
+            Some(BodyState::Staged | BodyState::InFlight(_)) => {}
+            None => unreachable!("next_required implies a body state"),
+        }
+        plan
+    }
+
+    /// Whether the applied tip is the header tip's block.
+    fn at_tip(&self) -> bool {
+        match (&self.chain.applied_tip, &self.chain.chain_tip) {
+            (Some(applied), Some(chain)) => applied.hash == chain.hash,
+            _ => false,
+        }
+    }
+
+    /// The P2P-05 probe pick: a witness-network peer rotated past the
+    /// expired (or dead) pending request's owner so consecutive probes do
+    /// not land on the same connection.
+    fn probe_pick(&self) -> Option<PeerSource> {
+        let required = ServiceFlags::NETWORK.to_u64() | ServiceFlags::WITNESS.to_u64();
+        let eligible = |peer: &&UsablePeer| peer.info.services & required == required;
+        let pending_addr = self.header_request.map(|request| request.source.addr);
+        self.usable_peers
+            .iter()
+            .filter(|peer| {
+                eligible(peer) && pending_addr.is_none_or(|addr| peer.source.addr > addr)
+            })
+            .min_by_key(|peer| peer.source.addr)
+            .map(|peer| peer.source)
+            .or_else(|| {
+                self.usable_peers
+                    .iter()
+                    .filter(|peer| eligible(peer))
+                    .min_by_key(|peer| peer.source.addr)
+                    .map(|peer| peer.source)
+            })
+    }
+}
+
+/// Whether `header_request` is live: unexpired and owned by a peer in the
+/// usable set.
+pub(crate) fn header_request_live(
+    header_request: Option<PendingHeaderRequest>,
+    usable_peers: &[UsablePeer],
+    now: Instant,
+) -> bool {
+    header_request.is_some_and(|request| {
+        now.saturating_duration_since(request.requested_at) < HEADER_REQUEST_TIMEOUT
+            && usable_peers
+                .iter()
+                .any(|peer| peer.source == request.source)
+    })
+}

@@ -51,7 +51,7 @@ fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer()
     let stale = current_source(&peers, peer);
     let _replacement = connect_peer(&peers, eligible_peer(peer, 1));
     let sync = Arc::new(sync);
-    let body = sync.body_sync.lock();
+    let body = sync.scheduler.lock();
     let (finished, completed) = crossbeam_channel::bounded(1);
     let worker_sync = Arc::clone(&sync);
     let worker = std::thread::spawn(move || {
@@ -86,8 +86,9 @@ fn empty_header_probe_is_paced_then_rotates_to_another_peer()
     sync.tick();
     assert!(first_rx.try_recv().is_err());
     assert!(second_rx.try_recv().is_err());
-    sync.pending_getheaders
+    sync.scheduler
         .lock()
+        .header_request
         .as_mut()
         .ok_or("probe lost its deadline")?
         .requested_at -= super::super::HEADER_REQUEST_TIMEOUT;
@@ -139,7 +140,7 @@ fn staged_successors_behind_a_rejected_frontier_still_probe()
     );
 
     // The successors staged; the malformed frontier body did not.
-    let body = sync.body_sync.lock();
+    let body = sync.scheduler.lock();
     assert_eq!(body.stager.received_len(), 2);
     assert!(!body.stager.contains(&Hash256::from(blocks[0].block_hash())));
     drop(body);
@@ -188,11 +189,11 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders()
     let genesis = Network::Regtest.genesis_block().block_hash();
     let locator = vec![Hash256::from_le_bytes(genesis.as_bytes())];
     assert!(
-        !sync.send_getheaders(old_source, 0, 10, locator),
+        sync.send_getheaders(old_source, 0, 10, locator) != super::super::GetheadersOutcome::Sent,
         "lease_source must reject a superseded session identity"
     );
     assert!(
-        sync.pending_getheaders.lock().is_none(),
+        sync.scheduler.lock().header_request.is_none(),
         "a rejected send must not leave scheduler state behind"
     );
     Ok(())
@@ -242,10 +243,11 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
     // The dead peer must not have inherited the pending request, and no
     // further getheaders lands anywhere in this tick.
     assert_eq!(
-        sync.pending_getheaders
+        sync.scheduler
             .lock()
+            .header_request
             .as_ref()
-            .map(|request| request.peer_addr),
+            .map(|request| request.source.addr),
         Some(high),
         "the fallback owner must hold the pending request"
     );
@@ -288,10 +290,11 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
         "the fallback request must start at the header tip"
     );
     assert_eq!(
-        sync.pending_getheaders
+        sync.scheduler
             .lock()
+            .header_request
             .as_ref()
-            .map(|request| request.peer_addr),
+            .map(|request| request.source.addr),
         Some(live),
         "the lower live peer must own the fallback request"
     );
@@ -335,8 +338,9 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
 
     // Expire the live peer's pending request so the next tick must choose a
     // probe target again.
-    sync.pending_getheaders
+    sync.scheduler
         .lock()
+        .header_request
         .as_mut()
         .ok_or("fallback lost its deadline")?
         .requested_at -= super::super::HEADER_REQUEST_TIMEOUT;
@@ -350,10 +354,11 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         "the dead peer session must not survive into the next tick",
     );
     assert_ne!(
-        sync.pending_getheaders
+        sync.scheduler
             .lock()
+            .header_request
             .as_ref()
-            .map(|request| request.peer_addr),
+            .map(|request| request.source.addr),
         Some(dead),
         "the pending request must not be keyed to the dead addr",
     );
@@ -490,7 +495,7 @@ fn untracked_delivery_records_tree_height() -> Result<(), Box<dyn std::error::Er
         1
     );
     assert_eq!(
-        sync.body_sync.lock().window.received_height(&hash),
+        sync.scheduler.lock().window.received_height(&hash),
         Some(2),
         "an untracked tree-known body must carry its canonical height"
     );

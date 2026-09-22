@@ -5,13 +5,27 @@ use super::chain::SyncChainError;
 use crate::InboundBlock;
 use crate::RejectDelivery;
 use crate::StagedBlock;
+use crate::connection::PeerSource;
 use crate::download_window::INBOUND_BLOCK_STAGE_CHUNK;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use smallvec::SmallVec;
 use std::time::Instant;
 use std::vec::Vec;
+
+/// Which window credit a staged delivery earns once the delivering
+/// connection is proven current under table authority.
+#[derive(Clone, Copy)]
+enum DeliveryCredit {
+    /// The block was already staged: only the pending-timeout observation
+    /// resolves.
+    Duplicate,
+    /// A first-copy delivery: timeout, cold-front, probe, and stall progress,
+    /// gated on the height the pending carried at removal.
+    Delivery(Option<u32>),
+}
 
 impl BlockSync {
     pub(super) fn drain_inbound_blocks(&self) {
@@ -34,12 +48,12 @@ impl BlockSync {
                 );
             }
         }
-        if received == 0 && self.body_sync.lock().stager.received_len() == 0 {
+        if received == 0 && self.scheduler.lock().stager.received_len() == 0 {
             return;
         }
 
         let now = Instant::now();
-        let dropped = self.body_sync.lock().stager.prune_expired(now);
+        let dropped = self.scheduler.lock().stager.prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
             let tree = self.chain.block_tree().read();
@@ -53,8 +67,8 @@ impl BlockSync {
                 })
                 .collect();
             drop(tree);
-            let mut body_sync = self.body_sync.lock();
-            let window = &mut body_sync.window;
+            let mut scheduler = self.scheduler.lock();
+            let window = &mut scheduler.window;
             for (hash, height) in height_updates {
                 window.update_received_height(&hash, height);
             }
@@ -152,8 +166,8 @@ impl BlockSync {
         // blocks whose hash is already in the stager. A correct body already
         // staged must not be displaced by a late malformed duplicate (P2-3).
         let already_staged: Vec<bool> = {
-            let body_sync = self.body_sync.lock();
-            let stager = &body_sync.stager;
+            let scheduler = self.scheduler.lock();
+            let stager = &scheduler.stager;
             blocks
                 .iter()
                 .map(|inbound| stager.contains(&Hash256::from(inbound.block.block_hash())))
@@ -182,8 +196,8 @@ impl BlockSync {
         let mut reject_deliveries = Vec::new();
         let now = Instant::now();
         {
-            let mut body_sync = self.body_sync.lock();
-            let stager = &mut body_sync.stager;
+            let mut scheduler = self.scheduler.lock();
+            let stager = &mut scheduler.stager;
             for (inbound, (already_staged, binding_result)) in blocks
                 .drain(..)
                 .zip(already_staged.into_iter().zip(binding_results))
@@ -234,15 +248,16 @@ impl BlockSync {
             }
         }
 
-        // Resolve staged sources before taking the window lock. Request sends
-        // hold PeerTable's read lock while marking the window, so no window
-        // holder may acquire PeerTable in the opposite order.
+        // Resolve staged sources before taking the scheduler lock. Request
+        // sends hold PeerTable's read lock while marking the window, so no
+        // scheduler holder may acquire PeerTable in the opposite order.
+        //
+        // The source is the whole connection identity: a cancelled lease is
+        // not a schedulable peer, so deliveries from one carry no credit.
         let staged_blocks: Vec<_> = staged_blocks
             .into_iter()
             .map(|(hash, source, staged)| {
-                let source_peer = source
-                    .filter(|source| self.peer_table.is_current(*source))
-                    .map(|source| source.addr);
+                let source_peer = source.filter(|source| self.peer_table.is_current(*source));
                 (hash, source_peer, staged)
             })
             .collect();
@@ -279,22 +294,35 @@ impl BlockSync {
         };
         let mut retry_count = 0_u64;
         let staged_count = staged_blocks.len() + reject_deliveries.len();
+        let mut delivery_credits: SmallVec<[(Hash256, PeerSource, DeliveryCredit); 8]> =
+            SmallVec::new();
         {
-            let mut body_sync = self.body_sync.lock();
-            let window = &mut body_sync.window;
+            let mut scheduler = self.scheduler.lock();
+            let window = &mut scheduler.window;
             for (hash, source_peer, staged, known_height, dropped_heights) in staged_blocks {
                 match staged {
                     StagedBlock::AlreadyStaged => {
                         metrics::counter!("node.sync.duplicate_deliveries").increment(1);
                         if let Some(source_peer) = source_peer {
-                            window.credit_duplicate_delivery(hash, source_peer);
+                            delivery_credits.push((hash, source_peer, DeliveryCredit::Duplicate));
                         }
                     }
                     StagedBlock::Memory { bytes, dropped } => {
-                        let needs_height_lookup =
-                            window.mark_received_from(hash, bytes, source_peer, now);
-                        if needs_height_lookup && let Some(height) = known_height {
+                        let pending_height = window.mark_received_from(hash, bytes, None, now);
+                        // A body that arrived before its header entered the
+                        // tree has no pending height: adopt the tree-resolved
+                        // height so a later retry lands at the right cursor.
+                        if pending_height.is_none()
+                            && let Some(height) = known_height
+                        {
                             window.update_received_height(&hash, height);
+                        }
+                        if let Some(source_peer) = source_peer {
+                            delivery_credits.push((
+                                hash,
+                                source_peer,
+                                DeliveryCredit::Delivery(pending_height),
+                            ));
                         }
                         for (entry, height) in dropped.into_iter().zip(dropped_heights) {
                             if let Some(height) = height {
@@ -312,25 +340,50 @@ impl BlockSync {
                 }
             }
         }
+        // Delivery credit is stamped only while the delivering connection is
+        // still current: `with_current` holds the table authority across the
+        // window mutation, so a same-address replacement registering between
+        // the liveness check above and this point voids the credit rather
+        // than clearing stall or timeout state for a retired connection.
+        for (hash, source_peer, credit) in delivery_credits {
+            self.peer_table.with_current(source_peer, || {
+                let mut scheduler = self.scheduler.lock();
+                match credit {
+                    DeliveryCredit::Duplicate => {
+                        scheduler
+                            .window
+                            .credit_duplicate_delivery(hash, source_peer);
+                    }
+                    DeliveryCredit::Delivery(pending_height) => {
+                        scheduler.window.credit_delivery_from(
+                            hash,
+                            source_peer,
+                            pending_height,
+                            now,
+                        );
+                    }
+                }
+            });
+        }
         for (hash, source) in reject_deliveries {
             let mut rejected = RejectDelivery::DiscardedUnsolicited;
             let current = source.is_some_and(|source| {
                 self.peer_table.with_current(source, || {
                     rejected = self
-                        .body_sync
+                        .scheduler
                         .lock()
                         .window
-                        .reject_delivery(hash, Some(source.addr));
+                        .reject_delivery(hash, Some(source));
                 })
             });
             if !current {
-                self.body_sync.lock().window.reject_delivery(hash, None);
+                self.scheduler.lock().window.reject_delivery(hash, None);
             }
             if rejected == RejectDelivery::ReleasedPending {
                 retry_count = retry_count.saturating_add(1);
                 if let Some(source) = source {
                     if self.peer_table.disconnect_source(source) {
-                        self.body_sync
+                        self.scheduler
                             .lock()
                             .window
                             .mark_peer_unresponsive(source.addr, now);

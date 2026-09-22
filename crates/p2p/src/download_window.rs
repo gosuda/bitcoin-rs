@@ -15,6 +15,7 @@ use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
 use crate::PeerInfo;
+use crate::connection::{ConnectionId, PeerSource};
 
 // ---------------------------------------------------------------------------
 // Download-policy constants
@@ -165,10 +166,17 @@ pub const fn at_least_one(value: usize) -> usize {
 /// A peer selected for block-header or block-body synchronization.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncPeer {
-    /// Peer network address.
-    pub addr: SocketAddr,
+    /// The exact connection that may carry requests for this selection.
+    pub source: PeerSource,
     /// Best known block height the peer advertises.
     pub best_known_height: i32,
+}
+
+impl SyncPeer {
+    /// Peer network address.
+    pub fn addr(&self) -> SocketAddr {
+        self.source.addr
+    }
 }
 
 /// The set of peers chosen for the current sync cycle.
@@ -224,7 +232,7 @@ pub fn configure_request_mode(
     let preferred_candidate = preferred_addr.and_then(|addr| {
         candidates
             .iter()
-            .find(|candidate| candidate.peer.addr == addr)
+            .find(|candidate| candidate.peer.addr() == addr)
     });
     let preferred = preferred_candidate
         .filter(|candidate| !candidate.soft_blocked)
@@ -383,7 +391,10 @@ const EWMA_MIN_SAMPLE_MS: u64 = 50;
 
 #[derive(Clone, Copy, Debug)]
 struct PendingBlock {
-    peer_addr: SocketAddr,
+    /// The exact connection that owns this request. Same-address
+    /// replacement must never inherit it: liveness is checked on the pair
+    /// `(owner.addr, owner.connection_id())`, not the address alone.
+    owner: PeerSource,
     requested_at: Instant,
     height: u32,
     estimated_bytes: usize,
@@ -391,7 +402,7 @@ struct PendingBlock {
 
 #[derive(Clone, Copy, Debug)]
 struct PendingTimeoutObservation {
-    peer_addr: SocketAddr,
+    owner: PeerSource,
     hash: Hash256,
 }
 
@@ -406,7 +417,7 @@ struct PeerInflight {
 /// per-peer `m_stalling_since` (`net_processing.cpp`).
 #[derive(Clone, Copy, Debug)]
 struct StallEpisode {
-    peer_addr: SocketAddr,
+    owner: PeerSource,
     front_hash: Hash256,
     since: Instant,
     /// Whether the one-shot episode-observability INFO line has been emitted
@@ -437,21 +448,21 @@ struct ApplySideStuck {
 #[derive(Clone, Copy, Debug)]
 enum ColdFrontState {
     Waiting {
-        owner: SocketAddr,
+        owner: PeerSource,
         hash: Hash256,
         since: Instant,
     },
     Racing {
-        owner: SocketAddr,
-        alternate: SocketAddr,
+        owner: PeerSource,
+        alternate: PeerSource,
         hash: Hash256,
     },
 }
 #[derive(Debug)]
 struct PrefixProbe {
-    owner: SocketAddr,
+    owner: PeerSource,
     hashes: SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
-    racers: HashMap<SocketAddr, u8>,
+    racers: HashMap<PeerSource, u8>,
     accepted: u8,
     started_at: Instant,
 }
@@ -575,7 +586,7 @@ pub struct DownloadWindow {
     /// without assigning unique height holes to alternate peers.
     prefix_probe: Option<PrefixProbe>,
     /// Deep owner already tested for the current pending assignment.
-    prefix_probe_attempted_owner: Option<SocketAddr>,
+    prefix_probe_attempted_owner: Option<PeerSource>,
     /// First observation of an expired front request. Conviction needs a
     /// second tick so blocks delivered during synchronous apply can drain.
     pending_timeout_observation: Option<PendingTimeoutObservation>,
@@ -872,7 +883,7 @@ impl DownloadWindow {
             return false;
         }
         self.pending.values().any(|pending| {
-            pending.peer_addr == peer_addr
+            pending.owner.addr == peer_addr
                 && now.duration_since(pending.requested_at) >= self.budget.pending_timeout
         })
     }
@@ -887,15 +898,15 @@ impl DownloadWindow {
         &mut self,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<SocketAddr> {
+    ) -> Option<PeerSource> {
         if apply_side_busy {
             self.pending_timeout_observation = None;
             return None;
         }
         if let Some(observation) = self.pending_timeout_observation {
             self.pending_timeout_observation = None;
-            self.mark_peer_unresponsive(observation.peer_addr, now);
-            return Some(observation.peer_addr);
+            self.mark_peer_unresponsive(observation.owner.addr, now);
+            return Some(observation.owner);
         }
         if self
             .next_pending_deadline
@@ -911,7 +922,7 @@ impl DownloadWindow {
             })
             .min_by_key(|(_, pending)| pending.height)
             .map(|(hash, pending)| PendingTimeoutObservation {
-                peer_addr: pending.peer_addr,
+                owner: pending.owner,
                 hash: *hash,
             });
         None
@@ -1024,7 +1035,7 @@ impl DownloadWindow {
         next_apply_height: u32,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<SocketAddr> {
+    ) -> Option<PeerSource> {
         // Measurement only (issue #51): interval bookkeeping ahead of the
         // stall state machine, which these observations never feed.
         // - download-blocked-by-apply: apply owns the frontier while requests
@@ -1052,16 +1063,14 @@ impl DownloadWindow {
             }
             return None;
         }
-        let Some((peer_addr, front_hash)) = self.window_blocked_on(next_apply_height) else {
+        let Some((owner, front_hash)) = self.window_blocked_on(next_apply_height) else {
             if self.stall.take().is_some() {
                 count_stall_episode_cleared("predicate");
             }
             return None;
         };
         let episode = match self.stall {
-            Some(episode) if episode.peer_addr == peer_addr && episode.front_hash == front_hash => {
-                episode
-            }
+            Some(episode) if episode.owner == owner && episode.front_hash == front_hash => episode,
             previous => {
                 if previous.is_some() {
                     // Predicate still holds but for a different
@@ -1071,7 +1080,7 @@ impl DownloadWindow {
                 }
                 metrics::counter!("node.sync.stall_episodes_started").increment(1);
                 let episode = StallEpisode {
-                    peer_addr,
+                    owner,
                     front_hash,
                     since: now,
                     info_logged: false,
@@ -1091,7 +1100,7 @@ impl DownloadWindow {
                 stored.info_logged = true;
             }
             tracing::info!(
-                peer_addr = %episode.peer_addr,
+                peer_addr = %episode.owner.addr,
                 front_hash = %episode.front_hash,
                 front_height = next_apply_height,
                 episode_age_ms = u64::try_from(now.duration_since(episode.since).as_millis())
@@ -1123,8 +1132,8 @@ impl DownloadWindow {
         self.stall_timeout = effective_timeout
             .saturating_mul(2)
             .min(self.budget.stall_timeout_max);
-        self.mark_peer_unresponsive(peer_addr, now);
-        Some(peer_addr)
+        self.mark_peer_unresponsive(owner.addr, now);
+        Some(owner)
     }
 
     /// Closes an open apply-idle interval, recording its duration.
@@ -1218,7 +1227,7 @@ impl DownloadWindow {
     ///    term trivially, so wedge conviction is preserved. The chain tail
     ///    (nothing above the window left to request) is deliberately not an
     ///    arm of this term — see [`Self::observe_stall`].
-    fn window_blocked_on(&self, next_apply_height: u32) -> Option<(SocketAddr, Hash256)> {
+    fn window_blocked_on(&self, next_apply_height: u32) -> Option<(PeerSource, Hash256)> {
         let (front_hash, front) = self
             .pending
             .iter()
@@ -1236,7 +1245,7 @@ impl DownloadWindow {
         if self.received.len() < self.budget.max_received_blocks / 2 {
             return None;
         }
-        Some((front.peer_addr, *front_hash))
+        Some((front.owner, *front_hash))
     }
 
     /// Current stall observation, if one is running: the blamed peer and when
@@ -1245,7 +1254,8 @@ impl DownloadWindow {
     /// never disconnected (same exposure as Core) but is visible here and on
     /// the `node.sync.stall_seconds` gauge.
     pub fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
-        self.stall.map(|episode| (episode.peer_addr, episode.since))
+        self.stall
+            .map(|episode| (episode.owner.addr, episode.since))
     }
     /// Advances the cold-start front timer independently of the strong stall
     /// predicate. Returns a duplicate request only after the same apply-front
@@ -1255,7 +1265,7 @@ impl DownloadWindow {
         next_apply_height: u32,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<(SocketAddr, Hash256)> {
+    ) -> Option<(PeerSource, Hash256)> {
         if matches!(self.cold_front, Some(ColdFrontState::Racing { .. })) {
             return None;
         }
@@ -1279,7 +1289,7 @@ impl DownloadWindow {
                 owner,
                 hash: waiting_hash,
                 since,
-            }) if owner == pending.peer_addr && waiting_hash == hash => {
+            }) if owner == pending.owner && waiting_hash == hash => {
                 if now.duration_since(since) >= self.budget.stall_timeout_initial {
                     Some((owner, hash))
                 } else {
@@ -1288,7 +1298,7 @@ impl DownloadWindow {
             }
             _ => {
                 self.cold_front = Some(ColdFrontState::Waiting {
-                    owner: pending.peer_addr,
+                    owner: pending.owner,
                     hash,
                     since: now,
                 });
@@ -1300,8 +1310,8 @@ impl DownloadWindow {
     /// Records a successfully sent cold-front duplicate request.
     pub fn confirm_cold_front_hedge(
         &mut self,
-        owner: SocketAddr,
-        alternate: SocketAddr,
+        owner: PeerSource,
+        alternate: PeerSource,
         hash: Hash256,
     ) {
         if !matches!(
@@ -1345,7 +1355,7 @@ impl DownloadWindow {
     pub fn prefix_probe_plan(
         &self,
     ) -> Option<(
-        SocketAddr,
+        PeerSource,
         SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
         u32,
     )> {
@@ -1356,12 +1366,9 @@ impl DownloadWindow {
             .pending
             .values()
             .min_by_key(|pending| pending.height)?
-            .peer_addr;
+            .owner;
         if self.prefix_probe_attempted_owner == Some(owner)
-            || self
-                .pending
-                .values()
-                .any(|pending| pending.peer_addr != owner)
+            || self.pending.values().any(|pending| pending.owner != owner)
         {
             return None;
         }
@@ -1395,9 +1402,9 @@ impl DownloadWindow {
     /// Starts the prefix race after at least one alternate accepted the probe.
     pub fn confirm_prefix_probe(
         &mut self,
-        owner: SocketAddr,
+        owner: PeerSource,
         hashes: SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
-        alternates: &[SocketAddr],
+        alternates: &[PeerSource],
         now: Instant,
     ) {
         if alternates.is_empty() {
@@ -1466,6 +1473,11 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
+    /// The exact connection owning the pending request for `hash`.
+    pub fn pending_owner(&self, hash: &Hash256) -> Option<PeerSource> {
+        self.pending.get(hash).map(|pending| pending.owner)
+    }
+
     /// Returns the start time of the active prefix probe, if any. Test-only.
     pub fn active_prefix_probe_started_at(&self) -> Option<Instant> {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)
@@ -1495,24 +1507,32 @@ impl DownloadWindow {
             .min();
     }
 
-    /// Releases all state for peers that are no longer live, re-queuing their
-    /// pending and in-flight blocks for retry.
-    pub fn release_disconnected_peers(&mut self, is_live_peer: impl Fn(&SocketAddr) -> bool) {
+    /// Releases all state for connections that are no longer live, re-queuing
+    /// their pending and in-flight blocks for retry. Liveness is identity
+    /// checked: a pending request owned by `(addr, connection_id)` is live
+    /// only while that exact connection is, so a same-address replacement
+    /// never inherits its predecessor's outstanding work.
+    pub fn release_disconnected_peers(&mut self, live: &[(SocketAddr, ConnectionId)]) {
+        let live_addr = |addr: &SocketAddr| live.iter().any(|(a, _)| a == addr);
+        let live_source = |source: &PeerSource| {
+            live.iter()
+                .any(|(a, id)| *a == source.addr && *id == source.connection_id())
+        };
         let cold_front_live = match self.cold_front {
-            Some(ColdFrontState::Waiting { owner, .. }) => is_live_peer(&owner),
+            Some(ColdFrontState::Waiting { owner, .. }) => live_source(&owner),
             Some(ColdFrontState::Racing {
                 owner, alternate, ..
-            }) => is_live_peer(&owner) && is_live_peer(&alternate),
+            }) => live_source(&owner) && live_source(&alternate),
             None => true,
         };
         if !cold_front_live {
             self.cold_front = None;
         }
-        if self.preferred_peer.is_some_and(|peer| !is_live_peer(&peer)) {
+        if self.preferred_peer.is_some_and(|peer| !live_addr(&peer)) {
             self.preferred_peer = None;
         }
         let cancel_probe = if let Some(probe) = self.prefix_probe.as_mut() {
-            probe.racers.retain(|peer, _| is_live_peer(peer));
+            probe.racers.retain(|peer, _| live_source(peer));
             probe.racers.len() < 2
         } else {
             false
@@ -1520,44 +1540,47 @@ impl DownloadWindow {
         if cancel_probe {
             self.prefix_probe = None;
         }
-        self.retain_peer_assignments(is_live_peer);
+        self.retain_peer_assignments(|owner| live_source(owner));
     }
 
     /// Drops every assignment and attribution fact owned by a replaced
     /// connection before a new connection may reuse its socket address.
     pub fn forget_peer(&mut self, peer_addr: SocketAddr) {
-        self.release_peer_assignments(peer_addr);
+        self.retain_peer_assignments(|owner| owner.addr != peer_addr);
         if self.preferred_peer == Some(peer_addr) {
             self.preferred_peer = None;
         }
-        if self.prefix_probe_attempted_owner == Some(peer_addr) {
+        if self
+            .prefix_probe_attempted_owner
+            .is_some_and(|owner| owner.addr == peer_addr)
+        {
             self.prefix_probe_attempted_owner = None;
         }
         if self.cold_front.is_some_and(|state| match state {
-            ColdFrontState::Waiting { owner, .. } => owner == peer_addr,
+            ColdFrontState::Waiting { owner, .. } => owner.addr == peer_addr,
             ColdFrontState::Racing {
                 owner, alternate, ..
-            } => owner == peer_addr || alternate == peer_addr,
+            } => owner.addr == peer_addr || alternate.addr == peer_addr,
         }) {
             self.cold_front = None;
         }
         if self
             .prefix_probe
             .as_ref()
-            .is_some_and(|probe| probe.racers.contains_key(&peer_addr))
+            .is_some_and(|probe| probe.racers.keys().any(|racer| racer.addr == peer_addr))
         {
             self.prefix_probe = None;
         }
     }
 
     fn release_peer_assignments(&mut self, peer_addr: SocketAddr) {
-        self.retain_peer_assignments(|peer| *peer != peer_addr);
+        self.retain_peer_assignments(|owner| owner.addr != peer_addr);
     }
 
-    fn retain_peer_assignments(&mut self, retain_peer: impl Fn(&SocketAddr) -> bool) {
+    fn retain_peer_assignments(&mut self, retain_owner: impl Fn(&PeerSource) -> bool) {
         if self
             .pending_timeout_observation
-            .is_some_and(|observation| !retain_peer(&observation.peer_addr))
+            .is_some_and(|observation| !retain_owner(&observation.owner))
         {
             self.pending_timeout_observation = None;
         }
@@ -1566,7 +1589,7 @@ impl DownloadWindow {
         let pending_timeout = self.budget.pending_timeout;
         let next_pending_deadline = self.next_pending_deadline;
         self.pending.retain(|_hash, pending| {
-            if retain_peer(&pending.peer_addr) {
+            if retain_owner(&pending.owner) {
                 return true;
             }
             retry_height = retry_height.min(pending.height);
@@ -1580,8 +1603,14 @@ impl DownloadWindow {
             }
             false
         });
-        self.peer_inflight
-            .retain(|peer, _inflight| retain_peer(peer));
+        // Rebuild per-peer in-flight counts from the retained owners so a
+        // released connection's share cannot transfer to a same-address
+        // replacement.
+        self.peer_inflight.clear();
+        for pending in self.pending.values() {
+            let inflight = self.peer_inflight.entry(pending.owner.addr).or_default();
+            inflight.blocks = inflight.blocks.saturating_add(1);
+        }
         if removed_earliest_deadline {
             self.refresh_next_pending_deadline();
         }
@@ -1851,7 +1880,7 @@ impl DownloadWindow {
     fn record_prefix_probe_delivery(
         &mut self,
         hash: Hash256,
-        delivery_peer: Option<SocketAddr>,
+        delivery_peer: Option<PeerSource>,
         now: Instant,
     ) {
         let Some(mut probe) = self.prefix_probe.take() else {
@@ -1886,12 +1915,12 @@ impl DownloadWindow {
         self.pending_timeout_observation = None;
         self.retain_peer_assignments(|peer| *peer == winner || !probe.racers.contains_key(peer));
         if winner != owner {
-            self.mark_peer_unresponsive(owner, now);
+            self.mark_peer_unresponsive(owner.addr, now);
         }
-        self.preferred_peer = Some(winner);
+        self.preferred_peer = Some(winner.addr);
         tracing::info!(
-            owner = %owner,
-            winner = %winner,
+            owner = %owner.addr,
+            winner = %winner.addr,
             winner_is_owner = winner == owner,
             blocks = probe.hashes.len(),
             elapsed_ms = u64::try_from(now.duration_since(probe.started_at).as_millis()).unwrap_or(u64::MAX),
@@ -1903,7 +1932,7 @@ impl DownloadWindow {
     fn resolve_cold_front_delivery(
         &mut self,
         hash: Hash256,
-        delivery_peer: Option<SocketAddr>,
+        delivery_peer: Option<PeerSource>,
         now: Instant,
     ) {
         let Some(state) = self.cold_front else {
@@ -1925,30 +1954,36 @@ impl DownloadWindow {
                     return;
                 }
                 self.prefix_probe = None;
-                self.release_peer_assignments(owner);
-                self.mark_peer_unresponsive(owner, now);
-                self.preferred_peer = Some(alternate);
+                self.release_peer_assignments(owner.addr);
+                self.mark_peer_unresponsive(owner.addr, now);
+                self.preferred_peer = Some(alternate.addr);
                 metrics::counter!("node.sync.cold_front_wins").increment(1);
             }
             _ => {}
         }
     }
 
-    /// Records that `request` has been sent to its peer, moving entries to
-    /// pending. Returns `true` if the window still has request capacity.
-    pub fn mark_requested(&mut self, request: &PeerRequest, now: Instant) -> bool {
+    /// Records that `request` has been sent to `owner`, moving entries to
+    /// pending under that exact connection's ownership. Returns `true` if
+    /// the window still has request capacity.
+    pub fn mark_requested(
+        &mut self,
+        request: &PeerRequest,
+        owner: PeerSource,
+        now: Instant,
+    ) -> bool {
         if self.pending.is_empty() && !request.entries.is_empty() {
             self.prefix_probe_attempted_owner = None;
         }
         let estimated_bytes = self.ewma_block_bytes;
-        let inflight = self.peer_inflight.entry(request.peer_addr).or_default();
+        let inflight = self.peer_inflight.entry(owner.addr).or_default();
         for entry in &request.entries {
             debug_assert!(!self.pending.contains_key(&entry.hash));
             debug_assert!(!self.received.contains_key(&entry.hash));
             let previous = self.pending.insert(
                 entry.hash,
                 PendingBlock {
-                    peer_addr: request.peer_addr,
+                    owner,
                     requested_at: now,
                     height: entry.height,
                     estimated_bytes,
@@ -1968,34 +2003,27 @@ impl DownloadWindow {
     }
 
     /// Records that block `hash` was received from `source_peer`, moving it
-    /// from pending to received (staged). Returns `true` if the window still
-    /// has request capacity.
+    /// from pending to received (staged). Returns the removed pending's
+    /// height, `None` when the hash was not pending.
+    ///
+    /// The source-attributed credit runs through [`Self::credit_delivery_from`];
+    /// callers proving the source's connection is still current may also call
+    /// it directly after an unattributed `mark_received_from(hash, bytes, None, _)`.
     pub fn mark_received_from(
         &mut self,
         hash: Hash256,
         bytes: usize,
-        source_peer: Option<SocketAddr>,
+        source_peer: Option<PeerSource>,
         now: Instant,
-    ) -> bool {
+    ) -> Option<u32> {
         let pending = self.remove_pending(&hash);
-        // A local injection releases the request but cannot establish that the
-        // requested peer delivered anything.
-        let delivery_peer = source_peer;
-        if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && Some(observation.peer_addr) == delivery_peer
-        }) {
-            self.pending_timeout_observation = None;
+        let pending_height = pending.map(|pending| pending.height);
+        if let Some(source) = source_peer {
+            self.credit_delivery_from(hash, source, pending_height, now);
         }
-        self.resolve_cold_front_delivery(hash, delivery_peer, now);
-        self.record_prefix_probe_delivery(hash, delivery_peer, now);
-        let (height, needs_height_lookup) = if let Some(pending) = pending {
-            if let Some(peer_addr) = delivery_peer {
-                self.record_delivery_progress(peer_addr, hash, pending.height, now);
-            }
-            (pending.height, false)
-        } else {
-            (0, true)
-        };
+        // Heights of unsolicited deliveries stay 0 until `update_received_height`
+        // fills them in from the tree.
+        let height = pending_height.unwrap_or(0);
         let previous = self.received.insert(hash, ReceivedBlock { height, bytes });
         if let Some(previous) = previous {
             self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
@@ -2007,22 +2035,50 @@ impl DownloadWindow {
             .saturating_add(bytes)
             / 8;
         self.ewma_block_bytes = self.ewma_block_bytes.max(80);
-        needs_height_lookup
+        pending_height
     }
 
-    /// Test-only shorthand for delivery by the pending owner.
+    /// The source-attributed share of a staged delivery: pending-timeout,
+    /// cold-front, and prefix-probe resolution plus stall-episode progress,
+    /// all under the delivering connection's exact identity. `pending_height`
+    /// is the height the pending carried at removal — `None` for an
+    /// unsolicited delivery, which carries no progress credit.
+    pub fn credit_delivery_from(
+        &mut self,
+        hash: Hash256,
+        source: PeerSource,
+        pending_height: Option<u32>,
+        now: Instant,
+    ) {
+        if self
+            .pending_timeout_observation
+            .is_some_and(|observation| observation.hash == hash && observation.owner == source)
+        {
+            self.pending_timeout_observation = None;
+        }
+        self.resolve_cold_front_delivery(hash, Some(source), now);
+        self.record_prefix_probe_delivery(hash, Some(source), now);
+        if let Some(height) = pending_height {
+            self.record_delivery_progress(source, hash, height, now);
+        }
+    }
+
+    /// Test-only shorthand for delivery by the pending owner. Returns whether
+    /// the hash was not pending, i.e. its height needs a tree lookup.
     pub fn mark_received(&mut self, hash: Hash256, bytes: usize, now: Instant) -> bool {
-        let source_peer = self.pending.get(&hash).map(|pending| pending.peer_addr);
+        let source_peer = self.pending.get(&hash).map(|pending| pending.owner);
         self.mark_received_from(hash, bytes, source_peer, now)
+            .is_none()
     }
 
     /// Credits a duplicate after the first copy was already staged.
     ///
     /// The first copy owns all byte, EWMA, cold-front and probe accounting.
-    pub fn credit_duplicate_delivery(&mut self, hash: Hash256, source_peer: SocketAddr) {
-        if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && observation.peer_addr == source_peer
-        }) {
+    pub fn credit_duplicate_delivery(&mut self, hash: Hash256, source: PeerSource) {
+        if self
+            .pending_timeout_observation
+            .is_some_and(|observation| observation.hash == hash && observation.owner == source)
+        {
             self.pending_timeout_observation = None;
         }
     }
@@ -2031,9 +2087,11 @@ impl DownloadWindow {
     /// (Core's `RemoveBlockRequest`: "this peer delivered, so it's not
     /// stalling"). Called after `hash` was removed from `pending`.
     ///
-    /// Any requested block arriving from the episode peer clears the running
-    /// episode, so blame accumulates only against a peer that delivers
-    /// *nothing* while owning the front and others stream past it. In the
+    /// Any requested block arriving from the episode *connection* clears the
+    /// running episode, so blame accumulates only against a connection that
+    /// delivers *nothing* while owning the front and others stream past it.
+    /// A same-address replacement's deliveries never clear its predecessor's
+    /// clock. In the
     /// saturated fan-out steady state (the staged backlog sits at the count
     /// budget, so the staged-fraction arming term holds almost always),
     /// charging only front arrivals would serially false-blame
@@ -2052,14 +2110,14 @@ impl DownloadWindow {
     /// progress.
     fn record_delivery_progress(
         &mut self,
-        peer_addr: SocketAddr,
+        source: PeerSource,
         hash: Hash256,
         height: u32,
         now: Instant,
     ) {
         if self
             .stall
-            .is_some_and(|episode| episode.peer_addr == peer_addr || episode.front_hash == hash)
+            .is_some_and(|episode| episode.owner == source || episode.front_hash == hash)
         {
             self.stall = None;
             count_stall_episode_cleared("peer_delivery");
@@ -2159,12 +2217,12 @@ impl DownloadWindow {
     pub fn reject_delivery(
         &mut self,
         hash: Hash256,
-        source_peer: Option<SocketAddr>,
+        source_peer: Option<PeerSource>,
     ) -> RejectDelivery {
         // A malformed response is still proof that this peer answered. Do not
         // let a first-tick timeout observation disconnect it on the next tick.
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && Some(observation.peer_addr) == source_peer
+            observation.hash == hash && Some(observation.owner) == source_peer
         }) {
             self.pending_timeout_observation = None;
         }
@@ -2193,7 +2251,7 @@ impl DownloadWindow {
         let is_owner = self
             .pending
             .get(&hash)
-            .is_some_and(|pending| Some(pending.peer_addr) == source_peer);
+            .is_some_and(|pending| Some(pending.owner) == source_peer);
         if is_owner {
             if let Some(pending) = self.remove_pending(&hash) {
                 self.next_request_height = self.next_request_height.min(pending.height);
@@ -2221,7 +2279,7 @@ impl DownloadWindow {
                 now.duration_since(pending.requested_at) >= pending_timeout
             }) {
                 *pending_bytes = pending_bytes.saturating_sub(pending.estimated_bytes);
-                release_peer_block(peer_inflight, pending.peer_addr);
+                release_peer_block(peer_inflight, pending.owner.addr);
                 *next_request_height = (*next_request_height).min(pending.height);
                 entries.push(PeerRequestEntry {
                     hash,
@@ -2242,7 +2300,7 @@ impl DownloadWindow {
     fn remove_pending(&mut self, hash: &Hash256) -> Option<PendingBlock> {
         let pending = self.pending.remove(hash)?;
         self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-        self.release_peer_block(pending.peer_addr);
+        self.release_peer_block(pending.owner.addr);
         if Some(self.pending_deadline(pending.requested_at)) == self.next_pending_deadline {
             self.refresh_next_pending_deadline();
         }
@@ -2335,6 +2393,58 @@ mod tests {
         DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
         FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, fast_sync_budget,
     };
+    use crate::connection::{ConnectionId, PeerSource};
+
+    fn test_source(addr: std::net::SocketAddr) -> PeerSource {
+        PeerSource::for_test(addr)
+    }
+
+    /// Releases every assignment owned by connections at addresses `keep`
+    /// rejects, mirroring `reconcile_peer_sessions`' live set for the
+    /// seeded window.
+    fn release_addrs(window: &mut DownloadWindow, keep: impl Fn(std::net::SocketAddr) -> bool) {
+        let mut live: Vec<(std::net::SocketAddr, ConnectionId)> = window
+            .pending
+            .values()
+            .filter(|pending| keep(pending.owner.addr))
+            .map(|pending| (pending.owner.addr, pending.owner.connection_id()))
+            .collect();
+        live.sort_by_key(|(addr, _)| *addr);
+        live.dedup();
+        window.release_disconnected_peers(&live);
+    }
+
+    fn stall_owner(
+        window: &mut DownloadWindow,
+        next_apply_height: u32,
+        apply_side_busy: bool,
+        now: Instant,
+    ) -> Option<std::net::SocketAddr> {
+        window
+            .observe_stall(next_apply_height, apply_side_busy, now)
+            .map(|owner| owner.addr)
+    }
+
+    fn timeout_owner(
+        window: &mut DownloadWindow,
+        apply_side_busy: bool,
+        now: Instant,
+    ) -> Option<std::net::SocketAddr> {
+        window
+            .observe_pending_timeout(apply_side_busy, now)
+            .map(|owner| owner.addr)
+    }
+
+    fn cold_front_owner(
+        window: &mut DownloadWindow,
+        next_apply_height: u32,
+        apply_side_busy: bool,
+        now: Instant,
+    ) -> Option<(std::net::SocketAddr, Hash256)> {
+        window
+            .observe_cold_front(next_apply_height, apply_side_busy, now)
+            .map(|(owner, hash)| (owner.addr, hash))
+    }
 
     #[test]
     fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
@@ -2370,7 +2480,7 @@ mod tests {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    peer_addr,
+                    owner: test_source(peer_addr),
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2399,16 +2509,16 @@ mod tests {
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                peer_addr,
+                owner: test_source(peer_addr),
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
             },
         );
         window.next_pending_deadline = Some(observed_at);
-        assert_eq!(window.observe_pending_timeout(false, observed_at), None);
+        assert_eq!(timeout_owner(&mut window, false, observed_at), None);
         window.mark_received(block_hash, 80, observed_at);
-        assert_eq!(window.observe_pending_timeout(false, observed_at), None);
+        assert_eq!(timeout_owner(&mut window, false, observed_at), None);
         assert!(!window.peer_in_staller_cooldown(peer_addr, observed_at));
     }
 
@@ -2421,11 +2531,17 @@ mod tests {
         let requested_at = Instant::now();
         let observed_at = requested_at + Duration::from_secs(10);
         let peer_addr = staller_addr();
-        insert_pending(&mut window, peer_addr, hash(0x92), 1, requested_at);
+        insert_pending(
+            &mut window,
+            test_source(peer_addr),
+            hash(0x92),
+            1,
+            requested_at,
+        );
 
-        assert_eq!(window.observe_pending_timeout(false, observed_at), None);
+        assert_eq!(timeout_owner(&mut window, false, observed_at), None);
         assert!(window.pending_timeout_observation.is_some());
-        assert_eq!(window.observe_pending_timeout(true, observed_at), None);
+        assert_eq!(timeout_owner(&mut window, true, observed_at), None);
         assert!(window.pending_timeout_observation.is_none());
         assert!(!window.peer_in_staller_cooldown(peer_addr, observed_at));
     }
@@ -2444,7 +2560,7 @@ mod tests {
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                peer_addr: original_peer,
+                owner: test_source(original_peer),
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2452,10 +2568,10 @@ mod tests {
         );
         window.next_pending_deadline = Some(observed_at);
 
-        assert_eq!(window.observe_pending_timeout(false, observed_at), None);
-        window.mark_received_from(block_hash, 80, Some(retry_peer), observed_at);
+        assert_eq!(timeout_owner(&mut window, false, observed_at), None);
+        window.mark_received_from(block_hash, 80, Some(test_source(retry_peer)), observed_at);
         assert_eq!(
-            window.observe_pending_timeout(false, observed_at),
+            timeout_owner(&mut window, false, observed_at),
             Some(original_peer)
         );
         assert!(window.peer_in_staller_cooldown(original_peer, observed_at));
@@ -2495,7 +2611,7 @@ mod tests {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    peer_addr,
+                    owner: test_source(peer_addr),
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2505,7 +2621,7 @@ mod tests {
             window.record_pending_deadline(requested_at);
         }
 
-        window.release_disconnected_peers(|peer| *peer == live_peer);
+        release_addrs(&mut window, |a| a == live_peer);
 
         assert_eq!(window.pending_len(), 1);
         assert_eq!(window.pending_bytes(), estimated_bytes);
@@ -2537,7 +2653,7 @@ mod tests {
             window.pending.insert(
                 hash,
                 super::PendingBlock {
-                    peer_addr,
+                    owner: test_source(peer_addr),
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2573,7 +2689,7 @@ mod tests {
         window.pending.insert(
             pending,
             super::PendingBlock {
-                peer_addr,
+                owner: test_source(peer_addr),
                 requested_at: now,
                 height: 2,
                 estimated_bytes: pending_bytes,
@@ -2745,7 +2861,7 @@ mod tests {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    peer_addr,
+                    owner: test_source(peer_addr),
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2816,15 +2932,15 @@ mod tests {
 
     fn insert_pending(
         window: &mut DownloadWindow,
-        peer_addr: std::net::SocketAddr,
+        owner: PeerSource,
         block_hash: Hash256,
         height: u32,
         now: Instant,
-    ) {
+    ) -> PeerSource {
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                peer_addr,
+                owner,
                 requested_at: now,
                 height,
                 estimated_bytes: 80,
@@ -2832,8 +2948,9 @@ mod tests {
         );
         window.pending_bytes = window.pending_bytes.saturating_add(80);
         window.record_pending_deadline(now);
-        let inflight = window.peer_inflight.entry(peer_addr).or_default();
+        let inflight = window.peer_inflight.entry(owner.addr).or_default();
         inflight.blocks = inflight.blocks.saturating_add(1);
+        owner
     }
 
     /// Seeds the front-cadence EWMA through the real delivery path: heights
@@ -2848,11 +2965,11 @@ mod tests {
         t0: Instant,
         gap: Duration,
     ) -> Instant {
-        insert_pending(window, peer, hash(0x01), 1, t0);
+        insert_pending(window, test_source(peer), hash(0x01), 1, t0);
         window.mark_received(hash(0x01), 80, t0);
         window.mark_applied(&hash(0x01));
         let t1 = t0 + gap;
-        insert_pending(window, peer, hash(0x02), 2, t1);
+        insert_pending(window, test_source(peer), hash(0x02), 2, t1);
         window.mark_received(hash(0x02), 80, t1);
         window.mark_applied(&hash(0x02));
         t1
@@ -2875,9 +2992,9 @@ mod tests {
         let mut window = DownloadWindow::new(stall_budget());
         let t1 = seed_front_cadence(&mut window, healthy, t0, Duration::from_millis(100));
         assert_eq!(window.front_interval_ewma_ms(), Some(100));
-        insert_pending(&mut window, staller, hash(0x03), 3, t1);
+        insert_pending(&mut window, test_source(staller), hash(0x03), 3, t1);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
-            insert_pending(&mut window, healthy, hash(byte), height, t1);
+            insert_pending(&mut window, test_source(healthy), hash(byte), height, t1);
             window.mark_received(hash(byte), 80, t1);
         }
         (window, t1)
@@ -2898,11 +3015,11 @@ mod tests {
         // how much time passes.
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
-        insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, now);
 
-        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(stall_owner(&mut window, 1, false, now), None);
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -2915,15 +3032,21 @@ mod tests {
         // attaches even with delivered successors and zero headroom.
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
-        insert_pending(&mut window, staller_addr(), hash(0x02), 2, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x02), 2, now);
         for (byte, height) in [(0x03_u8, 3_u32), (0x04, 4), (0x05, 5)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
             window.mark_received(hash(byte), 80, now);
         }
 
-        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(stall_owner(&mut window, 1, false, now), None);
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -2941,12 +3064,12 @@ mod tests {
         // capacity_closed`.)
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
-        insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
-        insert_pending(&mut window, healthy_addr(), hash(0x02), 2, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, now);
+        insert_pending(&mut window, test_source(healthy_addr()), hash(0x02), 2, now);
         window.mark_received(hash(0x02), 80, now);
         assert!(window.has_request_capacity());
 
-        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(stall_owner(&mut window, 1, false, now), None);
         assert!(window.stalling_peer().is_none());
 
         // Chain-tail decision (ADV-2): this same state at the header tip
@@ -2956,7 +3079,7 @@ mod tests {
         // Below the staged fraction the predicate stays false no matter how
         // much time passes.
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -2978,10 +3101,16 @@ mod tests {
             Instant::now(),
             Duration::from_millis(100),
         );
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x03), 3, now);
         // Exactly half the 4-slot staged window (2 blocks) above the front.
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
             window.mark_received(hash(byte), 80, now);
         }
         assert!(
@@ -2991,16 +3120,16 @@ mod tests {
 
         // U7 no-blame guard, under the new arming term: while the apply
         // side is busy the armed-shaped window must not start an episode.
-        assert_eq!(window.observe_stall(3, true, now), None);
+        assert_eq!(stall_owner(&mut window, 3, true, now), None);
         assert!(window.stalling_peer().is_none());
 
         // Apply idle: the staged fraction arms, and the unchanged
         // conviction clock fires at the unchanged threshold.
-        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(stall_owner(&mut window, 3, false, now), None);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
         assert!(window.has_request_capacity());
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
             Some(staller_addr())
         );
     }
@@ -3026,14 +3155,14 @@ mod tests {
                 Instant::now(),
                 Duration::from_millis(100),
             );
-            insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+            insert_pending(&mut window, test_source(staller_addr()), hash(0x03), 3, now);
             let half = depth / 2;
             // One below the fraction: no episode, no matter the depth.
             for offset in 0..half - 1 {
                 let byte = u8::try_from(4 + offset).unwrap_or_else(|_| panic!("height fits u8"));
                 insert_pending(
                     &mut window,
-                    healthy_addr(),
+                    test_source(healthy_addr()),
                     hash(byte),
                     u32::from(byte),
                     now,
@@ -3041,7 +3170,7 @@ mod tests {
                 window.mark_received(hash(byte), 80, now);
             }
             assert!(window.has_request_capacity());
-            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert!(
                 window.stalling_peer().is_none(),
                 "one below half the window must not arm (depth {depth})"
@@ -3051,14 +3180,14 @@ mod tests {
             let byte = u8::try_from(4 + half - 1).unwrap_or_else(|_| panic!("height fits u8"));
             insert_pending(
                 &mut window,
-                healthy_addr(),
+                test_source(healthy_addr()),
                 hash(byte),
                 u32::from(byte),
                 now,
             );
             window.mark_received(hash(byte), 80, now);
             assert!(window.has_request_capacity());
-            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert_eq!(
                 window.stalling_peer(),
                 Some((staller_addr(), now)),
@@ -3089,9 +3218,15 @@ mod tests {
             Instant::now(),
             Duration::from_millis(100),
         );
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x03), 3, now);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6), (0x07, 7)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
             window.mark_received(hash(byte), 80, now);
         }
         assert!(
@@ -3099,10 +3234,10 @@ mod tests {
             "the staged-byte clamp must close request capacity (the old arming trigger)"
         );
 
-        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(stall_owner(&mut window, 3, false, now), None);
         assert!(window.stalling_peer().is_none());
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, 3, false, now + Duration::from_mins(1)),
             None,
             "capacity-closed below the staged fraction must never arm"
         );
@@ -3115,14 +3250,14 @@ mod tests {
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
 
         // Episode starts on first observation; no fire before the threshold.
-        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(stall_owner(&mut window, 3, false, now), None);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(1)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(1)),
             None
         );
 
-        let fired = window.observe_stall(3, false, now + Duration::from_secs(2));
+        let fired = stall_owner(&mut window, 3, false, now + Duration::from_secs(2));
 
         assert_eq!(fired, Some(staller_addr()));
         assert!(window.stalling_peer().is_none());
@@ -3139,22 +3274,22 @@ mod tests {
         assert_eq!(window.stall_timeout(), Duration::from_secs(2));
 
         // Fire 1 at +2s: threshold doubles to 4s.
-        window.observe_stall(3, false, now);
+        stall_owner(&mut window, 3, false, now);
         let mut at = now + Duration::from_secs(2);
-        assert_eq!(window.observe_stall(3, false, at), Some(staller_addr()));
+        assert_eq!(stall_owner(&mut window, 3, false, at), Some(staller_addr()));
         assert_eq!(window.stall_timeout(), Duration::from_secs(4));
 
         // The window state still satisfies the predicate (the disconnect and
         // re-queue are the sync layer's job), so a fresh episode starts and
         // must now survive the doubled threshold: fire 2 doubles to the 8s
         // cap, fire 3 stays capped.
-        window.observe_stall(3, false, at);
+        stall_owner(&mut window, 3, false, at);
         at += Duration::from_secs(4);
-        assert_eq!(window.observe_stall(3, false, at), Some(staller_addr()));
+        assert_eq!(stall_owner(&mut window, 3, false, at), Some(staller_addr()));
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
-        window.observe_stall(3, false, at);
+        stall_owner(&mut window, 3, false, at);
         at += Duration::from_secs(8);
-        assert_eq!(window.observe_stall(3, false, at), Some(staller_addr()));
+        assert_eq!(stall_owner(&mut window, 3, false, at), Some(staller_addr()));
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
 
         // Progress: the front block arrives — any running episode ends, and
@@ -3166,7 +3301,7 @@ mod tests {
         // above the bare x0.85 decay (8s x0.85 = 6.8s), so the floor binds.
         // (The bare decay arithmetic in isolation is pinned by
         // `stall_timeout_decays_across_rotation_and_shields_slow_honest_peer`.)
-        window.observe_stall(3, false, at);
+        stall_owner(&mut window, 3, false, at);
         window.mark_received(hash(0x03), 80, at);
         assert_eq!(window.front_interval_ewma_ms(), Some(3575));
         assert_eq!(window.stall_timeout(), Duration::from_millis(7150));
@@ -3187,21 +3322,27 @@ mod tests {
             Instant::now(),
             Duration::from_millis(100),
         );
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x03), 3, now);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
             window.mark_received(hash(byte), 80, now);
         }
-        insert_pending(&mut window, healthy_addr(), hash(0x06), 6, now);
+        insert_pending(&mut window, test_source(healthy_addr()), hash(0x06), 6, now);
 
-        window.observe_stall(3, false, now);
+        stall_owner(&mut window, 3, false, now);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
 
         window.mark_received(hash(0x06), 80, now + Duration::from_secs(1));
 
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
             Some(staller_addr())
         );
     }
@@ -3213,22 +3354,22 @@ mod tests {
 
         // With the apply side busy the clock never runs, no matter how long
         // the state persists.
-        assert_eq!(window.observe_stall(3, true, now), None);
+        assert_eq!(stall_owner(&mut window, 3, true, now), None);
         assert!(window.stalling_peer().is_none());
         let later = now + Duration::from_mins(1);
-        assert_eq!(window.observe_stall(3, true, later), None);
+        assert_eq!(stall_owner(&mut window, 3, true, later), None);
         assert!(window.stalling_peer().is_none());
 
         // Once the apply side drains, blame starts from scratch — the busy
         // interval is never retroactively charged to the peer.
-        assert_eq!(window.observe_stall(3, false, later), None);
+        assert_eq!(stall_owner(&mut window, 3, false, later), None);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), later)));
         assert_eq!(
-            window.observe_stall(3, false, later + Duration::from_secs(1)),
+            stall_owner(&mut window, 3, false, later + Duration::from_secs(1)),
             None
         );
         assert_eq!(
-            window.observe_stall(3, false, later + Duration::from_secs(2)),
+            stall_owner(&mut window, 3, false, later + Duration::from_secs(2)),
             Some(staller_addr())
         );
     }
@@ -3349,33 +3490,33 @@ mod tests {
                 window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
 
             // No running episode: the guard paths must not count a clear.
-            assert_eq!(window.observe_stall(3, true, now), None);
-            assert_eq!(window.observe_stall(4, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, true, now), None);
+            assert_eq!(stall_owner(&mut window, 4, false, now), None);
             assert_eq!(recorder.cleared("apply_busy"), 0);
             assert_eq!(recorder.cleared("predicate"), 0);
             assert_eq!(recorder.started(), 0);
 
             // apply_busy: a running episode cleared by the no-blame guard.
-            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert_eq!(recorder.started(), 1);
-            assert_eq!(window.observe_stall(3, true, now), None);
+            assert_eq!(stall_owner(&mut window, 3, true, now), None);
             assert_eq!(recorder.cleared("apply_busy"), 1);
 
             // predicate: re-arm, then a predicate term goes false (the
             // frontier moves past the pending front, so term 1 fails).
-            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert_eq!(recorder.started(), 2);
-            assert_eq!(window.observe_stall(4, false, now), None);
+            assert_eq!(stall_owner(&mut window, 4, false, now), None);
             assert_eq!(recorder.cleared("predicate"), 1);
 
             // front_moved: re-arm, then re-key the front to another peer at
             // the same frontier while every predicate term still holds — the
             // old episode clears as front_moved and a new one starts.
-            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert_eq!(recorder.started(), 3);
             window.remove_pending(&hash(0x03));
-            insert_pending(&mut window, healthy_addr(), hash(0x07), 3, now);
-            assert_eq!(window.observe_stall(3, false, now), None);
+            insert_pending(&mut window, test_source(healthy_addr()), hash(0x07), 3, now);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert_eq!(recorder.cleared("front_moved"), 1);
             assert_eq!(recorder.started(), 4);
 
@@ -3387,10 +3528,10 @@ mod tests {
             // fired: a fresh construction runs an episode to conviction.
             let (mut window, now) =
                 window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
-            assert_eq!(window.observe_stall(3, false, now), None);
+            assert_eq!(stall_owner(&mut window, 3, false, now), None);
             assert_eq!(recorder.started(), 5);
             assert_eq!(
-                window.observe_stall(3, false, now + Duration::from_secs(2)),
+                stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
                 Some(staller_addr())
             );
             assert_eq!(recorder.cleared("fired"), 1);
@@ -3430,10 +3571,10 @@ mod tests {
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
 
         // Below the 1s log age: episode running, nothing emitted.
-        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(stall_owner(&mut window, 3, false, now), None);
         assert_eq!(info_logged(&window), Some(false));
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_millis(500)),
+            stall_owner(&mut window, 3, false, now + Duration::from_millis(500)),
             None
         );
         assert_eq!(info_logged(&window), Some(false));
@@ -3441,16 +3582,16 @@ mod tests {
         // Past 1s: the latch flips on the emitting tick and stays latched —
         // one line, no matter how many further ticks the episode survives.
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(1)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(1)),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_millis(1500)),
+            stall_owner(&mut window, 3, false, now + Duration::from_millis(1500)),
             None
         );
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_millis(1900)),
+            stall_owner(&mut window, 3, false, now + Duration::from_millis(1900)),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
@@ -3458,17 +3599,17 @@ mod tests {
         // Fire ends the episode; the replacement episode (judged against the
         // doubled threshold) carries a fresh latch and re-emits once at 1s.
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
             Some(staller_addr())
         );
         assert_eq!(info_logged(&window), None);
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(2)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
             None
         );
         assert_eq!(info_logged(&window), Some(false));
         assert_eq!(
-            window.observe_stall(3, false, now + Duration::from_secs(4)),
+            stall_owner(&mut window, 3, false, now + Duration::from_secs(4)),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
@@ -3482,23 +3623,29 @@ mod tests {
     fn stall_episode_logs_info_during_ewma_cold_start_without_firing() {
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
-        insert_pending(&mut window, staller_addr(), hash(0x01), 1, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, now);
         for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
             window.mark_received(hash(byte), 80, now);
         }
         assert_eq!(window.front_interval_ewma_ms(), None);
 
-        assert_eq!(window.observe_stall(1, false, now), None);
+        assert_eq!(stall_owner(&mut window, 1, false, now), None);
         assert_eq!(info_logged(&window), Some(false));
         // The INFO latch flips at 1s, but an unseeded window never convicts.
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_secs(1)),
+            stall_owner(&mut window, 1, false, now + Duration::from_secs(1)),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
         assert_eq!(
-            window.observe_stall(1, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
@@ -3541,11 +3688,11 @@ mod tests {
         // fallback`), and in real IBD the EWMA has tracked the cadence since
         // the first two blocks of the session anyway, long before blocks
         // grow past one threshold of transfer time.
-        insert_pending(&mut window, peer_addr(0), hash(0x01), 1, t0);
+        insert_pending(&mut window, test_source(peer_addr(0)), hash(0x01), 1, t0);
         window.mark_received(hash(0x01), 80, t0);
         window.mark_applied(&hash(0x01));
         let t1 = t0 + Duration::from_secs(3);
-        insert_pending(&mut window, peer_addr(0), hash(0x02), 2, t1);
+        insert_pending(&mut window, test_source(peer_addr(0)), hash(0x02), 2, t1);
         window.mark_received(hash(0x02), 80, t1);
         window.mark_applied(&hash(0x02));
         assert_eq!(window.front_interval_ewma_ms(), Some(3000));
@@ -3561,7 +3708,7 @@ mod tests {
                 let height = peer * 3 + slot + 3;
                 insert_pending(
                     &mut window,
-                    peer_addr(peer),
+                    test_source(peer_addr(peer)),
                     hash(height),
                     u32::from(height),
                     t1,
@@ -3569,7 +3716,7 @@ mod tests {
             }
         }
         // Nothing staged yet: download-bound, no episode regardless of time.
-        assert_eq!(window.observe_stall(3, false, t1), None);
+        assert_eq!(stall_owner(&mut window, 3, false, t1), None);
 
         for round in 0..3u8 {
             let at = t1 + Duration::from_secs(3) * (u32::from(round) + 1);
@@ -3580,7 +3727,7 @@ mod tests {
                 window.mark_received(hash(height), 80, at);
             }
             assert_eq!(
-                window.observe_stall(3, false, at),
+                stall_owner(&mut window, 3, false, at),
                 None,
                 "a streaming peer must never fire (round {round})"
             );
@@ -3590,7 +3737,7 @@ mod tests {
             // pre-fix drip fired exactly here) but under the 6s adaptive
             // floor.
             assert_eq!(
-                window.observe_stall(3, false, at + Duration::from_secs(2)),
+                stall_owner(&mut window, 3, false, at + Duration::from_secs(2)),
                 None,
                 "a mid-gap observation must never fire on a streaming peer (round {round})"
             );
@@ -3623,16 +3770,16 @@ mod tests {
         // construction) sits at the count budget, far past the half-window
         // arming fraction, so the predicate holds the moment a front
         // pending and a staged successor exist.
-        insert_pending(&mut window, peer_addr(0), hash(27), 27, end);
-        insert_pending(&mut window, peer_addr(1), hash(28), 28, end);
+        insert_pending(&mut window, test_source(peer_addr(0)), hash(27), 27, end);
+        insert_pending(&mut window, test_source(peer_addr(1)), hash(28), 28, end);
         window.mark_received(hash(28), 80, end);
-        assert_eq!(window.observe_stall(27, false, end), None);
+        assert_eq!(stall_owner(&mut window, 27, false, end), None);
         assert_eq!(
             window.stalling_peer().map(|(addr, _)| addr),
             Some(peer_addr(0))
         );
         assert_eq!(
-            window.observe_stall(27, false, end + Duration::from_secs(7)),
+            stall_owner(&mut window, 27, false, end + Duration::from_secs(7)),
             None,
             "a slow honest front owner must stay under the preserved adaptive floor"
         );
@@ -3656,14 +3803,23 @@ mod tests {
             Instant::now(),
             Duration::from_millis(100),
         );
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
-        insert_pending(&mut window, staller_addr(), hash(0x06), 6, now);
+        // Both pendings belong to one connection: its mid-window delivery is
+        // owner progress and restarts that connection's episode clock.
+        let staller = test_source(staller_addr());
+        insert_pending(&mut window, staller, hash(0x03), 3, now);
+        insert_pending(&mut window, staller, hash(0x06), 6, now);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, now);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
             window.mark_received(hash(byte), 80, now);
         }
 
-        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(stall_owner(&mut window, 3, false, now), None);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
 
         // The episode peer delivers its mid-window block at +1.5s: progress,
@@ -3675,13 +3831,13 @@ mod tests {
         // +2.5s (past the original episode's threshold): blame restarts from
         // the delivery, no fire.
         let restarted = now + Duration::from_millis(2500);
-        assert_eq!(window.observe_stall(3, false, restarted), None);
+        assert_eq!(stall_owner(&mut window, 3, false, restarted), None);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), restarted)));
 
         // No deliveries for a full threshold after that: a true staller now,
         // and it fires.
         assert_eq!(
-            window.observe_stall(3, false, restarted + Duration::from_secs(2)),
+            stall_owner(&mut window, 3, false, restarted + Duration::from_secs(2)),
             Some(staller_addr())
         );
     }
@@ -3704,10 +3860,10 @@ mod tests {
         // `stall_decay_limit_cycle_stops_at_adaptive_floor`.
         let (mut window, now) =
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
-        assert_eq!(window.observe_stall(3, false, now), None);
+        assert_eq!(stall_owner(&mut window, 3, false, now), None);
         let fired_at = now + Duration::from_secs(2);
         assert_eq!(
-            window.observe_stall(3, false, fired_at),
+            stall_owner(&mut window, 3, false, fired_at),
             Some(staller_addr())
         );
         assert_eq!(window.stall_timeout(), Duration::from_secs(4));
@@ -3715,8 +3871,14 @@ mod tests {
         // Rotation: the sync layer drops the staller and re-queues the front
         // to the healthy peer, which delivers it. The 2s wedge gap is a real
         // sample: EWMA 100 -> 100 + (2000-100)/4 = 575ms, floor still 2s.
-        window.release_disconnected_peers(|peer| *peer != staller_addr());
-        insert_pending(&mut window, healthy_addr(), hash(0x03), 3, fired_at);
+        release_addrs(&mut window, |a| a != staller_addr());
+        insert_pending(
+            &mut window,
+            test_source(healthy_addr()),
+            hash(0x03),
+            3,
+            fired_at,
+        );
         window.mark_received(hash(0x03), 80, fired_at);
         assert_eq!(window.front_interval_ewma_ms(), Some(575));
         assert_eq!(
@@ -3729,14 +3891,20 @@ mod tests {
         // window again saturated: 3s of blame stays under the elevated
         // 3.4s threshold — no fire.
         let honest = peer_addr(3);
-        insert_pending(&mut window, honest, hash(0x07), 7, fired_at);
+        insert_pending(&mut window, test_source(honest), hash(0x07), 7, fired_at);
         for (byte, height) in [(0x08_u8, 8_u32), (0x09, 9)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, fired_at);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                fired_at,
+            );
             window.mark_received(hash(byte), 80, fired_at);
         }
-        assert_eq!(window.observe_stall(7, false, fired_at), None);
+        assert_eq!(stall_owner(&mut window, 7, false, fired_at), None);
         assert_eq!(
-            window.observe_stall(7, false, fired_at + Duration::from_secs(3)),
+            stall_owner(&mut window, 7, false, fired_at + Duration::from_secs(3)),
             None,
             "a ~3s honest front owner must not fire while the threshold is elevated"
         );
@@ -3752,7 +3920,13 @@ mod tests {
             (0x0c, Duration::from_secs(2)),
             (0x0d, Duration::from_secs(2)),
         ] {
-            insert_pending(&mut window, honest, hash(byte), u32::from(byte), fired_at);
+            insert_pending(
+                &mut window,
+                test_source(honest),
+                hash(byte),
+                u32::from(byte),
+                fired_at,
+            );
             window.mark_received(hash(byte), 80, fired_at);
             assert_eq!(window.stall_timeout(), expected);
         }
@@ -3777,9 +3951,14 @@ mod tests {
         let (mut window, front, at, _silent) = limit_cycle_window_state();
         assert_eq!(window.front_interval_ewma_ms(), Some(3239));
         // No re-fire: the honest 3s owner must never cross the adaptive floor.
-        assert_eq!(window.observe_stall(u32::from(front), false, at), None);
+        assert_eq!(stall_owner(&mut window, u32::from(front), false, at), None);
         assert_eq!(
-            window.observe_stall(u32::from(front), false, at + Duration::from_secs(3)),
+            stall_owner(
+                &mut window,
+                u32::from(front),
+                false,
+                at + Duration::from_secs(3)
+            ),
             None,
             "honest front owner must not fire after limit cycle stops"
         );
@@ -3797,22 +3976,32 @@ mod tests {
         // successor arrival (different peer, not the front hash) and convicts
         // at the adaptive ~2g threshold — 6.478s, far inside the 60s
         // pending-timeout fallback.
-        assert_eq!(window.observe_stall(u32::from(front), false, at), None);
+        assert_eq!(stall_owner(&mut window, u32::from(front), false, at), None);
         insert_pending(
             &mut window,
-            healthy_addr(),
+            test_source(healthy_addr()),
             hash(front + 4),
             u32::from(front) + 4,
             at,
         );
         window.mark_received(hash(front + 4), 80, at + Duration::from_secs(2));
         assert_eq!(
-            window.observe_stall(u32::from(front), false, at + Duration::from_secs(3)),
+            stall_owner(
+                &mut window,
+                u32::from(front),
+                false,
+                at + Duration::from_secs(3)
+            ),
             None,
             "a true staller is judged at the adaptive floor, not the static 2s"
         );
         assert_eq!(
-            window.observe_stall(u32::from(front), false, at + Duration::from_millis(6478)),
+            stall_owner(
+                &mut window,
+                u32::from(front),
+                false,
+                at + Duration::from_millis(6478)
+            ),
             Some(silent),
             "a silent front owner must still convict at the adaptive threshold"
         );
@@ -3830,6 +4019,8 @@ mod tests {
     /// adaptive floor. Returns `(window, front_height, now, silent_peer)`.
     fn limit_cycle_window_state() -> (DownloadWindow, u8, Instant, std::net::SocketAddr) {
         let mut window = DownloadWindow::new(stall_budget());
+        let healthy = test_source(healthy_addr());
+        let staller = test_source(staller_addr());
         let t1 = seed_front_cadence(
             &mut window,
             healthy_addr(),
@@ -3838,38 +4029,38 @@ mod tests {
         );
 
         // First conviction: staller takes height 3 at the 6s adaptive floor.
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, t1);
+        insert_pending(&mut window, staller, hash(0x03), 3, t1);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, t1);
+            insert_pending(&mut window, healthy, hash(byte), height, t1);
             window.mark_received(hash(byte), 80, t1);
         }
-        assert_eq!(window.observe_stall(3, false, t1), None);
+        assert_eq!(stall_owner(&mut window, 3, false, t1), None);
         assert_eq!(
-            window.observe_stall(3, false, t1 + Duration::from_secs(3)),
+            stall_owner(&mut window, 3, false, t1 + Duration::from_secs(3)),
             None,
             "one honest-cadence gap of blame must stay under the adaptive floor"
         );
         let fired_at = t1 + Duration::from_secs(6);
         assert_eq!(
-            window.observe_stall(3, false, fired_at),
+            stall_owner(&mut window, 3, false, fired_at),
             Some(staller_addr())
         );
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
-        window.release_disconnected_peers(|peer| *peer != staller_addr());
+        release_addrs(&mut window, |a| a != staller_addr());
 
         // Healthy peer resumes; four 3s cycles walk the EWMA back with the
         // decay clamped at the adaptive floor — the limit cycle never re-fires.
-        insert_pending(&mut window, healthy_addr(), hash(0x03), 3, fired_at);
+        insert_pending(&mut window, healthy, hash(0x03), 3, fired_at);
         window.mark_received(hash(0x03), 80, fired_at);
         for offset in 0..4u8 {
             window.mark_received_applied(&hash(3 + offset));
         }
         let silent = peer_addr(9);
-        insert_pending(&mut window, healthy_addr(), hash(0x07), 7, fired_at);
+        insert_pending(&mut window, healthy, hash(0x07), 7, fired_at);
         for offset in 1..4u8 {
             insert_pending(
                 &mut window,
-                healthy_addr(),
+                healthy,
                 hash(7 + offset),
                 u32::from(7 + offset),
                 fired_at,
@@ -3887,8 +4078,11 @@ mod tests {
         for expected_timeout in expected {
             let arrive = at + Duration::from_secs(3);
             // No fire at wake or at honest-cadence arrival.
-            assert_eq!(window.observe_stall(u32::from(front), false, at), None);
-            assert_eq!(window.observe_stall(u32::from(front), false, arrive), None);
+            assert_eq!(stall_owner(&mut window, u32::from(front), false, at), None);
+            assert_eq!(
+                stall_owner(&mut window, u32::from(front), false, arrive),
+                None
+            );
             window.mark_received(hash(front), 80, arrive);
             assert_eq!(
                 window.stall_timeout(),
@@ -3906,7 +4100,7 @@ mod tests {
             };
             insert_pending(
                 &mut window,
-                owner,
+                test_source(owner),
                 hash(next_front),
                 u32::from(next_front),
                 arrive,
@@ -3915,7 +4109,7 @@ mod tests {
                 let height = next_front + offset;
                 insert_pending(
                     &mut window,
-                    healthy_addr(),
+                    healthy,
                     hash(height),
                     u32::from(height),
                     arrive,
@@ -3935,21 +4129,31 @@ mod tests {
         // predicate. It races only the unchanged apply-front hash.
         let t0 = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
-        insert_pending(&mut window, staller_addr(), hash(0x01), 1, t0);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, t0);
         for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, t0);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                t0,
+            );
             window.mark_received(hash(byte), 80, t0);
         }
         assert_eq!(window.front_interval_ewma_ms(), None);
 
-        assert_eq!(window.observe_cold_front(1, false, t0), None);
+        assert_eq!(cold_front_owner(&mut window, 1, false, t0), None);
         assert_eq!(
-            window.observe_cold_front(1, false, t0 + Duration::from_secs(2)),
+            cold_front_owner(&mut window, 1, false, t0 + Duration::from_secs(2)),
             Some((staller_addr(), hash(0x01)))
         );
-        window.confirm_cold_front_hedge(staller_addr(), healthy_addr(), hash(0x01));
+        let owner = window
+            .pending_owner(&hash(0x01))
+            .unwrap_or_else(|| panic!("pending owner"));
+        let alternate = test_source(healthy_addr());
+        window.confirm_cold_front_hedge(owner, alternate, hash(0x01));
         assert_eq!(
-            window.observe_cold_front(1, false, t0 + Duration::from_secs(30)),
+            cold_front_owner(&mut window, 1, false, t0 + Duration::from_secs(30)),
             None
         );
         assert_eq!(window.stall_timeout(), Duration::from_secs(2));
@@ -3959,10 +4163,10 @@ mod tests {
         // demotes the tracked owner and selects the replacement deep peer.
         let t1 = t0 + Duration::from_secs(30);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            peer_addr: staller_addr(),
+            owner: test_source(staller_addr()),
             hash: hash(0x01),
         });
-        window.mark_received_from(hash(0x01), 80, Some(healthy_addr()), t1);
+        window.mark_received_from(hash(0x01), 80, Some(alternate), t1);
         assert_eq!(window.preferred_peer(), Some(healthy_addr()));
         assert!(window.peer_in_staller_cooldown(staller_addr(), t1));
         assert!(window.pending_timeout_observation.is_none());
@@ -3971,7 +4175,7 @@ mod tests {
             window.mark_received_applied(&hash(byte));
         }
         let t2 = t1 + Duration::from_secs(3);
-        insert_pending(&mut window, healthy_addr(), hash(0x05), 5, t1);
+        insert_pending(&mut window, test_source(healthy_addr()), hash(0x05), 5, t1);
         window.mark_received(hash(0x05), 80, t2);
         window.mark_received_applied(&hash(0x05));
         assert_eq!(window.front_interval_ewma_ms(), Some(3000));
@@ -3980,18 +4184,24 @@ mod tests {
         // staged successors wait) now fires at the effective threshold —
         // the 6s adaptive floor (2x the demonstrated 3s cadence).
         let silent = peer_addr(9);
-        insert_pending(&mut window, silent, hash(0x06), 6, t2);
+        insert_pending(&mut window, test_source(silent), hash(0x06), 6, t2);
         for (byte, height) in [(0x07_u8, 7_u32), (0x08, 8), (0x09, 9)] {
-            insert_pending(&mut window, healthy_addr(), hash(byte), height, t2);
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                t2,
+            );
             window.mark_received(hash(byte), 80, t2);
         }
-        assert_eq!(window.observe_stall(6, false, t2), None);
+        assert_eq!(stall_owner(&mut window, 6, false, t2), None);
         assert_eq!(
-            window.observe_stall(6, false, t2 + Duration::from_secs(3)),
+            stall_owner(&mut window, 6, false, t2 + Duration::from_secs(3)),
             None
         );
         assert_eq!(
-            window.observe_stall(6, false, t2 + Duration::from_secs(6)),
+            stall_owner(&mut window, 6, false, t2 + Duration::from_secs(6)),
             Some(silent),
             "a seeded window must convict a true staller at the effective threshold"
         );
@@ -4001,25 +4211,37 @@ mod tests {
     fn disconnected_alternate_rearms_same_cold_front() {
         let t0 = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
-        insert_pending(&mut window, staller_addr(), hash(0x01), 1, t0);
-        assert_eq!(window.observe_cold_front(1, false, t0), None);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, t0);
+        assert_eq!(cold_front_owner(&mut window, 1, false, t0), None);
         assert_eq!(
-            window.observe_cold_front(1, false, t0 + Duration::from_secs(2)),
+            cold_front_owner(&mut window, 1, false, t0 + Duration::from_secs(2)),
             Some((staller_addr(), hash(0x01)))
         );
-        window.confirm_cold_front_hedge(staller_addr(), healthy_addr(), hash(0x01));
+        let owner = window
+            .pending_owner(&hash(0x01))
+            .unwrap_or_else(|| panic!("pending owner"));
+        let alternate = test_source(healthy_addr());
+        window.confirm_cold_front_hedge(owner, alternate, hash(0x01));
 
-        window.release_disconnected_peers(|peer| *peer != healthy_addr());
+        release_addrs(&mut window, |a| a != healthy_addr());
         let retry_started = t0 + Duration::from_secs(3);
-        assert_eq!(window.observe_cold_front(1, false, retry_started), None);
+        assert_eq!(cold_front_owner(&mut window, 1, false, retry_started), None);
         assert_eq!(
-            window.observe_cold_front(1, false, retry_started + Duration::from_secs(2)),
+            cold_front_owner(
+                &mut window,
+                1,
+                false,
+                retry_started + Duration::from_secs(2)
+            ),
             Some((staller_addr(), hash(0x01)))
         );
-        window.confirm_cold_front_hedge(staller_addr(), peer_addr(2), hash(0x01));
+        let owner = window
+            .pending_owner(&hash(0x01))
+            .unwrap_or_else(|| panic!("pending owner"));
+        window.confirm_cold_front_hedge(owner, test_source(peer_addr(2)), hash(0x01));
         assert!(matches!(
             window.cold_front,
-            Some(super::ColdFrontState::Racing { alternate, .. }) if alternate == peer_addr(2)
+            Some(super::ColdFrontState::Racing { alternate, .. }) if alternate.addr == peer_addr(2)
         ));
     }
 
@@ -4028,10 +4250,10 @@ mod tests {
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
         window.cold_hedged_fronts.extend([hash(0x01), hash(0x02)]);
-        insert_pending(&mut window, staller_addr(), hash(0x03), 3, now);
+        insert_pending(&mut window, test_source(staller_addr()), hash(0x03), 3, now);
 
         assert_eq!(
-            window.observe_cold_front(3, false, now + Duration::from_secs(2)),
+            cold_front_owner(&mut window, 3, false, now + Duration::from_secs(2)),
             None
         );
         assert!(window.cold_front.is_none());
@@ -4044,9 +4266,9 @@ mod tests {
     #[test]
     fn mixed_prefix_sources_do_not_elect_a_winner() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let first = healthy_addr();
-        let second = peer_addr(2);
+        let owner = test_source(staller_addr());
+        let first = test_source(healthy_addr());
+        let second = test_source(peer_addr(2));
         let mut window = DownloadWindow::new(stall_budget());
         for height in 1..=8_u8 {
             insert_pending(&mut window, owner, hash(height), u32::from(height), now);
@@ -4072,7 +4294,7 @@ mod tests {
     #[test]
     fn prefix_probe_respects_estimated_byte_cutoff() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
+        let owner = test_source(staller_addr());
         let mut window = DownloadWindow::new(stall_budget());
         for height in 1..=8_u8 {
             insert_pending(&mut window, owner, hash(height), u32::from(height), now);
@@ -4096,8 +4318,8 @@ mod tests {
     #[test]
     fn fanout_cancels_prefix_probe_without_rearming_it() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let alternate = healthy_addr();
+        let owner = test_source(staller_addr());
+        let alternate = test_source(healthy_addr());
         let budget = SyncBudget {
             min_peers_for_fanout: 2,
             ..stall_budget()
@@ -4142,8 +4364,8 @@ mod tests {
     fn fanout_threshold_during_fresh_probe_defers_engagement()
     -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let alternate = healthy_addr();
+        let owner = test_source(staller_addr());
+        let alternate = test_source(healthy_addr());
         let mut window = DownloadWindow::new(SyncBudget {
             min_peers_for_fanout: 2,
             ..stall_budget()
@@ -4190,8 +4412,8 @@ mod tests {
     fn probe_resolution_before_deadline_allows_fanout_immediately()
     -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let alternate = healthy_addr();
+        let owner = test_source(staller_addr());
+        let alternate = test_source(healthy_addr());
         let mut window = DownloadWindow::new(SyncBudget {
             min_peers_for_fanout: 2,
             ..stall_budget()
@@ -4221,7 +4443,7 @@ mod tests {
         // The alternate disconnects before the deadline, dropping racers
         // below two and cancelling the probe — without electing a winner or
         // setting a preferred peer.
-        window.release_disconnected_peers(|peer| *peer != alternate);
+        release_addrs(&mut window, |a| a != alternate.addr);
         assert!(window.prefix_probe.is_none(), "the probe must be cancelled");
         assert!(
             window.preferred_peer().is_none(),
@@ -4243,9 +4465,9 @@ mod tests {
     fn disconnected_prefix_racer_queued_deliveries_cannot_win()
     -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let disconnected = healthy_addr();
-        let live_alternate = peer_addr(2);
+        let owner = test_source(staller_addr());
+        let disconnected = test_source(healthy_addr());
+        let live_alternate = test_source(peer_addr(2));
         let mut window = DownloadWindow::new(stall_budget());
         for height in 1..=8_u8 {
             insert_pending(&mut window, owner, hash(height), u32::from(height), now);
@@ -4254,7 +4476,7 @@ mod tests {
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
         window.confirm_prefix_probe(planned_owner, hashes, &[disconnected, live_alternate], now);
-        window.release_disconnected_peers(|peer| *peer != disconnected);
+        release_addrs(&mut window, |a| a != disconnected.addr);
 
         for byte in 1..=4_u8 {
             window.mark_received_from(hash(byte), 80, Some(disconnected), now);
@@ -4268,8 +4490,8 @@ mod tests {
     #[test]
     fn late_prefix_loser_cannot_replace_winner() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let winner = healthy_addr();
+        let owner = test_source(staller_addr());
+        let winner = test_source(healthy_addr());
         let mut window = DownloadWindow::new(stall_budget());
         for height in 1..=8_u8 {
             insert_pending(&mut window, owner, hash(height), u32::from(height), now);
@@ -4277,26 +4499,26 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        let loser = peer_addr(2);
+        let loser = test_source(peer_addr(2));
         window.confirm_prefix_probe(planned_owner, hashes, &[winner, loser], now);
         for byte in 1..=4_u8 {
             window.mark_received_from(hash(byte), 80, Some(winner), now);
         }
-        assert_eq!(window.preferred_peer(), Some(winner));
+        assert_eq!(window.preferred_peer(), Some(winner.addr));
         window.mark_received_from(hash(5), 80, Some(owner), now);
-        assert_eq!(window.preferred_peer(), Some(winner));
-        window.release_disconnected_peers(|peer| *peer != winner);
+        assert_eq!(window.preferred_peer(), Some(winner.addr));
+        release_addrs(&mut window, |a| a != winner.addr);
         assert_eq!(window.preferred_peer(), None);
-        assert!(!window.peer_in_staller_cooldown(loser, now));
+        assert!(!window.peer_in_staller_cooldown(loser.addr, now));
         Ok(())
     }
 
     #[test]
     fn prefix_owner_win_keeps_unrelated_peer_requests() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let loser = healthy_addr();
-        let unrelated = peer_addr(2);
+        let owner = test_source(staller_addr());
+        let loser = test_source(healthy_addr());
+        let unrelated = test_source(peer_addr(2));
         let mut window = DownloadWindow::new(stall_budget());
         for height in 1..=8_u8 {
             insert_pending(&mut window, owner, hash(height), u32::from(height), now);
@@ -4312,23 +4534,23 @@ mod tests {
             window.mark_received_from(hash(byte), 80, Some(owner), now);
         }
 
-        assert_eq!(window.preferred_peer(), Some(owner));
+        assert_eq!(window.preferred_peer(), Some(owner.addr));
         assert!(window.contains_pending(&hash(9)));
-        assert!(window.peer_inflight.contains_key(&owner));
-        assert!(window.peer_inflight.contains_key(&unrelated));
+        assert!(window.peer_inflight.contains_key(&owner.addr));
+        assert!(window.peer_inflight.contains_key(&unrelated.addr));
         assert!(!window.contains_pending(&hash(10)));
-        assert!(!window.peer_inflight.contains_key(&loser));
-        assert!(!window.peer_in_staller_cooldown(owner, now));
+        assert!(!window.peer_inflight.contains_key(&loser.addr));
+        assert!(!window.peer_in_staller_cooldown(owner.addr, now));
         Ok(())
     }
 
     #[test]
     fn prefix_alternate_win_releases_only_probe_losers() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
-        let winner = healthy_addr();
-        let loser = peer_addr(2);
-        let unrelated = peer_addr(3);
+        let owner = test_source(staller_addr());
+        let winner = test_source(healthy_addr());
+        let loser = test_source(peer_addr(2));
+        let unrelated = test_source(peer_addr(3));
         let mut window = DownloadWindow::new(stall_budget());
         for height in 1..=8_u8 {
             insert_pending(&mut window, owner, hash(height), u32::from(height), now);
@@ -4344,46 +4566,46 @@ mod tests {
             window.mark_received_from(hash(byte), 80, Some(winner), now);
         }
 
-        assert_eq!(window.preferred_peer(), Some(winner));
+        assert_eq!(window.preferred_peer(), Some(winner.addr));
         for byte in 5..=8_u8 {
             assert!(!window.contains_pending(&hash(byte)));
         }
         assert!(window.contains_pending(&hash(9)));
         assert!(!window.contains_pending(&hash(10)));
-        assert!(!window.peer_inflight.contains_key(&owner));
-        assert!(!window.peer_inflight.contains_key(&loser));
-        assert!(window.peer_inflight.contains_key(&unrelated));
+        assert!(!window.peer_inflight.contains_key(&owner.addr));
+        assert!(!window.peer_inflight.contains_key(&loser.addr));
+        assert!(window.peer_inflight.contains_key(&unrelated.addr));
         assert_eq!(window.next_request_height, 1);
         assert!(window.next_pending_deadline.is_some());
-        assert!(window.peer_in_staller_cooldown(owner, now));
+        assert!(window.peer_in_staller_cooldown(owner.addr, now));
         Ok(())
     }
 
     #[test]
     fn stale_cold_hedge_confirmation_after_forget_does_not_blame_replacement() {
         let now = Instant::now();
-        let owner = staller_addr();
-        let alternate = healthy_addr();
+        let owner = test_source(staller_addr());
+        let alternate = test_source(healthy_addr());
         let front = hash(0x51);
         let mut window = DownloadWindow::new(stall_budget());
         insert_pending(&mut window, owner, front, 1, now);
-        assert_eq!(window.observe_cold_front(1, false, now), None);
+        assert_eq!(cold_front_owner(&mut window, 1, false, now), None);
 
-        window.forget_peer(owner);
+        window.forget_peer(owner.addr);
         window.confirm_cold_front_hedge(owner, alternate, front);
         window.mark_received_from(front, 80, Some(alternate), now);
 
         assert!(window.cold_front.is_none());
         assert!(window.cold_hedged_fronts.is_empty());
         assert_eq!(window.preferred_peer(), None);
-        assert!(!window.peer_in_staller_cooldown(owner, now));
+        assert!(!window.peer_in_staller_cooldown(owner.addr, now));
     }
 
     #[test]
     fn stale_prefix_confirmation_after_forget_does_not_install_probe_or_gate()
     -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
-        let owner = staller_addr();
+        let owner = test_source(staller_addr());
         let mut window = DownloadWindow::new(test_budget());
         let win_blocks = u8::try_from(super::PREFIX_PROBE_WIN_BLOCKS)?;
         for byte in 1..=win_blocks {
@@ -4392,8 +4614,8 @@ mod tests {
         let (planned_owner, hashes, _) = window.prefix_probe_plan().ok_or_else(|| {
             std::io::Error::other("contiguous owner should produce a prefix plan")
         })?;
-        window.forget_peer(owner);
-        window.confirm_prefix_probe(planned_owner, hashes, &[healthy_addr()], now);
+        window.forget_peer(owner.addr);
+        window.confirm_prefix_probe(planned_owner, hashes, &[test_source(healthy_addr())], now);
 
         assert!(window.prefix_probe.is_none());
         assert!(window.prefix_probe_attempted_owner.is_none());
@@ -4424,7 +4646,7 @@ mod tests {
     #[test]
     fn reject_delivery_from_pending_owner_releases_pending() {
         let now = Instant::now();
-        let owner = peer_addr(1);
+        let owner = test_source(peer_addr(1));
         let block_hash = hash(0x42);
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
@@ -4445,12 +4667,12 @@ mod tests {
     #[test]
     fn reject_delivery_from_owner_clears_timeout_observation() {
         let now = Instant::now();
-        let owner = peer_addr(1);
+        let owner = test_source(peer_addr(1));
         let block_hash = hash(0x42);
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            peer_addr: owner,
+            owner,
             hash: block_hash,
         });
 
@@ -4459,8 +4681,8 @@ mod tests {
             super::RejectDelivery::ReleasedPending
         );
         assert!(window.pending_timeout_observation.is_none());
-        assert_eq!(window.observe_pending_timeout(false, now), None);
-        assert!(!window.peer_in_staller_cooldown(owner, now));
+        assert_eq!(timeout_owner(&mut window, false, now), None);
+        assert!(!window.peer_in_staller_cooldown(owner.addr, now));
     }
 
     /// Either participant's malformed response terminates a cold-front race
@@ -4469,8 +4691,8 @@ mod tests {
     #[test]
     fn reject_delivery_cleans_cold_front_race_participants() {
         let now = Instant::now();
-        let owner = peer_addr(1);
-        let alternate = peer_addr(2);
+        let owner = test_source(peer_addr(1));
+        let alternate = test_source(peer_addr(2));
         let block_hash = hash(0x42);
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
@@ -4487,10 +4709,18 @@ mod tests {
         assert!(window.cold_front.is_none());
         assert!(window.contains_pending(&block_hash));
         let retry_started = now + Duration::from_secs(3);
-        assert_eq!(window.observe_cold_front(100, false, retry_started), None);
         assert_eq!(
-            window.observe_cold_front(100, false, retry_started + Duration::from_secs(2)),
-            Some((owner, block_hash))
+            cold_front_owner(&mut window, 100, false, retry_started),
+            None
+        );
+        assert_eq!(
+            cold_front_owner(
+                &mut window,
+                100,
+                false,
+                retry_started + Duration::from_secs(2)
+            ),
+            Some((owner.addr, block_hash))
         );
 
         assert_eq!(
@@ -4506,14 +4736,14 @@ mod tests {
     #[test]
     fn reject_delivery_from_unrelated_peer_preserves_observations() {
         let now = Instant::now();
-        let owner = peer_addr(1);
-        let alternate = peer_addr(2);
-        let unrelated = peer_addr(3);
+        let owner = test_source(peer_addr(1));
+        let alternate = test_source(peer_addr(2));
+        let unrelated = test_source(peer_addr(3));
         let block_hash = hash(0x42);
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            peer_addr: owner,
+            owner,
             hash: block_hash,
         });
         window.cold_front = Some(super::ColdFrontState::Racing {
@@ -4541,8 +4771,8 @@ mod tests {
     #[test]
     fn reject_delivery_from_different_peer_preserves_pending() {
         let now = Instant::now();
-        let owner = peer_addr(1);
-        let other = peer_addr(2);
+        let owner = test_source(peer_addr(1));
+        let other = test_source(peer_addr(2));
         let block_hash = hash(0x42);
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
@@ -4563,7 +4793,7 @@ mod tests {
     #[test]
     fn reject_delivery_with_no_source_preserves_pending() {
         let now = Instant::now();
-        let owner = peer_addr(1);
+        let owner = test_source(peer_addr(1));
         let block_hash = hash(0x42);
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
@@ -4580,7 +4810,7 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let block_hash = hash(0x99);
 
-        let outcome = window.reject_delivery(block_hash, Some(peer_addr(1)));
+        let outcome = window.reject_delivery(block_hash, Some(test_source(peer_addr(1))));
 
         assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
         assert_eq!(window.pending_len(), 0);
@@ -4617,7 +4847,7 @@ mod tests {
         );
         // The no-blame suppression itself is unchanged below the bound.
         assert_eq!(
-            window.observe_stall(7, true, just_below(start, bound, 1)),
+            stall_owner(&mut window, 7, true, just_below(start, bound, 1)),
             None
         );
     }

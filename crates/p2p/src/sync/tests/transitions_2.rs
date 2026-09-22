@@ -75,25 +75,17 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
     let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
     let (tx, rx) = unbounded::<Message>();
     peers.register(peer, PeerLease::new(tx));
-    let applied = applied_tip
-        .load_full()
-        .ok_or_else(|| std::io::Error::other("missing genesis applied tip"))?;
-    let initial = chain_tip
-        .load_full()
-        .ok_or_else(|| std::io::Error::other("missing losing chain tip"))?;
+    let source = current_source(&sync.peer_table, peer);
 
     assert!(
-        sync.send_getdata_for_pending_blocks(peer, false, 100, &initial, &applied)
+        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
             .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
 
     chain_tip.store(Some(Arc::new(winning_tip)));
-    let retargeted = chain_tip
-        .load_full()
-        .ok_or_else(|| std::io::Error::other("missing winning chain tip"))?;
     assert!(
-        sync.send_getdata_for_pending_blocks(peer, false, 100, &retargeted, &applied)
+        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
             .sent
     );
     let requested = witness_block_inventory(next_getdata(&rx)?)?;
@@ -103,7 +95,7 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
         "retargeted requests must not retain hashes from the losing branch"
     );
     assert_eq!(
-        sync.body_sync.lock().window.pending_len(),
+        sync.scheduler.lock().window.pending_len(),
         winning_hashes.len(),
         "retargeting must release losing-branch pending capacity"
     );

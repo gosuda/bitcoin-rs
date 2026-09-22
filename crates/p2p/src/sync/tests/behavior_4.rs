@@ -149,14 +149,14 @@ fn oversized_received_block_releases_pending_budget_for_retry()
         std::vec![expected_hash]
     );
     let _headers = rx.try_recv()?;
-    assert_eq!(sync.body_sync.lock().window.pending_len(), 1);
+    assert_eq!(sync.scheduler.lock().window.pending_len(), 1);
 
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block))?;
     sync.drain_inbound_blocks();
 
     {
-        let body_sync = sync.body_sync.lock();
-        let window = &body_sync.window;
+        let scheduler = sync.scheduler.lock();
+        let window = &scheduler.window;
         assert_eq!(window.pending_len(), 0);
         assert_eq!(window.pending_bytes(), 0);
     }
@@ -223,7 +223,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2.clone()))?;
     sync.drain_inbound_blocks();
     assert_eq!(
-        sync.body_sync.lock().stager.received_bytes(),
+        sync.scheduler.lock().stager.received_bytes(),
         consensus_bytes(&block2).len()
     );
 
@@ -232,7 +232,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
     // not dropped for re-download.
     sync.tick();
     assert!(rx.try_recv().is_err());
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 1);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
 
     // The window-front block arrives: the stager admits it past the
     // exhausted budget (expected-block exemption), apply drains both, and
@@ -245,7 +245,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
         .ok_or_else(|| std::io::Error::other("apply did not publish tip"))?
         .height;
     assert_eq!(applied_height, 2);
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 0);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
     let Message::GetData(recovered) = rx.try_recv()? else {
         return Err(std::io::Error::other("expected recovery getdata").into());
     };
@@ -283,7 +283,7 @@ fn staging_byte_exhaustion_blocks_all_requests() -> Result<(), Box<dyn std::erro
             .into());
         }
     }
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 1);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
     Ok(())
 }
 
@@ -310,10 +310,10 @@ fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
     std::thread::sleep(Duration::from_millis(125));
     sync.tick();
 
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 0);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
     {
-        let body_sync = sync.body_sync.lock();
-        let window = &body_sync.window;
+        let scheduler = sync.scheduler.lock();
+        let window = &scheduler.window;
         assert_eq!(window.received_len(), 0);
         assert!(window.has_request_capacity());
         assert!(window.contains_pending(&Hash256::from_le_bytes(block1_hash.as_bytes())));
@@ -368,8 +368,8 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
         }
         sync.drain_inbound_blocks();
         let (received_count, peak_staged_bytes) = {
-            let body_sync = sync.body_sync.lock();
-            let stager = &body_sync.stager;
+            let scheduler = sync.scheduler.lock();
+            let stager = &scheduler.stager;
             (stager.received_len(), stager.received_bytes())
         };
         assert_eq!(received_count, DETERMINISTIC_PROXY_BLOCKS.saturating_sub(1));
@@ -386,8 +386,8 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
             .ok_or_else(|| std::io::Error::other("proxy apply did not publish tip"))?
             .height;
         assert_eq!(applied_height, DETERMINISTIC_PROXY_TIP_HEIGHT);
-        assert_eq!(sync.body_sync.lock().stager.received_len(), 0);
-        assert_eq!(sync.body_sync.lock().window.pending_len(), 0);
+        assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
+        assert_eq!(sync.scheduler.lock().window.pending_len(), 0);
         assert_histogram(&recorder, "node.sync.apply_buffered_blocks_seconds");
 
         println!(

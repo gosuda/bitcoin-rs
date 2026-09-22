@@ -7,7 +7,7 @@ use super::*;
 fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::error::Error>> {
     let (sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
     stage_body(&sync, &main[0]);
-    let staged = sync.body_sync.lock().stager.received_len();
+    let staged = sync.scheduler.lock().stager.received_len();
     assert!(
         staged > 0,
         "the staged block must be queued before the halt"
@@ -23,7 +23,7 @@ fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::er
         "a halted sync must not start another transition"
     );
     assert_eq!(
-        sync.body_sync.lock().stager.received_len(),
+        sync.scheduler.lock().stager.received_len(),
         staged,
         "halted ticks must preserve staged blocks for recreation"
     );
@@ -53,11 +53,11 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
     fixture.sync.drain_inbound_blocks();
 
     assert!(
-        fixture.sync.body_sync.lock().stager.received_len() <= max_received_blocks,
+        fixture.sync.scheduler.lock().stager.received_len() <= max_received_blocks,
         "block stager must enforce received block count budget"
     );
     assert!(
-        fixture.sync.body_sync.lock().window.received_len() <= max_received_blocks,
+        fixture.sync.scheduler.lock().window.received_len() <= max_received_blocks,
         "download window must mirror received block count budget"
     );
     assert!(
@@ -196,8 +196,8 @@ fn on_peer_ready_clears_same_address_header_state_for_replacement()
 -> Result<(), Box<dyn std::error::Error>> {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    *sync.pending_getheaders.lock() = Some(super::super::PendingHeaderRequest {
-        peer_addr,
+    sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
+        source: crate::PeerSource::for_test(peer_addr),
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
@@ -206,7 +206,7 @@ fn on_peer_ready_clears_same_address_header_state_for_replacement()
     let source = current_source(&sync.peer_table, peer_addr);
     sync.on_peer_ready(source);
     assert!(
-        sync.pending_getheaders.lock().is_none(),
+        sync.scheduler.lock().header_request.is_none(),
         "replacement readiness must drop address-scoped header state"
     );
     Ok(())
@@ -220,15 +220,15 @@ fn on_peer_ready_ignores_stale_predecessor_source() -> Result<(), Box<dyn std::e
     let stale = PeerLease::new(stale_tx);
     sync.peer_table.register(peer_addr, stale.clone());
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
-    *sync.pending_getheaders.lock() = Some(super::super::PendingHeaderRequest {
-        peer_addr,
+    sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
+        source: crate::PeerSource::for_test(peer_addr),
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
     });
     sync.on_peer_ready(stale.source(peer_addr));
     assert!(
-        sync.pending_getheaders.lock().is_some(),
+        sync.scheduler.lock().header_request.is_some(),
         "stale predecessor must not clear the replacement's header state"
     );
     Ok(())
@@ -275,7 +275,7 @@ fn far_future_matching_peer_retries_without_peer_blame() -> Result<(), Box<dyn s
     assert!(peers.is_connected(peer_addr));
     assert!(
         !sync
-            .body_sync
+            .scheduler
             .lock()
             .window
             .peer_in_staller_cooldown(peer_addr, Instant::now()),

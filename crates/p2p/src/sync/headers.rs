@@ -1,12 +1,13 @@
 //! Header request ownership, locator construction, and inbound header admission.
 
 use super::BlockSync;
+use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
-use super::IdleFrontierProbeOutcome;
 use super::LOCATOR_MAX_ENTRIES;
 use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
+use super::frontier::SyncFrontier;
 use super::peers::active_demonstrated_height;
 use super::peers::is_peer_fault;
 use super::peers::outranks;
@@ -18,7 +19,6 @@ use crate::download_window::SyncPeer;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_primitives::Hash256;
-use std::net::SocketAddr;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -33,12 +33,16 @@ impl BlockSync {
             // A nonempty response consumes the request even when rejected.
             // An empty response supplies no new capability: retain its
             // deadline so idle discovery is paced and rotates to another peer.
+            // The consumption is identity-exact: only the connection the
+            // request was sent to can answer it, so a same-address
+            // replacement's batch never frees the predecessor's deadline.
             if let Some(source) = source.filter(|_| !headers.is_empty()) {
-                if self.peer_table.is_current(source) {
-                    let mut pending = self.pending_getheaders.lock();
-                    if pending.is_some_and(|request| request.peer_addr == source.addr) {
-                        *pending = None;
-                    }
+                let mut scheduler = self.scheduler.lock();
+                if scheduler
+                    .header_request
+                    .is_some_and(|request| request.source == source)
+                {
+                    scheduler.header_request = None;
                 }
             }
 
@@ -66,7 +70,7 @@ impl BlockSync {
                     let mut blamed_peer = None;
                     if let Some(source) = source {
                         if self.peer_table.disconnect_source(source) {
-                            self.body_sync
+                            self.scheduler
                                 .lock()
                                 .window
                                 .mark_peer_unresponsive(source.addr, Instant::now());
@@ -106,7 +110,7 @@ impl BlockSync {
     }
 
     pub(super) fn refresh_active_peer_credit(&self) {
-        let sessions = self.peer_table.sessions();
+        let sessions = self.peer_table.usable_peers();
         let updates: Vec<(PeerSource, i32)> = {
             let tree = self.chain.block_tree().read();
             let Some(active_tip) = tree.tip() else {
@@ -132,39 +136,40 @@ impl BlockSync {
         }
     }
 
-    /// Requests the next header batch from the highest peer above the applied
-    /// tip, using a locator taken after `drain_inbound_headers` so it reflects
-    /// headers accepted this tick.
+    /// Requests the next header batch from the highest usable peer above the
+    /// applied tip, using a locator taken after `drain_inbound_headers` so it
+    /// reflects headers accepted this tick.
     /// `exclude` carries the source whose probe send failed this tick, so the
     /// same-tick fallback cannot retry it.
-    pub(super) fn request_headers_from_best_peer(&self, exclude: Option<PeerSource>) {
-        let applied_tip = self.chain.applied_tip().load_full();
-        let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let chain_tip = self.chain.chain_tip().load_full();
-        let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
+    pub(super) fn request_headers_from_best_peer(
+        &self,
+        frontier: &SyncFrontier,
+        exclude: Option<PeerSource>,
+    ) {
+        let applied_height = frontier
+            .chain
+            .applied_tip
+            .as_ref()
+            .map_or(0, |tip| tip.height);
+        let header_height = frontier
+            .chain
+            .chain_tip
+            .as_ref()
+            .map_or(applied_height, |tip| tip.height);
         let mut header_peer: Option<(PeerSource, SyncPeer)> = None;
-        for session in self.peer_table.sessions() {
-            // A session whose lease already cancelled is dead regardless of
-            // its published metadata; picking it wastes the tick on a failed
-            // send and can wedge the fetch loop.
-            if session.lease.is_cancelled() {
-                continue;
-            }
-            let Some(info) = session.info.as_ref() else {
+        for peer in &frontier.usable_peers {
+            let Some(candidate) = sync_peer_candidate(peer.source, &peer.info, applied_height)
+            else {
                 continue;
             };
-            let Some(candidate) = sync_peer_candidate(info, applied_height) else {
-                continue;
-            };
-            let source = session.lease.source(session.addr);
-            if exclude.is_some_and(|excluded| excluded == source) {
+            if exclude.is_some_and(|excluded| excluded == peer.source) {
                 continue;
             }
             if header_peer
                 .as_ref()
                 .is_none_or(|(_, current)| outranks(*current, candidate))
             {
-                header_peer = Some((source, candidate));
+                header_peer = Some((peer.source, candidate));
             }
         }
         if let Some((source, peer)) = header_peer {
@@ -180,124 +185,81 @@ impl BlockSync {
         }
     }
 
-    /// P2P-05: learn current peer capability when the known-header gap has no
-    /// body work on the apply frontier: the probe fires only when the
-    /// apply-frontier block itself is neither in flight nor staged. Staged
-    /// successors behind an unowned or rejected frontier are stuck inventory
-    /// awaiting the staged-body timeout, not progress. Start at the applied
-    /// chain so a peer at our header tip returns branch evidence. Reuse the
-    /// existing header-request deadline.
-    pub(super) fn probe_idle_frontier(&self, now: Instant) -> IdleFrontierProbeOutcome {
+    /// P2P-05: probes the capability frontier at the applied anchor through
+    /// `source` — the peer `SyncFrontier::probe_pick` selected this tick.
+    ///
+    /// The probe fires only while the canonical next-required body is
+    /// unowned (`HeaderAction::Probe`): staged successors behind an unowned
+    /// or rejected frontier are stuck inventory awaiting the staged-body
+    /// timeout, not progress. The locator anchors on the active chain at
+    /// the applied height, not on the applied tip's branch: during a deep
+    /// header-first reorg the applied tip may still sit on the losing
+    /// branch, and a locator from that branch can match only at a common
+    /// ancestor more than the 2,000-header wire page behind us.
+    pub(super) fn probe_frontier_peer(
+        &self,
+        frontier: &SyncFrontier,
+        source: PeerSource,
+    ) -> GetheadersOutcome {
         let (Some(applied), Some(headers)) = (
-            self.chain.applied_tip().load_full(),
-            self.chain.chain_tip().load_full(),
+            frontier.chain.applied_tip.as_ref(),
+            frontier.chain.chain_tip.as_ref(),
         ) else {
-            return IdleFrontierProbeOutcome::NotSent;
+            return GetheadersOutcome::Failed;
         };
-        if applied.hash == headers.hash
-            || self.apply_halted.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return IdleFrontierProbeOutcome::NotSent;
+        // The plan's Probe decision was taken at observation time; a body
+        // request scheduled since may already own the frontier, in which
+        // case capability discovery has nothing left to resolve.
+        let frontier_owned = frontier.chain.next_required.is_some_and(|required| {
+            let scheduler = self.scheduler.lock();
+            scheduler.window.contains_pending(&required.hash)
+                || scheduler.stager.contains(&required.hash)
+        });
+        if frontier_owned {
+            return GetheadersOutcome::Suppressed;
         }
-        // The frontier hash is derived under a short tree read; body_sync is
-        // taken only after the guard drops (tree before body_sync is the
-        // codebase's lock order). An unresolvable frontier is conservative:
-        // no probe.
-        let frontier_hash = {
-            let tree = self.chain.block_tree().read();
-            Self::first_connect_height(&tree, applied.hash, headers.tip_id)
-                .and_then(|height| tree.node_at_height_from(headers.tip_id, height))
-                .and_then(|frontier_id| tree.node(frontier_id).ok().map(|node| node.hash))
-        };
-        let Some(frontier_hash) = frontier_hash else {
-            return IdleFrontierProbeOutcome::NotSent;
-        };
-        {
-            let state = self.body_sync.lock();
-            if state.window.contains_pending(&frontier_hash)
-                || state.stager.contains(&frontier_hash)
-            {
-                return IdleFrontierProbeOutcome::NotSent;
-            }
-        }
-        let pending = *self.pending_getheaders.lock();
-        if pending.is_some_and(|request| {
-            now.saturating_duration_since(request.requested_at) < HEADER_REQUEST_TIMEOUT
-                && self.peer_table.ready_source(request.peer_addr).is_some()
-        }) {
-            return IdleFrontierProbeOutcome::Sent;
-        }
-        let required = bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
-            | bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
-        let sessions = self.peer_table.sessions();
-        let eligible = || {
-            sessions.iter().filter(|session| {
-                // Same guard as the height-ranked selection: a cancelled lease
-                // is a dead send target.
-                !session.lease.is_cancelled()
-                    && session
-                        .info
-                        .as_ref()
-                        .is_some_and(|info| info.services & required == required)
-            })
-        };
-        // Rotate after the existing request expires, without a second queue.
-        let session = eligible()
-            .filter(|session| pending.is_none_or(|request| session.addr > request.peer_addr))
-            .min_by_key(|session| session.addr)
-            .or_else(|| eligible().min_by_key(|session| session.addr));
-        let Some(session) = session else {
-            return IdleFrontierProbeOutcome::NotSent;
-        };
-        let source = session.lease.source(session.addr);
-        // Anchor on the active chain at the applied height, not on the
-        // applied tip's branch. During a deep header-first reorg the applied
-        // tip may still sit on the losing branch. A locator from that branch
-        // can match only at a common ancestor more than the 2,000-header wire
-        // page behind us, so every probe repeats the same insufficient page
-        // and never demonstrates a height above the applied tip.
         let locator = {
             let tree = self.chain.block_tree().read();
             let Some(active_anchor) = tree.node_at_height_from(headers.tip_id, applied.height)
             else {
-                return IdleFrontierProbeOutcome::NotSent;
+                return GetheadersOutcome::Failed;
             };
             tree.block_locator(active_anchor, LOCATOR_MAX_ENTRIES)
         };
-        let sent = self.send_getheaders(
+        let outcome = self.send_getheaders(
             source,
             applied.height,
             i32::try_from(headers.height).unwrap_or(i32::MAX),
             locator,
         );
-        if sent {
+        if outcome == GetheadersOutcome::Sent {
             metrics::counter!("node.sync.idle_frontier_probes").increment(1);
-            IdleFrontierProbeOutcome::Sent
-        } else {
-            IdleFrontierProbeOutcome::SendFailed(source)
         }
+        outcome
     }
 
+    /// Sends `getheaders` to the exact connection `source` identifies and
+    /// registers the request under that connection's ownership.
     pub(super) fn send_getheaders(
         &self,
         source: crate::PeerSource,
         our_height: u32,
         target_height: i32,
         locator: Vec<Hash256>,
-    ) -> bool {
+    ) -> GetheadersOutcome {
         let Some(locator_tip_hash) = locator.first().copied() else {
-            return false;
+            return GetheadersOutcome::Failed;
         };
         let target_height = u32::try_from(target_height).unwrap_or(0);
         let now = Instant::now();
-        if self.has_pending_getheaders(source.addr, locator_tip_hash, target_height, now) {
+        if self.has_pending_getheaders(source, locator_tip_hash, target_height, now) {
             tracing::trace!(
                 peer_addr = %source.addr,
                 our_height,
                 target_height,
                 "block sync: getheaders already pending",
             );
-            return false;
+            return GetheadersOutcome::Suppressed;
         }
         let locator_hashes: Vec<bitcoin::BlockHash> = locator
             .into_iter()
@@ -307,27 +269,22 @@ impl BlockSync {
             locator_hashes,
             bitcoin::BlockHash::all_zeros(),
         ));
-        let tx = self.peer_table.lease_source(source);
-        let Some(tx) = tx else {
-            tracing::warn!(
-                peer_addr = %source.addr,
-                "block sync: target peer no longer has outbound channel"
-            );
-            return false;
-        };
-        let mut sent = false;
-        self.peer_table.with_current(source, || {
-            if tx.send(msg).is_ok() {
-                *self.pending_getheaders.lock() = Some(PendingHeaderRequest {
-                    peer_addr: source.addr,
+        // `send_then` holds the connection's identity through the enqueue
+        // and the pending stamp under one table authority, so a replacement
+        // slipping in between cannot leave a request registered to a dead
+        // connection.
+        if self
+            .peer_table
+            .send_then(source, msg, || {
+                self.scheduler.lock().header_request = Some(PendingHeaderRequest {
+                    source,
                     locator_tip_hash,
                     target_height,
                     requested_at: now,
                 });
-                sent = true;
-            }
-        });
-        if !sent {
+            })
+            .is_err()
+        {
             tracing::warn!(
                 peer_addr = %source.addr,
                 "block sync: outbound channel disconnected"
@@ -336,15 +293,18 @@ impl BlockSync {
             // scheduler cannot re-pick a dead peer every tick. The identity
             // check inside `disconnect_source` keeps a same-address
             // replacement untouched, and only then is a pending request keyed
-            // to this address dropped so a fast reconnect does not inherit a
-            // stale deadline gate.
+            // to this connection dropped so a fast reconnect does not inherit
+            // a stale deadline gate.
             if self.peer_table.disconnect_source(source) {
-                let mut pending = self.pending_getheaders.lock();
-                if pending.is_some_and(|request| request.peer_addr == source.addr) {
-                    *pending = None;
+                let mut scheduler = self.scheduler.lock();
+                if scheduler
+                    .header_request
+                    .is_some_and(|request| request.source == source)
+                {
+                    scheduler.header_request = None;
                 }
             }
-            return false;
+            return GetheadersOutcome::Failed;
         }
         tracing::debug!(
             peer_addr = %source.addr,
@@ -353,21 +313,24 @@ impl BlockSync {
             protocol_version = PROTOCOL_VERSION,
             "block sync: sent getheaders"
         );
-        true
+        GetheadersOutcome::Sent
     }
 
+    /// Whether an unexpired request with these exact parameters is already
+    /// pending on this exact connection. Identity is the full `PeerSource`:
+    /// a same-address replacement is a different request.
     pub(super) fn has_pending_getheaders(
         &self,
-        peer_addr: SocketAddr,
+        source: PeerSource,
         locator_tip_hash: Hash256,
         target_height: u32,
         now: Instant,
     ) -> bool {
-        let pending = *self.pending_getheaders.lock();
-        let Some(pending) = pending else {
+        let scheduler = self.scheduler.lock();
+        let Some(pending) = scheduler.header_request else {
             return false;
         };
-        pending.peer_addr == peer_addr
+        pending.source == source
             && pending.locator_tip_hash == locator_tip_hash
             && pending.target_height == target_height
             && now.duration_since(pending.requested_at) < HEADER_REQUEST_TIMEOUT

@@ -197,6 +197,15 @@ impl PeerSource {
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
     }
+
+    /// Mints a source with a fresh process-unique identity for tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            connection_id: ConnectionId::allocate(),
+        }
+    }
 }
 
 impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {

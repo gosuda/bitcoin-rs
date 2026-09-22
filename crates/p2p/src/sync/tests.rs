@@ -382,7 +382,12 @@ fn check_sync_frontier_pair(
         "branch gate differs: {applied:?} -> {target:?}; indexed or parent-walk fixture"
     );
     sync.install_budget(super::default_sync_budget());
-    let outcome = sync.send_getdata_for_pending_blocks(addr, true, 100, target, applied);
+    let outcome = sync.send_getdata_for_pending_blocks(
+        current_source(&sync.peer_table, addr),
+        true,
+        100,
+        &test_frontier(sync),
+    );
     let expected_ids = expected
         .as_ref()
         .map(|plan| plan.connect.as_slice())
@@ -558,7 +563,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
     );
     let _headers = rx.try_recv()?;
     apply_fixture_block(&sync, block1)?;
-    sync.body_sync
+    sync.scheduler
         .lock()
         .window
         .drop_for_retry(&Hash256::from(expected_hash));
@@ -566,8 +571,8 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
     sync.drain_inbound_blocks();
 
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 0);
-    assert_eq!(sync.body_sync.lock().window.received_len(), 0);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
+    assert_eq!(sync.scheduler.lock().window.received_len(), 0);
 
     sync.tick();
 
@@ -622,7 +627,7 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
         "the alternate must receive the one-shot probe prefix"
     );
     assert!(
-        !sync.body_sync.lock().window.fanout_active(),
+        !sync.scheduler.lock().window.fanout_active(),
         "below the threshold fanout must stay off"
     );
 
@@ -635,7 +640,7 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     }
     sync.tick();
     assert!(
-        !sync.body_sync.lock().window.fanout_active(),
+        !sync.scheduler.lock().window.fanout_active(),
         "a fresh prefix probe must defer the threshold-crossing tick"
     );
 
@@ -644,8 +649,8 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     // `Instant::now()` used when the probe is created, so read it back and
     // add exactly `stall_timeout_initial`. Then assert the planned
     // duration equals the budget before engaging fanout.
-    let mut body_sync = sync.body_sync.lock();
-    let window = &mut body_sync.window;
+    let mut scheduler = sync.scheduler.lock();
+    let window = &mut scheduler.window;
     let started_at = window
         .active_prefix_probe_started_at()
         .ok_or_else(|| std::io::Error::other("probe must remain active after deferral"))?;
@@ -736,7 +741,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     // suppression, pinned at the window level). Seed it at 50ms — the
     // decay floor stays max(2x50ms, 100ms) = the injected initial
     // threshold — so this test keeps pinning the adaptive-timeout fire.
-    sync.body_sync
+    sync.scheduler
         .lock()
         .window
         .seed_front_cadence_for_test(50, Instant::now());
@@ -745,8 +750,8 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     // budget) and the stall episode starts on the front-stripe owner.
     sync.tick();
     {
-        let body_sync = sync.body_sync.lock();
-        let window = &body_sync.window;
+        let scheduler = sync.scheduler.lock();
+        let window = &scheduler.window;
         assert_eq!(window.received_len(), 14);
         assert_eq!(window.pending_len(), 2);
         assert_eq!(
@@ -767,7 +772,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
         "staller's outbound lease must be revoked"
     );
     assert!(
-        sync.body_sync
+        sync.scheduler
             .lock()
             .window
             .peer_in_staller_cooldown(staller, Instant::now()),
@@ -788,13 +793,13 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
         "the stalled front stripe must be re-requested from a healthy peer"
     );
     assert_eq!(
-        sync.body_sync.lock().stager.received_len(),
+        sync.scheduler.lock().stager.received_len(),
         14,
         "staged progress must survive the staller disconnect"
     );
     {
-        let body_sync = sync.body_sync.lock();
-        let window = &body_sync.window;
+        let scheduler = sync.scheduler.lock();
+        let window = &scheduler.window;
         assert_eq!(window.pending_len(), 2);
         for front in &expected[..2] {
             assert!(window.contains_pending(&Hash256::from_le_bytes(front.as_bytes())));
@@ -894,7 +899,7 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     // budget, closing the request gate.
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
     sync.drain_inbound_blocks();
-    assert!(!sync.body_sync.lock().window.has_request_capacity());
+    assert!(!sync.scheduler.lock().window.has_request_capacity());
 
     let healthy_rx = connect_peer(&peers, synthetic_peer(healthy_addr, 100));
 
@@ -1004,7 +1009,7 @@ fn apply_cache_fixture(
 fn stage_body(sync: &BlockSync, block: &Block) {
     let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
     let serialized = bytes::Bytes::from(consensus_bytes(block));
-    sync.body_sync
+    sync.scheduler
         .lock()
         .stager
         .insert(hash, None, block.clone(), serialized, Instant::now());
@@ -1684,6 +1689,11 @@ fn current_source(peer_table: &Arc<PeerTable>, addr: SocketAddr) -> PeerSource {
     )
 }
 
+/// The canonical frontier `tick()` would observe right now.
+fn test_frontier(sync: &BlockSync) -> super::SyncFrontier {
+    sync.observe_frontier(sync.observe_chain_frontier(), Instant::now())
+}
+
 fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
     let (tx, _rx) = unbounded::<Message>();
     let lease = PeerLease::new(tx);
@@ -1782,3 +1792,6 @@ mod validation_1;
 mod witness_staging_gate;
 
 mod frontier_recovery;
+
+#[cfg(test)]
+mod frontier_model;

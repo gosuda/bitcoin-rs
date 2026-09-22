@@ -122,12 +122,12 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
     );
     // The stager must NOT contain the malformed body.
     assert!(
-        !sync.body_sync.lock().stager.contains(&block_hash),
+        !sync.scheduler.lock().stager.contains(&block_hash),
         "malformed body must not be staged"
     );
     // The window must not have the malformed body in its received state.
     assert_eq!(
-        sync.body_sync.lock().window.received_len(),
+        sync.scheduler.lock().window.received_len(),
         0,
         "malformed body must not be in window received state"
     );
@@ -138,7 +138,7 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
     assert_eq!(received, 1, "correct body should be processed (staged)");
     // The stager must now contain the correct body.
     assert!(
-        sync.body_sync.lock().stager.contains(&block_hash),
+        sync.scheduler.lock().stager.contains(&block_hash),
         "correct body must be staged after malformed was rejected"
     );
 
@@ -167,7 +167,7 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
     );
     assert!(!sync.peer_table.is_current(source_a));
     assert!(
-        sync.body_sync
+        sync.scheduler
             .lock()
             .window
             .peer_in_staller_cooldown(peer_a, std::time::Instant::now())
@@ -202,15 +202,15 @@ fn altered_non_witness_body_dropped_then_correct_body_staged()
         sync.buffer_received_block_chunk(&mut batch, Some(block_hash)),
         1
     );
-    assert!(!sync.body_sync.lock().stager.contains(&block_hash));
-    assert_eq!(sync.body_sync.lock().window.received_len(), 0);
+    assert!(!sync.scheduler.lock().stager.contains(&block_hash));
+    assert_eq!(sync.scheduler.lock().window.received_len(), 0);
 
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
     assert_eq!(
         sync.buffer_received_block_chunk(&mut batch, Some(block_hash)),
         1
     );
-    assert!(sync.body_sync.lock().stager.contains(&block_hash));
+    assert!(sync.scheduler.lock().stager.contains(&block_hash));
 
     Ok(())
 }
@@ -230,11 +230,11 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "correct body should be staged");
     assert!(
-        sync.body_sync.lock().stager.contains(&block_hash),
+        sync.scheduler.lock().stager.contains(&block_hash),
         "correct body must be staged"
     );
-    let staged_bytes = sync.body_sync.lock().stager.received_bytes();
-    let window_received = sync.body_sync.lock().window.received_len();
+    let staged_bytes = sync.scheduler.lock().stager.received_bytes();
+    let window_received = sync.scheduler.lock().window.received_len();
 
     // Send the stripped (malformed) duplicate.
     let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
@@ -243,23 +243,23 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
 
     // The stager must still contain the correct body — not displaced.
     assert!(
-        sync.body_sync.lock().stager.contains(&block_hash),
+        sync.scheduler.lock().stager.contains(&block_hash),
         "correct body must still be staged after malformed duplicate"
     );
     assert_eq!(
-        sync.body_sync.lock().stager.received_bytes(),
+        sync.scheduler.lock().stager.received_bytes(),
         staged_bytes,
         "staged byte count must not change from a duplicate"
     );
     assert_eq!(
-        sync.body_sync.lock().stager.received_len(),
+        sync.scheduler.lock().stager.received_len(),
         1,
         "only one body should be staged"
     );
     // The already-staged precheck skips witness hashing, so no
     // reject_delivery touches the window — received state is unchanged.
     assert_eq!(
-        sync.body_sync.lock().window.received_len(),
+        sync.scheduler.lock().window.received_len(),
         window_received,
         "window received state must not change from an already-staged duplicate"
     );

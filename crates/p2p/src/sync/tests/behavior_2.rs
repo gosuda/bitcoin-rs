@@ -135,8 +135,8 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> Result<(), Box<dy
     };
     assert_eq!(witness_block_inventory(inventory)?, expected);
 
-    let body_sync = sync.body_sync.lock();
-    let window = &body_sync.window;
+    let scheduler = sync.scheduler.lock();
+    let window = &scheduler.window;
     assert_eq!(window.pending_len(), expected.len());
     for hash in expected {
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(hash.as_bytes());
@@ -156,22 +156,22 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
     let serialized = bytes::Bytes::from(consensus_bytes(&block));
     let staged = sync
-        .body_sync
+        .scheduler
         .lock()
         .stager
         .insert(hash, None, block, serialized, received_at);
     let StagedBlock::Memory { bytes, .. } = staged else {
         return Err(std::io::Error::other("test block should stage in memory").into());
     };
-    sync.body_sync
+    sync.scheduler
         .lock()
         .window
         .mark_received(hash, bytes, Instant::now());
 
     sync.drain_inbound_blocks();
 
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 0);
-    assert_eq!(sync.body_sync.lock().window.received_len(), 0);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
+    assert_eq!(sync.scheduler.lock().window.received_len(), 0);
     Ok(())
 }
 
@@ -195,7 +195,7 @@ fn tick_respects_pending_byte_budget() -> Result<(), Box<dyn std::error::Error>>
         return Err(std::io::Error::other("expected getdata").into());
     };
     assert_eq!(inventory.len(), 1);
-    assert_eq!(sync.body_sync.lock().window.pending_len(), 1);
+    assert_eq!(sync.scheduler.lock().window.pending_len(), 1);
     Ok(())
 }
 
@@ -256,7 +256,7 @@ fn tick_falls_back_to_single_deep_peer_below_fanout_threshold()
         assert_eq!(witness_block_inventory(next_getdata(rx)?)?, expected[..8]);
     }
     assert_eq!(
-        sync.body_sync.lock().window.pending_len(),
+        sync.scheduler.lock().window.pending_len(),
         super::super::PENDING_BUDGET
     );
     Ok(())
@@ -398,7 +398,7 @@ fn ineligible_peers_receive_no_block_requests_during_fanout()
         "a peer that misses the request timeout must release its outbound slot"
     );
     assert!(
-        sync.body_sync
+        sync.scheduler
             .lock()
             .window
             .peer_in_staller_cooldown(test_addr(9250, 0)?, Instant::now()),

@@ -10,15 +10,42 @@ impl BlockSync {
     /// is the operator-facing progress signal that #223 identified as
     /// missing during IBD — without it, `docker logs` shows no indication
     /// that the node is alive and applying blocks.
+    ///
+    /// When the canonical frontier cannot make progress at all, the line
+    /// names the explicit reason instead of staying silent (#1128).
     pub fn emit_sync_progress(&self) {
-        let applied_tip = self.chain.applied_tip().load_full();
-        let chain_tip = self.chain.chain_tip().load_full();
-        let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let live_peers = self.peer_table.len();
+        let now = std::time::Instant::now();
+        let chain = self.observe_chain_frontier();
+        let frontier = self.observe_frontier(chain, now);
+        let plan = frontier.plan();
+        let applied_height = frontier
+            .chain
+            .applied_tip
+            .as_ref()
+            .map_or(0, |tip| tip.height);
+        let header_height = frontier
+            .chain
+            .chain_tip
+            .as_ref()
+            .map_or(applied_height, |tip| tip.height);
+        let live_peers = frontier.usable_peers.len();
         let in_ibd = header_height > 0 && applied_height < header_height;
         let gap = header_height.saturating_sub(applied_height);
 
+        if let Some(reason) = plan.no_progress
+            && reason != crate::sync::NoProgressReason::AtTip
+        {
+            tracing::warn!(
+                applied_height,
+                header_height,
+                gap,
+                peers = live_peers,
+                ibd = in_ibd,
+                %reason,
+                "sync progress: frontier cannot advance"
+            );
+            return;
+        }
         if in_ibd {
             tracing::info!(
                 applied_height,
@@ -40,9 +67,9 @@ impl BlockSync {
     }
 
     pub(super) fn record_sync_metrics(&self) {
-        let body_sync = self.body_sync.lock();
-        let window = &body_sync.window;
-        let stager = &body_sync.stager;
+        let scheduler = self.scheduler.lock();
+        let window = &scheduler.window;
+        let stager = &scheduler.stager;
         metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
         metrics::gauge!("node.sync.received_blocks").set(metric_count(stager.received_len()));
@@ -59,8 +86,8 @@ impl BlockSync {
     }
 
     pub(super) fn record_pending_sync_metrics(&self) {
-        let body_sync = self.body_sync.lock();
-        let window = &body_sync.window;
+        let scheduler = self.scheduler.lock();
+        let window = &scheduler.window;
         metrics::gauge!("node.sync.pending_blocks").set(metric_count(window.pending_len()));
         metrics::gauge!("node.sync.pending_bytes").set(metric_count(window.pending_bytes()));
     }

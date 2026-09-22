@@ -113,7 +113,7 @@ impl PeerTable {
         let mut entries = self.entries.write();
         let Some(entry) = entries
             .get_mut(&source.addr)
-            .filter(|entry| entry.lease.is_current(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
         else {
             return false;
         };
@@ -137,7 +137,7 @@ impl PeerTable {
     pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&source.addr) {
-            Some(entry) if entry.lease.is_current(source) => {
+            Some(entry) if entry.lease.is_current(source) && !entry.lease.is_cancelled() => {
                 let Some(info) = entry.info.as_mut() else {
                     return false;
                 };
@@ -158,7 +158,7 @@ impl PeerTable {
     pub fn note_compact_relay(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&source.addr) {
-            Some(entry) if entry.lease.is_current(source) => {
+            Some(entry) if entry.lease.is_current(source) && !entry.lease.is_cancelled() => {
                 let Some(info) = entry.info.as_mut() else {
                     return false;
                 };
@@ -253,21 +253,23 @@ impl PeerTable {
         self.entries.read().contains_key(&addr)
     }
 
-    /// Returns whether the connection that stamped `source` is still live.
+    /// Returns whether the connection that stamped `source` is still live
+    /// and uncancelled. A cancelled lease is not a schedulable peer.
     #[must_use]
     pub fn is_current(&self, source: PeerSource) -> bool {
         self.entries
             .read()
             .get(&source.addr)
-            .is_some_and(|entry| entry.lease.is_current(source))
+            .is_some_and(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
     }
 
-    /// Clones the lease of the live connection at `addr`.
+    /// Clones the lease of the live, uncancelled connection at `addr`.
     #[must_use]
     pub fn lease(&self, addr: SocketAddr) -> Option<PeerLease> {
         self.entries
             .read()
             .get(&addr)
+            .filter(|entry| !entry.lease.is_cancelled())
             .map(|entry| entry.lease.clone())
     }
 
@@ -289,12 +291,14 @@ impl PeerTable {
         self.entries.read().keys().copied().collect()
     }
 
-    /// Address and connection identity of every live connection.
+    /// Address and connection identity of every live, uncancelled
+    /// connection.
     #[must_use]
     pub fn live_connections(&self) -> Vec<(SocketAddr, ConnectionId)> {
         self.entries
             .read()
             .iter()
+            .filter(|(_, entry)| !entry.lease.is_cancelled())
             .map(|(addr, entry)| (*addr, entry.lease.connection_id()))
             .collect()
     }
@@ -314,6 +318,9 @@ impl PeerTable {
         mut f: impl FnMut(SocketAddr, &PeerLease, &PeerInfo),
     ) {
         for (addr, entry) in self.entries.read().iter() {
+            if entry.lease.is_cancelled() {
+                continue;
+            }
             if let Some(info) = &entry.info {
                 f(*addr, &entry.lease, info);
             }
@@ -355,14 +362,39 @@ impl PeerTable {
         sessions
     }
 
+    /// The peer-liveness snapshot every scheduler consumes: handshake-complete
+    /// sessions whose leases are not cancelled, ordered by connection
+    /// identity. A cancelled lease is not representable as a schedulable
+    /// peer.
+    #[must_use]
+    pub fn usable_peers(&self) -> Vec<PeerSession> {
+        let entries = self.entries.read();
+        let mut sessions: Vec<PeerSession> = entries
+            .iter()
+            .filter(|(_, entry)| !entry.lease.is_cancelled() && entry.info.is_some())
+            .map(|(addr, entry)| PeerSession {
+                addr: *addr,
+                lease: entry.lease.clone(),
+                info: entry.info.clone(),
+                demonstrated_tips: entry.demonstrated_tips.clone(),
+            })
+            .collect();
+        sessions.sort_unstable_by_key(|session| session.lease.connection_id().get());
+        sessions
+    }
+
     /// Returns the current connection source only when `addr` is published as
-    /// ready. Registration clears predecessor metadata, so a handshaking
-    /// replacement cannot inherit an old scheduler decision.
+    /// ready and its lease is not cancelled. Registration clears predecessor
+    /// metadata, so a handshaking replacement cannot inherit an old scheduler
+    /// decision.
     #[must_use]
     pub fn ready_source(&self, addr: SocketAddr) -> Option<PeerSource> {
         let entries = self.entries.read();
         let entry = entries.get(&addr)?;
         entry.info.as_ref()?;
+        if entry.lease.is_cancelled() {
+            return None;
+        }
         Some(entry.lease.source(addr))
     }
 
@@ -382,29 +414,53 @@ impl PeerTable {
     }
 
     /// Clones the lease only when it is still the connection identified by
-    /// `source`.
+    /// `source` and has not been cancelled.
     #[must_use]
     pub fn lease_source(&self, source: PeerSource) -> Option<PeerLease> {
         self.entries
             .read()
             .get(&source.addr)
-            .filter(|entry| entry.lease.is_current(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
             .map(|entry| entry.lease.clone())
     }
 
-    /// Sends only to the current connection, holding its identity through the
-    /// nonblocking enqueue. A replacement cannot register between validation
-    /// and enqueue; saturation retains the lease's cancellation policy.
+    /// Sends only to the current, uncancelled connection, holding its
+    /// identity through the nonblocking enqueue. A replacement cannot
+    /// register between validation and enqueue; saturation retains the
+    /// lease's cancellation policy.
     #[allow(clippy::result_large_err)]
     pub fn send(&self, source: PeerSource, message: crate::Message) -> Result<(), crate::Message> {
         let entries = self.entries.read();
         let Some(entry) = entries
             .get(&source.addr)
-            .filter(|entry| entry.lease.is_current(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
         else {
             return Err(message);
         };
         entry.lease.send(message).map_err(|error| error.0)
+    }
+
+    /// Like [`Self::send`], then runs `published` while the connection's
+    /// identity is still held: a same-address replacement cannot register
+    /// between the enqueue and the caller stamping request ownership under
+    /// that identity.
+    #[allow(clippy::result_large_err)]
+    pub fn send_then(
+        &self,
+        source: PeerSource,
+        message: crate::Message,
+        published: impl FnOnce(),
+    ) -> Result<(), crate::Message> {
+        let entries = self.entries.read();
+        let Some(entry) = entries
+            .get(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return Err(message);
+        };
+        entry.lease.send(message).map_err(|error| error.0)?;
+        published();
+        Ok(())
     }
 
     /// Snapshots handshake-complete peers together with the connection that
@@ -413,6 +469,7 @@ impl PeerTable {
     pub fn ready_peers(&self) -> Vec<crate::connection::ReadyPeer> {
         self.sessions()
             .into_iter()
+            .filter(|session| !session.lease.is_cancelled())
             .filter_map(|session| {
                 Some(crate::connection::ReadyPeer {
                     source: session.lease.source(session.addr),

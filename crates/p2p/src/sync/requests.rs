@@ -4,17 +4,17 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
-use super::peers::body_capability_height;
+use super::frontier::SyncFrontier;
+use super::peers::active_demonstrated_height;
 use super::telemetry::metric_count;
 use crate::Message;
+use crate::connection::PeerSource;
 use crate::download_window::SyncPeer;
 use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
-use std::net::SocketAddr;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -33,21 +33,17 @@ impl BlockSync {
     /// create a unique out-of-order height hole. It runs once per deep owner.
     pub(super) fn send_prefix_probes(&self, probe_peers: &[SyncPeer], now: Instant) {
         let Some((owner, hashes, required_height)) =
-            self.body_sync.lock().window.prefix_probe_plan()
+            self.scheduler.lock().window.prefix_probe_plan()
         else {
             return;
         };
         let candidates = probe_peers.iter().filter(|peer| {
-            peer.addr != owner
+            peer.source != owner
                 && u32::try_from(peer.best_known_height)
                     .is_ok_and(|height| height >= required_height)
         });
-        let mut successful = SmallVec::<[SocketAddr; 8]>::new();
+        let mut successful = SmallVec::<[PeerSource; 8]>::new();
         for peer in candidates {
-            let peer_addr = peer.addr;
-            let Some(tx) = self.peer_table.lease(peer_addr) else {
-                continue;
-            };
             let inventory = hashes
                 .iter()
                 .map(|hash| {
@@ -56,22 +52,26 @@ impl BlockSync {
                     ))
                 })
                 .collect();
-            if tx.send(Message::GetData(inventory)).is_ok() {
-                successful.push(peer_addr);
+            if self
+                .peer_table
+                .send(peer.source, Message::GetData(inventory))
+                .is_ok()
+            {
+                successful.push(peer.source);
             }
         }
         if successful.is_empty() {
             return;
         }
         let block_count = hashes.len();
-        self.body_sync
+        self.scheduler
             .lock()
             .window
             .confirm_prefix_probe(owner, hashes, &successful, now);
         metrics::counter!("node.sync.prefix_probe_peers")
             .increment(u64::try_from(successful.len()).unwrap_or(u64::MAX));
         tracing::info!(
-            owner = %owner,
+            owner = %owner.addr,
             alternates = successful.len(),
             blocks = block_count,
             "block sync: started common-prefix peer probe"
@@ -118,8 +118,11 @@ impl BlockSync {
     fn compact_fetch_eligible(
         &self,
         request: &crate::download_window::PeerRequest,
-        chain_tip: &TipSnapshot,
+        frontier: &SyncFrontier,
     ) -> bool {
+        let Some(chain_tip) = frontier.chain.chain_tip.as_ref() else {
+            return false;
+        };
         let Some((first_height, _)) = request.entries().next() else {
             return false;
         };
@@ -127,27 +130,31 @@ impl BlockSync {
             && self.peer_table.compact_relay_of(request.peer_addr())
     }
 
+    /// Requests the next window batch from `source`, a usable peer from the
+    /// frontier snapshot. The request start is the canonical next-required
+    /// height — recovery and scheduling never disagree about the frontier.
     pub(super) fn send_getdata_for_pending_blocks(
         &self,
-        sync_peer_addr: SocketAddr,
+        source: PeerSource,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
-        chain_tip: &TipSnapshot,
-        applied_tip: &TipSnapshot,
+        frontier: &SyncFrontier,
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
-        let tree = self.chain.block_tree().read();
-        let Some(request_start_height) =
-            Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)
-        else {
+        let (Some(chain_tip), Some(applied_tip), Some(required)) = (
+            frontier.chain.chain_tip.as_ref(),
+            frontier.chain.applied_tip.as_ref(),
+            frontier.chain.next_required,
+        ) else {
             return GetdataRequestOutcome::default();
         };
 
-        let request = self.body_sync.lock().window.next_peer_request(
-            sync_peer_addr,
+        let tree = self.chain.block_tree().read();
+        let request = self.scheduler.lock().window.next_peer_request(
+            source.addr,
             allow_expired_retry_from_peer,
             chain_tip,
-            request_start_height,
+            required.height,
             peer_best_height,
             &tree,
             now,
@@ -157,39 +164,34 @@ impl BlockSync {
             return GetdataRequestOutcome::default();
         };
 
-        let compact_fetch = self.compact_fetch_eligible(&request, chain_tip);
+        let compact_fetch = self.compact_fetch_eligible(&request, frontier);
         let (inventory, expected_hashes, is_contiguous) =
             Self::build_inventory(&request, compact_fetch, applied_tip.height);
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
-        let tx = self.peer_table.lease(request.peer_addr());
-        let Some(tx) = tx else {
-            tracing::trace!(
-                peer_addr = %request.peer_addr(),
-                "block sync: target peer has no outbound channel (getdata skipped)"
-            );
-            return GetdataRequestOutcome::default();
-        };
-        let source = tx.source(request.peer_addr());
-        let mut send_ok = false;
+        // `send_then` holds the connection's identity through the enqueue
+        // and the pending stamp under one table authority, so a replacement
+        // can never be blamed for — or credited with — this request.
         let mut has_request_capacity = false;
-        let still_current = self.peer_table.with_current(source, || {
-            send_ok = tx.send(msg).is_ok();
-            if send_ok {
-                has_request_capacity = self.body_sync.lock().window.mark_requested(&request, now);
-            }
-        });
-        if !still_current {
-            return GetdataRequestOutcome::default();
-        }
-        if !send_ok {
+        if self
+            .peer_table
+            .send_then(source, msg, || {
+                has_request_capacity = self
+                    .scheduler
+                    .lock()
+                    .window
+                    .mark_requested(&request, source, now);
+            })
+            .is_err()
+        {
             tracing::warn!(
-                peer_addr = %request.peer_addr(),
+                peer_addr = %source.addr,
                 "block sync: outbound channel disconnected (getdata)"
             );
             return GetdataRequestOutcome::default();
         }
+
         if is_contiguous {
             *self.expected_apply_cache.lock() = Some(ExpectedApplyCache {
                 chain_tip_hash: chain_tip.hash,
@@ -202,13 +204,13 @@ impl BlockSync {
         metrics::histogram!("node.sync.getdata_batch_size").record(metric_count(count));
         if compact_fetch {
             tracing::info!(
-                peer_addr = %request.peer_addr(),
+                peer_addr = %source.addr,
                 count,
                 "block sync: requested compact blocks near tip"
             );
         }
         tracing::debug!(
-            peer_addr = %request.peer_addr(),
+            peer_addr = %source.addr,
             count,
             compact = compact_fetch,
             applied_height = applied_tip.height,
@@ -225,69 +227,69 @@ impl BlockSync {
     ///
     /// The original request remains the sole pending owner. This bounded
     /// hedge therefore changes neither capacity accounting nor timeout state.
+    /// Returns the alternate's source so the race can be armed.
     pub(super) fn send_cold_front_hedge(
         &self,
-        owner: SocketAddr,
+        owner: PeerSource,
         front_hash: Hash256,
         front_height: u32,
         now: Instant,
-    ) -> Option<SocketAddr> {
-        let sessions = self.peer_table.sessions();
+    ) -> Option<PeerSource> {
+        let sessions = self.peer_table.usable_peers();
         let tree = self.chain.block_tree().read();
         let active_tip = self.chain.chain_tip().load_full()?.tip_id;
         let active_front_height = tree.active_height_of(active_tip, front_hash)?;
-        let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
+        let mut eligible = SmallVec::<[PeerSource; 8]>::new();
         for session in sessions {
             let Some(peer) = session.info else {
                 continue;
             };
-            if peer.addr != owner
+            let source = session.lease.source(session.addr);
+            // Same capability rule as `UsablePeer::capability`: the
+            // handshake best-known while the peer has no branch evidence,
+            // else only a tip on the current active chain counts.
+            let capability = if session.demonstrated_tips.is_empty() {
+                u32::try_from(peer.best_known_height).ok()
+            } else {
+                active_demonstrated_height(&tree, active_tip, &session.demonstrated_tips)
+            };
+            if source != owner
                 && statically_fanout_eligible(&peer)
-                && body_capability_height(
-                    &peer,
-                    &tree,
-                    Some(active_tip),
-                    &session.demonstrated_tips,
-                )
-                .is_some_and(|height| height >= active_front_height)
+                && capability.is_some_and(|height| height >= active_front_height)
             {
-                candidates.push(peer.addr);
+                eligible.push(source);
             }
         }
         drop(tree);
-        let candidates: SmallVec<[SocketAddr; 8]> = {
-            let body_sync = self.body_sync.lock();
-            let window = &body_sync.window;
-            candidates
+        let candidates: SmallVec<[PeerSource; 8]> = {
+            let scheduler = self.scheduler.lock();
+            let window = &scheduler.window;
+            eligible
                 .into_iter()
-                .filter(|addr| {
-                    !window.peer_has_expired_pending(*addr, now)
-                        && !window.peer_in_staller_cooldown(*addr, now)
+                .filter(|source| {
+                    !window.peer_has_expired_pending(source.addr, now)
+                        && !window.peer_in_staller_cooldown(source.addr, now)
                 })
                 .collect()
         };
         let mut message = Message::GetData(vec![Inventory::WitnessBlock(
             bitcoin::BlockHash::from_byte_array(*front_hash.as_byte_array()),
         )]);
-        for peer_addr in candidates {
-            let tx = self.peer_table.lease(peer_addr);
-            let Some(tx) = tx else {
-                continue;
-            };
-            match tx.send(message) {
+        for source in candidates {
+            match self.peer_table.send(source, message) {
                 Ok(()) => {
                     metrics::counter!("node.sync.cold_front_hedges").increment(1);
                     tracing::info!(
-                        owner = %owner,
-                        hedge_peer = %peer_addr,
+                        owner = %owner.addr,
+                        hedge_peer = %source.addr,
                         %front_hash,
                         front_height,
                         "block sync: hedged cold-start stalled front"
                     );
-                    return Some(peer_addr);
+                    return Some(source);
                 }
-                Err(error) => {
-                    message = error.0;
+                Err(returned) => {
+                    message = returned;
                 }
             }
         }

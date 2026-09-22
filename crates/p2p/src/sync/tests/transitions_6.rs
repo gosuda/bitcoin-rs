@@ -116,7 +116,7 @@ fn window_failure_applies_prefix_and_restores_suffix() -> Result<(), Box<dyn std
     // descendants while the transition was held. They can never become
     // applicable, so instead of returning to the stager they are purged
     // from it: the frontier must not cycle on invalidated blocks.
-    let restored = fixture.sync.body_sync.lock().stager.received_len();
+    let restored = fixture.sync.scheduler.lock().stager.received_len();
     assert_eq!(
         restored, 0,
         "invalidated blocks and their descendants are purged, not restored"
@@ -198,7 +198,7 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
     freed.sort();
     assert_eq!(requeued, freed, "every freed block must be re-requested");
     assert_eq!(
-        sync.body_sync.lock().window.pending_len(),
+        sync.scheduler.lock().window.pending_len(),
         super::super::PENDING_BUDGET
     );
     Ok(())
@@ -257,17 +257,17 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes()
     peers.register(addr, lease.clone());
     peers.publish_info(addr, &lease, synthetic_peer(addr, 8));
     sync.tick();
-    assert!(sync.pending_getheaders.lock().is_some());
+    assert!(sync.scheduler.lock().header_request.is_some());
 
     assert!(!peers.register(addr, lease));
     sync.reconcile_peer_sessions();
-    assert!(sync.pending_getheaders.lock().is_some());
+    assert!(sync.scheduler.lock().header_request.is_some());
 
     let (new_tx, _new_rx) = unbounded::<Message>();
     let replacement = PeerLease::new(new_tx);
     peers.register(addr, replacement.clone());
     peers.publish_info(addr, &replacement, synthetic_peer(addr, 8));
     sync.reconcile_peer_sessions();
-    assert!(sync.pending_getheaders.lock().is_none());
+    assert!(sync.scheduler.lock().header_request.is_none());
     Ok(())
 }
