@@ -449,9 +449,9 @@ enum ColdFrontState {
 }
 #[derive(Debug)]
 struct PrefixProbe {
-    owner: SocketAddr,
+    owner: PeerSource,
     hashes: SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
-    racers: HashMap<SocketAddr, u8>,
+    racers: HashMap<PeerSource, u8>,
     accepted: u8,
     started_at: Instant,
 }
@@ -575,7 +575,7 @@ pub struct DownloadWindow {
     /// without assigning unique height holes to alternate peers.
     prefix_probe: Option<PrefixProbe>,
     /// Deep owner already tested for the current pending assignment.
-    prefix_probe_attempted_owner: Option<SocketAddr>,
+    prefix_probe_attempted_owner: Option<PeerSource>,
     /// First observation of an expired front request. Conviction needs a
     /// second tick so blocks delivered during synchronous apply can drain.
     pending_timeout_observation: Option<PendingTimeoutObservation>,
@@ -1345,7 +1345,7 @@ impl DownloadWindow {
     pub fn prefix_probe_plan(
         &self,
     ) -> Option<(
-        SocketAddr,
+        PeerSource,
         SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
         u32,
     )> {
@@ -1356,13 +1356,9 @@ impl DownloadWindow {
             .pending
             .values()
             .min_by_key(|pending| pending.height)?
-            .source
-            .addr;
+            .source;
         if self.prefix_probe_attempted_owner == Some(owner)
-            || self
-                .pending
-                .values()
-                .any(|pending| pending.source.addr != owner)
+            || self.pending.values().any(|pending| pending.source != owner)
         {
             return None;
         }
@@ -1396,9 +1392,9 @@ impl DownloadWindow {
     /// Starts the prefix race after at least one alternate accepted the probe.
     pub fn confirm_prefix_probe(
         &mut self,
-        owner: SocketAddr,
+        owner: PeerSource,
         hashes: SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
-        alternates: &[SocketAddr],
+        alternates: &[PeerSource],
         now: Instant,
     ) {
         if alternates.is_empty() {
@@ -1510,7 +1506,7 @@ impl DownloadWindow {
             self.preferred_peer = None;
         }
         let cancel_probe = if let Some(probe) = self.prefix_probe.as_mut() {
-            probe.racers.retain(|peer, _| is_live_peer(peer));
+            probe.racers.retain(|peer, _| is_live_peer(&peer.addr));
             probe.racers.len() < 2
         } else {
             false
@@ -1528,7 +1524,10 @@ impl DownloadWindow {
         if self.preferred_peer == Some(peer_addr) {
             self.preferred_peer = None;
         }
-        if self.prefix_probe_attempted_owner == Some(peer_addr) {
+        if self
+            .prefix_probe_attempted_owner
+            .is_some_and(|owner| owner.addr == peer_addr)
+        {
             self.prefix_probe_attempted_owner = None;
         }
         if self.cold_front.is_some_and(|state| match state {
@@ -1542,7 +1541,7 @@ impl DownloadWindow {
         if self
             .prefix_probe
             .as_ref()
-            .is_some_and(|probe| probe.racers.contains_key(&peer_addr))
+            .is_some_and(|probe| probe.racers.keys().any(|racer| racer.addr == peer_addr))
         {
             self.prefix_probe = None;
         }
@@ -1849,7 +1848,7 @@ impl DownloadWindow {
     fn record_prefix_probe_delivery(
         &mut self,
         hash: Hash256,
-        delivery_peer: Option<SocketAddr>,
+        delivery_peer: Option<PeerSource>,
         now: Instant,
     ) {
         let Some(mut probe) = self.prefix_probe.take() else {
@@ -1882,14 +1881,20 @@ impl DownloadWindow {
         let owner = probe.owner;
         self.cold_front = None;
         self.pending_timeout_observation = None;
-        self.retain_peer_assignments(|peer| *peer == winner || !probe.racers.contains_key(peer));
+        self.retain_peer_assignments(|peer_addr| {
+            *peer_addr == winner.addr
+                || !probe
+                    .racers
+                    .iter()
+                    .any(|(racer, _)| racer.addr == *peer_addr)
+        });
         if winner != owner {
-            self.mark_peer_unresponsive(owner, now);
+            self.mark_peer_unresponsive(owner.addr, now);
         }
-        self.preferred_peer = Some(winner);
+        self.preferred_peer = Some(winner.addr);
         tracing::info!(
-            owner = %owner,
-            winner = %winner,
+            owner = %owner.addr,
+            winner = %winner.addr,
             winner_is_owner = winner == owner,
             blocks = probe.hashes.len(),
             elapsed_ms = u64::try_from(now.duration_since(probe.started_at).as_millis()).unwrap_or(u64::MAX),
@@ -1986,7 +1991,7 @@ impl DownloadWindow {
         let pending = self.remove_pending(&hash);
         // A local injection releases the request but cannot establish that the
         // requested peer delivered anything.
-        let delivery_peer = source_peer.map(|source| source.addr);
+        let delivery_peer = source_peer;
         if self.pending_timeout_observation.is_some_and(|observation| {
             observation.hash == hash && Some(observation.source) == source_peer
         }) {
@@ -4077,7 +4082,7 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        window.confirm_prefix_probe(planned_owner, hashes, &[first, second], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(first), source(second)], now);
 
         for (byte, source) in [(1_u8, first), (2, second), (3, first), (4, second)] {
             window.mark_received_from(hash(byte), 80, Some(self::source(source)), now);
@@ -4142,7 +4147,7 @@ mod tests {
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
         assert_eq!(terminal_height, 8);
-        window.confirm_prefix_probe(planned_owner, hashes, &[alternate], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(alternate)], now);
         assert!(window.prefix_probe.is_some());
         // At exactly the `stall_timeout_initial` deadline (direct
         // window-boundary): the bounded deferral expires, fanout engages, and
@@ -4177,7 +4182,7 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        window.confirm_prefix_probe(planned_owner, hashes, &[alternate], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(alternate)], now);
         assert!(window.prefix_probe.is_some());
 
         // The eligible count reaches the fanout threshold while the probe is
@@ -4225,7 +4230,7 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        window.confirm_prefix_probe(planned_owner, hashes, &[alternate], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(alternate)], now);
         assert!(window.prefix_probe.is_some());
 
         // First prove the deferral holds: cross the fanout threshold while
@@ -4276,7 +4281,12 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        window.confirm_prefix_probe(planned_owner, hashes, &[disconnected, live_alternate], now);
+        window.confirm_prefix_probe(
+            planned_owner,
+            hashes,
+            &[source(disconnected), source(live_alternate)],
+            now,
+        );
         window.release_disconnected_peers(|peer| *peer != disconnected);
 
         for byte in 1..=4_u8 {
@@ -4301,7 +4311,7 @@ mod tests {
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
         let loser = peer_addr(2);
-        window.confirm_prefix_probe(planned_owner, hashes, &[winner, loser], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(winner), source(loser)], now);
         for byte in 1..=4_u8 {
             window.mark_received_from(hash(byte), 80, Some(source(winner)), now);
         }
@@ -4327,7 +4337,7 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        window.confirm_prefix_probe(planned_owner, hashes, &[loser], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(loser)], now);
         insert_pending(&mut window, unrelated, hash(9), 9, now);
         insert_pending(&mut window, loser, hash(10), 10, now);
 
@@ -4359,7 +4369,7 @@ mod tests {
         let (planned_owner, hashes, _) = window
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
-        window.confirm_prefix_probe(planned_owner, hashes, &[winner, loser], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(winner), source(loser)], now);
         insert_pending(&mut window, unrelated, hash(9), 9, now);
         insert_pending(&mut window, loser, hash(10), 10, now);
 
@@ -4381,7 +4391,36 @@ mod tests {
         assert!(window.peer_in_staller_cooldown(owner, now));
         Ok(())
     }
-
+    #[test]
+    fn same_address_replacement_does_not_inherit_prefix_probe_racer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let now = Instant::now();
+        let owner_addr = staller_addr();
+        let owner = source(owner_addr);
+        let alternate_addr = healthy_addr();
+        let alternate = crate::PeerSource::for_test(alternate_addr, 1);
+        let replacement = crate::PeerSource::for_test(alternate_addr, 2);
+        let mut window = DownloadWindow::new(stall_budget());
+        for height in 1..=8_u8 {
+            insert_pending_from(&mut window, owner, hash(height), u32::from(height), now);
+        }
+        let (planned_owner, hashes, _) = window
+            .prefix_probe_plan()
+            .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
+        assert_eq!(planned_owner, owner);
+        window.confirm_prefix_probe(planned_owner, hashes, &[alternate], now);
+        // A new connection at the same socket address as the probe racer
+        // delivers the four win blocks. It must not be credited to the
+        // original racer; the race is inconclusive and no preferred peer
+        // is elected.
+        for byte in 1..=4_u8 {
+            window.mark_received_from(hash(byte), 80, Some(replacement), now);
+        }
+        assert_eq!(window.preferred_peer(), None);
+        assert!(window.prefix_probe.is_none());
+        assert!(!window.peer_in_staller_cooldown(owner_addr, now));
+        Ok(())
+    }
     #[test]
     fn stale_cold_hedge_confirmation_after_forget_does_not_blame_replacement() {
         let now = Instant::now();
@@ -4416,7 +4455,7 @@ mod tests {
             std::io::Error::other("contiguous owner should produce a prefix plan")
         })?;
         window.forget_peer(owner);
-        window.confirm_prefix_probe(planned_owner, hashes, &[healthy_addr()], now);
+        window.confirm_prefix_probe(planned_owner, hashes, &[source(healthy_addr())], now);
 
         assert!(window.prefix_probe.is_none());
         assert!(window.prefix_probe_attempted_owner.is_none());

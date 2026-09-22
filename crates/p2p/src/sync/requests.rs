@@ -36,13 +36,12 @@ impl BlockSync {
             return;
         };
         let candidates = probe_peers.iter().filter(|selected| {
-            selected.peer.addr != owner
+            selected.source != owner
                 && u32::try_from(selected.peer.best_known_height)
                     .is_ok_and(|height| height >= required_height)
         });
-        let mut successful = SmallVec::<[SocketAddr; 8]>::new();
+        let mut successful = SmallVec::<[crate::PeerSource; 8]>::new();
         for selected in candidates {
-            let peer_addr = selected.peer.addr;
             let inventory = hashes
                 .iter()
                 .map(|hash| {
@@ -56,7 +55,7 @@ impl BlockSync {
                 .send(selected.source, Message::GetData(inventory))
                 .is_ok()
             {
-                successful.push(peer_addr);
+                successful.push(selected.source);
             }
         }
         if successful.is_empty() {
@@ -70,7 +69,7 @@ impl BlockSync {
         metrics::counter!("node.sync.prefix_probe_peers")
             .increment(u64::try_from(successful.len()).unwrap_or(u64::MAX));
         tracing::info!(
-            owner = %owner,
+            owner = %owner.addr,
             alternates = successful.len(),
             blocks = block_count,
             "block sync: started common-prefix peer probe"
