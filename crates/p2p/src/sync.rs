@@ -227,12 +227,16 @@ impl BlockSync {
         }
         match plan.header_action {
             frontier::HeaderAction::ProbeMissingFrontier(source) => {
-                // A sent probe fills the pending-request gate, so the
-                // tip-extension request below becomes a no-op. A probe
+                // A sent probe is this tick's header request. A probe
                 // suppressed by a just-published body still owes the normal
                 // extension; a send failure must exclude the dead source.
-                let exclude = self.execute_frontier_probe(&frontier, source).err();
-                self.request_headers_from_best_peer(&frontier, exclude);
+                match self.execute_frontier_probe(&frontier, source) {
+                    Ok(true) => {}
+                    Ok(false) => self.request_headers_from_best_peer(&frontier, None),
+                    Err(source) => {
+                        self.request_headers_from_best_peer(&frontier, Some(source));
+                    }
+                }
             }
             frontier::HeaderAction::AwaitPending => {}
             frontier::HeaderAction::ExtendHeaderTip => {

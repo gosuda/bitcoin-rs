@@ -374,18 +374,6 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         Some(*Network::Regtest.genesis_block().block_hash().as_bytes()),
         "the live peer must own the follow-up header request",
     );
-    // The probe arms a pending question about the applied-anchor locator
-    // tip; the fallback asks a different question (the chain tip), which
-    // the locator-tip gate lets through and the wire message supersedes.
-    let request = next_getheaders(&live_rx)?;
-    assert_eq!(
-        request
-            .locator_hashes
-            .first()
-            .map(|hash| *hash.as_byte_array()),
-        Some(*expected[0].as_bytes()),
-        "the fallback request must again start at the header tip",
-    );
     assert!(live_rx.try_recv().is_err());
     Ok(())
 }

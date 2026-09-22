@@ -187,21 +187,22 @@ impl BlockSync {
     /// successors behind an unowned or rejected frontier are stuck inventory
     /// awaiting the staged-body timeout, not progress. Start at the applied
     /// chain so a peer at our header tip returns branch evidence. Reuse the
-    /// existing header-request deadline.
+    /// existing header-request deadline. `Ok(true)` reports the getheaders
+    /// was sent, `Ok(false)` every suppressed path, `Err` the send failure.
     pub(super) fn execute_frontier_probe(
         &self,
         frontier: &SyncFrontier,
         source: PeerSource,
-    ) -> Result<(), PeerSource> {
+    ) -> Result<bool, PeerSource> {
         if !self.frontier_chain_is_current(frontier) {
-            return Ok(());
+            return Ok(false);
         }
         let (Some(applied), Some(headers), Some(required)) = (
             frontier.applied_tip.as_ref(),
             frontier.header_tip.as_ref(),
             frontier.next_required,
         ) else {
-            return Ok(());
+            return Ok(false);
         };
         // Body dispatch runs before this action. Revalidate the observed hash
         // so a successful getdata publication suppresses the recovery probe.
@@ -210,7 +211,7 @@ impl BlockSync {
             if state.window.contains_pending(&required.hash)
                 || state.stager.contains(&required.hash)
             {
-                return Ok(());
+                return Ok(false);
             }
         }
         // Anchor on the active chain at the applied height, not on the
@@ -223,7 +224,7 @@ impl BlockSync {
             let tree = self.chain.block_tree().read();
             let Some(active_anchor) = tree.node_at_height_from(headers.tip_id, applied.height)
             else {
-                return Ok(());
+                return Ok(false);
             };
             tree.block_locator(active_anchor, LOCATOR_MAX_ENTRIES)
         };
@@ -235,7 +236,7 @@ impl BlockSync {
         );
         if sent {
             metrics::counter!("node.sync.idle_frontier_probes").increment(1);
-            Ok(())
+            Ok(true)
         } else {
             Err(source)
         }
