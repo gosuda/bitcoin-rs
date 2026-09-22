@@ -1,5 +1,6 @@
 //! Resolver tests for grouped node configuration layers.
 
+use std::net::SocketAddr;
 use std::str::FromStr as _;
 
 use anyhow::Result;
@@ -35,6 +36,58 @@ fn drynet4_network_applies_atomic_p2p_profile() -> Result<()> {
     assert_eq!(config.p2p.magic, [0xec, 0xa5, 0xd4, 0x04]);
     assert_eq!(config.p2p.connect, vec!["drynet4.drivechain.dev:8533"]);
     assert!(!config.p2p.dns_seeds_enabled);
+    Ok(())
+}
+
+#[test]
+fn betanet_network_applies_native_profile() -> Result<()> {
+    assert_eq!(
+        NetworkSelection::parse("betanet"),
+        Some(NetworkSelection::Betanet)
+    );
+
+    let layer = UserConfig {
+        network: Some(NetworkSelection::Betanet),
+        ..Default::default()
+    };
+    let config = resolve(&[&layer])?;
+    assert_eq!(config.network, Network::Betanet);
+    assert_eq!(config.p2p.magic, [0xec, 0xa5, 0xb1, 0x04]);
+    assert_eq!(config.rpc.bind.port(), 8532);
+    assert_eq!(
+        config.p2p.listen,
+        vec![SocketAddr::from(([0, 0, 0, 0], 8533))]
+    );
+    assert!(config.p2p.connect.is_empty());
+    assert!(config.p2p.dns_seeds_enabled);
+
+    // The DNS seed set is betanet's own: the four beta seeds and no mainnet seed.
+    let seeds = Network::Betanet.dns_seeds();
+    assert_eq!(
+        seeds,
+        &[
+            "seed.beta.ecash.ninja.",
+            "seed.beta.bip300.xyz.",
+            "seed.beta.ecash.drivecha.in.",
+            "seed.beta.ecash.zuexeuz.net.",
+        ]
+    );
+    assert!(
+        seeds
+            .iter()
+            .all(|seed| !Network::Mainnet.dns_seeds().contains(seed))
+    );
+
+    // Consensus history is shared with mainnet up to the ecash fork.
+    assert_eq!(
+        config.network.genesis_block_hash(),
+        Network::Mainnet.genesis_block_hash()
+    );
+
+    assert_eq!(config.network.ecash_fork_height(), Some(967_680));
+    assert_eq!(config.network.ecash_fork_bits(), Some(0x1904_4b7e));
+    assert_eq!(Network::Mainnet.ecash_fork_height(), None);
+    assert_eq!(Network::Mainnet.ecash_fork_bits(), None);
     Ok(())
 }
 

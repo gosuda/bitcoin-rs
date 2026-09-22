@@ -234,7 +234,7 @@ fn script_asm(script: &[u8]) -> String {
 #[must_use]
 const fn bitcoin_network(network: Network) -> bitcoin::Network {
     match network {
-        Network::Mainnet => bitcoin::Network::Bitcoin,
+        Network::Mainnet | Network::Betanet => bitcoin::Network::Bitcoin,
         Network::Testnet3 => bitcoin::Network::Testnet,
         Network::Testnet4 => bitcoin::Network::Testnet4,
         Network::Signet => bitcoin::Network::Signet,

@@ -158,6 +158,8 @@ pub const OP_NOP6: u8 = 0xb5;
 pub const OP_NOP7: u8 = 0xb6;
 /// `OP_NOP8` (0xb7).
 pub const OP_NOP8: u8 = 0xb7;
+/// `OP_DRIVECHAIN` (0xb7) — the ecash fork's redefinition of `OP_NOP8`.
+pub const OP_DRIVECHAIN: u8 = OP_NOP8;
 /// `OP_NOP9` (0xb8).
 pub const OP_NOP9: u8 = 0xb8;
 /// `OP_NOP10` (0xb9).
@@ -489,6 +491,23 @@ pub fn eval_script(
         }
 
         let f_exec = conditions.all_true();
+
+        // ecash fork: `OP_DRIVECHAIN`'s whole-script 4-byte form pushes the
+        // drivechain marker and ends evaluation successfully (Core
+        // interpreter.cpp: `stack.push_back({0xDC}); pc = pend;`). The form is
+        // the whole script, so only the first instruction can match; every
+        // other `0xb7` shape keeps `OP_NOP8` behavior. Without the `ECASH`
+        // flag the opcode is plain `OP_NOP8` on every network.
+        if flags.contains(VerifyFlags::ECASH)
+            && f_exec
+            && opcode_byte == OP_DRIVECHAIN
+            && script.len() == 4
+            && script[0] == OP_DRIVECHAIN
+        {
+            push_bytes(stack, &[0xDC])?;
+            return Ok(());
+        }
+
         if f_exec || (OP_IF..=OP_ENDIF).contains(&opcode_byte) {
             dispatch(
                 opcode_byte,

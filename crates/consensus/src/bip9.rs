@@ -87,7 +87,7 @@ pub struct SoftforkState {
 #[must_use]
 pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
     let threshold = match network {
-        Network::Mainnet => MAINNET_THRESHOLD,
+        Network::Mainnet | Network::Betanet => MAINNET_THRESHOLD,
         Network::Testnet3 => TESTNET3_THRESHOLD,
         Network::Testnet4 | Network::Signet | Network::Regtest => return None,
     };
@@ -95,7 +95,7 @@ pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<D
         CSV_DEPLOYMENT_ID => Some(DeploymentParams {
             bit: 0,
             start_time: match network {
-                Network::Mainnet => 1_462_060_800,
+                Network::Mainnet | Network::Betanet => 1_462_060_800,
                 Network::Testnet3 => 1_456_790_400,
                 Network::Testnet4 | Network::Signet | Network::Regtest => return None,
             },
@@ -106,12 +106,12 @@ pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<D
         SEGWIT_DEPLOYMENT_ID => Some(DeploymentParams {
             bit: 1,
             start_time: match network {
-                Network::Mainnet => 1_479_168_000,
+                Network::Mainnet | Network::Betanet => 1_479_168_000,
                 Network::Testnet3 => 1_462_060_800,
                 Network::Testnet4 | Network::Signet | Network::Regtest => return None,
             },
             timeout: match network {
-                Network::Mainnet => 1_510_704_000,
+                Network::Mainnet | Network::Betanet => 1_510_704_000,
                 Network::Testnet3 => 1_493_596_800,
                 Network::Testnet4 | Network::Signet | Network::Regtest => return None,
             },

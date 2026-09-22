@@ -28,6 +28,8 @@ pub mod bip68;
 pub mod bip9;
 /// Parse-once block state shared by the native apply path.
 pub mod block_view;
+/// ecash betanet repurpose-forgiveness data.
+pub mod ecash;
 /// Feature-gated bitcoinkernel wrapper.
 pub mod kernel;
 /// Portable Rust validator.

@@ -88,6 +88,7 @@ fn section_matches_network(section: &str, network: Network) -> bool {
         "testnet4" => network == Network::Testnet4,
         "signet" => network == Network::Signet,
         "regtest" => network == Network::Regtest,
+        "betanet" => network == Network::Betanet,
         _ => false,
     }
 }
