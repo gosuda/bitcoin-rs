@@ -177,7 +177,7 @@ fn repeated_at_tip_extensions_keep_one_owned_frontier() -> Result<(), Box<dyn st
         );
         assert_eq!(
             sync.frontier_state.lock().window.pending_owner(&hash),
-            Some(source.addr),
+            Some(source),
             "the current connection must own the frontier body request"
         );
         assert!(peers.is_current(source));

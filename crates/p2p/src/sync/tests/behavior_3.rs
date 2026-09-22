@@ -403,6 +403,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     );
     let staller = test_addr(9470, 0)?;
     let rx = connect_peer(&peers, synthetic_peer(staller, 100));
+    let staller_source = current_source(&peers, staller);
 
     // Cold-start disarm, exactly like the no-blame test above, so the final
     // phase fires on the fixed threshold rather than the unseeded-EWMA gate.
@@ -434,14 +435,13 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
             .insert(hash, None, block, serialized, Instant::now());
     }
     let staged_at = Instant::now();
-    sync.frontier_state
-        .lock()
-        .window
-        .mark_received_from(frontier, 80, Some(staller), staged_at);
-    sync.frontier_state
-        .lock()
-        .window
-        .mark_received(successor, 80, staged_at);
+    {
+        let mut state = sync.frontier_state.lock();
+        state
+            .window
+            .mark_received_from(frontier, 80, Some(staller_source), staged_at);
+        state.window.mark_received(successor, 80, staged_at);
+    }
 
     let applied = sync
         .chain

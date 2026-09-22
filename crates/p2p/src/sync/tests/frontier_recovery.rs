@@ -397,8 +397,8 @@ fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick()
 }
 
 #[test]
-fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
--> Result<(), Box<dyn std::error::Error>> {
+fn reorg_probe_anchors_locator_before_first_required_body() -> Result<(), Box<dyn std::error::Error>>
+{
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
@@ -437,9 +437,9 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     let active_tip = tree.tip().ok_or("missing active tip")?;
     assert_eq!(active_tip.tip_id, winning_4_id);
     let active_anchor = tree
-        .node_at_height_from(winning_4_id, 3)
-        .ok_or("missing active height-3 anchor")?;
-    assert_eq!(active_anchor, winning_3_id);
+        .node_at_height_from(winning_4_id, 1)
+        .ok_or("missing active parent of first required body")?;
+    assert_eq!(active_anchor, common_id);
     let active_anchor_hash = tree.node(active_anchor)?.hash;
     let losing_tip = tree.node(losing_3_id)?;
     let losing_snapshot = TipSnapshot {
@@ -471,7 +471,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     assert_eq!(
         *locator_tip.as_byte_array(),
         active_anchor_hash.to_le_bytes(),
-        "idle recovery must anchor at the active-chain node at applied height",
+        "idle recovery must anchor immediately before the first required body",
     );
     assert_ne!(
         *locator_tip.as_byte_array(),

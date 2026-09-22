@@ -217,7 +217,8 @@ impl BlockSync {
             self.send_prefix_probes(&sync_peer_selection.probe_peers, now);
         }
         if let Some(hedge) = cold_hedge
-            && let Some(alternate) = self.send_cold_front_hedge(&frontier, hedge, now)
+            && let Some(alternate) =
+                self.send_cold_front_hedge(&frontier, &sync_peer_selection.probe_peers, hedge, now)
         {
             self.frontier_state.lock().window.confirm_cold_front_hedge(
                 hedge.owner,

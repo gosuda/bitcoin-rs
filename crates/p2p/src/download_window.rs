@@ -14,7 +14,7 @@ use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
-use crate::PeerInfo;
+use crate::{PeerInfo, PeerSource};
 
 // ---------------------------------------------------------------------------
 // Download-policy constants
@@ -383,7 +383,7 @@ const EWMA_MIN_SAMPLE_MS: u64 = 50;
 
 #[derive(Clone, Copy, Debug)]
 struct PendingBlock {
-    peer_addr: SocketAddr,
+    source: PeerSource,
     requested_at: Instant,
     height: u32,
     estimated_bytes: usize,
@@ -391,7 +391,7 @@ struct PendingBlock {
 
 #[derive(Clone, Copy, Debug)]
 struct PendingTimeoutObservation {
-    peer_addr: SocketAddr,
+    source: PeerSource,
     hash: Hash256,
 }
 
@@ -437,13 +437,13 @@ struct ApplySideStuck {
 #[derive(Clone, Copy, Debug)]
 enum ColdFrontState {
     Waiting {
-        owner: SocketAddr,
+        owner: PeerSource,
         hash: Hash256,
         since: Instant,
     },
     Racing {
-        owner: SocketAddr,
-        alternate: SocketAddr,
+        owner: PeerSource,
+        alternate: PeerSource,
         hash: Hash256,
     },
 }
@@ -872,7 +872,7 @@ impl DownloadWindow {
             return false;
         }
         self.pending.values().any(|pending| {
-            pending.peer_addr == peer_addr
+            pending.source.addr == peer_addr
                 && now.duration_since(pending.requested_at) >= self.budget.pending_timeout
         })
     }
@@ -887,15 +887,15 @@ impl DownloadWindow {
         &mut self,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<SocketAddr> {
+    ) -> Option<PeerSource> {
         if apply_side_busy {
             self.pending_timeout_observation = None;
             return None;
         }
         if let Some(observation) = self.pending_timeout_observation {
             self.pending_timeout_observation = None;
-            self.mark_peer_unresponsive(observation.peer_addr, now);
-            return Some(observation.peer_addr);
+            self.mark_peer_unresponsive(observation.source.addr, now);
+            return Some(observation.source);
         }
         if self
             .next_pending_deadline
@@ -911,7 +911,7 @@ impl DownloadWindow {
             })
             .min_by_key(|(_, pending)| pending.height)
             .map(|(hash, pending)| PendingTimeoutObservation {
-                peer_addr: pending.peer_addr,
+                source: pending.source,
                 hash: *hash,
             });
         None
@@ -1236,7 +1236,7 @@ impl DownloadWindow {
         if self.received.len() < self.budget.max_received_blocks / 2 {
             return None;
         }
-        Some((front.peer_addr, *front_hash))
+        Some((front.source.addr, *front_hash))
     }
 
     /// Current stall observation, if one is running: the blamed peer and when
@@ -1255,7 +1255,7 @@ impl DownloadWindow {
         next_apply_height: u32,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<(SocketAddr, Hash256)> {
+    ) -> Option<(PeerSource, Hash256)> {
         if matches!(self.cold_front, Some(ColdFrontState::Racing { .. })) {
             return None;
         }
@@ -1279,7 +1279,7 @@ impl DownloadWindow {
                 owner,
                 hash: waiting_hash,
                 since,
-            }) if owner == pending.peer_addr && waiting_hash == hash => {
+            }) if owner == pending.source && waiting_hash == hash => {
                 if now.duration_since(since) >= self.budget.stall_timeout_initial {
                     Some((owner, hash))
                 } else {
@@ -1288,7 +1288,7 @@ impl DownloadWindow {
             }
             _ => {
                 self.cold_front = Some(ColdFrontState::Waiting {
-                    owner: pending.peer_addr,
+                    owner: pending.source,
                     hash,
                     since: now,
                 });
@@ -1300,8 +1300,8 @@ impl DownloadWindow {
     /// Records a successfully sent cold-front duplicate request.
     pub fn confirm_cold_front_hedge(
         &mut self,
-        owner: SocketAddr,
-        alternate: SocketAddr,
+        owner: PeerSource,
+        alternate: PeerSource,
         hash: Hash256,
     ) {
         if !matches!(
@@ -1356,12 +1356,13 @@ impl DownloadWindow {
             .pending
             .values()
             .min_by_key(|pending| pending.height)?
-            .peer_addr;
+            .source
+            .addr;
         if self.prefix_probe_attempted_owner == Some(owner)
             || self
                 .pending
                 .values()
-                .any(|pending| pending.peer_addr != owner)
+                .any(|pending| pending.source.addr != owner)
         {
             return None;
         }
@@ -1458,9 +1459,9 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
-    /// Returns the address owning the pending request for `hash`. Test-only accessor.
-    pub fn pending_owner(&self, hash: &Hash256) -> Option<SocketAddr> {
-        self.pending.get(hash).map(|pending| pending.peer_addr)
+    /// Returns the owner of the pending request for `hash`, if any.
+    pub fn pending_owner(&self, hash: &Hash256) -> Option<PeerSource> {
+        self.pending.get(hash).map(|pending| pending.source)
     }
 
     /// Returns the start time of the active prefix probe, if any. Test-only.
@@ -1496,10 +1497,10 @@ impl DownloadWindow {
     /// pending and in-flight blocks for retry.
     pub fn release_disconnected_peers(&mut self, is_live_peer: impl Fn(&SocketAddr) -> bool) {
         let cold_front_live = match self.cold_front {
-            Some(ColdFrontState::Waiting { owner, .. }) => is_live_peer(&owner),
+            Some(ColdFrontState::Waiting { owner, .. }) => is_live_peer(&owner.addr),
             Some(ColdFrontState::Racing {
                 owner, alternate, ..
-            }) => is_live_peer(&owner) && is_live_peer(&alternate),
+            }) => is_live_peer(&owner.addr) && is_live_peer(&alternate.addr),
             None => true,
         };
         if !cold_front_live {
@@ -1531,10 +1532,10 @@ impl DownloadWindow {
             self.prefix_probe_attempted_owner = None;
         }
         if self.cold_front.is_some_and(|state| match state {
-            ColdFrontState::Waiting { owner, .. } => owner == peer_addr,
+            ColdFrontState::Waiting { owner, .. } => owner.addr == peer_addr,
             ColdFrontState::Racing {
                 owner, alternate, ..
-            } => owner == peer_addr || alternate == peer_addr,
+            } => owner.addr == peer_addr || alternate.addr == peer_addr,
         }) {
             self.cold_front = None;
         }
@@ -1554,7 +1555,7 @@ impl DownloadWindow {
     fn retain_peer_assignments(&mut self, retain_peer: impl Fn(&SocketAddr) -> bool) {
         if self
             .pending_timeout_observation
-            .is_some_and(|observation| !retain_peer(&observation.peer_addr))
+            .is_some_and(|observation| !retain_peer(&observation.source.addr))
         {
             self.pending_timeout_observation = None;
         }
@@ -1563,7 +1564,7 @@ impl DownloadWindow {
         let pending_timeout = self.budget.pending_timeout;
         let next_pending_deadline = self.next_pending_deadline;
         self.pending.retain(|_hash, pending| {
-            if retain_peer(&pending.peer_addr) {
+            if retain_peer(&pending.source.addr) {
                 return true;
             }
             retry_height = retry_height.min(pending.height);
@@ -1900,17 +1901,18 @@ impl DownloadWindow {
     fn resolve_cold_front_delivery(
         &mut self,
         hash: Hash256,
-        delivery_peer: Option<SocketAddr>,
+        delivery_peer: Option<PeerSource>,
         now: Instant,
-    ) {
+    ) -> bool {
         let Some(state) = self.cold_front else {
-            return;
+            return false;
         };
         match state {
             ColdFrontState::Waiting {
                 hash: waiting_hash, ..
             } if waiting_hash == hash => {
                 self.cold_front = None;
+                false
             }
             ColdFrontState::Racing {
                 owner,
@@ -1919,21 +1921,28 @@ impl DownloadWindow {
             } if racing_hash == hash => {
                 self.cold_front = None;
                 if delivery_peer != Some(alternate) {
-                    return;
+                    return false;
                 }
                 self.prefix_probe = None;
-                self.release_peer_assignments(owner);
-                self.mark_peer_unresponsive(owner, now);
-                self.preferred_peer = Some(alternate);
+                self.release_peer_assignments(owner.addr);
+                self.mark_peer_unresponsive(owner.addr, now);
+                self.preferred_peer = Some(alternate.addr);
                 metrics::counter!("node.sync.cold_front_wins").increment(1);
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
     /// Records that `request` has been sent to its peer, moving entries to
     /// pending. Returns `true` if the window still has request capacity.
-    pub fn mark_requested(&mut self, request: &PeerRequest, now: Instant) -> bool {
+    pub fn mark_requested(
+        &mut self,
+        request: &PeerRequest,
+        source: PeerSource,
+        now: Instant,
+    ) -> bool {
+        debug_assert_eq!(request.peer_addr, source.addr);
         if self.pending.is_empty() && !request.entries.is_empty() {
             self.prefix_probe_attempted_owner = None;
         }
@@ -1945,7 +1954,7 @@ impl DownloadWindow {
             let previous = self.pending.insert(
                 entry.hash,
                 PendingBlock {
-                    peer_addr: request.peer_addr,
+                    source,
                     requested_at: now,
                     height: entry.height,
                     estimated_bytes,
@@ -1971,23 +1980,25 @@ impl DownloadWindow {
         &mut self,
         hash: Hash256,
         bytes: usize,
-        source_peer: Option<SocketAddr>,
+        source_peer: Option<PeerSource>,
         now: Instant,
     ) -> bool {
         let pending = self.remove_pending(&hash);
         // A local injection releases the request but cannot establish that the
         // requested peer delivered anything.
-        let delivery_peer = source_peer;
+        let delivery_peer = source_peer.map(|source| source.addr);
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && Some(observation.peer_addr) == delivery_peer
+            observation.hash == hash && Some(observation.source) == source_peer
         }) {
             self.pending_timeout_observation = None;
         }
-        self.resolve_cold_front_delivery(hash, delivery_peer, now);
+        let won_cold_front = self.resolve_cold_front_delivery(hash, source_peer, now);
         self.record_prefix_probe_delivery(hash, delivery_peer, now);
         let (height, needs_height_lookup) = if let Some(pending) = pending {
-            if let Some(peer_addr) = delivery_peer {
-                self.record_delivery_progress(peer_addr, hash, pending.height, now);
+            if let Some(credited) =
+                source_peer.filter(|source| *source == pending.source || won_cold_front)
+            {
+                self.record_delivery_progress(credited.addr, hash, pending.height, now);
             }
             (pending.height, false)
         } else {
@@ -2009,16 +2020,16 @@ impl DownloadWindow {
 
     /// Test-only shorthand for delivery by the pending owner.
     pub fn mark_received(&mut self, hash: Hash256, bytes: usize, now: Instant) -> bool {
-        let source_peer = self.pending.get(&hash).map(|pending| pending.peer_addr);
+        let source_peer = self.pending.get(&hash).map(|pending| pending.source);
         self.mark_received_from(hash, bytes, source_peer, now)
     }
 
     /// Credits a duplicate after the first copy was already staged.
     ///
     /// The first copy owns all byte, EWMA, cold-front and probe accounting.
-    pub fn credit_duplicate_delivery(&mut self, hash: Hash256, source_peer: SocketAddr) {
+    pub fn credit_duplicate_delivery(&mut self, hash: Hash256, source_peer: PeerSource) {
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && observation.peer_addr == source_peer
+            observation.hash == hash && observation.source == source_peer
         }) {
             self.pending_timeout_observation = None;
         }
@@ -2156,12 +2167,12 @@ impl DownloadWindow {
     pub fn reject_delivery(
         &mut self,
         hash: Hash256,
-        source_peer: Option<SocketAddr>,
+        source_peer: Option<PeerSource>,
     ) -> RejectDelivery {
         // A malformed response is still proof that this peer answered. Do not
         // let a first-tick timeout observation disconnect it on the next tick.
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && Some(observation.peer_addr) == source_peer
+            observation.hash == hash && Some(observation.source) == source_peer
         }) {
             self.pending_timeout_observation = None;
         }
@@ -2174,14 +2185,14 @@ impl DownloadWindow {
                 owner,
                 hash: waiting_hash,
                 ..
-            } => waiting_hash == hash && Some(owner) == source_peer,
+            } => waiting_hash == hash && source_peer == Some(owner),
             ColdFrontState::Racing {
                 owner,
                 alternate,
                 hash: racing_hash,
             } => {
                 racing_hash == hash
-                    && source_peer.is_some_and(|peer| peer == owner || peer == alternate)
+                    && source_peer.is_some_and(|source| source == owner || source == alternate)
             }
         }) {
             self.cold_front = None;
@@ -2190,7 +2201,7 @@ impl DownloadWindow {
         let is_owner = self
             .pending
             .get(&hash)
-            .is_some_and(|pending| Some(pending.peer_addr) == source_peer);
+            .is_some_and(|pending| Some(pending.source) == source_peer);
         if is_owner {
             if let Some(pending) = self.remove_pending(&hash) {
                 self.next_request_height = self.next_request_height.min(pending.height);
@@ -2218,7 +2229,7 @@ impl DownloadWindow {
                 now.duration_since(pending.requested_at) >= pending_timeout
             }) {
                 *pending_bytes = pending_bytes.saturating_sub(pending.estimated_bytes);
-                release_peer_block(peer_inflight, pending.peer_addr);
+                release_peer_block(peer_inflight, pending.source.addr);
                 *next_request_height = (*next_request_height).min(pending.height);
                 entries.push(PeerRequestEntry {
                     hash,
@@ -2239,7 +2250,7 @@ impl DownloadWindow {
     fn remove_pending(&mut self, hash: &Hash256) -> Option<PendingBlock> {
         let pending = self.pending.remove(hash)?;
         self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-        self.release_peer_block(pending.peer_addr);
+        self.release_peer_block(pending.source.addr);
         if Some(self.pending_deadline(pending.requested_at)) == self.next_pending_deadline {
             self.refresh_next_pending_deadline();
         }
@@ -2333,6 +2344,10 @@ mod tests {
         FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, fast_sync_budget,
     };
 
+    fn source(peer_addr: std::net::SocketAddr) -> crate::PeerSource {
+        crate::PeerSource::for_test(peer_addr, u64::from(peer_addr.port()))
+    }
+
     #[test]
     fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
         let mut window = DownloadWindow::new(SyncBudget {
@@ -2367,7 +2382,7 @@ mod tests {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    peer_addr,
+                    source: source(peer_addr),
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2396,7 +2411,7 @@ mod tests {
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                peer_addr,
+                source: source(peer_addr),
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2441,7 +2456,7 @@ mod tests {
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                peer_addr: original_peer,
+                source: source(original_peer),
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2450,10 +2465,10 @@ mod tests {
         window.next_pending_deadline = Some(observed_at);
 
         assert_eq!(window.observe_pending_timeout(false, observed_at), None);
-        window.mark_received_from(block_hash, 80, Some(retry_peer), observed_at);
+        window.mark_received_from(block_hash, 80, Some(source(retry_peer)), observed_at);
         assert_eq!(
             window.observe_pending_timeout(false, observed_at),
-            Some(original_peer)
+            Some(source(original_peer))
         );
         assert!(window.peer_in_staller_cooldown(original_peer, observed_at));
         assert!(!window.peer_in_staller_cooldown(retry_peer, observed_at));
@@ -2492,7 +2507,7 @@ mod tests {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    peer_addr,
+                    source: source(peer_addr),
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2534,7 +2549,7 @@ mod tests {
             window.pending.insert(
                 hash,
                 super::PendingBlock {
-                    peer_addr,
+                    source: source(peer_addr),
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2570,7 +2585,7 @@ mod tests {
         window.pending.insert(
             pending,
             super::PendingBlock {
-                peer_addr,
+                source: source(peer_addr),
                 requested_at: now,
                 height: 2,
                 estimated_bytes: pending_bytes,
@@ -2742,7 +2757,7 @@ mod tests {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    peer_addr,
+                    source: source(peer_addr),
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2818,10 +2833,20 @@ mod tests {
         height: u32,
         now: Instant,
     ) {
+        insert_pending_from(window, source(peer_addr), block_hash, height, now);
+    }
+
+    fn insert_pending_from(
+        window: &mut DownloadWindow,
+        owner: crate::PeerSource,
+        block_hash: Hash256,
+        height: u32,
+        now: Instant,
+    ) {
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                peer_addr,
+                source: owner,
                 requested_at: now,
                 height,
                 estimated_bytes: 80,
@@ -2829,7 +2854,7 @@ mod tests {
         );
         window.pending_bytes = window.pending_bytes.saturating_add(80);
         window.record_pending_deadline(now);
-        let inflight = window.peer_inflight.entry(peer_addr).or_default();
+        let inflight = window.peer_inflight.entry(owner.addr).or_default();
         inflight.blocks = inflight.blocks.saturating_add(1);
     }
 
@@ -3942,9 +3967,9 @@ mod tests {
         assert_eq!(window.observe_cold_front(1, false, t0), None);
         assert_eq!(
             window.observe_cold_front(1, false, t0 + Duration::from_secs(2)),
-            Some((staller_addr(), hash(0x01)))
+            Some((source(staller_addr()), hash(0x01)))
         );
-        window.confirm_cold_front_hedge(staller_addr(), healthy_addr(), hash(0x01));
+        window.confirm_cold_front_hedge(source(staller_addr()), source(healthy_addr()), hash(0x01));
         assert_eq!(
             window.observe_cold_front(1, false, t0 + Duration::from_secs(30)),
             None
@@ -3956,10 +3981,10 @@ mod tests {
         // demotes the tracked owner and selects the replacement deep peer.
         let t1 = t0 + Duration::from_secs(30);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            peer_addr: staller_addr(),
+            source: source(staller_addr()),
             hash: hash(0x01),
         });
-        window.mark_received_from(hash(0x01), 80, Some(healthy_addr()), t1);
+        window.mark_received_from(hash(0x01), 80, Some(source(healthy_addr())), t1);
         assert_eq!(window.preferred_peer(), Some(healthy_addr()));
         assert!(window.peer_in_staller_cooldown(staller_addr(), t1));
         assert!(window.pending_timeout_observation.is_none());
@@ -4002,21 +4027,22 @@ mod tests {
         assert_eq!(window.observe_cold_front(1, false, t0), None);
         assert_eq!(
             window.observe_cold_front(1, false, t0 + Duration::from_secs(2)),
-            Some((staller_addr(), hash(0x01)))
+            Some((source(staller_addr()), hash(0x01)))
         );
-        window.confirm_cold_front_hedge(staller_addr(), healthy_addr(), hash(0x01));
+        window.confirm_cold_front_hedge(source(staller_addr()), source(healthy_addr()), hash(0x01));
 
         window.release_disconnected_peers(|peer| *peer != healthy_addr());
         let retry_started = t0 + Duration::from_secs(3);
         assert_eq!(window.observe_cold_front(1, false, retry_started), None);
         assert_eq!(
             window.observe_cold_front(1, false, retry_started + Duration::from_secs(2)),
-            Some((staller_addr(), hash(0x01)))
+            Some((source(staller_addr()), hash(0x01)))
         );
-        window.confirm_cold_front_hedge(staller_addr(), peer_addr(2), hash(0x01));
+        window.confirm_cold_front_hedge(source(staller_addr()), source(peer_addr(2)), hash(0x01));
         assert!(matches!(
             window.cold_front,
-            Some(super::ColdFrontState::Racing { alternate, .. }) if alternate == peer_addr(2)
+            Some(super::ColdFrontState::Racing { alternate, .. })
+                if alternate == source(peer_addr(2))
         ));
     }
 
@@ -4054,7 +4080,7 @@ mod tests {
         window.confirm_prefix_probe(planned_owner, hashes, &[first, second], now);
 
         for (byte, source) in [(1_u8, first), (2, second), (3, first), (4, second)] {
-            window.mark_received_from(hash(byte), 80, Some(source), now);
+            window.mark_received_from(hash(byte), 80, Some(self::source(source)), now);
         }
 
         assert_eq!(window.preferred_peer(), None);
@@ -4254,7 +4280,7 @@ mod tests {
         window.release_disconnected_peers(|peer| *peer != disconnected);
 
         for byte in 1..=4_u8 {
-            window.mark_received_from(hash(byte), 80, Some(disconnected), now);
+            window.mark_received_from(hash(byte), 80, Some(source(disconnected)), now);
         }
 
         assert_eq!(window.preferred_peer(), None);
@@ -4277,10 +4303,10 @@ mod tests {
         let loser = peer_addr(2);
         window.confirm_prefix_probe(planned_owner, hashes, &[winner, loser], now);
         for byte in 1..=4_u8 {
-            window.mark_received_from(hash(byte), 80, Some(winner), now);
+            window.mark_received_from(hash(byte), 80, Some(source(winner)), now);
         }
         assert_eq!(window.preferred_peer(), Some(winner));
-        window.mark_received_from(hash(5), 80, Some(owner), now);
+        window.mark_received_from(hash(5), 80, Some(source(owner)), now);
         assert_eq!(window.preferred_peer(), Some(winner));
         window.release_disconnected_peers(|peer| *peer != winner);
         assert_eq!(window.preferred_peer(), None);
@@ -4306,7 +4332,7 @@ mod tests {
         insert_pending(&mut window, loser, hash(10), 10, now);
 
         for byte in 1..=4_u8 {
-            window.mark_received_from(hash(byte), 80, Some(owner), now);
+            window.mark_received_from(hash(byte), 80, Some(source(owner)), now);
         }
 
         assert_eq!(window.preferred_peer(), Some(owner));
@@ -4338,7 +4364,7 @@ mod tests {
         insert_pending(&mut window, loser, hash(10), 10, now);
 
         for byte in 1..=4_u8 {
-            window.mark_received_from(hash(byte), 80, Some(winner), now);
+            window.mark_received_from(hash(byte), 80, Some(source(winner)), now);
         }
 
         assert_eq!(window.preferred_peer(), Some(winner));
@@ -4367,8 +4393,8 @@ mod tests {
         assert_eq!(window.observe_cold_front(1, false, now), None);
 
         window.forget_peer(owner);
-        window.confirm_cold_front_hedge(owner, alternate, front);
-        window.mark_received_from(front, 80, Some(alternate), now);
+        window.confirm_cold_front_hedge(source(owner), source(alternate), front);
+        window.mark_received_from(front, 80, Some(source(alternate)), now);
 
         assert!(window.cold_front.is_none());
         assert!(window.cold_hedged_fronts.is_empty());
@@ -4428,7 +4454,7 @@ mod tests {
         assert!(window.contains_pending(&block_hash));
         assert_eq!(window.pending_len(), 1);
 
-        let outcome = window.reject_delivery(block_hash, Some(owner));
+        let outcome = window.reject_delivery(block_hash, Some(source(owner)));
 
         assert_eq!(outcome, super::RejectDelivery::ReleasedPending);
         assert!(!window.contains_pending(&block_hash));
@@ -4447,12 +4473,12 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            peer_addr: owner,
+            source: source(owner),
             hash: block_hash,
         });
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(owner)),
+            window.reject_delivery(block_hash, Some(source(owner))),
             super::RejectDelivery::ReleasedPending
         );
         assert!(window.pending_timeout_observation.is_none());
@@ -4472,13 +4498,13 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.cold_front = Some(super::ColdFrontState::Racing {
-            owner,
-            alternate,
+            owner: source(owner),
+            alternate: source(alternate),
             hash: block_hash,
         });
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(alternate)),
+            window.reject_delivery(block_hash, Some(source(alternate))),
             super::RejectDelivery::DiscardedUnsolicited
         );
         assert!(window.cold_front.is_none());
@@ -4487,15 +4513,52 @@ mod tests {
         assert_eq!(window.observe_cold_front(100, false, retry_started), None);
         assert_eq!(
             window.observe_cold_front(100, false, retry_started + Duration::from_secs(2)),
-            Some((owner, block_hash))
+            Some((source(owner), block_hash))
         );
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(owner)),
+            window.reject_delivery(block_hash, Some(source(owner))),
             super::RejectDelivery::ReleasedPending
         );
         assert!(window.cold_front.is_none());
         assert!(!window.contains_pending(&block_hash));
+    }
+
+    #[test]
+    fn same_address_predecessor_cannot_mutate_successor_ownership() {
+        let now = Instant::now();
+        let addr = peer_addr(1);
+        let predecessor = crate::PeerSource::for_test(addr, 41);
+        let successor = crate::PeerSource::for_test(addr, 42);
+        let rejected_hash = hash(0x41);
+        let delivered_hash = hash(0x42);
+        let mut window = DownloadWindow::new(test_budget());
+
+        insert_pending_from(&mut window, successor, rejected_hash, 1, now);
+        window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
+            source: successor,
+            hash: rejected_hash,
+        });
+        assert_eq!(
+            window.reject_delivery(rejected_hash, Some(predecessor)),
+            super::RejectDelivery::DiscardedUnsolicited
+        );
+        assert_eq!(window.pending_owner(&rejected_hash), Some(successor));
+        assert!(window.pending_timeout_observation.is_some());
+
+        window.drop_for_retry(&rejected_hash);
+        insert_pending_from(&mut window, successor, delivered_hash, 1, now);
+        window.stall = Some(super::StallEpisode {
+            peer_addr: addr,
+            front_hash: delivered_hash,
+            since: now,
+            info_logged: false,
+        });
+        window.mark_received_from(delivered_hash, 80, Some(predecessor), now);
+        assert!(
+            window.stall.is_some(),
+            "a stale predecessor delivery must not count as successor progress"
+        );
     }
 
     /// An unrelated malformed delivery cannot cancel another peer's timeout
@@ -4510,17 +4573,17 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            peer_addr: owner,
+            source: source(owner),
             hash: block_hash,
         });
         window.cold_front = Some(super::ColdFrontState::Racing {
-            owner,
-            alternate,
+            owner: source(owner),
+            alternate: source(alternate),
             hash: block_hash,
         });
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(unrelated)),
+            window.reject_delivery(block_hash, Some(source(unrelated))),
             super::RejectDelivery::DiscardedUnsolicited
         );
         assert!(window.pending_timeout_observation.is_some());
@@ -4546,7 +4609,7 @@ mod tests {
         assert!(window.contains_pending(&block_hash));
         assert_eq!(window.pending_len(), 1);
 
-        let outcome = window.reject_delivery(block_hash, Some(other));
+        let outcome = window.reject_delivery(block_hash, Some(source(other)));
 
         assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
         assert!(window.contains_pending(&block_hash));
@@ -4577,7 +4640,7 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let block_hash = hash(0x99);
 
-        let outcome = window.reject_delivery(block_hash, Some(peer_addr(1)));
+        let outcome = window.reject_delivery(block_hash, Some(source(peer_addr(1))));
 
         assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
         assert_eq!(window.pending_len(), 0);

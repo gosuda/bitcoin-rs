@@ -197,7 +197,7 @@ impl BlockSync {
         if !self.frontier_chain_is_current(frontier) {
             return Ok(false);
         }
-        let (Some(applied), Some(headers), Some(required)) = (
+        let (Some(_applied), Some(headers), Some(required)) = (
             frontier.applied_tip.as_ref(),
             frontier.header_tip.as_ref(),
             frontier.next_required,
@@ -214,23 +214,22 @@ impl BlockSync {
                 return Ok(false);
             }
         }
-        // Anchor on the active chain at the applied height, not on the
-        // applied tip's branch. During a deep header-first reorg the applied
-        // tip may still sit on the losing branch. A locator from that branch
-        // can match only at a common ancestor more than the 2,000-header wire
-        // page behind us, so every probe repeats the same insufficient page
-        // and never demonstrates a height above the applied tip.
+        // Anchor immediately before the required body on the selected header
+        // branch. During a shorter but higher-chainwork reorg this can be
+        // below the losing applied tip; anchoring at `applied.height` would
+        // not exist on the new branch and would silently suppress recovery.
+        let anchor_height = required.height.saturating_sub(1);
         let locator = {
             let tree = self.chain.block_tree().read();
-            let Some(active_anchor) = tree.node_at_height_from(headers.tip_id, applied.height)
+            let Some(active_anchor) = tree.node_at_height_from(headers.tip_id, anchor_height)
             else {
-                return Ok(false);
+                return Err(source);
             };
             tree.block_locator(active_anchor, LOCATOR_MAX_ENTRIES)
         };
         let sent = self.send_getheaders(
             source,
-            applied.height,
+            anchor_height,
             i32::try_from(headers.height).unwrap_or(i32::MAX),
             locator,
         );

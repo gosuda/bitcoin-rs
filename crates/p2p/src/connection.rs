@@ -197,6 +197,14 @@ impl PeerSource {
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
     }
+
+    #[cfg(test)]
+    pub(crate) const fn for_test(addr: SocketAddr, connection_id: u64) -> Self {
+        Self {
+            addr,
+            connection_id: ConnectionId(connection_id),
+        }
+    }
 }
 
 impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {

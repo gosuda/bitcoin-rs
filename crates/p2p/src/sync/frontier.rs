@@ -62,7 +62,7 @@ pub(super) struct SyncFrontier {
     pub(super) next_required: Option<RequiredBody>,
     pub(super) body_state: Option<BodyState>,
     /// Owner of the in-flight frontier body request, for operator telemetry.
-    pub(super) body_owner: Option<SocketAddr>,
+    pub(super) body_owner: Option<crate::PeerSource>,
     pub(super) header_request: Option<PendingHeaderRequest>,
     pub(super) usable_peers: Vec<UsablePeer>,
     pub(super) has_body_candidate: bool,
@@ -77,7 +77,7 @@ pub(super) struct ReconciledFrontier {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ColdFrontHedge {
-    pub(super) owner: SocketAddr,
+    pub(super) owner: crate::PeerSource,
     pub(super) hash: Hash256,
     pub(super) height: u32,
 }
@@ -284,12 +284,12 @@ impl BlockSync {
             _ => None,
         };
         // Chain reads stay outside the scheduler write lock.
-        let has_body_candidate = applied_tip.as_ref().is_some_and(|applied| {
+        let has_body_candidate = next_required.is_some_and(|required| {
             let tree = self.chain.block_tree().read();
             let active_tip = tree.tip_id();
             usable_peers.iter().any(|usable| {
                 body_capability_height(&usable.info, &tree, active_tip, &usable.demonstrated_tips)
-                    .is_some_and(|height| height > applied.height)
+                    .is_some_and(|height| height >= required.height)
             })
         });
         let state = self.frontier_state.lock();

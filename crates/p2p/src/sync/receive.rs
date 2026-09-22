@@ -240,9 +240,7 @@ impl BlockSync {
         let staged_blocks: Vec<_> = staged_blocks
             .into_iter()
             .map(|(hash, source, staged)| {
-                let source_peer = source
-                    .filter(|source| self.peer_table.is_current(*source))
-                    .map(|source| source.addr);
+                let source_peer = source.filter(|source| self.peer_table.is_current(*source));
                 (hash, source_peer, staged)
             })
             .collect();
@@ -282,7 +280,7 @@ impl BlockSync {
                         .frontier_state
                         .lock()
                         .window
-                        .reject_delivery(hash, Some(source.addr));
+                        .reject_delivery(hash, Some(source));
                 })
             });
             if !current {

@@ -173,10 +173,10 @@ impl SyncPlanner {
                 );
             }
         }
-        if let Some(addr) = self.window.observe_pending_timeout(apply_side_busy, now) {
+        if let Some(source) = self.window.observe_pending_timeout(apply_side_busy, now) {
             return (
                 Some(SyncAction::Disconnect {
-                    addr,
+                    addr: source.addr,
                     reason: SyncDisconnectReason::PendingTimeout,
                 }),
                 None,
@@ -184,7 +184,10 @@ impl SyncPlanner {
         }
         (
             None,
-            cold_front_hedge.map(|(owner, front_hash)| ColdFrontHedge { owner, front_hash }),
+            cold_front_hedge.map(|(owner, front_hash)| ColdFrontHedge {
+                owner: owner.addr,
+                front_hash,
+            }),
         )
     }
 }

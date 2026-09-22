@@ -155,7 +155,15 @@ impl BlockSync {
         frontier: &SyncFrontier,
         now: Instant,
     ) -> FrontierPeerSelection {
-        let our_height = frontier.applied_tip.as_ref().map_or(0, |tip| tip.height);
+        let required_height = frontier.next_required.map_or_else(
+            || {
+                frontier
+                    .applied_tip
+                    .as_ref()
+                    .map_or(1, |tip| tip.height.saturating_add(1))
+            },
+            |required| required.height,
+        );
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         let tree = self.chain.block_tree().read();
         let active_tip = tree.tip_id();
@@ -176,7 +184,7 @@ impl BlockSync {
             else {
                 continue;
             };
-            if active_height <= our_height {
+            if active_height < required_height {
                 continue;
             }
             let body_peer = SyncPeer {
@@ -425,7 +433,9 @@ impl BlockSync {
             .next_expected_block_hash()
             .is_some_and(|hash| self.frontier_state.lock().stager.contains(&hash));
         let Some(peer_addr) = self.select_and_evict_window_peer(|window| {
-            window.observe_pending_timeout(apply_side_busy, now)
+            window
+                .observe_pending_timeout(apply_side_busy, now)
+                .map(|source| source.addr)
         }) else {
             return false;
         };

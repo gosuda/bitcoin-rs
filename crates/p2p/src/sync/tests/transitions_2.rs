@@ -146,6 +146,7 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
 
     let SyncHarness {
         sync,
+        peers,
         applied_tip,
         inbound_headers_tx: _inbound_headers_tx,
         inbound_blocks_tx: _inbound_blocks_tx,
@@ -154,5 +155,13 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
     applied_tip.store(Some(Arc::new(applied)));
 
     assert_eq!(sync.outweighed_branch_target(), Some(high_work_id));
+    let peer = test_addr(9722, 0)?;
+    let outbound = connect_peer(&peers, eligible_peer(peer, 1));
+    sync.tick();
+    assert_eq!(
+        witness_block_inventory(next_getdata(&outbound)?)?,
+        vec![high_work.compute_hash()],
+        "body eligibility must use the reconnect height, not the losing applied height"
+    );
     Ok(())
 }

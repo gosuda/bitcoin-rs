@@ -139,6 +139,9 @@ This page assigns ownership and cites proof under the
   The download cursor is a scan hint. An unowned frontier behind that hint
   becomes requestable again, including an applied rollback with unchanged
   headers. Existing pending and staged bodies retain their ownership.
+  Body-peer eligibility is measured against `next_required.height`, not the
+  losing applied tip height, so a shorter higher-chainwork branch remains
+  fetchable. Recovery locators anchor immediately before that required body.
 - Request publication binds the exact `PeerSource` — address plus connection
   identity — while the download window stays address-scoped policy state.
   Body delivery, duplicate accounting, and malformed-body rejection preserve

@@ -5,10 +5,9 @@ use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
 use super::frontier::{ColdFrontHedge, SyncFrontier};
-use super::peers::{FrontierPeer, body_capability_height};
+use super::peers::FrontierPeer;
 use super::telemetry::metric_count;
 use crate::Message;
-use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::TipSnapshot;
@@ -195,7 +194,7 @@ impl BlockSync {
                     .frontier_state
                     .lock()
                     .window
-                    .mark_requested(&request, now);
+                    .mark_requested(&request, sync_peer, now);
             }
         });
         if !still_current {
@@ -246,27 +245,22 @@ impl BlockSync {
     pub(super) fn send_cold_front_hedge(
         &self,
         frontier: &SyncFrontier,
+        probe_peers: &[FrontierPeer],
         hedge: ColdFrontHedge,
         now: Instant,
-    ) -> Option<SocketAddr> {
+    ) -> Option<crate::PeerSource> {
         if !self.frontier_chain_is_current(frontier) {
             return None;
         }
-        let tree = self.chain.block_tree().read();
-        let active_tip = self.chain.chain_tip().load_full()?.tip_id;
-        let active_front_height = tree.active_height_of(active_tip, hedge.hash)?;
         let mut candidates = SmallVec::<[(crate::PeerSource, SocketAddr); 8]>::new();
-        for usable in &frontier.usable_peers {
-            let peer = &usable.info;
-            if peer.addr != hedge.owner
-                && statically_fanout_eligible(peer)
-                && body_capability_height(peer, &tree, Some(active_tip), &usable.demonstrated_tips)
-                    .is_some_and(|height| height >= active_front_height)
+        for selected in probe_peers {
+            if selected.peer.addr != hedge.owner.addr
+                && u32::try_from(selected.peer.best_known_height)
+                    .is_ok_and(|height| height >= hedge.height)
             {
-                candidates.push((usable.source, peer.addr));
+                candidates.push((selected.source, selected.peer.addr));
             }
         }
-        drop(tree);
         let candidates: SmallVec<[(crate::PeerSource, SocketAddr); 8]> = {
             let state = self.frontier_state.lock();
             let window = &state.window;
@@ -286,13 +280,13 @@ impl BlockSync {
                 Ok(()) => {
                     metrics::counter!("node.sync.cold_front_hedges").increment(1);
                     tracing::info!(
-                        owner = %hedge.owner,
+                        owner = %hedge.owner.addr,
                         hedge_peer = %peer_addr,
                         front_hash = %hedge.hash,
                         front_height = hedge.height,
                         "block sync: hedged cold-start stalled front"
                     );
-                    return Some(peer_addr);
+                    return Some(source);
                 }
                 Err(unsent) => {
                     message = unsent;
