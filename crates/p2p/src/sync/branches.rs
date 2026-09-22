@@ -94,6 +94,18 @@ impl BlockSync {
                     "block sync: disconnect body unreadable mid-rollback, coherent at reached tip"
                 );
             }
+            Err(BranchSwitchError::ConnectBodyLost {
+                disconnected,
+                connected,
+                stopped_at,
+            }) => {
+                tracing::debug!(
+                    disconnected,
+                    connected,
+                    stopped_at,
+                    "block sync: connect body unavailable mid-switch, coherent at reached tip"
+                );
+            }
             Err(error) => {
                 tracing::warn!(%error, "block sync: branch switch failed");
             }

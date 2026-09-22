@@ -66,9 +66,8 @@ bitcoin = { version = ">=0.32.9, <0.33", default-features = false, features = [
     "std", "secp-recovery", "serde", "rand-std",
 ] }
 
-# bitcoinkernel: latest stable is 0.2.0 (corrected from plan claim of 0.1).
-# No features exposed.
-bitcoinkernel = { version = ">=0.2.1, <0.3", default-features = false }
+# bitcoinkernel 0.3 line (libbitcoinkernel-sys 0.4). No features exposed.
+bitcoinkernel = { version = ">=0.3, <0.4", default-features = false }
 
 # secp256k1 0.29 line — pinned to the same major bitcoin 0.32 embeds, so the
 # graph carries exactly one secp256k1/secp256k1-sys (deny.toml bans deny).
@@ -83,9 +82,9 @@ sha2 = { version = ">=0.11, <0.12", default-features = false }
 bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features = [
     "alloc", "std",
 ] }
-cap-std = "=4.0.2"
-cap-fs-ext = "=4.0.2"
-rustix = { version = "=1.1.4", features = ["fs"] }
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
+rustix = { version = "=1.1.5", features = ["fs"] }
 
 # Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
@@ -95,7 +94,7 @@ corepc-types = { version = "0.15.0", default-features = false, features = [
 
 # bitcoin_slices: zero-alloc block visitor. Default features list is empty;
 # enable bitcoin + sha2 explicitly.
-bitcoin_slices = { version = ">=0.11, <0.12", default-features = false, features = [
+bitcoin_slices = { version = ">=0.12, <0.13", default-features = false, features = [
     "bitcoin", "sha2",
 ] }
 
@@ -154,10 +153,10 @@ bytes    = { version = ">=1.11, <2", default-features = false }
 zerocopy = { version = ">=0.8, <0.9", default-features = false, features = ["derive", "std"] }
 
 # --- Storage backends ---------------------------------------------------------
-# rust-rocksdb 0.50 line.
+# rust-rocksdb 0.53 line.
 # `default = [snappy, lz4, zstd, zlib, bzip2, bindgen-runtime]` — disable to
 # pick only what the explicit rocksdb feature uses.
-rust-rocksdb = { version = ">=0.50, <0.51", default-features = false, features = [
+rust-rocksdb = { version = ">=0.53, <0.54", default-features = false, features = [
     "mt_static", "snappy", "lz4", "zstd",
 ] }
 
@@ -204,7 +203,6 @@ zmq       = { version = ">=0.10, <0.11", default-features = false }
 
 # --- Test / bench -------------------------------------------------------------
 proptest        = { version = ">=1.11, <2",    default-features = false, features = ["std"] }
-proptest-derive = { version = ">=0.8, <0.9",   default-features = false }
 # criterion 0.8 line.
 criterion       = { version = ">=0.8.2, <0.9", default-features = false, features = [
     "cargo_bench_support", "html_reports", "plotters", "rayon",

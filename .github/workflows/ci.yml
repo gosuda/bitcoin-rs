@@ -105,6 +105,9 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           cache-on-failure: true
+      # The rocksdb feature compiles rust-librocksdb-sys, whose build runs
+      # bindgen via clang-sys and needs libclang.
+      - uses: ./.github/actions/native-deps
       - name: Provision pinned Core
         run: bash scripts/provision-ci-reference-fixtures.sh core
       - run: ./scripts/ci-pr.sh test-binary

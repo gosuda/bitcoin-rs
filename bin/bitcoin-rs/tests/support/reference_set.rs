@@ -15,7 +15,7 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 const RELEASE_CUSTODY_SHA256: &str =
     "12e58454e41bb8d15c6998b999c25c8ce407e513cb4ce7d09ccb494b321d24be";
 const KERNEL_CUSTODY_SHA256: &str =
-    "86e246d78dcb313f55c367785e59ef51b38c45867b550bf68c45ce9df2221ddd";
+    "567455b412b76af4b394b371defc42f7e01c2a4e1dd2cdd1b891ca549c775f3b";
 
 /// The immutable reference identities the compatibility manifest is claimed
 /// against.

@@ -32,7 +32,7 @@ after promotion.
 | Invalid and contextual corpora | Rejection parity on invalid local corpora; a passing valid chain alone does not prove rejection | T15 matrix | `planned_not_executed` |
 | Kernel-free closure | `cargo tree --locked -p bitcoin-rs --no-default-features --features fjall -e features` shows no `bitcoinkernel` on any transitive path; native and oracle lanes built under separate `CARGO_TARGET_DIR` | `cargo tree --locked -p bitcoin-rs --no-default-features --features fjall -e features` plus the native and kernel `sync_pipeline` lanes above, each under its own `CARGO_TARGET_DIR` | `planned_not_executed` |
 
-Reference identity for the comparison arm: Bitcoin Core release `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, x86_64 linux archive SHA-256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind` SHA-256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`. The kernel oracle is the `31.99.0` development tree through `bitcoinkernel 0.2.1` with `differential_harness = false`; it is oracle evidence only and never a policy pin.
+Reference identity for the comparison arm: Bitcoin Core release `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, x86_64 linux archive SHA-256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind` SHA-256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`. The kernel oracle is the `31.99.0` development tree through `bitcoinkernel 0.3.0` with `differential_harness = false`; it is oracle evidence only and never a policy pin.
 
 ## Refusal conditions
 

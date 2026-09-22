@@ -11,17 +11,19 @@ description = "bitcoin-rs :: p2p"
 [lints]
 workspace = true
 
+# Backend features forward through `bitcoin-rs-chain` (an approved adapter),
+# which propagates the selection into `bitcoin-rs-storage`; p2p itself holds
+# no storage handle (ARCH-03).
 [features]
 default = ["fjall"]
-rocksdb = ["bitcoin-rs-storage/rocksdb"]
-fjall = ["bitcoin-rs-storage/fjall"]
-redb = ["bitcoin-rs-storage/redb"]
+rocksdb = ["bitcoin-rs-chain/rocksdb"]
+fjall = ["bitcoin-rs-chain/fjall"]
+redb = ["bitcoin-rs-chain/redb"]
 
 [dependencies]
 bitcoin-rs-chain.workspace = true
 bitcoin-rs-mempool.workspace = true
 bitcoin-rs-primitives.workspace = true
-bitcoin-rs-storage = { workspace = true, default-features = false }
 bitcoin.workspace = true
 bytes.workspace = true
 crossbeam-channel.workspace = true
@@ -36,7 +38,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-proptest.workspace = true
 tempfile = ">=3.20.0, <4"
 serde_json.workspace = true
 bitcoin-rs-consensus.workspace = true

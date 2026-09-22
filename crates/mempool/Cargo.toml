@@ -23,7 +23,6 @@ sha2.workspace = true
 hashbrown.workspace = true
 parking_lot.workspace = true
 metrics.workspace = true
-slab.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

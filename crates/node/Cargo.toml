@@ -57,7 +57,6 @@ prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 [dependencies]
 hashbrown.workspace = true
 bitcoin-rs-primitives.workspace = true
-bitcoin-rs-script.workspace = true
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-utxo.workspace = true
@@ -73,8 +72,6 @@ bitcoin-rs-rpc.workspace = true
 bitcoin.workspace = true
 bytes.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-toml.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 arc-swap.workspace = true
@@ -90,14 +87,16 @@ anyhow.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 cap-std.workspace = true
-cap-fs-ext.workspace = true
-rustix.workspace = true
 
 [dev-dependencies]
 tempfile = ">=3.20.0, <4"
 proptest.workspace = true
 criterion.workspace = true
 sonic-rs.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+rustix.workspace = true
+bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-index = { workspace = true, features = ["test-seam"] }
 

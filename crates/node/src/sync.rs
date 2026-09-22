@@ -339,6 +339,20 @@ impl SyncChain for NodeSyncChain {
                 disconnected,
                 stopped_at,
             }),
+            // A connect body absent mid-switch is retryable at the coherent
+            // prefix; any other load failure keeps its causal error in `Other`.
+            Err(crate::reorg::ReorgError::ConnectBodyLost {
+                disconnected,
+                connected,
+                stopped_at,
+                source,
+            }) if matches!(*source, crate::reorg::ReorgError::MissingBody { .. }) => {
+                Err(BranchSwitchError::ConnectBodyLost {
+                    disconnected,
+                    connected,
+                    stopped_at,
+                })
+            }
             // An unclassified reorg error crossed the seam unchanged.
             Err(error) => Err(BranchSwitchError::Other(Box::new(error))),
         }

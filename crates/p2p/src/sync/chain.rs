@@ -118,6 +118,16 @@ pub enum BranchSwitchError {
         /// Height the applied tip reached before stopping.
         stopped_at: u32,
     },
+    /// A connect-side body became unavailable after part of the branch
+    /// applied; the chain is coherent at `stopped_at`.
+    ConnectBodyLost {
+        /// Fully disconnected blocks before the loss, in plan order.
+        disconnected: usize,
+        /// Fully connected new-branch blocks before the loss, in plan order.
+        connected: usize,
+        /// Height the applied tip reached before stopping.
+        stopped_at: u32,
+    },
     /// Chainstate torn by a failed disconnect; the implementation has
     /// already closed admission and requested shutdown.
     Fatal(SyncChainError),
@@ -141,6 +151,14 @@ impl core::fmt::Display for BranchSwitchError {
             } => write!(
                 f,
                 "body lost mid-rollback after {disconnected} disconnects at height {stopped_at}"
+            ),
+            Self::ConnectBodyLost {
+                disconnected,
+                connected,
+                stopped_at,
+            } => write!(
+                f,
+                "body lost mid-connect after {disconnected} disconnects and {connected} connects at height {stopped_at}"
             ),
             Self::Fatal(source)
             | Self::TransitionSettlement(source)
@@ -173,6 +191,16 @@ impl core::fmt::Debug for BranchSwitchError {
             } => f
                 .debug_struct("DisconnectBodyLost")
                 .field("disconnected", disconnected)
+                .field("stopped_at", stopped_at)
+                .finish(),
+            Self::ConnectBodyLost {
+                disconnected,
+                connected,
+                stopped_at,
+            } => f
+                .debug_struct("ConnectBodyLost")
+                .field("disconnected", disconnected)
+                .field("connected", connected)
                 .field("stopped_at", stopped_at)
                 .finish(),
             Self::Fatal(source) => f.debug_tuple("Fatal").field(source).finish(),

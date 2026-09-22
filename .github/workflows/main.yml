@@ -39,10 +39,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      # The kernel engine is built from C++ (cmake + libboost-dev); the
-      # full-node feature set includes it, so this lane installs the
-      # prerequisites up front.
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      # The kernel engine is built from C++ and rocksdb's bindgen needs
+      # libclang; install the native prerequisites up front.
+      - uses: ./.github/actions/native-deps
         id: native_deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: toolchain
@@ -99,12 +98,11 @@ jobs:
           toolchain: "1.95.0"
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The kernel engine is built from C++ (cmake + libboost-dev); the default
-      # feature set now includes it, so every production lane installs the
-      # prerequisites up front.
+      # The default feature set includes the C++ kernel engine, so every
+      # production lane installs the native prerequisites up front.
       - name: Kernel prerequisites
         id: kernel_deps
-        run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+        uses: ./.github/actions/native-deps
       # Reuse this lane's C++ prerequisites for the focused kernel regression;
       # the fast gate's rust job exercises the same target with the native
       # backend.
@@ -210,13 +208,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # consensus and node have `kernel` in their per-crate defaults, so
       # `cargo check --workspace --all-targets` compiles the C++ kernel
-      # engine; install its prerequisites.
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
-      # The minimal lane checks `--all-features`, which enables the `rocksdb`
-      # backend; its bindgen build scripts probe libclang. The maximum lane
-      # uses default features and never builds bindgen, so this stays gated.
-      - run: sudo apt-get install -y libclang-dev
-        if: matrix.range == 'minimal'
+      # engine; install the native prerequisites.
+      - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
         if: matrix.range == 'minimal'
@@ -239,7 +232,7 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # Kernel and rocksdb rows need the C++ toolchain; the TSV's
       # native lane is why this job lives in main.yml.
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      - uses: ./.github/actions/native-deps
       - run: scripts/check-feature-matrix.sh
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build
@@ -348,7 +341,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: sudo apt-get update && sudo apt-get install -y libboost-dev cmake
+      - uses: ./.github/actions/native-deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo test --locked -p bitcoin-rs-consensus --features kernel --test kernel_block_parity --test kernel_vector_parity -- --nocapture

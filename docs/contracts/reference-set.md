@@ -62,16 +62,16 @@ The kernel oracle is a development tree identity, not a released product,
 carried by the scalar keys of `[reference]` itself:
 
 - `core_version = "31.99.0"`
-- `kernel_crate = "bitcoinkernel"` at `kernel_crate_version = "0.2.1"`
+- `kernel_crate = "bitcoinkernel"` at `kernel_crate_version = "0.3.0"`
 - `kernel_sys_crate = "libbitcoinkernel-sys"` at
-  `kernel_sys_crate_version = "0.3.0"`
-- `kernel_vendor_commit = "4b51ffdddfa82b84a03a1fa76bbfa72a4f0b6ccf"`
-- `kernel_source_commit = "fb0e8612d6f74071af77b3f27d915da69e0a726b"`
-- `kernel_sys_crate_sha256 = "2906bc31f02dff7af9611fe9129c9eae021bd359f9d8e79824026fe1aaf28ab1"`
+  `kernel_sys_crate_version = "0.4.0"`
+- `kernel_vendor_commit = "2a4a46487903f27883321d7342ae053c5112374a"`
+- `kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"`
+- `kernel_sys_crate_sha256 = "ccee819dc48af6ce3fb213e6f93bae7a7231cd0689b0435afd86ab167cad5321"`
 - `differential_harness = false`
 
 The published crate's `.cargo_vcs_info.json` identifies the vendor revision.
-Its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/691b006f271c6d19565266541d7397eaf0c64944)
+Its [subtree import](https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44)
 records the Bitcoin Core revision in `git-subtree-split`. The reference gate
 checks the package digest against `Cargo.lock`; source and package identities
 are additionally covered by one NUL-separated, domain-separated
