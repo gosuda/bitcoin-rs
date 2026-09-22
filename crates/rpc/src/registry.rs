@@ -94,6 +94,7 @@ declare_rows! {
     "getblockstats", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(chain::getblockstats);
     "verifychain", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(chain::verifychain);
     "gettxoutsetinfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(chain::gettxoutsetinfo);
+    "getchainstates", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.7.0", Some(chain::getchainstates);
     "getindexinfo", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(chain::getindexinfo);
     "pruneblockchain", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(chain::pruneblockchain);
     "invalidateblock", SurfaceKind::Rpc, Status::Implemented, "", CORE_VERSION, "", "0.4.0", Some(chain::invalidateblock);
@@ -151,7 +152,6 @@ declare_rows! {
     // -- JSON-RPC: Core surface not exposed (blockchain/control) -----
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;
     "getblockfrompeer", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No on-demand block fetch from peers.", "n/a", None;
-    "getchainstates", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented.", "n/a", None;
     "getdeploymentinfo", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists).", "n/a", None;
     "getdescriptoractivity", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "No wallet/scan index to serve it.", "n/a", None;
     "getmempoolcluster", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "Cluster mempool tracking not implemented.", "n/a", None;

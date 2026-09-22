@@ -73,6 +73,45 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     typed_to_sonic(&response)
 }
 
+pub(crate) fn getchainstates(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    ensure_no_params(params)?;
+    let progress = ctx.sync_progress();
+    // The same wire-only bits/target pair `getblockchaininfo` adds on top of
+    // the shared facts.
+    let tip_bits =
+        ctx.applied_tip
+            .load_full()
+            .as_deref()
+            .map_or(CompactTarget::from_consensus(0), |tip| {
+                ctx.block_tree
+                    .read()
+                    .node(tip.tip_id)
+                    .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
+            });
+    // bitcoin-rs runs a single, fully validated chainstate: the assumeutxo
+    // snapshot machinery stays unimplemented (`loadtxoutset`), so there is no
+    // background chainstate and no block-data gap to wait out. Consumers that
+    // poll this during their own initial sync to detect a snapshot's
+    // background sync (the BIP300/301 enforcer does) must read the lone
+    // `validated` entry as "every block is available". The cache sizes are a
+    // Core `coinsdb` tuning knob this node does not expose.
+    let response = json!({
+        "headers": progress.headers,
+        "chainstates": [{
+            "blocks": progress.blocks,
+            "bestblockhash": progress.best_block_hash.to_string_be(),
+            "bits": format!("{tip_bits:08x}"),
+            "target": compact_target_hex(tip_bits),
+            "difficulty": progress.difficulty,
+            "verificationprogress": progress.verification_progress,
+            "coins_db_cache_bytes": 0,
+            "coins_tip_cache_bytes": 0,
+            "validated": true,
+        }],
+    });
+    Ok(response)
+}
+
 /// UNIX seconds now.
 pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -2544,6 +2583,75 @@ mod tests {
                 .and_then(JsonValueTrait::as_f64),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn getchainstates_reports_the_single_validated_chainstate() {
+        let ctx = context_with_tip(
+            bitcoin_rs_primitives::Network::Regtest,
+            0x207f_ffff,
+            &[100, 200, 300],
+        );
+        let result = getchainstates(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchainstates failed: {err}"));
+        let Some(states) = result.get("chainstates").and_then(Value::as_array) else {
+            panic!("chainstates array missing: {result:?}");
+        };
+        assert_eq!(states.len(), 1, "one chainstate expected: {result:?}");
+        let state = &states[0];
+        assert_eq!(
+            result.get("headers").and_then(JsonValueTrait::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            state.get("blocks").and_then(JsonValueTrait::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            state.get("validated").and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
+        assert!(state.get("snapshot_blockhash").is_none());
+        // Wire facts stay consistent with what `getblockchaininfo` reports
+        // for the same tip.
+        let chain_info = getblockchaininfo(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+        assert_eq!(state.get("bestblockhash"), chain_info.get("bestblockhash"));
+        assert_eq!(state.get("bits"), chain_info.get("bits"));
+        assert_eq!(state.get("target"), chain_info.get("target"));
+    }
+
+    #[test]
+    fn getchainstates_on_a_fresh_context_reports_an_empty_validated_chainstate() {
+        let ctx = Arc::new(Context::new());
+        let result = getchainstates(&ctx, &json!([]))
+            .unwrap_or_else(|err| panic!("getchainstates failed: {err}"));
+        let Some(states) = result.get("chainstates").and_then(Value::as_array) else {
+            panic!("chainstates array missing: {result:?}");
+        };
+        assert_eq!(states.len(), 1, "{result:?}");
+        let state = &states[0];
+        assert_eq!(
+            result.get("headers").and_then(JsonValueTrait::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            state.get("blocks").and_then(JsonValueTrait::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            state.get("validated").and_then(JsonValueTrait::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn getchainstates_rejects_trailing_parameters() {
+        let ctx = Arc::new(Context::new());
+        let Err(error) = getchainstates(&ctx, &json!([1])) else {
+            panic!("trailing parameters must be refused");
+        };
+        assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
     }
 
     #[test]
