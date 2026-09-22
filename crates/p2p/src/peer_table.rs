@@ -30,6 +30,18 @@ pub struct PeerSession {
     pub demonstrated_tips: Vec<Hash256>,
 }
 
+/// One handshake-complete, uncancelled connection projected for schedulers.
+///
+/// The source and its metadata are captured under one peer-table read, so a
+/// caller never has to reconstruct schedulability from table membership,
+/// handshake state, and lease cancellation independently.
+#[derive(Clone, Debug)]
+pub(crate) struct UsablePeer {
+    pub(crate) source: PeerSource,
+    pub(crate) info: PeerInfo,
+    pub(crate) demonstrated_tips: Vec<Hash256>,
+}
+
 #[derive(Debug)]
 struct Entry {
     lease: PeerLease,
@@ -113,7 +125,7 @@ impl PeerTable {
         let mut entries = self.entries.write();
         let Some(entry) = entries
             .get_mut(&source.addr)
-            .filter(|entry| entry.lease.is_current(source))
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
         else {
             return false;
         };
@@ -137,7 +149,7 @@ impl PeerTable {
     pub fn note_announced_height(&self, source: PeerSource, height: i32) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&source.addr) {
-            Some(entry) if entry.lease.is_current(source) => {
+            Some(entry) if entry.lease.is_current(source) && !entry.lease.is_cancelled() => {
                 let Some(info) = entry.info.as_mut() else {
                     return false;
                 };
@@ -158,7 +170,7 @@ impl PeerTable {
     pub fn note_compact_relay(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&source.addr) {
-            Some(entry) if entry.lease.is_current(source) => {
+            Some(entry) if entry.lease.is_current(source) && !entry.lease.is_cancelled() => {
                 let Some(info) = entry.info.as_mut() else {
                     return false;
                 };
@@ -259,7 +271,7 @@ impl PeerTable {
         self.entries
             .read()
             .get(&source.addr)
-            .is_some_and(|entry| entry.lease.is_current(source))
+            .is_some_and(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
     }
 
     /// Clones the lease of the live connection at `addr`.
@@ -314,7 +326,9 @@ impl PeerTable {
         mut f: impl FnMut(SocketAddr, &PeerLease, &PeerInfo),
     ) {
         for (addr, entry) in self.entries.read().iter() {
-            if let Some(info) = &entry.info {
+            if !entry.lease.is_cancelled()
+                && let Some(info) = &entry.info
+            {
                 f(*addr, &entry.lease, info);
             }
         }
@@ -355,6 +369,30 @@ impl PeerTable {
         sessions
     }
 
+    /// Snapshot of every handshake-complete, uncancelled connection.
+    ///
+    /// This is the authoritative scheduler projection. A cancelled lease is
+    /// deliberately not representable in the returned set, even if its
+    /// connection owner has not removed the table entry yet.
+    pub(crate) fn usable_peers(&self) -> Vec<UsablePeer> {
+        let entries = self.entries.read();
+        let mut peers: Vec<UsablePeer> = entries
+            .iter()
+            .filter_map(|(addr, entry)| {
+                if entry.lease.is_cancelled() {
+                    return None;
+                }
+                Some(UsablePeer {
+                    source: entry.lease.source(*addr),
+                    info: entry.info.clone()?,
+                    demonstrated_tips: entry.demonstrated_tips.clone(),
+                })
+            })
+            .collect();
+        peers.sort_unstable_by_key(|peer| peer.source.connection_id().get());
+        peers
+    }
+
     /// Returns the current connection source only when `addr` is published as
     /// ready. Registration clears predecessor metadata, so a handshaking
     /// replacement cannot inherit an old scheduler decision.
@@ -363,6 +401,9 @@ impl PeerTable {
         let entries = self.entries.read();
         let entry = entries.get(&addr)?;
         entry.info.as_ref()?;
+        if entry.lease.is_cancelled() {
+            return None;
+        }
         Some(entry.lease.source(addr))
     }
 
@@ -411,13 +452,11 @@ impl PeerTable {
     /// published them.
     #[must_use]
     pub fn ready_peers(&self) -> Vec<crate::connection::ReadyPeer> {
-        self.sessions()
+        self.usable_peers()
             .into_iter()
-            .filter_map(|session| {
-                Some(crate::connection::ReadyPeer {
-                    source: session.lease.source(session.addr),
-                    info: session.info?,
-                })
+            .map(|peer| crate::connection::ReadyPeer {
+                source: peer.source,
+                info: peer.info,
             })
             .collect()
     }
@@ -559,6 +598,25 @@ mod tests {
         assert_eq!(ports, vec![14, 13, 12, 11, 10]);
         let session_ports: Vec<u16> = table.sessions().iter().map(|s| s.addr.port()).collect();
         assert_eq!(session_ports, ports);
+    }
+
+    #[test]
+    fn usable_snapshot_excludes_cancelled_and_handshaking_sessions() {
+        let table = PeerTable::new();
+        let ready = lease();
+        let cancelled = lease();
+        let handshaking = lease();
+        table.register(addr(1), ready.clone());
+        table.publish_info(addr(1), &ready, info(addr(1), 1));
+        table.register(addr(2), cancelled.clone());
+        table.publish_info(addr(2), &cancelled, info(addr(2), 2));
+        table.register(addr(3), handshaking);
+        cancelled.cancel();
+
+        let usable = table.usable_peers();
+        assert_eq!(usable.len(), 1);
+        assert_eq!(usable[0].source, ready.source(addr(1)));
+        assert_eq!(usable[0].info.addr, addr(1));
     }
 
     // P2P-02: source-checked operations reject replacements and already-cancelled leases.

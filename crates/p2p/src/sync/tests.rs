@@ -382,7 +382,13 @@ fn check_sync_frontier_pair(
         "branch gate differs: {applied:?} -> {target:?}; indexed or parent-walk fixture"
     );
     sync.install_budget(super::default_sync_budget());
-    let outcome = sync.send_getdata_for_pending_blocks(addr, true, 100, target, applied);
+    let outcome = sync.send_getdata_for_pending_blocks(
+        current_source(&sync.peer_table, addr),
+        true,
+        100,
+        target,
+        applied,
+    );
     let expected_ids = expected
         .as_ref()
         .map(|plan| plan.connect.as_slice())

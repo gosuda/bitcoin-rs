@@ -125,6 +125,7 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> Result<(), Box<dy
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
+    let source = current_source(&peers, addr);
 
     sync.tick();
 
@@ -141,6 +142,7 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> Result<(), Box<dy
     for hash in expected {
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(hash.as_bytes());
         assert!(window.contains_pending(&hash));
+        assert_eq!(window.pending_source(&hash), Some(source));
     }
     Ok(())
 }

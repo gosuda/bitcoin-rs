@@ -12,6 +12,7 @@
 mod branches;
 pub mod chain;
 mod commit;
+mod frontier;
 mod headers;
 mod peers;
 mod receive;
@@ -115,7 +116,7 @@ struct BodySyncState {
 
 #[derive(Clone, Copy, Debug)]
 struct PendingHeaderRequest {
-    peer_addr: SocketAddr,
+    source: PeerSource,
     locator_tip_hash: Hash256,
     target_height: u32,
     requested_at: Instant,
@@ -198,47 +199,61 @@ impl BlockSync {
     pub fn tick(&self) {
         self.drain_inbound_headers();
         self.chain.bootstrap_genesis();
-        // Remove dead racers before queued blocks can affect peer election.
-        self.reconcile_peer_sessions();
         self.drain_inbound_blocks();
 
-        let applied_tip = self.chain.applied_tip().load_full();
-        let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let chain_tip = self.chain.chain_tip().load_full();
         let now = Instant::now();
-        // Peer conviction runs after the apply drain and before peer release
-        // so released blocks can be re-requested in the same tick. At most
-        // one peer is disconnected per tick.
-        if !self.disconnect_window_staller(applied_tip.as_deref(), now) {
-            self.disconnect_timed_out_peer(now);
-        }
-        self.reconcile_peer_sessions();
-        let sync_peer_selection = self.sync_peer_selection(applied_height, now);
+        // Reconciliation runs after apply drain so timeout/replacement release
+        // can make the canonical body requestable again in this same tick.
+        let reconciled = self.reconcile_frontier(now);
+        let frontier = reconciled.observation;
+        let plan = reconciled.plan;
+        let sync_peer_selection = self.sync_peer_selection(&frontier, now);
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
-        for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
-            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
-            let request_outcome = match (&chain_tip, &applied_tip) {
-                (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
-                    peer.addr,
-                    peer_idx + 1 == request_peer_count,
-                    peer_best_height,
-                    chain_tip,
-                    applied_tip,
-                ),
-                _ => GetdataRequestOutcome::default(),
-            };
-            sent_getdata |= request_outcome.sent;
-            if request_outcome.sent && !request_outcome.has_request_capacity {
-                break;
+        if plan.schedule_bodies {
+            for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
+                let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
+                let Some(source) = frontier
+                    .usable_peers
+                    .iter()
+                    .find(|usable| usable.source.addr == peer.addr)
+                    .map(|usable| usable.source)
+                else {
+                    continue;
+                };
+                let request_outcome = match (&frontier.header_tip, &frontier.applied_tip) {
+                    (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
+                        source,
+                        peer_idx + 1 == request_peer_count,
+                        peer_best_height,
+                        chain_tip,
+                        applied_tip,
+                    ),
+                    _ => GetdataRequestOutcome::default(),
+                };
+                sent_getdata |= request_outcome.sent;
+                if request_outcome.sent && !request_outcome.has_request_capacity {
+                    break;
+                }
             }
         }
-        self.send_prefix_probes(&sync_peer_selection.probe_peers, now);
-        match self.probe_idle_frontier(now) {
-            IdleFrontierProbeOutcome::Sent => {}
-            IdleFrontierProbeOutcome::NotSent => self.request_headers_from_best_peer(None),
-            IdleFrontierProbeOutcome::SendFailed(source) => {
-                self.request_headers_from_best_peer(Some(source));
+        if plan.schedule_bodies {
+            self.send_prefix_probes(&frontier, &sync_peer_selection.probe_peers, now);
+        }
+        match plan.header_action {
+            frontier::HeaderAction::ProbeMissingFrontier => {
+                match self.probe_idle_frontier(&frontier, now) {
+                    IdleFrontierProbeOutcome::Sent => {}
+                    IdleFrontierProbeOutcome::NotSent => {
+                        self.request_headers_from_best_peer(&frontier, None);
+                    }
+                    IdleFrontierProbeOutcome::SendFailed(source) => {
+                        self.request_headers_from_best_peer(&frontier, Some(source));
+                    }
+                }
+            }
+            frontier::HeaderAction::ExtendHeaderTip => {
+                self.request_headers_from_best_peer(&frontier, None);
             }
         }
         if sent_getdata {

@@ -8,6 +8,8 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use crate::PeerSource;
+
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
@@ -295,11 +297,19 @@ pub struct SyncBudget {
 #[derive(Clone, Debug)]
 pub struct PeerRequest {
     peer_addr: SocketAddr,
+    source: Option<PeerSource>,
     entries: Vec<PeerRequestEntry>,
     next_request_height: u32,
 }
 
 impl PeerRequest {
+    /// Binds this plan to the connection selected by the canonical frontier
+    /// before the request is published.
+    pub(crate) fn bind_source(&mut self, source: PeerSource) {
+        debug_assert_eq!(self.peer_addr, source.addr);
+        self.source = Some(source);
+    }
+
     /// Returns the peer address this request is directed to.
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
@@ -384,6 +394,7 @@ const EWMA_MIN_SAMPLE_MS: u64 = 50;
 #[derive(Clone, Copy, Debug)]
 struct PendingBlock {
     peer_addr: SocketAddr,
+    source: Option<PeerSource>,
     requested_at: Instant,
     height: u32,
     estimated_bytes: usize,
@@ -1458,6 +1469,13 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
+    /// Connection currently owning `hash`, when identity was bound before
+    /// publication.
+    #[must_use]
+    pub(crate) fn pending_source(&self, hash: &Hash256) -> Option<PeerSource> {
+        self.pending.get(hash).and_then(|pending| pending.source)
+    }
+
     /// Returns the start time of the active prefix probe, if any. Test-only.
     pub fn active_prefix_probe_started_at(&self) -> Option<Instant> {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)
@@ -1941,6 +1959,7 @@ impl DownloadWindow {
                 entry.hash,
                 PendingBlock {
                     peer_addr: request.peer_addr,
+                    source: request.source,
                     requested_at: now,
                     height: entry.height,
                     estimated_bytes,
@@ -2285,6 +2304,7 @@ fn non_empty_request(
 ) -> Option<PeerRequest> {
     (!entries.is_empty()).then_some(PeerRequest {
         peer_addr,
+        source: None,
         entries,
         next_request_height,
     })
@@ -2363,6 +2383,7 @@ mod tests {
                 hash(byte),
                 super::PendingBlock {
                     peer_addr,
+                    source: None,
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2392,6 +2413,7 @@ mod tests {
             block_hash,
             super::PendingBlock {
                 peer_addr,
+                source: None,
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2437,6 +2459,7 @@ mod tests {
             block_hash,
             super::PendingBlock {
                 peer_addr: original_peer,
+                source: None,
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2488,6 +2511,7 @@ mod tests {
                 hash(byte),
                 super::PendingBlock {
                     peer_addr,
+                    source: None,
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2530,6 +2554,7 @@ mod tests {
                 hash,
                 super::PendingBlock {
                     peer_addr,
+                    source: None,
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2566,6 +2591,7 @@ mod tests {
             pending,
             super::PendingBlock {
                 peer_addr,
+                source: None,
                 requested_at: now,
                 height: 2,
                 estimated_bytes: pending_bytes,
@@ -2738,6 +2764,7 @@ mod tests {
                 hash(byte),
                 super::PendingBlock {
                     peer_addr,
+                    source: None,
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2817,6 +2844,7 @@ mod tests {
             block_hash,
             super::PendingBlock {
                 peer_addr,
+                source: None,
                 requested_at: now,
                 height,
                 estimated_bytes: 80,

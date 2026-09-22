@@ -30,7 +30,6 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
         }
     };
     let losing_hashes = vec![losing1.compute_hash(), losing2.compute_hash()];
-
     let winning1 = test_header(genesis.compute_hash(), 101);
     let winning1_id = tree.insert_node(Some(genesis_id), winning1, NodeStatus::HeaderValid)?;
     let winning2 = test_header(winning1.compute_hash(), 102);
@@ -75,15 +74,15 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
     let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
     let (tx, rx) = unbounded::<Message>();
     peers.register(peer, PeerLease::new(tx));
+    let source = current_source(&peers, peer);
     let applied = applied_tip
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing genesis applied tip"))?;
     let initial = chain_tip
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing losing chain tip"))?;
-
     assert!(
-        sync.send_getdata_for_pending_blocks(peer, false, 100, &initial, &applied)
+        sync.send_getdata_for_pending_blocks(source, false, 100, &initial, &applied)
             .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
@@ -93,7 +92,7 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing winning chain tip"))?;
     assert!(
-        sync.send_getdata_for_pending_blocks(peer, false, 100, &retargeted, &applied)
+        sync.send_getdata_for_pending_blocks(source, false, 100, &retargeted, &applied)
             .sent
     );
     let requested = witness_block_inventory(next_getdata(&rx)?)?;
@@ -102,11 +101,8 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
         requested.iter().all(|hash| !losing_hashes.contains(hash)),
         "retargeted requests must not retain hashes from the losing branch"
     );
-    assert_eq!(
-        sync.body_sync.lock().window.pending_len(),
-        winning_hashes.len(),
-        "retargeting must release losing-branch pending capacity"
-    );
+    let pending_len = sync.body_sync.lock().window.pending_len();
+    assert_eq!(pending_len, winning_hashes.len());
     Ok(())
 }
 

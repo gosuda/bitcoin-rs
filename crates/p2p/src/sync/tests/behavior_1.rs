@@ -135,8 +135,14 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
         .ok_or_else(|| std::io::Error::other("missing losing applied tip"))?;
 
     assert!(
-        sync.send_getdata_for_pending_blocks(peer, false, 100, &chain_tip, &applied_tip)
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            current_source(&peers, peer),
+            false,
+            100,
+            &chain_tip,
+            &applied_tip,
+        )
+        .sent
     );
     assert_eq!(
         witness_block_inventory(next_getdata(&rx)?)?,

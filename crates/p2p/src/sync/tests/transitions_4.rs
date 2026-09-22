@@ -32,7 +32,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders()
     assert!(
         sync.pending_getheaders
             .lock()
-            .is_some_and(|request| request.peer_addr == invalid_peer),
+            .is_some_and(|request| request.source.addr == invalid_peer),
         "a pending getheaders must name the invalid peer before its batch arrives"
     );
 

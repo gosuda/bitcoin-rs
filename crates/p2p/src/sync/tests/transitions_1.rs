@@ -133,6 +133,66 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn repeated_at_tip_extensions_keep_one_owned_frontier() -> Result<(), Box<dyn std::error::Error>> {
+    let (sync, peers, applied_tip, blocks, inbound_blocks) = sync_with_mined_chain(8)?;
+    let genesis_hash = Network::Regtest.genesis_block_hash();
+    let genesis_tip = {
+        let tree = sync.chain.block_tree().read();
+        let id = tree.lookup(genesis_hash).ok_or("missing genesis")?;
+        let node = tree.node(id)?;
+        TipSnapshot {
+            tip_id: id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    sync.chain.chain_tip().store(Some(Arc::new(genesis_tip)));
+    let addr = test_addr(9_740, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 0));
+    let source = current_source(&peers, addr);
+
+    for (index, block) in blocks.into_iter().enumerate() {
+        let hash = Hash256::from(block.block_hash());
+        let announced = {
+            let tree = sync.chain.block_tree().read();
+            let id = tree.lookup(hash).ok_or("missing announced block")?;
+            let node = tree.node(id)?;
+            TipSnapshot {
+                tip_id: id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+        sync.chain
+            .chain_tip()
+            .store(Some(Arc::new(announced.clone())));
+        assert!(peers.note_announced_tip(source, hash, Some(i32::try_from(announced.height)?),));
+
+        sync.tick();
+        assert_eq!(
+            witness_block_inventory(next_getdata(&rx)?)?,
+            vec![block.block_hash()]
+        );
+        assert_eq!(
+            sync.body_sync.lock().window.pending_source(&hash),
+            Some(source),
+            "the current connection must own the frontier body request"
+        );
+
+        let mut inbound = crate::InboundBlock::from_decoded(block);
+        inbound.source = Some(source);
+        inbound_blocks.send(inbound)?;
+        sync.tick();
+        let applied = applied_tip.load_full().ok_or("missing applied tip")?;
+        assert_eq!(applied.height, u32::try_from(index + 1)?);
+        assert_eq!(applied.hash, hash);
+    }
+    Ok(())
+}
+
+#[test]
 fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std::error::Error>> {
     // Contract proof: P2P-03 (docs/contracts/p2p-wire.md) — the reorg
     // edge of the branch-aware credit. A winning fork announced at tip

@@ -196,13 +196,15 @@ fn on_peer_ready_clears_same_address_header_state_for_replacement()
 -> Result<(), Box<dyn std::error::Error>> {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
+    register_info(&sync.peer_table, synthetic_peer(peer_addr, 1));
+    let predecessor = current_source(&sync.peer_table, peer_addr);
     *sync.pending_getheaders.lock() = Some(super::super::PendingHeaderRequest {
-        peer_addr,
+        source: predecessor,
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
     });
-    register_info(&sync.peer_table, synthetic_peer(peer_addr, 1));
+    register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
     let source = current_source(&sync.peer_table, peer_addr);
     sync.on_peer_ready(source);
     assert!(
@@ -220,8 +222,9 @@ fn on_peer_ready_ignores_stale_predecessor_source() -> Result<(), Box<dyn std::e
     let stale = PeerLease::new(stale_tx);
     sync.peer_table.register(peer_addr, stale.clone());
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
+    let replacement = current_source(&sync.peer_table, peer_addr);
     *sync.pending_getheaders.lock() = Some(super::super::PendingHeaderRequest {
-        peer_addr,
+        source: replacement,
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),

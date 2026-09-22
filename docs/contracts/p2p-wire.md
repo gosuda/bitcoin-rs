@@ -127,6 +127,12 @@ This page assigns ownership and cites proof under the
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 
+- `crates/p2p/src/sync/frontier.rs` is the single owner of the ephemeral
+  canonical P2P frontier observation and tick-level reconciliation decision.
+  It combines chain facts obtained through `SyncChain` with the P2P-owned
+  download window, staged bodies, header request, and usable-peer projection.
+  It owns no durable chainstate and does not move apply or reorg mutation into
+  P2P.
 - The applied chain and selected header ancestry own the next required body.
   The download cursor is a scan hint. An unowned frontier behind that hint
   becomes requestable again, including an applied rollback with unchanged
@@ -144,6 +150,14 @@ This page assigns ownership and cites proof under the
 - Session validation and request publication hold the peer table before
   download or header-request state. A cancelled ready event does not wait for
   the download writer or modify its replacement's state.
+- Header request ownership and body-send publication carry `PeerSource`
+  connection identity. Header and body selection consume the same
+  handshake-complete, uncancelled peer-table snapshot; a cancelled lease is
+  not representable in that scheduler projection.
+- When a known canonical body gap has no pending or staged owner, one
+  reconciliation must either arm body/frontier recovery work or retain an
+  explicit no-progress reason. Operator sync-progress logs expose the derived
+  next body, body ownership, header owner, and no-progress reason.
 - Body/header binding failures reject the delivery, not the header branch.
   Rejection logs carry source, byte/transaction counts and coinbase witness
   shape. Compact reconstruction logs include the same block hash for joining
@@ -153,6 +167,10 @@ This page assigns ownership and cites proof under the
 Proof: `crates/p2p/src/sync/tests/frontier_recovery.rs` covers applied
 rollback, duplicate request suppression, empty-response pacing/rotation and
 cancelled readiness under contention.
+`crates/p2p/src/sync/frontier.rs` property tests cover the action-or-reason
+rule for arbitrary availability, peer, and apply-halt facts, and
+`crates/p2p/src/peer_table.rs` proves that cancelled and handshaking sessions
+are absent from the scheduler projection.
 `crates/p2p/src/sync/tests/witness_staging_gate.rs` covers bad delivery,
 peer replacement, relearned capability and eventual application. Existing
 branch-plan, attribution, timeout and bounded-staging suites remain required.

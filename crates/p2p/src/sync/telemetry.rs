@@ -11,11 +11,23 @@ impl BlockSync {
     /// missing during IBD — without it, `docker logs` shows no indication
     /// that the node is alive and applying blocks.
     pub fn emit_sync_progress(&self) {
-        let applied_tip = self.chain.applied_tip().load_full();
-        let chain_tip = self.chain.chain_tip().load_full();
-        let applied_height = applied_tip.as_ref().map_or(0, |tip| tip.height);
-        let header_height = chain_tip.as_ref().map_or(applied_height, |tip| tip.height);
-        let live_peers = self.peer_table.len();
+        let frontier = self.observe_frontier();
+        let plan = frontier.reconcile();
+        let applied_height = frontier.applied_tip.as_ref().map_or(0, |tip| tip.height);
+        let header_height = frontier
+            .header_tip
+            .as_ref()
+            .map_or(applied_height, |tip| tip.height);
+        let usable_peers = frontier.usable_peers.len();
+        let next_required_height = frontier.next_required.map(|body| body.height);
+        let next_required_hash = frontier.next_required.map(|body| body.hash);
+        let body_state = frontier.body_state;
+        let header_request_peer = frontier.header_request.map(|request| request.source.addr);
+        let header_request_locator = frontier
+            .header_request
+            .map(|request| request.locator_tip_hash);
+        let header_request_target = frontier.header_request.map(|request| request.target_height);
+        let no_progress_reason = plan.no_progress_reason;
         let in_ibd = header_height > 0 && applied_height < header_height;
         let gap = header_height.saturating_sub(applied_height);
 
@@ -24,7 +36,14 @@ impl BlockSync {
                 applied_height,
                 header_height,
                 gap,
-                peers = live_peers,
+                peers = usable_peers,
+                ?next_required_height,
+                ?next_required_hash,
+                ?body_state,
+                ?header_request_peer,
+                ?header_request_locator,
+                ?header_request_target,
+                ?no_progress_reason,
                 ibd = true,
                 "sync progress"
             );
@@ -32,7 +51,14 @@ impl BlockSync {
             tracing::info!(
                 applied_height,
                 header_height,
-                peers = live_peers,
+                peers = usable_peers,
+                ?next_required_height,
+                ?next_required_hash,
+                ?body_state,
+                ?header_request_peer,
+                ?header_request_locator,
+                ?header_request_target,
+                ?no_progress_reason,
                 ibd = false,
                 "sync progress"
             );

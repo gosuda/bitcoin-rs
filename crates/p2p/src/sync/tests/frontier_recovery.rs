@@ -245,7 +245,7 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
         sync.pending_getheaders
             .lock()
             .as_ref()
-            .map(|request| request.peer_addr),
+            .map(|request| request.source.addr),
         Some(high),
         "the fallback owner must hold the pending request"
     );
@@ -291,7 +291,7 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
         sync.pending_getheaders
             .lock()
             .as_ref()
-            .map(|request| request.peer_addr),
+            .map(|request| request.source.addr),
         Some(live),
         "the lower live peer must own the fallback request"
     );
@@ -353,7 +353,7 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         sync.pending_getheaders
             .lock()
             .as_ref()
-            .map(|request| request.peer_addr),
+            .map(|request| request.source.addr),
         Some(dead),
         "the pending request must not be keyed to the dead addr",
     );

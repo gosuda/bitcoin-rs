@@ -4,6 +4,7 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
+use super::frontier::SyncFrontier;
 use super::peers::body_capability_height;
 use super::telemetry::metric_count;
 use crate::Message;
@@ -31,7 +32,12 @@ impl BlockSync {
     ///
     /// Every alternate receives the same earliest hashes, so the probe cannot
     /// create a unique out-of-order height hole. It runs once per deep owner.
-    pub(super) fn send_prefix_probes(&self, probe_peers: &[SyncPeer], now: Instant) {
+    pub(super) fn send_prefix_probes(
+        &self,
+        frontier: &SyncFrontier,
+        probe_peers: &[SyncPeer],
+        now: Instant,
+    ) {
         let Some((owner, hashes, required_height)) =
             self.body_sync.lock().window.prefix_probe_plan()
         else {
@@ -45,7 +51,12 @@ impl BlockSync {
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
         for peer in candidates {
             let peer_addr = peer.addr;
-            let Some(tx) = self.peer_table.lease(peer_addr) else {
+            let Some(source) = frontier
+                .usable_peers
+                .iter()
+                .find(|usable| usable.source.addr == peer_addr)
+                .map(|usable| usable.source)
+            else {
                 continue;
             };
             let inventory = hashes
@@ -56,7 +67,11 @@ impl BlockSync {
                     ))
                 })
                 .collect();
-            if tx.send(Message::GetData(inventory)).is_ok() {
+            if self
+                .peer_table
+                .send(source, Message::GetData(inventory))
+                .is_ok()
+            {
                 successful.push(peer_addr);
             }
         }
@@ -129,12 +144,27 @@ impl BlockSync {
 
     pub(super) fn send_getdata_for_pending_blocks(
         &self,
-        sync_peer_addr: SocketAddr,
+        sync_peer: crate::PeerSource,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         chain_tip: &TipSnapshot,
         applied_tip: &TipSnapshot,
     ) -> GetdataRequestOutcome {
+        if self
+            .chain
+            .chain_tip()
+            .load_full()
+            .as_ref()
+            .is_none_or(|current| current.hash != chain_tip.hash)
+            || self
+                .chain
+                .applied_tip()
+                .load_full()
+                .as_ref()
+                .is_none_or(|current| current.hash != applied_tip.hash)
+        {
+            return GetdataRequestOutcome::default();
+        }
         let now = Instant::now();
         let tree = self.chain.block_tree().read();
         let Some(request_start_height) =
@@ -144,7 +174,7 @@ impl BlockSync {
         };
 
         let request = self.body_sync.lock().window.next_peer_request(
-            sync_peer_addr,
+            sync_peer.addr,
             allow_expired_retry_from_peer,
             chain_tip,
             request_start_height,
@@ -153,9 +183,10 @@ impl BlockSync {
             now,
         );
         drop(tree);
-        let Some(request) = request else {
+        let Some(mut request) = request else {
             return GetdataRequestOutcome::default();
         };
+        request.bind_source(sync_peer);
 
         let compact_fetch = self.compact_fetch_eligible(&request, chain_tip);
         let (inventory, expected_hashes, is_contiguous) =
@@ -163,7 +194,7 @@ impl BlockSync {
         let count = inventory.len();
         let msg = Message::GetData(inventory);
 
-        let tx = self.peer_table.lease(request.peer_addr());
+        let tx = self.peer_table.lease_source(sync_peer);
         let Some(tx) = tx else {
             tracing::trace!(
                 peer_addr = %request.peer_addr(),
@@ -171,10 +202,9 @@ impl BlockSync {
             );
             return GetdataRequestOutcome::default();
         };
-        let source = tx.source(request.peer_addr());
         let mut send_ok = false;
         let mut has_request_capacity = false;
-        let still_current = self.peer_table.with_current(source, || {
+        let still_current = self.peer_table.with_current(sync_peer, || {
             send_ok = tx.send(msg).is_ok();
             if send_ok {
                 has_request_capacity = self.body_sync.lock().window.mark_requested(&request, now);

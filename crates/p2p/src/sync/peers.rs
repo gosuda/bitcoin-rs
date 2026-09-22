@@ -1,6 +1,7 @@
 //! Session reconciliation, useful-peer selection, and stalled-peer retirement.
 
 use super::BlockSync;
+use super::frontier::SyncFrontier;
 use crate::PeerInfo;
 use crate::download_window::DownloadWindow;
 use crate::download_window::FanoutCandidate;
@@ -96,7 +97,9 @@ impl BlockSync {
         self.peer_table.with_current(source, || {
             self.body_sync.lock().window.forget_peer(source.addr);
             let mut pending = self.pending_getheaders.lock();
-            if pending.is_some_and(|request| request.peer_addr == source.addr) {
+            if pending.is_some_and(|request| {
+                request.source.addr == source.addr && request.source != source
+            }) {
                 *pending = None;
             }
         });
@@ -116,7 +119,7 @@ impl BlockSync {
             if known.insert(*addr, *id).is_some_and(|prev| prev != *id) {
                 window.forget_peer(*addr);
                 let mut pending = self.pending_getheaders.lock();
-                if pending.is_some_and(|request| request.peer_addr == *addr) {
+                if pending.is_some_and(|request| request.source.addr == *addr) {
                     *pending = None;
                 }
             }
@@ -125,15 +128,17 @@ impl BlockSync {
         window.release_disconnected_peers(|peer| live.iter().any(|(a, _)| a == peer));
     }
 
-    pub(super) fn sync_peer_selection(&self, our_height: u32, now: Instant) -> SyncPeerSelection {
+    pub(super) fn sync_peer_selection(
+        &self,
+        frontier: &SyncFrontier,
+        now: Instant,
+    ) -> SyncPeerSelection {
+        let our_height = frontier.applied_tip.as_ref().map_or(0, |tip| tip.height);
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
-        let sessions = self.peer_table.sessions();
         let tree = self.chain.block_tree().read();
         let active_tip = tree.tip_id();
-        for session in sessions {
-            let Some(peer) = session.info else {
-                continue;
-            };
+        for usable in &frontier.usable_peers {
+            let peer = &usable.info;
             // Height clause of the fan-out eligibility predicate (KTD6) and
             // the pre-existing candidate filter: the peer's known chain must
             // reach past our applied tip, i.e., cover the window front being
@@ -145,7 +150,7 @@ impl BlockSync {
             // (#617). Per-request truncation by `peer_best_height` still
             // bounds the damage of a stale value.
             let Some(active_height) =
-                body_capability_height(&peer, &tree, active_tip, &session.demonstrated_tips)
+                body_capability_height(peer, &tree, active_tip, &usable.demonstrated_tips)
             else {
                 continue;
             };
@@ -158,7 +163,7 @@ impl BlockSync {
             };
             candidates.push(FanoutCandidate {
                 peer: body_peer,
-                fanout_eligible: statically_fanout_eligible(&peer),
+                fanout_eligible: statically_fanout_eligible(peer),
                 soft_blocked: false,
             });
         }
@@ -410,7 +415,7 @@ impl BlockSync {
             return None;
         }
         let mut pending = self.pending_getheaders.lock();
-        if pending.is_some_and(|request| request.peer_addr == peer_addr) {
+        if pending.is_some_and(|request| request.source.addr == peer_addr) {
             *pending = None;
         }
         Some(peer_addr)
