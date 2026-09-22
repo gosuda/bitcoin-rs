@@ -112,6 +112,16 @@ impl BlockSync {
         self.peer_table
             .disconnect_matching(|_, lease| lease.is_cancelled());
         let live = self.peer_table.live_connections();
+        {
+            let mut pending = self.pending_getheaders.lock();
+            if pending.is_some_and(|request| {
+                !live.iter().any(|(addr, id)| {
+                    *addr == request.source.addr && *id == request.source.connection_id()
+                })
+            }) {
+                *pending = None;
+            }
+        }
         let mut body_sync = self.body_sync.lock();
         let window = &mut body_sync.window;
         let mut known = self.known_sessions.lock();

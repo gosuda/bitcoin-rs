@@ -271,3 +271,29 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes()
     assert!(sync.pending_getheaders.lock().is_none());
     Ok(())
 }
+
+#[test]
+fn reconcile_releases_header_request_when_owner_disconnects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture { sync, peers, .. } = header_sync_with_genesis()?;
+    install_budget(
+        &sync,
+        super::super::SyncBudget {
+            max_pending_blocks: 0,
+            ..super::super::default_sync_budget()
+        },
+    );
+    let addr = test_addr(9510, 0)?;
+    let (tx, _rx) = unbounded::<Message>();
+    let lease = PeerLease::new(tx);
+    let source = lease.source(addr);
+    peers.register(addr, lease.clone());
+    peers.publish_info(addr, &lease, synthetic_peer(addr, 8));
+    sync.tick();
+    assert!(sync.pending_getheaders.lock().is_some());
+
+    assert!(peers.disconnect_source(source));
+    sync.reconcile_peer_sessions();
+    assert!(sync.pending_getheaders.lock().is_none());
+    Ok(())
+}

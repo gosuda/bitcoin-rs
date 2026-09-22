@@ -240,10 +240,8 @@ impl BlockSync {
         let staged_blocks: Vec<_> = staged_blocks
             .into_iter()
             .map(|(hash, source, staged)| {
-                let source_peer = source
-                    .filter(|source| self.peer_table.is_current(*source))
-                    .map(|source| source.addr);
-                (hash, source_peer, staged)
+                let source = source.filter(|source| self.peer_table.is_current(*source));
+                (hash, source, staged)
             })
             .collect();
         let mut retry_count = 0_u64;
@@ -251,16 +249,16 @@ impl BlockSync {
         {
             let mut body_sync = self.body_sync.lock();
             let window = &mut body_sync.window;
-            for (hash, source_peer, staged) in staged_blocks {
+            for (hash, source, staged) in staged_blocks {
                 match staged {
                     StagedBlock::AlreadyStaged => {
                         metrics::counter!("node.sync.duplicate_deliveries").increment(1);
-                        if let Some(source_peer) = source_peer {
-                            window.credit_duplicate_delivery(hash, source_peer);
+                        if let Some(source) = source {
+                            window.credit_duplicate_delivery_from_source(hash, source);
                         }
                     }
                     StagedBlock::Memory { bytes, dropped } => {
-                        window.mark_received_from(hash, bytes, source_peer, now);
+                        window.mark_received_from_source(hash, bytes, source, now);
                         for dropped in dropped {
                             window.drop_received_for_retry(&dropped.hash);
                             retry_count = retry_count.saturating_add(1);
@@ -282,11 +280,14 @@ impl BlockSync {
                         .body_sync
                         .lock()
                         .window
-                        .reject_delivery(hash, Some(source.addr));
+                        .reject_delivery_from_source(hash, Some(source));
                 })
             });
             if !current {
-                self.body_sync.lock().window.reject_delivery(hash, None);
+                self.body_sync
+                    .lock()
+                    .window
+                    .reject_delivery_from_source(hash, None);
             }
             if rejected == RejectDelivery::ReleasedPending {
                 retry_count = retry_count.saturating_add(1);

@@ -182,6 +182,34 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
     Ok(())
 }
 
+#[test]
+fn malformed_same_address_replacement_does_not_inherit_body_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sync, block_hash, _correct_block, stripped_block) = segwit_sync_fixture()?;
+    let addr = test_addr(9751, 0)?;
+    let predecessor_rx = connect_peer(&sync.peer_table, synthetic_peer(addr, 1));
+    sync.tick();
+    assert_eq!(
+        witness_block_inventory(next_getdata(&predecessor_rx)?)?,
+        vec![BlockHash(block_hash)]
+    );
+    let predecessor = current_source(&sync.peer_table, addr);
+
+    let _replacement_rx = connect_peer(&sync.peer_table, synthetic_peer(addr, 1));
+    let replacement = current_source(&sync.peer_table, addr);
+    assert_ne!(replacement, predecessor);
+    let mut malformed = InboundBlock::from_decoded(stripped_block);
+    malformed.source = Some(replacement);
+    sync.buffer_received_block_chunk(&mut vec![malformed], Some(block_hash));
+
+    assert!(sync.peer_table.is_current(replacement));
+    assert_eq!(
+        sync.body_sync.lock().window.pending_source(&block_hash),
+        Some(predecessor)
+    );
+    Ok(())
+}
+
 /// A body with altered non-witness transaction data retains the header hash
 /// but fails the txid Merkle-root binding. It must not occupy the stager slot,
 /// leaving the original body eligible to arrive later.
