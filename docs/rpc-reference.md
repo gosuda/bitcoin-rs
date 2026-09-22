@@ -34,6 +34,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getblockstats` | 0.4.0 |  |
 | `verifychain` | 0.4.0 |  |
 | `gettxoutsetinfo` | 0.4.0 |  |
+| `getchainstates` | 0.7.0 |  |
 | `getindexinfo` | 0.4.0 |  |
 | `pruneblockchain` | 0.4.0 |  |
 | `invalidateblock` | 0.4.0 |  |
@@ -102,7 +103,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 |---|---|---|
 | `dumptxoutset` | n/a | UTXO snapshot dump not implemented. |
 | `getblockfrompeer` | n/a | No on-demand block fetch from peers. |
-| `getchainstates` | n/a | Not implemented. |
 | `getdeploymentinfo` | n/a | Not implemented over JSON-RPC (the REST /rest/deploymentinfo route exists). |
 | `getdescriptoractivity` | n/a | No wallet/scan index to serve it. |
 | `getmempoolcluster` | n/a | Cluster mempool tracking not implemented. |
@@ -236,4 +236,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Implemented 69, Deviation 10, Extension 2, Unimplemented 93 - total 174.
+Row counts: Implemented 70, Deviation 10, Extension 2, Unimplemented 92 - total 174.

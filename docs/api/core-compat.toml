@@ -227,6 +227,11 @@ group = "blockchain"
 status = "implemented_unverified"
 
 [[rpc]]
+method = "getchainstates"
+group = "blockchain"
+status = "implemented_unverified"
+
+[[rpc]]
 method = "getindexinfo"
 group = "blockchain"
 status = "implemented_unverified"
