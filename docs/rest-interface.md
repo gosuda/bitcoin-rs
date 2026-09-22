@@ -95,7 +95,7 @@ return HTTP 400. Probe a known supported endpoint such as
 request.
 
 The checked-in Compose stack (`tools/bip300301-enforcer/docker-compose.yaml`)
-supplies the REST, `pubsequence`, version-check bypass, and drynet4 network
+supplies the REST, `pubsequence`, version-check bypass, and betanet network
 settings required to run the unmodified enforcer. Because `pubsequence`
 carries transaction `A`/`R` events, the stack enables `--enable-mempool` so
 the enforcer tracks the mempool too.

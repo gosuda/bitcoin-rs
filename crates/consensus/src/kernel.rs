@@ -170,7 +170,7 @@ mod enabled {
         /// Creates a kernel context for a network.
         pub fn new(network: Network) -> Result<Self, ConsensusError> {
             let chain_type = match network {
-                Network::Mainnet => bitcoinkernel::ChainType::Mainnet,
+                Network::Mainnet | Network::Betanet => bitcoinkernel::ChainType::Mainnet,
                 Network::Testnet3 => bitcoinkernel::ChainType::Testnet,
                 Network::Testnet4 => bitcoinkernel::ChainType::Testnet4,
                 Network::Signet => bitcoinkernel::ChainType::Signet,

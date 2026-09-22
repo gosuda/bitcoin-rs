@@ -167,6 +167,9 @@ pub fn next_work_required(
         .height
         .checked_add(1)
         .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
+    if let Some(fork_bits) = ecash_fork_reset_bits(network, height) {
+        return Ok(fork_bits);
+    }
     let retarget_interval = network.retarget_interval();
     let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
     if is_retarget {
@@ -174,6 +177,22 @@ pub fn next_work_required(
     } else {
         expected_non_retarget_bits(network, tree, parent_id, candidate_time, retarget_interval)
     }
+}
+
+/// The ecash fork's one-time proof-of-work reset, when this candidate is the fork block.
+///
+/// Core's `GetNextWorkRequired` short-circuits the block at `EcashHeight`:
+/// its target is pinned to `EcashForkBits` instead of being derived from the
+/// retarget arithmetic. The height is a retarget boundary, so this is the one
+/// candidate height where the computed target and the enforced target would
+/// otherwise diverge. Networks without an ecash fork never reset.
+#[must_use]
+fn ecash_fork_reset_bits(network: Network, height: u32) -> Option<CompactTarget> {
+    let fork_height = network.ecash_fork_height()?;
+    if u64::from(height) == fork_height {
+        return Some(CompactTarget::from_consensus(network.ecash_fork_bits()?));
+    }
+    None
 }
 
 /// Validates a candidate header's compact target against the contextual network difficulty rules.
@@ -615,5 +634,185 @@ mod timestamp_tests {
     fn wall_clock_conversion_maps_pre_epoch_to_zero() {
         let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
         assert_eq!(super::unix_seconds_at(before_epoch), 0);
+    }
+}
+
+#[cfg(test)]
+mod ecash_fork_tests {
+    use super::{ecash_fork_reset_bits, next_work_required, validate_header_nbits};
+    use crate::{
+        ChainError,
+        node::{BlockHeader, NodeStatus},
+        tree::BlockTree,
+    };
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+
+    /// The ecash fork height: mainnet's shared history ends here and the next
+    /// block pins its target to `FORK_BITS`.
+    const FORK_HEIGHT: u32 = 967_680;
+    const FORK_BITS: u32 = 0x1904_4b7e;
+    const CHAIN_BITS: u32 = 0x2000_ffff;
+
+    fn header_at(prev_blockhash: BlockHash, height: u32, bits: u32) -> BlockHeader {
+        let mut merkle = [0_u8; 32];
+        merkle[..4].copy_from_slice(&height.to_le_bytes());
+        BlockHeader {
+            version: 1,
+            prev_blockhash,
+            merkle_root: Hash256::from_le_bytes(&merkle),
+            time: 1_700_000_000_u32
+                .checked_add(height)
+                .unwrap_or_else(|| panic!("fixture heights stay far from the u32 bound")),
+            bits: CompactTarget::from_consensus(bits),
+            nonce: 0,
+        }
+    }
+
+    /// Index twin of [`FORK_HEIGHT`] for `Vec` indexing.
+    fn idx(height: u32) -> usize {
+        usize::try_from(height).unwrap_or_else(|_| panic!("fixture heights fit usize"))
+    }
+
+    /// Builds a header-only chain `0..=FORK_HEIGHT` (so candidates at
+    /// `FORK_HEIGHT` and `FORK_HEIGHT + 1` have parents). Every shared-history
+    /// block carries `CHAIN_BITS`; the block AT the fork height carries the
+    /// fork bits, as every validated chain must. Insertion bypasses
+    /// `accept_headers` so the fixture is not subject to the proof-of-work and
+    /// `nBits` rules under test. Six hundred second spacing makes the
+    /// 2016-block retarget timespan exactly the expected 14 days, so the
+    /// ordinary retarget path recomputes the previous target unchanged.
+    fn shared_history_chain() -> (BlockTree, Vec<crate::NodeId>) {
+        let mut tree = BlockTree::new();
+        let mut prev = BlockHash::default();
+        let mut ids = Vec::with_capacity(idx(FORK_HEIGHT) + 1);
+        for height in 0..=FORK_HEIGHT {
+            let bits = if height == FORK_HEIGHT {
+                FORK_BITS
+            } else {
+                CHAIN_BITS
+            };
+            let header = header_at(prev, height, bits);
+            prev = header.compute_hash();
+            let id = tree
+                .insert_header(header, NodeStatus::HeaderValid)
+                .unwrap_or_else(|error| panic!("fixture chain inserts: {error}"));
+            ids.push(id);
+        }
+        (tree, ids)
+    }
+
+    #[test]
+    fn fork_reset_bits_activate_exactly_at_the_fork_height() {
+        assert_eq!(
+            ecash_fork_reset_bits(Network::Betanet, FORK_HEIGHT - 1),
+            None,
+            "the block before the fork keeps ordinary rules"
+        );
+        assert_eq!(
+            ecash_fork_reset_bits(Network::Betanet, FORK_HEIGHT),
+            Some(CompactTarget::from_consensus(FORK_BITS)),
+        );
+        assert_eq!(
+            ecash_fork_reset_bits(Network::Betanet, FORK_HEIGHT + 1),
+            None,
+            "the block after the fork returns to ordinary rules"
+        );
+        for height in [0, 1, 2016 * 479, FORK_HEIGHT + 2016] {
+            assert_eq!(
+                ecash_fork_reset_bits(Network::Mainnet, height),
+                None,
+                "networks without an ecash fork never reset at height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn fork_boundary_enforces_fork_bits_while_neighbors_stay_ordinary() {
+        let (tree, ids) = shared_history_chain();
+
+        // The fork block itself: wrong bits are rejected with the fork bits as
+        // the expected value; the exact fork bits are accepted.
+        let fork_parent = ids[idx(FORK_HEIGHT - 1)];
+        let prev = tree
+            .node(fork_parent)
+            .unwrap_or_else(|error| panic!("fixture node exists: {error}"))
+            .header
+            .compute_hash();
+        let wrong = header_at(prev, FORK_HEIGHT, CHAIN_BITS);
+        match validate_header_nbits(&tree, fork_parent, &wrong, Network::Betanet) {
+            Err(ChainError::NbitsMismatch {
+                actual,
+                expected,
+                height,
+            }) => {
+                assert_eq!(actual, CHAIN_BITS);
+                assert_eq!(expected, FORK_BITS);
+                assert_eq!(height, FORK_HEIGHT);
+            }
+            other => panic!("wrong fork-block bits must be an nbits mismatch, got {other:?}"),
+        }
+        let correct = header_at(prev, FORK_HEIGHT, FORK_BITS);
+        assert!(
+            validate_header_nbits(&tree, fork_parent, &correct, Network::Betanet).is_ok(),
+            "the fork block at exactly the fork bits is valid"
+        );
+
+        // One before the fork: an ordinary non-retarget height carries the
+        // parent's bits through.
+        let before_parent = ids[idx(FORK_HEIGHT - 2)];
+        let before_prev = tree
+            .node(before_parent)
+            .unwrap_or_else(|error| panic!("fixture node exists: {error}"))
+            .header
+            .compute_hash();
+        let before = header_at(before_prev, FORK_HEIGHT - 1, CHAIN_BITS);
+        assert_eq!(
+            next_work_required(&tree, before_parent, before.time, Network::Betanet)
+                .unwrap_or_else(|error| panic!("fixture chain computes: {error}")),
+            CompactTarget::from_consensus(CHAIN_BITS),
+        );
+
+        // One after the fork: still an ordinary non-retarget height, so the
+        // fork block's target simply carries forward.
+        let after_parent = ids[idx(FORK_HEIGHT)];
+        let after_prev = tree
+            .node(after_parent)
+            .unwrap_or_else(|error| panic!("fixture node exists: {error}"))
+            .header
+            .compute_hash();
+        let after = header_at(after_prev, FORK_HEIGHT + 1, FORK_BITS);
+        assert_eq!(
+            next_work_required(&tree, after_parent, after.time, Network::Betanet)
+                .unwrap_or_else(|error| panic!("fixture chain computes: {error}")),
+            CompactTarget::from_consensus(FORK_BITS),
+        );
+
+        // Mainnet at the same height is a plain retarget boundary: the ordinary
+        // DAA (whose result equals the previous period's computation) rules,
+        // and it is emphatically not the fork reset.
+        let prev_period_parent = ids[idx(FORK_HEIGHT - 1 - 2016)];
+        let ordinary = next_work_required(
+            &tree,
+            prev_period_parent,
+            1_700_000_000 + FORK_HEIGHT - 2016 + 600,
+            Network::Mainnet,
+        )
+        .unwrap_or_else(|error| panic!("fixture chain computes: {error}"));
+        let at_fork = next_work_required(
+            &tree,
+            fork_parent,
+            1_700_000_000 + FORK_HEIGHT + 600,
+            Network::Mainnet,
+        )
+        .unwrap_or_else(|error| panic!("fixture chain computes: {error}"));
+        assert_eq!(
+            at_fork, ordinary,
+            "mainnet computes the same ordinary retarget at both boundaries"
+        );
+        assert_ne!(
+            at_fork,
+            CompactTarget::from_consensus(FORK_BITS),
+            "mainnet must never produce the fork reset bits"
+        );
     }
 }

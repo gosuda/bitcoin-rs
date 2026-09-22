@@ -41,7 +41,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
                     .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
             });
     let chain = match progress.network {
-        Network::Mainnet => "main",
+        Network::Mainnet | Network::Betanet => "main",
         Network::Testnet3 => "test",
         Network::Testnet4 => "testnet4",
         Network::Signet => "signet",

@@ -68,6 +68,16 @@ impl VerifyFlags {
     pub const DISCOURAGE_OP_SUCCESS: Self = Self(1 << 19);
     /// Discourage unknown public-key versions in tapscript.
     pub const DISCOURAGE_UPGRADABLE_PUBKEYTYPE: Self = Self(1 << 20);
+    /// Enable the ecash-fork rule set on networks that carry an ecash fork
+    /// (`betanet`): `OP_DRIVECHAIN` (`0xb7`, mainnet's `OP_NOP8`) pushes its
+    /// marker and ends evaluation when the whole executing script is its
+    /// 4-byte form, and consensus forgives the repurposed-txid set.
+    ///
+    /// Not a Core-assigned bit: it is deliberately absent from
+    /// [`Self::MANDATORY`], [`Self::STANDARD`], and [`Self::ALL`], so vector
+    /// harnesses and the kernel mask are untouched and consensus sets it
+    /// explicitly per network in `verify_flags`.
+    pub const ECASH: Self = Self(1 << 21);
     /// Mandatory consensus flags used for block validation after taproot activation.
     pub const MANDATORY: Self = Self(
         Self::P2SH.0

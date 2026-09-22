@@ -549,7 +549,7 @@ impl<'a> Projection<'a> {
 
     pub(super) const fn bitcoin_network(&self) -> BitcoinNetwork {
         match self.ctx.chain_network {
-            Network::Mainnet => BitcoinNetwork::Bitcoin,
+            Network::Mainnet | Network::Betanet => BitcoinNetwork::Bitcoin,
             Network::Testnet3 => BitcoinNetwork::Testnet,
             Network::Testnet4 => BitcoinNetwork::Testnet4,
             Network::Signet => BitcoinNetwork::Signet,

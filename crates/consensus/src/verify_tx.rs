@@ -206,7 +206,7 @@ fn verify_transaction_with_locktime_cutoff(
         return Ok(());
     };
 
-    if !skip_scripts {
+    if !skip_scripts && !is_repurpose_transaction(tx, flags) {
         // Under the kernel feature every script class routes through Core's
         // engine — one transaction parse plus one sighash precompute shared across
         // inputs. Without it, the native interpreter in bitcoin-rs-script runs.
@@ -374,6 +374,21 @@ fn verify_input_script_portable(
             reason: error.to_string(),
         })?;
     Ok(())
+}
+
+/// ecash betanet's repurpose forgiveness: mainnet txids whose historical
+/// outputs the fork repurposed skip input-script verification entirely
+/// (Core's `setRepurposeTx` short-circuit in the input-script check). Gated
+/// on the [`VerifyFlags::ECASH`] activation, so every other network keeps
+/// verifying those scripts.
+fn is_repurpose_transaction(tx: &Tx, flags: VerifyFlags) -> bool {
+    skips_input_scripts(tx.txid().as_bytes(), flags)
+}
+
+/// The shared repurpose predicate over a txid's raw little-endian encoding:
+/// only an ecash-fork network forgives, and only the 232 known txids.
+fn skips_input_scripts(txid: &[u8; 32], flags: VerifyFlags) -> bool {
+    flags.contains(VerifyFlags::ECASH) && crate::ecash::is_repurpose_txid(txid)
 }
 
 /// Per-transaction state retained across the flat block verify phases.
@@ -739,13 +754,18 @@ fn prepare_block_input_checks<'b>(
 
         let prepared_index = prepared.len();
         let checks_start = checks.len();
-        for input_index in 0..tx.inputs.len() {
-            checks.push(InputCheck {
+        // ecash betanet: repurposed mainnet txids skip every input-script
+        // check while pre- and post-checks still apply, mirroring the
+        // single-transaction path.
+        let checks_len = if is_repurpose_transaction(tx, flags) {
+            0
+        } else {
+            checks.extend((0..tx.inputs.len()).map(|input_index| InputCheck {
                 prepared_index,
                 input_index,
-            });
-        }
-        let checks_len = tx.inputs.len();
+            }));
+            tx.inputs.len()
+        };
 
         let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let stop_after_tx = post_error.is_some();
@@ -2088,5 +2108,89 @@ mod tests {
         ));
         assert_eq!(super::check_coinbase_maturity(true, 10, 110), Ok(()));
         assert_eq!(super::check_coinbase_maturity(false, 10, 10), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod ecash_repurpose_tests {
+    use bitcoin_rs_primitives::{
+        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
+    use bitcoin_rs_script::VerifyFlags;
+    use bitcoin_rs_script::opcode::OP_RETURN;
+
+    use super::{skips_input_scripts, verify_transaction};
+
+    fn betanet_flags() -> VerifyFlags {
+        VerifyFlags::MANDATORY.union(VerifyFlags::ECASH)
+    }
+
+    fn spend_of(prevout_script: Script) -> (Tx, TxOut) {
+        let prevout = TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: prevout_script,
+        };
+        let tx = Tx {
+            version: 1,
+            lock_time: LockTime::ZERO,
+            inputs: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid(Hash256::from_le_bytes(&[0x11; 32])),
+                    vout: 0,
+                },
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(5_000),
+                script_pubkey: Script::new(),
+            }],
+        };
+        (tx, prevout)
+    }
+
+    #[test]
+    fn repurpose_skip_requires_ecash_activation_and_member_txid() {
+        let member = crate::ecash::REPURPOSE_TXIDS[0];
+        assert!(
+            skips_input_scripts(&member, betanet_flags()),
+            "a repurposed txid skips input scripts on an ecash network"
+        );
+        assert!(
+            !skips_input_scripts(&member, VerifyFlags::MANDATORY),
+            "mainnet keeps verifying repurposed txids' scripts"
+        );
+        assert!(
+            !skips_input_scripts(&[0xab_u8; 32], betanet_flags()),
+            "non-member txids get no forgiveness even on betanet"
+        );
+        assert!(
+            !skips_input_scripts(&member, VerifyFlags::NONE),
+            "the skip rides the ECASH activation, not a bare member txid"
+        );
+    }
+
+    #[test]
+    fn ecash_activation_does_not_relax_scripts_for_other_transactions() {
+        // An OP_RETURN prevout fails everywhere; a non-member spending
+        // transaction gets no repurpose forgiveness from the betanet flags.
+        let (tx, prevout) = spend_of(Script::from_bytes(vec![OP_RETURN]));
+        let mut utxos = hashbrown::HashMap::new();
+        utxos.insert(tx.inputs[0].previous_output, prevout);
+        let verdict = verify_transaction(&tx, &utxos, 0, 0, betanet_flags());
+        assert!(
+            verdict.is_err(),
+            "betanet flags must not blanket-skip script verification"
+        );
+
+        // Control: the same flags still accept an ordinary true-script spend.
+        let (tx, prevout) = spend_of(bitcoin_rs_script::push_int(1).into());
+        let mut utxos = hashbrown::HashMap::new();
+        utxos.insert(tx.inputs[0].previous_output, prevout);
+        assert_eq!(
+            verify_transaction(&tx, &utxos, 0, 0, betanet_flags()),
+            Ok(())
+        );
     }
 }

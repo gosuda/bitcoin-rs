@@ -490,7 +490,9 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
 
 fn bitcoin_network(network: Network) -> bitcoin::Network {
     match network {
-        Network::Mainnet => bitcoin::Network::Bitcoin,
+        // Betanet forks mainnet's history, so addresses keep mainnet's
+        // version-byte prefixes.
+        Network::Mainnet | Network::Betanet => bitcoin::Network::Bitcoin,
         Network::Testnet3 => bitcoin::Network::Testnet,
         Network::Testnet4 => bitcoin::Network::Testnet4,
         Network::Signet => bitcoin::Network::Signet,
@@ -649,6 +651,9 @@ pub enum NetworkSelection {
     Regtest,
     /// ecash drynet4: mainnet consensus history on a distinct P2P network.
     Drynet4,
+    /// ecash betanet: mainnet consensus history through the ecash fork, then
+    /// ecash rules on a distinct P2P network.
+    Betanet,
 }
 
 impl NetworkSelection {
@@ -662,6 +667,7 @@ impl NetworkSelection {
             "signet" => Some(Self::Signet),
             "regtest" => Some(Self::Regtest),
             "drynet4" => Some(Self::Drynet4),
+            "betanet" => Some(Self::Betanet),
             _ => None,
         }
     }
@@ -671,6 +677,7 @@ impl NetworkSelection {
     pub const fn consensus_network(self) -> Network {
         match self {
             Self::Mainnet | Self::Drynet4 => Network::Mainnet,
+            Self::Betanet => Network::Betanet,
             Self::Testnet3 => Network::Testnet3,
             Self::Testnet4 => Network::Testnet4,
             Self::Signet => Network::Signet,
@@ -695,6 +702,7 @@ impl From<Network> for NetworkSelection {
             Network::Testnet4 => Self::Testnet4,
             Network::Signet => Self::Signet,
             Network::Regtest => Self::Regtest,
+            Network::Betanet => Self::Betanet,
         }
     }
 }

@@ -111,6 +111,9 @@ pub enum Network {
     Signet,
     /// Local regression-test network.
     Regtest,
+    /// ecash betanet: full shared mainnet history up to the ecash fork, then
+    /// ecash rules on a distinct P2P network.
+    Betanet,
 }
 
 impl Network {
@@ -127,6 +130,7 @@ impl Network {
             Self::Testnet4 => "testnet4",
             Self::Signet => "signet",
             Self::Regtest => "regtest",
+            Self::Betanet => "betanet",
         }
     }
 
@@ -139,6 +143,7 @@ impl Network {
             Self::Testnet4 => [0x1c, 0x16, 0x3f, 0x28],
             Self::Signet => [0x0a, 0x03, 0xcf, 0x40],
             Self::Regtest => [0xfa, 0xbf, 0xb5, 0xda],
+            Self::Betanet => [0xec, 0xa5, 0xb1, 0x04],
         }
     }
 
@@ -151,6 +156,7 @@ impl Network {
             Self::Testnet4 => 48333,
             Self::Signet => 38333,
             Self::Regtest => 18444,
+            Self::Betanet => 8533,
         }
     }
 
@@ -164,7 +170,7 @@ impl Network {
     #[must_use]
     pub const fn bip34_activation_height(self) -> u32 {
         match self {
-            Self::Mainnet => 227_931,
+            Self::Mainnet | Self::Betanet => 227_931,
             Self::Testnet3 => 21_111,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 500,
@@ -176,7 +182,7 @@ impl Network {
     #[must_use]
     pub const fn bip34_activation_hash(self) -> Option<Hash256> {
         match self {
-            Self::Mainnet => Some(Hash256::from_le_bytes(&[
+            Self::Mainnet | Self::Betanet => Some(Hash256::from_le_bytes(&[
                 0xb8, 0x08, 0x08, 0x9c, 0x75, 0x6a, 0xdd, 0x15, 0x91, 0xb1, 0xd1, 0x7b, 0xab, 0x44,
                 0xbb, 0xa3, 0xfe, 0xd9, 0xe0, 0x2f, 0x94, 0x2a, 0xb4, 0x89, 0x4b, 0x02, 0x00, 0x00,
                 0x00, 0x00, 0x00, 0x00,
@@ -206,7 +212,7 @@ impl Network {
     #[must_use]
     pub const fn is_bip65_active(self, height: u32) -> bool {
         let activation = match self {
-            Self::Mainnet => 388_381,
+            Self::Mainnet | Self::Betanet => 388_381,
             Self::Testnet3 => 581_885,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 1_351,
@@ -218,7 +224,7 @@ impl Network {
     #[must_use]
     pub const fn is_bip66_active(self, height: u32) -> bool {
         let activation = match self {
-            Self::Mainnet => 363_725,
+            Self::Mainnet | Self::Betanet => 363_725,
             Self::Testnet3 => 330_776,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 1_251,
@@ -230,7 +236,7 @@ impl Network {
     #[must_use]
     pub const fn is_csv_active(self, height: u32) -> bool {
         let activation = match self {
-            Self::Mainnet => 419_328,
+            Self::Mainnet | Self::Betanet => 419_328,
             Self::Testnet3 => 770_112,
             Self::Testnet4 | Self::Signet => 1,
             Self::Regtest => 432,
@@ -242,7 +248,7 @@ impl Network {
     #[must_use]
     pub const fn is_segwit_active(self, height: u32) -> bool {
         let activation = match self {
-            Self::Mainnet => 481_824,
+            Self::Mainnet | Self::Betanet => 481_824,
             Self::Testnet3 => 834_624,
             Self::Testnet4 | Self::Signet | Self::Regtest => 0,
         };
@@ -253,7 +259,7 @@ impl Network {
     #[must_use]
     pub const fn is_taproot_active(self, height: u32) -> bool {
         let activation = match self {
-            Self::Mainnet => 709_632,
+            Self::Mainnet | Self::Betanet => 709_632,
             Self::Testnet3 => 2_017_256,
             Self::Testnet4 | Self::Signet | Self::Regtest => 0,
         };
@@ -285,7 +291,9 @@ impl Network {
     #[must_use]
     pub const fn assume_valid_anchor(self) -> Option<(u32, Hash256)> {
         match self {
-            Self::Mainnet => Some((MAINNET_ASSUME_VALID_HEIGHT, MAINNET_ASSUME_VALID_HASH)),
+            Self::Mainnet | Self::Betanet => {
+                Some((MAINNET_ASSUME_VALID_HEIGHT, MAINNET_ASSUME_VALID_HASH))
+            }
             Self::Testnet3 | Self::Testnet4 | Self::Signet | Self::Regtest => None,
         }
     }
@@ -299,6 +307,7 @@ impl Network {
             Self::Testnet4 => 48332,
             Self::Signet => 38332,
             Self::Regtest => 18443,
+            Self::Betanet => 8532,
         }
     }
 
@@ -332,6 +341,12 @@ impl Network {
                 "seed.signet.achownodes.xyz.",
             ],
             Self::Regtest => &["dummySeed.invalid."],
+            Self::Betanet => &[
+                "seed.beta.ecash.ninja.",
+                "seed.beta.bip300.xyz.",
+                "seed.beta.ecash.drivecha.in.",
+                "seed.beta.ecash.zuexeuz.net.",
+            ],
         }
     }
 
@@ -349,11 +364,13 @@ impl Network {
                 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
                 0xff, 0xff, 0xff, 0xff,
             ]),
-            Self::Mainnet | Self::Testnet3 | Self::Testnet4 => Uint::from_be_bytes([
-                0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff,
-            ]),
+            Self::Mainnet | Self::Betanet | Self::Testnet3 | Self::Testnet4 => {
+                Uint::from_be_bytes([
+                    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                ])
+            }
         }
     }
 
@@ -362,7 +379,7 @@ impl Network {
     pub const fn retarget_interval(self) -> u32 {
         match self {
             Self::Regtest => 144,
-            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet => 2016,
+            Self::Mainnet | Self::Betanet | Self::Testnet3 | Self::Testnet4 | Self::Signet => 2016,
         }
     }
 
@@ -374,7 +391,9 @@ impl Network {
     pub const fn subsidy_halving_interval(self) -> u32 {
         match self {
             Self::Regtest => 150,
-            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet => 210_000,
+            Self::Mainnet | Self::Betanet | Self::Testnet3 | Self::Testnet4 | Self::Signet => {
+                210_000
+            }
         }
     }
 
@@ -391,7 +410,7 @@ impl Network {
     #[must_use]
     pub const fn chain_tx_data(self) -> ChainTxData {
         match self {
-            Self::Mainnet => ChainTxData {
+            Self::Mainnet | Self::Betanet => ChainTxData {
                 time: 1_772_055_173,
                 tx_count: 1_315_805_869,
                 tx_rate: 5.401_110_064_961_22,
@@ -430,7 +449,7 @@ impl Network {
     #[must_use]
     pub const fn minimum_chain_work(self) -> [u8; 32] {
         match self {
-            Self::Mainnet => MAINNET_MINIMUM_CHAIN_WORK,
+            Self::Mainnet | Self::Betanet => MAINNET_MINIMUM_CHAIN_WORK,
             Self::Testnet3 => TESTNET3_MINIMUM_CHAIN_WORK,
             Self::Testnet4 => TESTNET4_MINIMUM_CHAIN_WORK,
             Self::Signet => SIGNET_MINIMUM_CHAIN_WORK,
@@ -452,7 +471,7 @@ impl Network {
     pub const fn allow_min_difficulty_blocks(self) -> bool {
         match self {
             Self::Testnet3 | Self::Testnet4 | Self::Regtest => true,
-            Self::Mainnet | Self::Signet => false,
+            Self::Mainnet | Self::Betanet | Self::Signet => false,
         }
     }
 
@@ -461,7 +480,7 @@ impl Network {
     pub const fn pow_no_retargeting(self) -> bool {
         match self {
             Self::Regtest => true,
-            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet => false,
+            Self::Mainnet | Self::Betanet | Self::Testnet3 | Self::Testnet4 | Self::Signet => false,
         }
     }
 
@@ -470,7 +489,34 @@ impl Network {
     pub const fn enforce_bip94(self) -> bool {
         match self {
             Self::Testnet4 => true,
-            Self::Mainnet | Self::Testnet3 | Self::Signet | Self::Regtest => false,
+            Self::Mainnet | Self::Betanet | Self::Testnet3 | Self::Signet | Self::Regtest => false,
+        }
+    }
+
+    /// Returns the ecash fork activation height, when the network carries one.
+    ///
+    /// Betanet shares mainnet's entire history up to this height; at it the
+    /// ecash rules activate and the proof-of-work target resets to
+    /// [`Self::ecash_fork_bits`]. Networks without an ecash fork return `None`.
+    #[must_use]
+    pub const fn ecash_fork_height(self) -> Option<u64> {
+        match self {
+            Self::Betanet => Some(967_680),
+            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet | Self::Regtest => None,
+        }
+    }
+
+    /// Returns the compact proof-of-work target enforced exactly at
+    /// [`Self::ecash_fork_height`], when the network carries one.
+    ///
+    /// `0x19044b7e` is the ecash fork's difficulty-1e9 reset target; the fork
+    /// height is a 2016-block retarget boundary, so this is the only height
+    /// whose expected bits differ from the ordinary retarget computation.
+    #[must_use]
+    pub const fn ecash_fork_bits(self) -> Option<u32> {
+        match self {
+            Self::Betanet => Some(0x1904_4b7e),
+            Self::Mainnet | Self::Testnet3 | Self::Testnet4 | Self::Signet | Self::Regtest => None,
         }
     }
 
@@ -478,7 +524,9 @@ impl Network {
     #[must_use]
     pub fn genesis_block_hash(self) -> Hash256 {
         let hex = match self {
-            Self::Mainnet => "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+            Self::Mainnet | Self::Betanet => {
+                "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+            }
             Self::Testnet3 => "000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943",
             Self::Testnet4 => "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043",
             Self::Signet => "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6",
@@ -499,7 +547,7 @@ impl Network {
     #[must_use]
     pub fn genesis_block(self) -> crate::Block {
         let bytes: &[u8] = match self {
-            Self::Mainnet => &MAINNET_GENESIS,
+            Self::Mainnet | Self::Betanet => &MAINNET_GENESIS,
             Self::Testnet3 => &TESTNET3_GENESIS,
             Self::Testnet4 => &TESTNET4_GENESIS,
             Self::Signet => &SIGNET_GENESIS,
@@ -631,6 +679,54 @@ mod tests {
         assert_eq!(Network::Signet.magic(), [0x0a, 0x03, 0xcf, 0x40]);
         assert_eq!(Network::Regtest.magic(), [0xfa, 0xbf, 0xb5, 0xda]);
         assert_eq!(Network::Regtest.retarget_interval(), 144);
+    }
+
+    #[test]
+    fn betanet_constants_match_ecash_chainparams() {
+        assert_eq!(Network::Betanet.identity_name(), "betanet");
+        assert_eq!(Network::Betanet.magic(), [0xec, 0xa5, 0xb1, 0x04]);
+        assert_eq!(Network::Betanet.default_p2p_port(), 8533);
+        assert_eq!(Network::Betanet.default_rpc_port(), 8532);
+        assert_eq!(Network::Betanet.retarget_interval(), 2016);
+        assert!(!Network::Betanet.allow_min_difficulty_blocks());
+        assert!(!Network::Betanet.pow_no_retargeting());
+        assert!(!Network::Betanet.enforce_bip94());
+
+        // Shared mainnet history before the ecash fork.
+        assert_eq!(
+            Network::Betanet.genesis_block_hash(),
+            Network::Mainnet.genesis_block_hash()
+        );
+        assert_eq!(
+            Network::Betanet.minimum_chain_work(),
+            Network::Mainnet.minimum_chain_work()
+        );
+        assert_eq!(Network::Betanet.max_target(), Network::Mainnet.max_target());
+        assert_eq!(
+            Network::Betanet.assume_valid_anchor(),
+            Network::Mainnet.assume_valid_anchor()
+        );
+
+        let seeds = Network::Betanet.dns_seeds();
+        assert_eq!(
+            seeds,
+            &[
+                "seed.beta.ecash.ninja.",
+                "seed.beta.bip300.xyz.",
+                "seed.beta.ecash.drivecha.in.",
+                "seed.beta.ecash.zuexeuz.net.",
+            ]
+        );
+        assert!(
+            seeds
+                .iter()
+                .all(|seed| !Network::Mainnet.dns_seeds().contains(seed))
+        );
+
+        assert_eq!(Network::Betanet.ecash_fork_height(), Some(967_680));
+        assert_eq!(Network::Betanet.ecash_fork_bits(), Some(0x1904_4b7e));
+        assert_eq!(Network::Mainnet.ecash_fork_height(), None);
+        assert_eq!(Network::Mainnet.ecash_fork_bits(), None);
     }
 
     #[test]
@@ -769,6 +865,7 @@ mod tests {
             Network::Testnet4,
             Network::Signet,
             Network::Regtest,
+            Network::Betanet,
         ] {
             let ChainTxData {
                 time,

@@ -698,7 +698,7 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
 
 fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
     let chain = match info.network {
-        bitcoin_rs_primitives::Network::Mainnet => "main",
+        bitcoin_rs_primitives::Network::Mainnet | bitcoin_rs_primitives::Network::Betanet => "main",
         bitcoin_rs_primitives::Network::Testnet3 => "test",
         bitcoin_rs_primitives::Network::Testnet4 => "testnet4",
         bitcoin_rs_primitives::Network::Signet => "signet",

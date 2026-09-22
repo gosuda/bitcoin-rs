@@ -52,6 +52,9 @@ pub fn verify_flags(
     if network.is_taproot_active(height) {
         flags = flags.union(VerifyFlags::TAPROOT);
     }
+    if network.ecash_fork_height().is_some() {
+        flags = flags.union(VerifyFlags::ECASH);
+    }
     flags
 }
 
@@ -590,6 +593,47 @@ mod tests {
         assert!(flags.contains(VerifyFlags::CHECKSEQUENCEVERIFY));
         assert!(flags.contains(VerifyFlags::WITNESS));
         assert!(flags.contains(VerifyFlags::NULLDUMMY));
+    }
+
+    #[test]
+    fn verify_flags_enable_ecash_rules_only_on_fork_networks() {
+        let softfork = SoftforkState {
+            csv_active: true,
+            segwit_active: true,
+        };
+        let betanet = verify_flags(
+            Network::Betanet,
+            100,
+            Hash256::from_le_bytes(&[0x22; 32]),
+            softfork,
+        );
+        assert!(
+            betanet.contains(VerifyFlags::ECASH),
+            "networks with an ecash fork activate the ecash rule set"
+        );
+
+        let mainnet = verify_flags(
+            Network::Mainnet,
+            100,
+            Hash256::from_le_bytes(&[0x22; 32]),
+            softfork,
+        );
+        assert!(
+            !mainnet.contains(VerifyFlags::ECASH),
+            "mainnet must not activate the ecash rule set"
+        );
+        for network in [
+            Network::Testnet3,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            let flags = verify_flags(network, 100, Hash256::from_le_bytes(&[0x22; 32]), softfork);
+            assert!(
+                !flags.contains(VerifyFlags::ECASH),
+                "{network:?} must not activate the ecash rule set"
+            );
+        }
     }
 
     #[test]
