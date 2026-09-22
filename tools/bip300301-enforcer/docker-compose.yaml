@@ -1,4 +1,4 @@
-name: bitcoin-rs
+name: bitcoin-rs-betanet
 
 services:
   node:
@@ -20,8 +20,10 @@ services:
       BITCOIN_RS_TXINDEX: "${BITCOIN_RS_TXINDEX:-true}"
       BITCOIN_RS_SCRIPTINDEX: "${BITCOIN_RS_SCRIPTINDEX:-false}"
       BITCOIN_RS_ZMQPUBSEQUENCE: tcp://0.0.0.0:29000
+    # intentionally outside the mainnet `data/bitcoin-rs` directory; do not
+    # point this stack at a running mainnet/testnet datadir.
     volumes:
-      - ../../data/bitcoin-rs/${BITCOIN_RS_NETWORK:-betanet}:/data
+      - ../../data/bitcoin-rs-betanet:/data
     ports:
       # Keep RPC private to the Docker host. Change this deliberately if a
       # trusted remote client must connect.
@@ -65,8 +67,9 @@ services:
       - --bitcoin-core-skip-version-check
       - --serve-grpc-addr=0.0.0.0:50051
       - --serve-rpc-addr=0.0.0.0:8122
+    # intentionally outside the mainnet `data/enforcer` directory.
     volumes:
-      - ../../data/enforcer/${BITCOIN_RS_NETWORK:-betanet}:/data
+      - ../../data/enforcer-betanet:/data
     ports:
       - "127.0.0.1:${ENFORCER_GRPC_PORT:-50051}:50051"
       - "127.0.0.1:${ENFORCER_RPC_PORT:-8122}:8122"
