@@ -339,6 +339,17 @@ impl SyncChain for NodeSyncChain {
                 disconnected,
                 stopped_at,
             }),
+            // A connect body was unavailable after part of the branch applied.
+            Err(crate::reorg::ReorgError::ConnectBodyLost {
+                disconnected,
+                connected,
+                stopped_at,
+                ..
+            }) => Err(BranchSwitchError::ConnectBodyLost {
+                disconnected,
+                connected,
+                stopped_at,
+            }),
             // An unclassified reorg error crossed the seam unchanged.
             Err(error) => Err(BranchSwitchError::Other(Box::new(error))),
         }

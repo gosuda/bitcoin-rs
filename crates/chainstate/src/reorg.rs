@@ -942,10 +942,17 @@ where
         Err(source) => {
             let disposition = crate::classify_apply_error(&source);
             let invalidated = if disposition == crate::WindowApplyDisposition::Permanent {
-                let mut tree = transition.chainstate().block_tree().write();
-                tree.lookup(body.hash)
+                let handles = transition.chainstate();
+                let mut tree = handles.block_tree().write();
+                let invalidated = tree
+                    .lookup(body.hash)
                     .and_then(|node_id| tree.invalidate_subtree(node_id).ok())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                if let Some(tip) = tree.tip() {
+                    handles.chain_tip().store(Some(tip));
+                }
+                handles.reevaluate_assume_valid_with(&tree);
+                invalidated
             } else {
                 Vec::new()
             };
