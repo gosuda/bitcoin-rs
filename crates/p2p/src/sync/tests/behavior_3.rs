@@ -311,10 +311,13 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        sync.frontier_state
-            .lock()
-            .stager
-            .insert(successor, None, block, serialized, Instant::now());
+        sync.frontier_state.lock().stager.insert(
+            successor,
+            None,
+            block,
+            serialized,
+            Instant::now(),
+        );
     }
     sync.frontier_state
         .lock()
@@ -341,7 +344,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     let far_future = Instant::now() + Duration::from_mins(1);
 
     // Far past any threshold, but the apply side is busy: frozen.
-    sync.disconnect_window_staller(Some(&applied), far_future);
+    sync.reconcile_window_recovery(Some(&applied), far_future);
     assert!(sync.frontier_state.lock().window.stalling_peer().is_none());
     assert!(peers.is_connected(staller));
 
@@ -353,7 +356,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
         .stager
         .drain_expected_prefix(&[frontier]);
     assert_eq!(drained.len(), 1);
-    sync.disconnect_window_staller(Some(&applied), far_future);
+    sync.reconcile_window_recovery(Some(&applied), far_future);
     assert_eq!(
         sync.frontier_state
             .lock()
@@ -363,7 +366,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
         Some(staller)
     );
     assert!(peers.is_connected(staller));
-    sync.disconnect_window_staller(
+    sync.reconcile_window_recovery(
         Some(&applied),
         far_future + super::super::BLOCK_STALLING_TIMEOUT,
     );
@@ -451,8 +454,8 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     let start = Instant::now();
 
     // Below the bound the suppression holds and nothing is evicted.
-    sync.disconnect_window_staller(Some(&applied), start);
-    sync.disconnect_window_staller(
+    sync.reconcile_window_recovery(Some(&applied), start);
+    sync.reconcile_window_recovery(
         Some(&applied),
         bound
             .checked_sub(Duration::from_secs(1))
@@ -467,7 +470,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
 
     // Past the bound: escalation evicts the stuck staged body for refetch
     // and blames nobody.
-    sync.disconnect_window_staller(Some(&applied), start + bound + Duration::from_secs(1));
+    sync.reconcile_window_recovery(Some(&applied), start + bound + Duration::from_secs(1));
     assert!(
         !sync.frontier_state.lock().stager.contains(&frontier),
         "past the bound the stuck staged frontier must be evicted for refetch"
@@ -490,7 +493,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
 
     // With the body evicted the normal unsuppressed stall path engages: the
     // front peer now owes an unanswered request and is convicted as before.
-    sync.disconnect_window_staller(
+    sync.reconcile_window_recovery(
         Some(&applied),
         start + bound + Duration::from_secs(1) + super::super::BLOCK_STALLING_TIMEOUT,
     );
@@ -502,7 +505,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
             .map(|(addr, _)| addr),
         Some(staller)
     );
-    sync.disconnect_window_staller(
+    sync.reconcile_window_recovery(
         Some(&applied),
         start + bound + Duration::from_secs(1) + super::super::BLOCK_STALLING_TIMEOUT * 2,
     );

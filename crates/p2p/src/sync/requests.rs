@@ -4,16 +4,14 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
-use super::frontier::SyncFrontier;
-use super::peers::body_capability_height;
+use super::frontier::{ColdFrontHedge, SyncFrontier};
+use super::peers::{FrontierPeer, body_capability_height};
 use super::telemetry::metric_count;
 use crate::Message;
-use crate::download_window::SyncPeer;
 use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -32,33 +30,20 @@ impl BlockSync {
     ///
     /// Every alternate receives the same earliest hashes, so the probe cannot
     /// create a unique out-of-order height hole. It runs once per deep owner.
-    pub(super) fn send_prefix_probes(
-        &self,
-        frontier: &SyncFrontier,
-        probe_peers: &[SyncPeer],
-        now: Instant,
-    ) {
+    pub(super) fn send_prefix_probes(&self, probe_peers: &[FrontierPeer], now: Instant) {
         let Some((owner, hashes, required_height)) =
             self.frontier_state.lock().window.prefix_probe_plan()
         else {
             return;
         };
-        let candidates = probe_peers.iter().filter(|peer| {
-            peer.addr != owner
-                && u32::try_from(peer.best_known_height)
+        let candidates = probe_peers.iter().filter(|selected| {
+            selected.peer.addr != owner
+                && u32::try_from(selected.peer.best_known_height)
                     .is_ok_and(|height| height >= required_height)
         });
         let mut successful = SmallVec::<[SocketAddr; 8]>::new();
-        for peer in candidates {
-            let peer_addr = peer.addr;
-            let Some(source) = frontier
-                .usable_peers
-                .iter()
-                .find(|usable| usable.source.addr == peer_addr)
-                .map(|usable| usable.source)
-            else {
-                continue;
-            };
+        for selected in candidates {
+            let peer_addr = selected.peer.addr;
             let inventory = hashes
                 .iter()
                 .map(|hash| {
@@ -69,7 +54,7 @@ impl BlockSync {
                 .collect();
             if self
                 .peer_table
-                .send(source, Message::GetData(inventory))
+                .send(selected.source, Message::GetData(inventory))
                 .is_ok()
             {
                 successful.push(peer_addr);
@@ -206,7 +191,11 @@ impl BlockSync {
         let still_current = self.peer_table.with_current(sync_peer, || {
             send_ok = tx.send(msg).is_ok();
             if send_ok {
-                has_request_capacity = self.frontier_state.lock().window.mark_requested(&request, now);
+                has_request_capacity = self
+                    .frontier_state
+                    .lock()
+                    .window
+                    .mark_requested(&request, now);
             }
         });
         if !still_current {
@@ -256,67 +245,57 @@ impl BlockSync {
     /// hedge therefore changes neither capacity accounting nor timeout state.
     pub(super) fn send_cold_front_hedge(
         &self,
-        owner: SocketAddr,
-        front_hash: Hash256,
-        front_height: u32,
+        frontier: &SyncFrontier,
+        hedge: ColdFrontHedge,
         now: Instant,
     ) -> Option<SocketAddr> {
-        let sessions = self.peer_table.sessions();
+        if !self.frontier_chain_is_current(frontier) {
+            return None;
+        }
         let tree = self.chain.block_tree().read();
         let active_tip = self.chain.chain_tip().load_full()?.tip_id;
-        let active_front_height = tree.active_height_of(active_tip, front_hash)?;
-        let mut candidates = SmallVec::<[SocketAddr; 8]>::new();
-        for session in sessions {
-            let Some(peer) = session.info else {
-                continue;
-            };
-            if peer.addr != owner
-                && statically_fanout_eligible(&peer)
-                && body_capability_height(
-                    &peer,
-                    &tree,
-                    Some(active_tip),
-                    &session.demonstrated_tips,
-                )
-                .is_some_and(|height| height >= active_front_height)
+        let active_front_height = tree.active_height_of(active_tip, hedge.hash)?;
+        let mut candidates = SmallVec::<[(crate::PeerSource, SocketAddr); 8]>::new();
+        for usable in &frontier.usable_peers {
+            let peer = &usable.info;
+            if peer.addr != hedge.owner
+                && statically_fanout_eligible(peer)
+                && body_capability_height(peer, &tree, Some(active_tip), &usable.demonstrated_tips)
+                    .is_some_and(|height| height >= active_front_height)
             {
-                candidates.push(peer.addr);
+                candidates.push((usable.source, peer.addr));
             }
         }
         drop(tree);
-        let candidates: SmallVec<[SocketAddr; 8]> = {
-            let frontier_state = self.frontier_state.lock();
-            let window = &frontier_state.window;
+        let candidates: SmallVec<[(crate::PeerSource, SocketAddr); 8]> = {
+            let state = self.frontier_state.lock();
+            let window = &state.window;
             candidates
                 .into_iter()
-                .filter(|addr| {
+                .filter(|(_, addr)| {
                     !window.peer_has_expired_pending(*addr, now)
                         && !window.peer_in_staller_cooldown(*addr, now)
                 })
                 .collect()
         };
         let mut message = Message::GetData(vec![Inventory::WitnessBlock(
-            bitcoin::BlockHash::from_byte_array(*front_hash.as_byte_array()),
+            bitcoin::BlockHash::from_byte_array(*hedge.hash.as_byte_array()),
         )]);
-        for peer_addr in candidates {
-            let tx = self.peer_table.lease(peer_addr);
-            let Some(tx) = tx else {
-                continue;
-            };
-            match tx.send(message) {
+        for (source, peer_addr) in candidates {
+            match self.peer_table.send(source, message) {
                 Ok(()) => {
                     metrics::counter!("node.sync.cold_front_hedges").increment(1);
                     tracing::info!(
-                        owner = %owner,
+                        owner = %hedge.owner,
                         hedge_peer = %peer_addr,
-                        %front_hash,
-                        front_height,
+                        front_hash = %hedge.hash,
+                        front_height = hedge.height,
                         "block sync: hedged cold-start stalled front"
                     );
                     return Some(peer_addr);
                 }
-                Err(error) => {
-                    message = error.0;
+                Err(unsent) => {
+                    message = unsent;
                 }
             }
         }

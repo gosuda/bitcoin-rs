@@ -36,7 +36,11 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn s
     );
     let stale_hash = Hash256::from_le_bytes(blocks[0].block_hash().as_bytes());
     assert!(
-        !sync.frontier_state.lock().window.contains_pending(&stale_hash),
+        !sync
+            .frontier_state
+            .lock()
+            .window
+            .contains_pending(&stale_hash),
         "the replay must be unsolicited after its request was applied"
     );
 

@@ -12,7 +12,7 @@ impl BlockSync {
     /// that the node is alive and applying blocks.
     pub fn emit_sync_progress(&self) {
         let frontier = self.observe_frontier();
-        let plan = frontier.reconcile();
+        let plan = frontier.reconcile(std::time::Instant::now());
         let applied_height = frontier.applied_tip.as_ref().map_or(0, |tip| tip.height);
         let header_height = frontier
             .header_tip

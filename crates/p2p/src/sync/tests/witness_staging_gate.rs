@@ -199,7 +199,13 @@ fn malformed_same_address_replacement_does_not_inherit_body_request()
     let replacement = current_source(&sync.peer_table, addr);
     assert_ne!(replacement, predecessor);
     sync.reconcile_peer_sessions();
-    assert!(!sync.frontier_state.lock().window.contains_pending(&block_hash));
+    assert!(
+        !sync
+            .frontier_state
+            .lock()
+            .window
+            .contains_pending(&block_hash)
+    );
 
     let mut malformed = InboundBlock::from_decoded(stripped_block);
     malformed.source = Some(replacement);

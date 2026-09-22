@@ -29,7 +29,6 @@ use crossbeam_channel::Receiver;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -93,9 +92,9 @@ pub struct BlockSync {
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
-    /// One lock owns the coupled download and staged-body state. Consensus and
-    /// chain I/O stay outside this lock; each component's policy remains in
-    /// the P2P crate.
+    /// One lock owns the complete mutable P2P scheduler state: download and
+    /// staged-body ownership, header request ownership, and the session map
+    /// used to normalize replacements. Consensus and chain I/O stay outside.
     frontier_state: Mutex<frontier::FrontierSchedulerState>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
@@ -113,13 +112,6 @@ struct PendingHeaderRequest {
     locator_tip_hash: Hash256,
     target_height: u32,
     requested_at: Instant,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum IdleFrontierProbeOutcome {
-    Sent,
-    NotSent,
-    SendFailed(PeerSource),
 }
 
 #[derive(Clone, Debug)]
@@ -191,31 +183,23 @@ impl BlockSync {
     pub fn tick(&self) {
         self.drain_inbound_headers();
         self.chain.bootstrap_genesis();
-        self.drain_inbound_blocks();
 
         let now = Instant::now();
-        // Reconciliation runs after apply drain so timeout/replacement release
-        // can make the canonical body requestable again in this same tick.
+        // The frontier transition owns peer normalization, inbound-body
+        // settlement, timeout recovery, and the resulting work plan.
         let reconciled = self.reconcile_frontier(now);
         let frontier = reconciled.observation;
         let plan = reconciled.plan;
+        let cold_hedge = reconciled.cold_hedge;
         let sync_peer_selection = self.sync_peer_selection(&frontier, now);
         let mut sent_getdata = false;
         let request_peer_count = sync_peer_selection.request_peers.len();
         if plan.schedule_bodies {
             for (peer_idx, peer) in sync_peer_selection.request_peers.into_iter().enumerate() {
-                let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
-                let Some(source) = frontier
-                    .usable_peers
-                    .iter()
-                    .find(|usable| usable.source.addr == peer.addr)
-                    .map(|usable| usable.source)
-                else {
-                    continue;
-                };
+                let peer_best_height = u32::try_from(peer.peer.best_known_height).unwrap_or(0);
                 let request_outcome = match (&frontier.header_tip, &frontier.applied_tip) {
                     (Some(chain_tip), Some(applied_tip)) => self.send_getdata_for_pending_blocks(
-                        source,
+                        peer.source,
                         peer_idx + 1 == request_peer_count,
                         peer_best_height,
                         chain_tip,
@@ -230,20 +214,24 @@ impl BlockSync {
             }
         }
         if plan.schedule_bodies {
-            self.send_prefix_probes(&frontier, &sync_peer_selection.probe_peers, now);
+            self.send_prefix_probes(&sync_peer_selection.probe_peers, now);
+        }
+        if let Some(hedge) = cold_hedge
+            && let Some(alternate) = self.send_cold_front_hedge(&frontier, hedge, now)
+        {
+            self.frontier_state.lock().window.confirm_cold_front_hedge(
+                hedge.owner,
+                alternate,
+                hedge.hash,
+            );
         }
         match plan.header_action {
-            frontier::HeaderAction::ProbeMissingFrontier => {
-                match self.probe_idle_frontier(&frontier, now) {
-                    IdleFrontierProbeOutcome::Sent => {}
-                    IdleFrontierProbeOutcome::NotSent => {
-                        self.request_headers_from_best_peer(&frontier, None);
-                    }
-                    IdleFrontierProbeOutcome::SendFailed(source) => {
-                        self.request_headers_from_best_peer(&frontier, Some(source));
-                    }
+            frontier::HeaderAction::ProbeMissingFrontier(source) => {
+                if self.execute_frontier_probe(&frontier, source).is_err() {
+                    self.request_headers_from_best_peer(&frontier, Some(source));
                 }
             }
+            frontier::HeaderAction::AwaitPending => {}
             frontier::HeaderAction::ExtendHeaderTip => {
                 self.request_headers_from_best_peer(&frontier, None);
             }

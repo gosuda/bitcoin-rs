@@ -2,7 +2,6 @@
 
 use super::BlockSync;
 use super::HEADER_REQUEST_TIMEOUT;
-use super::IdleFrontierProbeOutcome;
 use super::LOCATOR_MAX_ENTRIES;
 use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
@@ -189,25 +188,25 @@ impl BlockSync {
     /// awaiting the staged-body timeout, not progress. Start at the applied
     /// chain so a peer at our header tip returns branch evidence. Reuse the
     /// existing header-request deadline.
-    pub(super) fn probe_idle_frontier(
+    pub(super) fn execute_frontier_probe(
         &self,
         frontier: &SyncFrontier,
-        now: Instant,
-    ) -> IdleFrontierProbeOutcome {
+        source: PeerSource,
+    ) -> Result<(), PeerSource> {
         if !self.frontier_chain_is_current(frontier) {
-            return IdleFrontierProbeOutcome::NotSent;
+            return Ok(());
         }
         let (Some(applied), Some(headers), Some(required)) = (
             frontier.applied_tip.as_ref(),
             frontier.header_tip.as_ref(),
             frontier.next_required,
         ) else {
-            return IdleFrontierProbeOutcome::NotSent;
+            return Ok(());
         };
         if applied.hash == headers.hash
             || self.apply_halted.load(std::sync::atomic::Ordering::Acquire)
         {
-            return IdleFrontierProbeOutcome::NotSent;
+            return Ok(());
         }
         // Body dispatch runs before this action. Revalidate the observed hash
         // so a successful getdata publication suppresses the recovery probe.
@@ -216,36 +215,9 @@ impl BlockSync {
             if state.window.contains_pending(&required.hash)
                 || state.stager.contains(&required.hash)
             {
-                return IdleFrontierProbeOutcome::NotSent;
+                return Ok(());
             }
         }
-        let pending = frontier.header_request;
-        if pending.is_some_and(|request| {
-            now.saturating_duration_since(request.requested_at) < HEADER_REQUEST_TIMEOUT
-                && frontier
-                    .usable_peers
-                    .iter()
-                    .any(|peer| peer.source == request.source)
-        }) {
-            return IdleFrontierProbeOutcome::Sent;
-        }
-        let required = bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
-            | bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
-        let eligible = || {
-            frontier
-                .usable_peers
-                .iter()
-                .filter(|peer| peer.info.services & required == required)
-        };
-        // Rotate after the existing request expires, without a second queue.
-        let session = eligible()
-            .filter(|peer| pending.is_none_or(|request| peer.source.addr > request.source.addr))
-            .min_by_key(|peer| peer.source.addr)
-            .or_else(|| eligible().min_by_key(|peer| peer.source.addr));
-        let Some(peer) = session else {
-            return IdleFrontierProbeOutcome::NotSent;
-        };
-        let source = peer.source;
         // Anchor on the active chain at the applied height, not on the
         // applied tip's branch. During a deep header-first reorg the applied
         // tip may still sit on the losing branch. A locator from that branch
@@ -256,7 +228,7 @@ impl BlockSync {
             let tree = self.chain.block_tree().read();
             let Some(active_anchor) = tree.node_at_height_from(headers.tip_id, applied.height)
             else {
-                return IdleFrontierProbeOutcome::NotSent;
+                return Ok(());
             };
             tree.block_locator(active_anchor, LOCATOR_MAX_ENTRIES)
         };
@@ -268,9 +240,9 @@ impl BlockSync {
         );
         if sent {
             metrics::counter!("node.sync.idle_frontier_probes").increment(1);
-            IdleFrontierProbeOutcome::Sent
+            Ok(())
         } else {
-            IdleFrontierProbeOutcome::SendFailed(source)
+            Err(source)
         }
     }
 

@@ -2,11 +2,12 @@
 
 use super::BlockSync;
 use super::frontier::SyncFrontier;
+use super::frontier::{ColdFrontHedge, WindowRecovery};
 use crate::PeerInfo;
+use crate::PeerSource;
 use crate::download_window::DownloadWindow;
 use crate::download_window::FanoutCandidate;
 use crate::download_window::SyncPeer;
-use crate::download_window::SyncPeerSelection;
 use crate::download_window::configure_request_mode;
 use crate::download_window::statically_fanout_eligible;
 use bitcoin_rs_chain::BlockTree;
@@ -18,6 +19,18 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec::Vec;
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FrontierPeer {
+    pub(super) source: PeerSource,
+    pub(super) peer: SyncPeer,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct FrontierPeerSelection {
+    pub(super) request_peers: Vec<FrontierPeer>,
+    pub(super) probe_peers: Vec<FrontierPeer>,
+}
 
 pub(super) fn is_peer_fault(error: &ChainError) -> bool {
     match error {
@@ -114,10 +127,10 @@ impl BlockSync {
         let live = self.peer_table.live_connections();
         let mut state = self.frontier_state.lock();
         if state.header_request.is_some_and(|request| {
-                !live.iter().any(|(addr, id)| {
-                    *addr == request.source.addr && *id == request.source.connection_id()
-                })
-            }) {
+            !live.iter().any(|(addr, id)| {
+                *addr == request.source.addr && *id == request.source.connection_id()
+            })
+        }) {
             state.header_request = None;
         }
         for (addr, id) in &live {
@@ -147,7 +160,7 @@ impl BlockSync {
         &self,
         frontier: &SyncFrontier,
         now: Instant,
-    ) -> SyncPeerSelection {
+    ) -> FrontierPeerSelection {
         let our_height = frontier.applied_tip.as_ref().map_or(0, |tip| tip.height);
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         let tree = self.chain.block_tree().read();
@@ -198,7 +211,7 @@ impl BlockSync {
                 cold_preferred,
             )
         };
-        let probe_peers = candidates
+        let probe_peers: Vec<SyncPeer> = candidates
             .iter()
             .filter(|candidate| candidate.fanout_eligible)
             .map(|candidate| candidate.peer)
@@ -239,9 +252,24 @@ impl BlockSync {
             request_peers.sort_by_key(|peer| std::cmp::Reverse(peer.best_known_height));
         }
         request_peers.truncate(request_peer_limit);
-        SyncPeerSelection {
-            request_peers,
-            probe_peers,
+        let bind_sources = |peers: Vec<SyncPeer>| -> Vec<FrontierPeer> {
+            peers
+                .into_iter()
+                .filter_map(|peer| {
+                    frontier
+                        .usable_peers
+                        .iter()
+                        .find(|usable| usable.source.addr == peer.addr)
+                        .map(|usable| FrontierPeer {
+                            source: usable.source,
+                            peer,
+                        })
+                })
+                .collect()
+        };
+        FrontierPeerSelection {
+            request_peers: bind_sources(request_peers),
+            probe_peers: bind_sources(probe_peers),
         }
     }
 
@@ -259,16 +287,16 @@ impl BlockSync {
     /// that lease removal and exits; the next tick releases and reassigns the
     /// peer's in-flight blocks. The cooldown prevents an immediate reconnect
     /// from reacquiring the same stripe.
-    pub(super) fn disconnect_window_staller(
+    pub(super) fn reconcile_window_recovery(
         &self,
         applied_tip: Option<&TipSnapshot>,
         now: Instant,
-    ) -> bool {
+    ) -> WindowRecovery {
         let Some(applied_tip) = applied_tip else {
-            return false;
+            return WindowRecovery::default();
         };
         let Some(next_apply_height) = applied_tip.height.checked_add(1) else {
-            return false;
+            return WindowRecovery::default();
         };
         // Snapshot the apply frontier once, before the window lock: the hash
         // keys the stuck-clock episode and gates the escalation's final
@@ -305,11 +333,11 @@ impl BlockSync {
             // this tick. No peer is convicted here; while the body is
             // absent the unsuppressed stall path applies as usual.
             self.escalate_stuck_staged_body(next_apply_height, frontier_hash, suppressed_for);
-            return false;
+            return WindowRecovery::default();
         }
         if fired {
             let Some(peer_addr) = removed_peer else {
-                return false;
+                return WindowRecovery::default();
             };
             metrics::counter!("node.sync.staller_disconnects").increment(1);
             tracing::warn!(
@@ -317,18 +345,19 @@ impl BlockSync {
                 next_apply_height,
                 "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
             );
-            return true;
+            return WindowRecovery {
+                disconnected_staller: true,
+                cold_hedge: None,
+            };
         }
-        if let Some((owner, front_hash)) = cold_hedge
-            && let Some(alternate) =
-                self.send_cold_front_hedge(owner, front_hash, next_apply_height, now)
-        {
-            self.frontier_state
-                .lock()
-                .window
-                .confirm_cold_front_hedge(owner, alternate, front_hash);
+        WindowRecovery {
+            disconnected_staller: false,
+            cold_hedge: cold_hedge.map(|(owner, hash)| ColdFrontHedge {
+                owner,
+                hash,
+                height: next_apply_height,
+            }),
         }
-        false
     }
 
     /// Issue #1091 escalation: evict the stuck staged next-expected body for
@@ -384,7 +413,9 @@ impl BlockSync {
                     .window
                     .update_received_height(&frontier_hash, height);
             }
-            frontier_state.window.drop_received_for_retry(&frontier_hash);
+            frontier_state
+                .window
+                .drop_received_for_retry(&frontier_hash);
         }
         metrics::counter!("node.sync.apply_side_stall_escalations").increment(1);
         tracing::warn!(
@@ -418,20 +449,21 @@ impl BlockSync {
         &self,
         select: impl FnOnce(&mut DownloadWindow) -> Option<SocketAddr>,
     ) -> Option<SocketAddr> {
-        let peer_addr = {
-            let mut frontier_state = self.frontier_state.lock();
-            select(&mut frontier_state.window)?
+        let (peer_addr, connection_id) = {
+            let mut state = self.frontier_state.lock();
+            let peer_addr = select(&mut state.window)?;
+            let connection_id = state.known_sessions.get(&peer_addr).copied()?;
+            (peer_addr, connection_id)
         };
-        let connection_id = self
-            .frontier_state
-            .lock()
-            .known_sessions
-            .get(&peer_addr)
-            .copied()?;
         if !self
             .peer_table
             .disconnect_connection(peer_addr, connection_id)
         {
+            // The identity changed after selection. Do not leave the new
+            // connection carrying its predecessor's address-scoped cooldown
+            // or pending ownership; the next reconciliation rebuilds it from
+            // the current session snapshot.
+            self.frontier_state.lock().window.forget_peer(peer_addr);
             return None;
         }
         let mut state = self.frontier_state.lock();

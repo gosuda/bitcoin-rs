@@ -127,12 +127,13 @@ This page assigns ownership and cites proof under the
 
 ### `P2P-05`: Canonical frontier recovery without invented peer credit
 
-- `crates/p2p/src/sync/frontier.rs` is the single owner of the ephemeral
-  canonical P2P frontier observation and tick-level reconciliation decision.
-  It combines chain facts obtained through `SyncChain` with the P2P-owned
-  download window, staged bodies, header request, and usable-peer projection.
-  It owns no durable chainstate and does not move apply or reorg mutation into
-  P2P.
+- `crates/p2p/src/sync/frontier.rs` is the single owner of mutable P2P
+  scheduler state and its canonical tick transition. The download window and
+  block stager are subordinate bounded policy/storage components; they are not
+  parallel scheduler authorities. The transition normalizes peer lifecycle,
+  settles inbound bodies and recovery, then combines that state with chain
+  facts obtained through `SyncChain` and one usable-peer projection. It owns
+  no durable chainstate and does not move apply or reorg mutation into P2P.
 - The applied chain and selected header ancestry own the next required body.
   The download cursor is a scan hint. An unowned frontier behind that hint
   becomes requestable again, including an applied rollback with unchanged

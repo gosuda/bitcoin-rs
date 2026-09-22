@@ -155,11 +155,11 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
         .checked_sub(super::super::RECEIVED_BLOCK_TIMEOUT + Duration::from_secs(1))
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
     let serialized = bytes::Bytes::from(consensus_bytes(&block));
-    let staged = sync
-        .frontier_state
-        .lock()
-        .stager
-        .insert(hash, None, block, serialized, received_at);
+    let staged =
+        sync.frontier_state
+            .lock()
+            .stager
+            .insert(hash, None, block, serialized, received_at);
     let StagedBlock::Memory { bytes, .. } = staged else {
         return Err(std::io::Error::other("test block should stage in memory").into());
     };

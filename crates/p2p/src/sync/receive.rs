@@ -286,7 +286,10 @@ impl BlockSync {
                 })
             });
             if !current {
-                self.frontier_state.lock().window.reject_delivery(hash, None);
+                self.frontier_state
+                    .lock()
+                    .window
+                    .reject_delivery(hash, None);
             }
             if rejected == RejectDelivery::ReleasedPending {
                 retry_count = retry_count.saturating_add(1);

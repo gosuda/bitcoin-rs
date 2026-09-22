@@ -1,16 +1,20 @@
 //! Canonical P2P sync-frontier observation and reconciliation.
 //!
-//! This module owns no durable chain or scheduler state. It derives one
-//! read-only observation from the chain capability and P2P-owned state, then
-//! decides which classes of work the current tick must attempt.
+//! This module owns the mutable P2P scheduler state and the one transition
+//! that normalizes peer lifecycle, settles inbound bodies and timeout
+//! recovery, and derives the work the current tick must attempt. It owns no
+//! durable chainstate.
 
+use super::HEADER_REQUEST_TIMEOUT;
+use super::peers::body_capability_height;
 use super::{BlockSync, PendingHeaderRequest};
-use crate::{BlockStager, DownloadWindow, PeerSource};
 use crate::peer_table::UsablePeer;
+use crate::{BlockStager, DownloadWindow};
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use hashbrown::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{collections::HashMap, net::SocketAddr};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,7 +32,8 @@ pub(super) enum BodyState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HeaderAction {
-    ProbeMissingFrontier,
+    ProbeMissingFrontier(crate::PeerSource),
+    AwaitPending,
     ExtendHeaderTip,
 }
 
@@ -36,6 +41,7 @@ pub(super) enum HeaderAction {
 pub(super) enum NoProgressReason {
     AtTip,
     NoUsablePeers,
+    NoActionablePeers,
     BodyInFlight,
     BodyStaged,
     ApplyHalted,
@@ -57,12 +63,27 @@ pub(super) struct SyncFrontier {
     pub(super) body_state: Option<BodyState>,
     pub(super) header_request: Option<PendingHeaderRequest>,
     pub(super) usable_peers: Vec<UsablePeer>,
+    pub(super) has_body_candidate: bool,
     pub(super) apply_halted: bool,
 }
 
 pub(super) struct ReconciledFrontier {
     pub(super) observation: SyncFrontier,
     pub(super) plan: FrontierPlan,
+    pub(super) cold_hedge: Option<ColdFrontHedge>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ColdFrontHedge {
+    pub(super) owner: SocketAddr,
+    pub(super) hash: Hash256,
+    pub(super) height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct WindowRecovery {
+    pub(super) disconnected_staller: bool,
+    pub(super) cold_hedge: Option<ColdFrontHedge>,
 }
 
 /// Sole owner of mutable P2P scheduler state used to reconcile the canonical
@@ -77,44 +98,100 @@ pub(super) struct FrontierSchedulerState {
 
 impl SyncFrontier {
     /// Derives the work classes for this tick from one observation.
-    pub(super) fn reconcile(&self) -> FrontierPlan {
-        reconcile_facts(
-            self.applied_tip.is_some()
+    pub(super) fn reconcile(&self, now: Instant) -> FrontierPlan {
+        let missing_header_action = self.missing_frontier_header_action(now);
+        reconcile_facts(&ReconcileFacts {
+            chain_view: if self.applied_tip.is_some()
                 && self.header_tip.is_some()
                 && (self
                     .applied_tip
                     .as_ref()
                     .zip(self.header_tip.as_ref())
                     .is_some_and(|(applied, header)| applied.hash == header.hash)
-                    || self.next_required.is_some()),
-            self.body_state,
-            !self.usable_peers.is_empty(),
-            self.apply_halted,
-        )
+                    || self.next_required.is_some())
+            {
+                ChainView::Available
+            } else {
+                ChainView::Unavailable
+            },
+            body_state: self.body_state,
+            peers: if self.has_body_candidate {
+                PeerAvailability::BodyCandidate
+            } else if self.usable_peers.is_empty() {
+                PeerAvailability::None
+            } else {
+                PeerAvailability::UsableOnly
+            },
+            missing_header_action,
+            apply_halted: self.apply_halted,
+        })
+    }
+
+    fn missing_frontier_header_action(&self, now: Instant) -> Option<HeaderAction> {
+        if self.header_request.is_some_and(|request| {
+            now.saturating_duration_since(request.requested_at) < HEADER_REQUEST_TIMEOUT
+                && self
+                    .usable_peers
+                    .iter()
+                    .any(|peer| peer.source == request.source)
+        }) {
+            return Some(HeaderAction::AwaitPending);
+        }
+        let required_services = bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
+            | bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
+        let eligible = || {
+            self.usable_peers
+                .iter()
+                .filter(|peer| peer.info.services & required_services == required_services)
+        };
+        let peer = eligible()
+            .filter(|peer| {
+                self.header_request
+                    .is_none_or(|request| peer.source.addr > request.source.addr)
+            })
+            .min_by_key(|peer| peer.source.addr)
+            .or_else(|| eligible().min_by_key(|peer| peer.source.addr))?;
+        Some(HeaderAction::ProbeMissingFrontier(peer.source))
     }
 }
 
-fn reconcile_facts(
-    chain_view_available: bool,
+#[derive(Clone, Copy)]
+enum ChainView {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Copy)]
+enum PeerAvailability {
+    None,
+    UsableOnly,
+    BodyCandidate,
+}
+
+struct ReconcileFacts {
+    chain_view: ChainView,
     body_state: Option<BodyState>,
-    has_usable_peers: bool,
+    peers: PeerAvailability,
+    missing_header_action: Option<HeaderAction>,
     apply_halted: bool,
-) -> FrontierPlan {
-    if apply_halted {
+}
+
+fn reconcile_facts(facts: &ReconcileFacts) -> FrontierPlan {
+    if facts.apply_halted {
         return FrontierPlan {
             schedule_bodies: false,
             header_action: HeaderAction::ExtendHeaderTip,
             no_progress_reason: Some(NoProgressReason::ApplyHalted),
         };
     }
-    if !chain_view_available {
+    if matches!(facts.chain_view, ChainView::Unavailable) {
         return FrontierPlan {
             schedule_bodies: false,
             header_action: HeaderAction::ExtendHeaderTip,
             no_progress_reason: Some(NoProgressReason::ChainViewUnavailable),
         };
     }
-    let Some(body_state) = body_state else {
+    let Some(body_state) = facts.body_state else {
         return FrontierPlan {
             schedule_bodies: false,
             header_action: HeaderAction::ExtendHeaderTip,
@@ -122,16 +199,23 @@ fn reconcile_facts(
         };
     };
     match body_state {
-        BodyState::Missing if has_usable_peers => FrontierPlan {
-            schedule_bodies: true,
-            header_action: HeaderAction::ProbeMissingFrontier,
-            no_progress_reason: None,
-        },
-        BodyState::Missing => FrontierPlan {
-            schedule_bodies: false,
-            header_action: HeaderAction::ExtendHeaderTip,
-            no_progress_reason: Some(NoProgressReason::NoUsablePeers),
-        },
+        BodyState::Missing => {
+            let header_action = facts
+                .missing_header_action
+                .unwrap_or(HeaderAction::ExtendHeaderTip);
+            let has_body_candidate = matches!(facts.peers, PeerAvailability::BodyCandidate);
+            let actionable = has_body_candidate || facts.missing_header_action.is_some();
+            FrontierPlan {
+                schedule_bodies: has_body_candidate,
+                header_action,
+                no_progress_reason: (!actionable).then_some(match facts.peers {
+                    PeerAvailability::None => NoProgressReason::NoUsablePeers,
+                    PeerAvailability::UsableOnly | PeerAvailability::BodyCandidate => {
+                        NoProgressReason::NoActionablePeers
+                    }
+                }),
+            }
+        }
         BodyState::InFlight => FrontierPlan {
             schedule_bodies: true,
             header_action: HeaderAction::ExtendHeaderTip,
@@ -157,14 +241,26 @@ impl BlockSync {
     /// Normalizes timeout and peer-lifecycle transitions, then derives the
     /// single canonical observation and decision consumed by this tick.
     pub(super) fn reconcile_frontier(&self, now: Instant) -> ReconciledFrontier {
+        // Replacement/disconnect cleanup must precede both queued delivery
+        // attribution and peer conviction. Otherwise an address-identical
+        // successor can inherit its predecessor's request or cooldown.
+        self.reconcile_peer_sessions();
+        self.drain_inbound_blocks();
         let applied_tip = self.chain.applied_tip().load_full();
-        if !self.disconnect_window_staller(applied_tip.as_deref(), now) {
+        let recovery = self.reconcile_window_recovery(applied_tip.as_deref(), now);
+        if !recovery.disconnected_staller {
             self.disconnect_timed_out_peer(now);
         }
+        // Conviction may disconnect a source and release its work. Normalize
+        // again inside this same canonical transition before observing it.
         self.reconcile_peer_sessions();
         let observation = self.observe_frontier();
-        let plan = observation.reconcile();
-        ReconciledFrontier { observation, plan }
+        let plan = observation.reconcile(now);
+        ReconciledFrontier {
+            observation,
+            plan,
+            cold_hedge: recovery.cold_hedge,
+        }
     }
 
     pub(super) fn observe_frontier(&self) -> SyncFrontier {
@@ -185,6 +281,15 @@ impl BlockSync {
             }
             _ => None,
         };
+        // Chain reads stay outside the scheduler write lock.
+        let has_body_candidate = applied_tip.as_ref().is_some_and(|applied| {
+            let tree = self.chain.block_tree().read();
+            let active_tip = tree.tip_id();
+            usable_peers.iter().any(|usable| {
+                body_capability_height(&usable.info, &tree, active_tip, &usable.demonstrated_tips)
+                    .is_some_and(|height| height > applied.height)
+            })
+        });
         let state = self.frontier_state.lock();
         let body_state = next_required.map(|required| {
             if state.stager.contains(&required.hash) {
@@ -206,6 +311,7 @@ impl BlockSync {
             body_state,
             header_request,
             usable_peers,
+            has_body_candidate,
             apply_halted: self.apply_halted.load(std::sync::atomic::Ordering::Acquire),
         }
     }
@@ -218,18 +324,31 @@ mod tests {
 
     #[test]
     fn missing_body_is_the_only_state_that_arms_frontier_probe() {
-        let missing = reconcile_facts(true, Some(BodyState::Missing), true, false);
+        let missing = reconcile_facts(&ReconcileFacts {
+            chain_view: ChainView::Available,
+            body_state: Some(BodyState::Missing),
+            peers: PeerAvailability::BodyCandidate,
+            missing_header_action: Some(HeaderAction::AwaitPending),
+            apply_halted: false,
+        });
         assert_eq!(
             missing,
             FrontierPlan {
                 schedule_bodies: true,
-                header_action: HeaderAction::ProbeMissingFrontier,
+                header_action: HeaderAction::AwaitPending,
                 no_progress_reason: None,
             }
         );
         for state in [BodyState::InFlight, BodyState::Staged] {
             assert_eq!(
-                reconcile_facts(true, Some(state), true, false).header_action,
+                reconcile_facts(&ReconcileFacts {
+                    chain_view: ChainView::Available,
+                    body_state: Some(state),
+                    peers: PeerAvailability::BodyCandidate,
+                    missing_header_action: None,
+                    apply_halted: false,
+                })
+                .header_action,
                 HeaderAction::ExtendHeaderTip
             );
         }
@@ -245,16 +364,26 @@ mod tests {
             has_usable_peers in any::<bool>(),
             apply_halted in any::<bool>(),
         ) {
-            let plan = reconcile_facts(
-                chain_view_available,
-                Some(BodyState::Missing),
-                has_usable_peers,
+            let plan = reconcile_facts(&ReconcileFacts {
+                chain_view: if chain_view_available {
+                    ChainView::Available
+                } else {
+                    ChainView::Unavailable
+                },
+                body_state: Some(BodyState::Missing),
+                peers: if has_usable_peers {
+                    PeerAvailability::BodyCandidate
+                } else {
+                    PeerAvailability::None
+                },
+                missing_header_action: has_usable_peers.then_some(HeaderAction::AwaitPending),
                 apply_halted,
+            });
+            prop_assert!(
+                plan.schedule_bodies
+                    || plan.header_action == HeaderAction::AwaitPending
+                    || plan.no_progress_reason.is_some()
             );
-            prop_assert!(plan.schedule_bodies || plan.no_progress_reason.is_some());
-            if plan.schedule_bodies {
-                prop_assert_eq!(plan.header_action, HeaderAction::ProbeMissingFrontier);
-            }
         }
     }
 }
