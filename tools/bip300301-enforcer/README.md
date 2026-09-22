@@ -15,12 +15,15 @@ cd tools/bip300301-enforcer
 cp .env.example .env
 docker compose up -d --build
 ```
-
-The node and enforcer data directories are network-namespaced:
-`../../data/bitcoin-rs/betanet` and `../../data/enforcer/betanet` (relative to
-this directory). Published ports default to the betanet ports — RPC on
-`127.0.0.1:8532`, P2P on `8533`, enforcer gRPC on `127.0.0.1:50051`, enforcer
-RPC on `127.0.0.1:8122`.
+The `name:` field sets the compose project to `bitcoin-rs-betanet`, so
+container names do not collide with the main `btc-mempool-explorer` stack.
+The node and enforcer data directories are dedicated to this stack:
+`../../data/bitcoin-rs-betanet` and `../../data/enforcer-betanet` (relative to
+this directory). Do not point them at a live mainnet/testnet datadir — the
+magic and chainstate format are different and may corrupt or delete state.
+Published ports default to the betanet ports — RPC on `127.0.0.1:8532`,
+P2P on `8533`, enforcer gRPC on `127.0.0.1:50051`, enforcer RPC on
+`127.0.0.1:8122`.
 
 The enforcer's mempool mode (`--enable-mempool`) requires the node to run with
 `txindex=1`; the stack defaults `BITCOIN_RS_TXINDEX=true` for that reason.
