@@ -69,7 +69,7 @@ impl BlockSync {
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
-            .body_sync
+            .frontier_state
             .lock()
             .stager
             .ready_received_len(next_expected_hash)
@@ -89,7 +89,7 @@ impl BlockSync {
                 let expected_len = run.as_ref().map_or(0, |run| run.hashes.len());
                 let drained = match run.as_ref() {
                     Some(run) => self
-                        .body_sync
+                        .frontier_state
                         .lock()
                         .stager
                         .drain_expected_prefix(&run.hashes),
@@ -158,7 +158,7 @@ impl BlockSync {
                     // at the next chunk head.
                     let restore_from =
                         restore_split(chunk_start, stopped, chunk.len()).min(drained.len());
-                    self.body_sync
+                    self.frontier_state
                         .lock()
                         .stager
                         .restore_many(drained[restore_from..].iter().cloned());
@@ -185,8 +185,8 @@ impl BlockSync {
         }
         if !applied_hashes.is_empty() || failed_hash.is_some() {
             {
-                let mut body_sync = self.body_sync.lock();
-                let window = &mut body_sync.window;
+                let mut frontier_state = self.frontier_state.lock();
+                let window = &mut frontier_state.window;
                 for hash in &applied_hashes {
                     window.mark_received_applied(hash);
                 }
@@ -216,7 +216,7 @@ impl BlockSync {
     pub(super) fn expected_apply_horizon(&self, staged_count: usize) -> usize {
         // Snapshot the cap and release the window lock before any tree read so we
         // never invert the tree -> window lock order used elsewhere.
-        let max_pending_blocks = self.body_sync.lock().window.max_pending_blocks();
+        let max_pending_blocks = self.frontier_state.lock().window.max_pending_blocks();
         staged_count.max(max_pending_blocks)
     }
 
@@ -314,7 +314,7 @@ impl BlockSync {
         }
         let expected_end = cache.offset.saturating_add(expected_len);
         let drained = self
-            .body_sync
+            .frontier_state
             .lock()
             .stager
             .drain_expected_prefix(&cache.hashes[cache.offset..expected_end]);

@@ -101,7 +101,7 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
         requested.iter().all(|hash| !losing_hashes.contains(hash)),
         "retargeted requests must not retain hashes from the losing branch"
     );
-    let pending_len = sync.body_sync.lock().window.pending_len();
+    let pending_len = sync.frontier_state.lock().window.pending_len();
     assert_eq!(pending_len, winning_hashes.len());
     Ok(())
 }

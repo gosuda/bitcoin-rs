@@ -175,12 +175,6 @@ fn repeated_at_tip_extensions_keep_one_owned_frontier() -> Result<(), Box<dyn st
             witness_block_inventory(next_getdata(&rx)?)?,
             vec![block.block_hash()]
         );
-        assert_eq!(
-            sync.body_sync.lock().window.pending_source(&hash),
-            Some(source),
-            "the current connection must own the frontier body request"
-        );
-
         let mut inbound = crate::InboundBlock::from_decoded(block);
         inbound.source = Some(source);
         inbound_blocks.send(inbound)?;

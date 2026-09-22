@@ -154,9 +154,6 @@ This page assigns ownership and cites proof under the
   connection identity. Header and body selection consume the same
   handshake-complete, uncancelled peer-table snapshot; a cancelled lease is
   not representable in that scheduler projection.
-- Body delivery, duplicate accounting, and malformed-body rejection preserve
-  that identity through the download window. A same-address replacement
-  cannot inherit its predecessor's pending ownership or peer blame.
 - When a known canonical body gap has no pending or staged owner, one
   reconciliation must either arm body/frontier recovery work or retain an
   explicit no-progress reason. Operator sync-progress logs expose the derived

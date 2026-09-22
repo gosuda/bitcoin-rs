@@ -5,11 +5,12 @@
 //! decides which classes of work the current tick must attempt.
 
 use super::{BlockSync, PendingHeaderRequest};
-use crate::PeerSource;
+use crate::{BlockStager, DownloadWindow, PeerSource};
 use crate::peer_table::UsablePeer;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use std::sync::Arc;
+use std::{collections::HashMap, net::SocketAddr};
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +22,7 @@ pub(super) struct RequiredBody {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BodyState {
     Missing,
-    InFlight(Option<PeerSource>),
+    InFlight,
     Staged,
 }
 
@@ -62,6 +63,16 @@ pub(super) struct SyncFrontier {
 pub(super) struct ReconciledFrontier {
     pub(super) observation: SyncFrontier,
     pub(super) plan: FrontierPlan,
+}
+
+/// Sole owner of mutable P2P scheduler state used to reconcile the canonical
+/// chain frontier. `DownloadWindow` and `BlockStager` remain policy
+/// components; they are not independently published scheduler authorities.
+pub(super) struct FrontierSchedulerState {
+    pub(super) window: DownloadWindow,
+    pub(super) stager: BlockStager,
+    pub(super) header_request: Option<PendingHeaderRequest>,
+    pub(super) known_sessions: HashMap<SocketAddr, crate::ConnectionId>,
 }
 
 impl SyncFrontier {
@@ -121,7 +132,7 @@ fn reconcile_facts(
             header_action: HeaderAction::ExtendHeaderTip,
             no_progress_reason: Some(NoProgressReason::NoUsablePeers),
         },
-        BodyState::InFlight(_) => FrontierPlan {
+        BodyState::InFlight => FrontierPlan {
             schedule_bodies: true,
             header_action: HeaderAction::ExtendHeaderTip,
             no_progress_reason: Some(NoProgressReason::BodyInFlight),
@@ -174,12 +185,12 @@ impl BlockSync {
             }
             _ => None,
         };
+        let state = self.frontier_state.lock();
         let body_state = next_required.map(|required| {
-            let state = self.body_sync.lock();
             if state.stager.contains(&required.hash) {
                 BodyState::Staged
             } else if state.window.contains_pending(&required.hash) {
-                BodyState::InFlight(state.window.pending_source(&required.hash))
+                BodyState::InFlight
             } else {
                 BodyState::Missing
             }
@@ -187,7 +198,7 @@ impl BlockSync {
         // Preserve an expired request as the peer-rotation cursor. Session
         // reconciliation already removes ownership belonging to a replaced or
         // disconnected source.
-        let header_request = *self.pending_getheaders.lock();
+        let header_request = state.header_request;
         SyncFrontier {
             applied_tip,
             header_tip,
@@ -216,7 +227,7 @@ mod tests {
                 no_progress_reason: None,
             }
         );
-        for state in [BodyState::InFlight(None), BodyState::Staged] {
+        for state in [BodyState::InFlight, BodyState::Staged] {
             assert_eq!(
                 reconcile_facts(true, Some(state), true, false).header_action,
                 HeaderAction::ExtendHeaderTip

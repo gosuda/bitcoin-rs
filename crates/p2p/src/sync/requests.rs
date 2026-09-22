@@ -39,7 +39,7 @@ impl BlockSync {
         now: Instant,
     ) {
         let Some((owner, hashes, required_height)) =
-            self.body_sync.lock().window.prefix_probe_plan()
+            self.frontier_state.lock().window.prefix_probe_plan()
         else {
             return;
         };
@@ -79,7 +79,7 @@ impl BlockSync {
             return;
         }
         let block_count = hashes.len();
-        self.body_sync
+        self.frontier_state
             .lock()
             .window
             .confirm_prefix_probe(owner, hashes, &successful, now);
@@ -173,7 +173,7 @@ impl BlockSync {
             return GetdataRequestOutcome::default();
         };
 
-        let request = self.body_sync.lock().window.next_peer_request(
+        let request = self.frontier_state.lock().window.next_peer_request(
             sync_peer.addr,
             allow_expired_retry_from_peer,
             chain_tip,
@@ -183,10 +183,9 @@ impl BlockSync {
             now,
         );
         drop(tree);
-        let Some(mut request) = request else {
+        let Some(request) = request else {
             return GetdataRequestOutcome::default();
         };
-        request.bind_source(sync_peer);
 
         let compact_fetch = self.compact_fetch_eligible(&request, chain_tip);
         let (inventory, expected_hashes, is_contiguous) =
@@ -207,7 +206,7 @@ impl BlockSync {
         let still_current = self.peer_table.with_current(sync_peer, || {
             send_ok = tx.send(msg).is_ok();
             if send_ok {
-                has_request_capacity = self.body_sync.lock().window.mark_requested(&request, now);
+                has_request_capacity = self.frontier_state.lock().window.mark_requested(&request, now);
             }
         });
         if !still_current {
@@ -286,8 +285,8 @@ impl BlockSync {
         }
         drop(tree);
         let candidates: SmallVec<[SocketAddr; 8]> = {
-            let body_sync = self.body_sync.lock();
-            let window = &body_sync.window;
+            let frontier_state = self.frontier_state.lock();
+            let window = &frontier_state.window;
             candidates
                 .into_iter()
                 .filter(|addr| {

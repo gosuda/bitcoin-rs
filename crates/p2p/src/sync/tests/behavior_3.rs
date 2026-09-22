@@ -14,8 +14,8 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
     // Two of three staging slots already occupied: the staged-byte gate is
     // still open, but only one more estimated block fits.
     {
-        let mut body_sync = sync.body_sync.lock();
-        let window = &mut body_sync.window;
+        let mut frontier_state = sync.frontier_state.lock();
+        let window = &mut frontier_state.window;
         let now = Instant::now();
         window.mark_received(Hash256::from_le_bytes(&[0xEE; 32]), slot, now);
         window.mark_received(Hash256::from_le_bytes(&[0xEF; 32]), slot, now);
@@ -59,8 +59,8 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
     sync.tick();
 
     {
-        let body_sync = sync.body_sync.lock();
-        let window = &body_sync.window;
+        let frontier_state = sync.frontier_state.lock();
+        let window = &frontier_state.window;
         assert_eq!(window.received_len(), 14);
         assert_eq!(window.pending_len(), 2);
         for front in &expected[..2] {
@@ -80,8 +80,8 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
     for rx in &rxs {
         assert_no_getdata(rx)?;
     }
-    let body_sync = sync.body_sync.lock();
-    let stager = &body_sync.stager;
+    let frontier_state = sync.frontier_state.lock();
+    let stager = &frontier_state.stager;
     assert_eq!(stager.received_len(), 14, "no evictions may occur");
     for height in 3..=16_u32 {
         let hash = Hash256::from_le_bytes(expected[usize::try_from(height)? - 1].as_bytes());
@@ -90,7 +90,7 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
             "every delivered block must remain staged (height {height})"
         );
     }
-    assert_eq!(body_sync.window.pending_len(), 2);
+    assert_eq!(frontier_state.window.pending_len(), 2);
     Ok(())
 }
 
@@ -127,7 +127,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
 
     // The first drain builds the asymmetric wedge and starts the episode.
     sync.tick();
-    assert_eq!(sync.body_sync.lock().window.pending_len(), 2);
+    assert_eq!(sync.frontier_state.lock().window.pending_len(), 2);
     std::thread::sleep(Duration::from_millis(150));
     sync.tick();
 
@@ -144,7 +144,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         }
     }
     assert_eq!(hedged, expected[..1]);
-    assert_eq!(sync.body_sync.lock().window.pending_len(), 2);
+    assert_eq!(sync.frontier_state.lock().window.pending_len(), 2);
 
     // The confirmed front hash is not duplicated again on later ticks.
     std::thread::sleep(Duration::from_millis(50));
@@ -187,7 +187,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
     sync.tick();
     let _ = next_getdata(&alternate_rx)?;
     assert_eq!(
-        sync.body_sync.lock().window.preferred_peer(),
+        sync.frontier_state.lock().window.preferred_peer(),
         Some(alternate)
     );
 
@@ -205,12 +205,12 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
     }
     sync.tick();
 
-    let body_sync = sync.body_sync.lock();
+    let frontier_state = sync.frontier_state.lock();
 
-    let window = &body_sync.window;
+    let window = &frontier_state.window;
     assert!(window.preferred_peer().is_none());
     assert!(window.fanout_active());
-    drop(body_sync);
+    drop(frontier_state);
     assert!(
         recovered_rxs.iter().any(|rx| rx.try_recv().is_ok()),
         "a recovered eligible peer must receive a fanout request"
@@ -295,7 +295,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     // own and this test would pass vacuously. Seed it (50ms keeps the
     // decay floor at the default 2s initial threshold) so the no-fire
     // phase below pins the apply-side no-blame guard specifically.
-    sync.body_sync
+    sync.frontier_state
         .lock()
         .window
         .seed_front_cadence_for_test(50, Instant::now());
@@ -311,12 +311,12 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        sync.body_sync
+        sync.frontier_state
             .lock()
             .stager
             .insert(successor, None, block, serialized, Instant::now());
     }
-    sync.body_sync
+    sync.frontier_state
         .lock()
         .window
         .mark_received(successor, 80, Instant::now());
@@ -327,7 +327,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        sync.body_sync
+        sync.frontier_state
             .lock()
             .stager
             .insert(frontier, None, block, serialized, Instant::now());
@@ -342,20 +342,20 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
 
     // Far past any threshold, but the apply side is busy: frozen.
     sync.disconnect_window_staller(Some(&applied), far_future);
-    assert!(sync.body_sync.lock().window.stalling_peer().is_none());
+    assert!(sync.frontier_state.lock().window.stalling_peer().is_none());
     assert!(peers.is_connected(staller));
 
     // The apply side drains the frontier: blame starts from scratch and
     // only then runs to a fire — the busy interval was not charged.
     let drained = sync
-        .body_sync
+        .frontier_state
         .lock()
         .stager
         .drain_expected_prefix(&[frontier]);
     assert_eq!(drained.len(), 1);
     sync.disconnect_window_staller(Some(&applied), far_future);
     assert_eq!(
-        sync.body_sync
+        sync.frontier_state
             .lock()
             .window
             .stalling_peer()
@@ -403,7 +403,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
 
     // Cold-start disarm, exactly like the no-blame test above, so the final
     // phase fires on the fixed threshold rather than the unseeded-EWMA gate.
-    sync.body_sync
+    sync.frontier_state
         .lock()
         .window
         .seed_front_cadence_for_test(50, Instant::now());
@@ -425,17 +425,17 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     for hash in [frontier, successor] {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        sync.body_sync
+        sync.frontier_state
             .lock()
             .stager
             .insert(hash, None, block, serialized, Instant::now());
     }
     let staged_at = Instant::now();
-    sync.body_sync
+    sync.frontier_state
         .lock()
         .window
         .mark_received_from(frontier, 80, Some(staller), staged_at);
-    sync.body_sync
+    sync.frontier_state
         .lock()
         .window
         .mark_received(successor, 80, staged_at);
@@ -459,24 +459,24 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
             .map_or(start, |just_below| start + just_below),
     );
     assert!(
-        sync.body_sync.lock().stager.contains(&frontier),
+        sync.frontier_state.lock().stager.contains(&frontier),
         "below the bound the staged frontier must stay put"
     );
     assert!(peers.is_connected(staller));
-    assert!(sync.body_sync.lock().window.stalling_peer().is_none());
+    assert!(sync.frontier_state.lock().window.stalling_peer().is_none());
 
     // Past the bound: escalation evicts the stuck staged body for refetch
     // and blames nobody.
     sync.disconnect_window_staller(Some(&applied), start + bound + Duration::from_secs(1));
     assert!(
-        !sync.body_sync.lock().stager.contains(&frontier),
+        !sync.frontier_state.lock().stager.contains(&frontier),
         "past the bound the stuck staged frontier must be evicted for refetch"
     );
     assert!(
         peers.is_connected(staller),
         "the apply-side escalation must never blame or disconnect the front peer"
     );
-    assert!(sync.body_sync.lock().window.stalling_peer().is_none());
+    assert!(sync.frontier_state.lock().window.stalling_peer().is_none());
 
     // The eviction requeues the frontier through the window's
     // drop-for-retry path, so the next tick re-requests it — the refetch
@@ -495,7 +495,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
         start + bound + Duration::from_secs(1) + super::super::BLOCK_STALLING_TIMEOUT,
     );
     assert_eq!(
-        sync.body_sync
+        sync.frontier_state
             .lock()
             .window
             .stalling_peer()
@@ -547,7 +547,7 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
     // Tick 1: eight eligible peers engage fan-out and stripe the window.
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    assert!(sync.body_sync.lock().window.fanout_active());
+    assert!(sync.frontier_state.lock().window.fanout_active());
     for (idx, rx) in rxs.iter().enumerate() {
         let Message::GetData(inventory) = rx.try_recv()? else {
             return Err(std::io::Error::other("expected striped getdata").into());
@@ -572,7 +572,7 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
     // so the stalled stripe is redistributed in cap-sized batches instead
     // of re-concentrating the whole window on one deep peer.
     assert!(
-        sync.body_sync.lock().window.fanout_active(),
+        sync.frontier_state.lock().window.fanout_active(),
         "one demotion below the threshold must not disengage fan-out"
     );
     assert_no_getdata(&rxs[0])?;
@@ -601,6 +601,6 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
     // Tick 3: the dip heals (7 -> 8) and the mode is still fan-out — the
     // window stayed in one mode across 8 -> 7 -> 8.
     sync.tick();
-    assert!(sync.body_sync.lock().window.fanout_active());
+    assert!(sync.frontier_state.lock().window.fanout_active());
     Ok(())
 }

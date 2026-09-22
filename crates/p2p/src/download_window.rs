@@ -8,8 +8,6 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::PeerSource;
-
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_primitives::Hash256;
@@ -297,19 +295,11 @@ pub struct SyncBudget {
 #[derive(Clone, Debug)]
 pub struct PeerRequest {
     peer_addr: SocketAddr,
-    source: Option<PeerSource>,
     entries: Vec<PeerRequestEntry>,
     next_request_height: u32,
 }
 
 impl PeerRequest {
-    /// Binds this plan to the connection selected by the canonical frontier
-    /// before the request is published.
-    pub(crate) fn bind_source(&mut self, source: PeerSource) {
-        debug_assert_eq!(self.peer_addr, source.addr);
-        self.source = Some(source);
-    }
-
     /// Returns the peer address this request is directed to.
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
@@ -394,40 +384,14 @@ const EWMA_MIN_SAMPLE_MS: u64 = 50;
 #[derive(Clone, Copy, Debug)]
 struct PendingBlock {
     peer_addr: SocketAddr,
-    source: Option<PeerSource>,
     requested_at: Instant,
     height: u32,
     estimated_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum DeliveryPeer {
-    Exact(PeerSource),
-    Legacy(SocketAddr),
-}
-
-impl DeliveryPeer {
-    const fn addr(self) -> SocketAddr {
-        match self {
-            Self::Exact(source) => source.addr,
-            Self::Legacy(addr) => addr,
-        }
-    }
-
-    fn owns(self, peer_addr: SocketAddr, source: Option<PeerSource>) -> bool {
-        match (self, source) {
-            (Self::Exact(delivery), Some(owner)) => delivery == owner,
-            (_, Some(_)) => false,
-            (Self::Exact(delivery), None) => delivery.addr == peer_addr,
-            (Self::Legacy(delivery), None) => delivery == peer_addr,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
 struct PendingTimeoutObservation {
     peer_addr: SocketAddr,
-    source: Option<PeerSource>,
     hash: Hash256,
 }
 
@@ -948,7 +912,6 @@ impl DownloadWindow {
             .min_by_key(|(_, pending)| pending.height)
             .map(|(hash, pending)| PendingTimeoutObservation {
                 peer_addr: pending.peer_addr,
-                source: pending.source,
                 hash: *hash,
             });
         None
@@ -1495,13 +1458,6 @@ impl DownloadWindow {
         self.pending.contains_key(hash)
     }
 
-    /// Connection currently owning `hash`, when identity was bound before
-    /// publication.
-    #[must_use]
-    pub(crate) fn pending_source(&self, hash: &Hash256) -> Option<PeerSource> {
-        self.pending.get(hash).and_then(|pending| pending.source)
-    }
-
     /// Returns the start time of the active prefix probe, if any. Test-only.
     pub fn active_prefix_probe_started_at(&self) -> Option<Instant> {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)
@@ -1985,7 +1941,6 @@ impl DownloadWindow {
                 entry.hash,
                 PendingBlock {
                     peer_addr: request.peer_addr,
-                    source: request.source,
                     requested_at: now,
                     height: entry.height,
                     estimated_bytes,
@@ -2014,47 +1969,12 @@ impl DownloadWindow {
         source_peer: Option<SocketAddr>,
         now: Instant,
     ) -> bool {
-        self.mark_received_from_delivery(hash, bytes, source_peer.map(DeliveryPeer::Legacy), now)
-    }
-
-    /// Records a production delivery without reducing its connection identity
-    /// to an address shared with predecessor or replacement sessions.
-    pub(crate) fn mark_received_from_source(
-        &mut self,
-        hash: Hash256,
-        bytes: usize,
-        source: Option<PeerSource>,
-        now: Instant,
-    ) -> bool {
-        self.mark_received_from_delivery(hash, bytes, source.map(DeliveryPeer::Exact), now)
-    }
-
-    fn mark_received_from_delivery(
-        &mut self,
-        hash: Hash256,
-        bytes: usize,
-        delivery: Option<DeliveryPeer>,
-        now: Instant,
-    ) -> bool {
         let pending = self.remove_pending(&hash);
         // A local injection releases the request but cannot establish that the
         // requested peer delivered anything.
-        // A same-address replacement also cannot inherit the predecessor's
-        // request accounting. A different-address delivery remains a valid
-        // hedge winner even when it was not the original owner.
-        let delivery_peer = delivery.and_then(|delivery| {
-            pending
-                .is_none_or(|pending| {
-                    pending.peer_addr != delivery.addr()
-                        || delivery.owns(pending.peer_addr, pending.source)
-                })
-                .then(|| delivery.addr())
-        });
+        let delivery_peer = source_peer;
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash
-                && delivery.is_some_and(|delivery| {
-                    delivery.owns(observation.peer_addr, observation.source)
-                })
+            observation.hash == hash && Some(observation.peer_addr) == delivery_peer
         }) {
             self.pending_timeout_observation = None;
         }
@@ -2084,32 +2004,16 @@ impl DownloadWindow {
 
     /// Test-only shorthand for delivery by the pending owner.
     pub fn mark_received(&mut self, hash: Hash256, bytes: usize, now: Instant) -> bool {
-        let delivery = self.pending.get(&hash).map(|pending| {
-            pending
-                .source
-                .map_or(DeliveryPeer::Legacy(pending.peer_addr), DeliveryPeer::Exact)
-        });
-        self.mark_received_from_delivery(hash, bytes, delivery, now)
+        let source_peer = self.pending.get(&hash).map(|pending| pending.peer_addr);
+        self.mark_received_from(hash, bytes, source_peer, now)
     }
 
     /// Credits a duplicate after the first copy was already staged.
     ///
     /// The first copy owns all byte, EWMA, cold-front and probe accounting.
     pub fn credit_duplicate_delivery(&mut self, hash: Hash256, source_peer: SocketAddr) {
-        self.credit_duplicate_delivery_from(hash, DeliveryPeer::Legacy(source_peer));
-    }
-
-    pub(crate) fn credit_duplicate_delivery_from_source(
-        &mut self,
-        hash: Hash256,
-        source: PeerSource,
-    ) {
-        self.credit_duplicate_delivery_from(hash, DeliveryPeer::Exact(source));
-    }
-
-    fn credit_duplicate_delivery_from(&mut self, hash: Hash256, delivery: DeliveryPeer) {
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash && delivery.owns(observation.peer_addr, observation.source)
+            observation.hash == hash && observation.peer_addr == source_peer
         }) {
             self.pending_timeout_observation = None;
         }
@@ -2249,42 +2153,13 @@ impl DownloadWindow {
         hash: Hash256,
         source_peer: Option<SocketAddr>,
     ) -> RejectDelivery {
-        self.reject_delivery_from(hash, source_peer.map(DeliveryPeer::Legacy))
-    }
-
-    pub(crate) fn reject_delivery_from_source(
-        &mut self,
-        hash: Hash256,
-        source: Option<PeerSource>,
-    ) -> RejectDelivery {
-        self.reject_delivery_from(hash, source.map(DeliveryPeer::Exact))
-    }
-
-    fn reject_delivery_from(
-        &mut self,
-        hash: Hash256,
-        delivery: Option<DeliveryPeer>,
-    ) -> RejectDelivery {
         // A malformed response is still proof that this peer answered. Do not
         // let a first-tick timeout observation disconnect it on the next tick.
         if self.pending_timeout_observation.is_some_and(|observation| {
-            observation.hash == hash
-                && delivery.is_some_and(|delivery| {
-                    delivery.owns(observation.peer_addr, observation.source)
-                })
+            observation.hash == hash && Some(observation.peer_addr) == source_peer
         }) {
             self.pending_timeout_observation = None;
         }
-
-        let source_peer = delivery.map(DeliveryPeer::addr);
-        let is_owner = self.pending.get(&hash).is_some_and(|pending| {
-            delivery.is_some_and(|delivery| delivery.owns(pending.peer_addr, pending.source))
-        });
-        let attributed_peer = source_peer.filter(|peer| {
-            self.pending
-                .get(&hash)
-                .is_none_or(|pending| pending.peer_addr != *peer || is_owner)
-        });
 
         // A rejected race participant cannot remain eligible to complete the
         // cold-front race. Clear the episode without electing a winner or
@@ -2294,19 +2169,23 @@ impl DownloadWindow {
                 owner,
                 hash: waiting_hash,
                 ..
-            } => waiting_hash == hash && Some(owner) == attributed_peer,
+            } => waiting_hash == hash && Some(owner) == source_peer,
             ColdFrontState::Racing {
                 owner,
                 alternate,
                 hash: racing_hash,
             } => {
                 racing_hash == hash
-                    && attributed_peer.is_some_and(|peer| peer == owner || peer == alternate)
+                    && source_peer.is_some_and(|peer| peer == owner || peer == alternate)
             }
         }) {
             self.cold_front = None;
         }
 
+        let is_owner = self
+            .pending
+            .get(&hash)
+            .is_some_and(|pending| Some(pending.peer_addr) == source_peer);
         if is_owner {
             if let Some(pending) = self.remove_pending(&hash) {
                 self.next_request_height = self.next_request_height.min(pending.height);
@@ -2406,7 +2285,6 @@ fn non_empty_request(
 ) -> Option<PeerRequest> {
     (!entries.is_empty()).then_some(PeerRequest {
         peer_addr,
-        source: None,
         entries,
         next_request_height,
     })
@@ -2444,13 +2322,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bitcoin_rs_primitives::Hash256;
-    use crossbeam_channel::unbounded;
 
     use super::{
         DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
         FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, fast_sync_budget,
     };
-    use crate::PeerLease;
 
     #[test]
     fn request_peer_scan_limit_accounts_for_pending_bytes_and_inflight_peers() {
@@ -2487,7 +2363,6 @@ mod tests {
                 hash(byte),
                 super::PendingBlock {
                     peer_addr,
-                    source: None,
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2517,7 +2392,6 @@ mod tests {
             block_hash,
             super::PendingBlock {
                 peer_addr,
-                source: None,
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2563,7 +2437,6 @@ mod tests {
             block_hash,
             super::PendingBlock {
                 peer_addr: original_peer,
-                source: None,
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
@@ -2615,7 +2488,6 @@ mod tests {
                 hash(byte),
                 super::PendingBlock {
                     peer_addr,
-                    source: None,
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2658,7 +2530,6 @@ mod tests {
                 hash,
                 super::PendingBlock {
                     peer_addr,
-                    source: None,
                     requested_at,
                     height,
                     estimated_bytes,
@@ -2695,7 +2566,6 @@ mod tests {
             pending,
             super::PendingBlock {
                 peer_addr,
-                source: None,
                 requested_at: now,
                 height: 2,
                 estimated_bytes: pending_bytes,
@@ -2868,7 +2738,6 @@ mod tests {
                 hash(byte),
                 super::PendingBlock {
                     peer_addr,
-                    source: None,
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2948,7 +2817,6 @@ mod tests {
             block_hash,
             super::PendingBlock {
                 peer_addr,
-                source: None,
                 requested_at: now,
                 height,
                 estimated_bytes: 80,
@@ -4084,7 +3952,6 @@ mod tests {
         let t1 = t0 + Duration::from_secs(30);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
             peer_addr: staller_addr(),
-            source: None,
             hash: hash(0x01),
         });
         window.mark_received_from(hash(0x01), 80, Some(healthy_addr()), t1);
@@ -4565,33 +4432,6 @@ mod tests {
         assert!(window.next_request_height <= 100);
     }
 
-    #[test]
-    fn same_address_replacement_cannot_inherit_pending_ownership() {
-        let now = Instant::now();
-        let owner = peer_addr(1);
-        let block_hash = hash(0x43);
-        let (old_tx, _old_rx) = unbounded();
-        let predecessor = PeerLease::new(old_tx).source(owner);
-        let (new_tx, _new_rx) = unbounded();
-        let replacement = PeerLease::new(new_tx).source(owner);
-        let mut window = DownloadWindow::new(test_budget());
-        insert_pending(&mut window, owner, block_hash, 100, now);
-        let Some(pending) = window.pending.get_mut(&block_hash) else {
-            panic!("fixture must install the pending body");
-        };
-        pending.source = Some(predecessor);
-
-        assert_eq!(
-            window.reject_delivery_from_source(block_hash, Some(replacement)),
-            super::RejectDelivery::DiscardedUnsolicited
-        );
-        assert!(window.contains_pending(&block_hash));
-        assert_eq!(
-            window.reject_delivery_from_source(block_hash, Some(predecessor)),
-            super::RejectDelivery::ReleasedPending
-        );
-    }
-
     /// Rejecting the observed owner's response proves it was responsive, so a
     /// stale first-tick timeout observation must not convict it later.
     #[test]
@@ -4603,7 +4443,6 @@ mod tests {
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
             peer_addr: owner,
-            source: None,
             hash: block_hash,
         });
 
@@ -4667,7 +4506,6 @@ mod tests {
         insert_pending(&mut window, owner, block_hash, 100, now);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
             peer_addr: owner,
-            source: None,
             hash: block_hash,
         });
         window.cold_front = Some(super::ColdFrontState::Racing {

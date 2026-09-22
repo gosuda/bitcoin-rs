@@ -125,7 +125,6 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> Result<(), Box<dy
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
-    let source = current_source(&peers, addr);
 
     sync.tick();
 
@@ -136,13 +135,12 @@ fn successful_getdata_send_marks_requested_blocks_pending() -> Result<(), Box<dy
     };
     assert_eq!(witness_block_inventory(inventory)?, expected);
 
-    let body_sync = sync.body_sync.lock();
-    let window = &body_sync.window;
+    let frontier_state = sync.frontier_state.lock();
+    let window = &frontier_state.window;
     assert_eq!(window.pending_len(), expected.len());
     for hash in expected {
         let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(hash.as_bytes());
         assert!(window.contains_pending(&hash));
-        assert_eq!(window.pending_source(&hash), Some(source));
     }
     Ok(())
 }
@@ -158,22 +156,22 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
         .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
     let serialized = bytes::Bytes::from(consensus_bytes(&block));
     let staged = sync
-        .body_sync
+        .frontier_state
         .lock()
         .stager
         .insert(hash, None, block, serialized, received_at);
     let StagedBlock::Memory { bytes, .. } = staged else {
         return Err(std::io::Error::other("test block should stage in memory").into());
     };
-    sync.body_sync
+    sync.frontier_state
         .lock()
         .window
         .mark_received(hash, bytes, Instant::now());
 
     sync.drain_inbound_blocks();
 
-    assert_eq!(sync.body_sync.lock().stager.received_len(), 0);
-    assert_eq!(sync.body_sync.lock().window.received_len(), 0);
+    assert_eq!(sync.frontier_state.lock().stager.received_len(), 0);
+    assert_eq!(sync.frontier_state.lock().window.received_len(), 0);
     Ok(())
 }
 
@@ -197,7 +195,7 @@ fn tick_respects_pending_byte_budget() -> Result<(), Box<dyn std::error::Error>>
         return Err(std::io::Error::other("expected getdata").into());
     };
     assert_eq!(inventory.len(), 1);
-    assert_eq!(sync.body_sync.lock().window.pending_len(), 1);
+    assert_eq!(sync.frontier_state.lock().window.pending_len(), 1);
     Ok(())
 }
 
@@ -258,7 +256,7 @@ fn tick_falls_back_to_single_deep_peer_below_fanout_threshold()
         assert_eq!(witness_block_inventory(next_getdata(rx)?)?, expected[..8]);
     }
     assert_eq!(
-        sync.body_sync.lock().window.pending_len(),
+        sync.frontier_state.lock().window.pending_len(),
         super::super::PENDING_BUDGET
     );
     Ok(())
@@ -400,7 +398,7 @@ fn ineligible_peers_receive_no_block_requests_during_fanout()
         "a peer that misses the request timeout must release its outbound slot"
     );
     assert!(
-        sync.body_sync
+        sync.frontier_state
             .lock()
             .window
             .peer_in_staller_cooldown(test_addr(9250, 0)?, Instant::now()),

@@ -96,10 +96,8 @@ pub struct BlockSync {
     /// One lock owns the coupled download and staged-body state. Consensus and
     /// chain I/O stay outside this lock; each component's policy remains in
     /// the P2P crate.
-    body_sync: Mutex<BodySyncState>,
-    pending_getheaders: Arc<Mutex<Option<PendingHeaderRequest>>>,
+    frontier_state: Mutex<frontier::FrontierSchedulerState>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
-    known_sessions: Mutex<HashMap<SocketAddr, crate::ConnectionId>>,
     /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
     /// no chain transition: the failed settlement left the implementation's
@@ -107,11 +105,6 @@ pub struct BlockSync {
     /// Only recreating the sync object (restart path) clears it; there is no
     /// in-place recovery that reopens admission.
     apply_halted: std::sync::atomic::AtomicBool,
-}
-
-struct BodySyncState {
-    window: DownloadWindow,
-    stager: BlockStager,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,13 +166,13 @@ impl BlockSync {
             peer_table,
             inbound_headers_rx,
             inbound_blocks_rx,
-            body_sync: Mutex::new(BodySyncState {
+            frontier_state: Mutex::new(frontier::FrontierSchedulerState {
                 window: DownloadWindow::new(default_sync_budget()),
                 stager: BlockStager::new(default_sync_budget()),
+                header_request: None,
+                known_sessions: HashMap::new(),
             }),
-            pending_getheaders: Arc::new(Mutex::new(None)),
             expected_apply_cache: Arc::new(Mutex::new(None)),
-            known_sessions: Mutex::new(HashMap::new()),
             apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -188,10 +181,9 @@ impl BlockSync {
     /// `budget`: the fast-sync opt-in at node open, and tests and benchmarks
     /// that exercise non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
-        *self.body_sync.lock() = BodySyncState {
-            window: DownloadWindow::new(budget),
-            stager: BlockStager::new(budget),
-        };
+        let mut state = self.frontier_state.lock();
+        state.window = DownloadWindow::new(budget);
+        state.stager = BlockStager::new(budget);
     }
 
     /// Runs one orchestrator tick: requests pending blocks from eligible peers

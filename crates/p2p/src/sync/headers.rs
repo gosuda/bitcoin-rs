@@ -35,9 +35,12 @@ impl BlockSync {
             // deadline so idle discovery is paced and rotates to another peer.
             if let Some(source) = source.filter(|_| !headers.is_empty()) {
                 if self.peer_table.is_current(source) {
-                    let mut pending = self.pending_getheaders.lock();
-                    if pending.is_some_and(|request| request.source == source) {
-                        *pending = None;
+                    let mut state = self.frontier_state.lock();
+                    if state
+                        .header_request
+                        .is_some_and(|request| request.source == source)
+                    {
+                        state.header_request = None;
                     }
                 }
             }
@@ -66,7 +69,7 @@ impl BlockSync {
                     let mut blamed_peer = None;
                     if let Some(source) = source {
                         if self.peer_table.disconnect_source(source) {
-                            self.body_sync
+                            self.frontier_state
                                 .lock()
                                 .window
                                 .mark_peer_unresponsive(source.addr, Instant::now());
@@ -209,7 +212,7 @@ impl BlockSync {
         // Body dispatch runs before this action. Revalidate the observed hash
         // so a successful getdata publication suppresses the recovery probe.
         {
-            let state = self.body_sync.lock();
+            let state = self.frontier_state.lock();
             if state.window.contains_pending(&required.hash)
                 || state.stager.contains(&required.hash)
             {
@@ -311,7 +314,7 @@ impl BlockSync {
         let mut sent = false;
         self.peer_table.with_current(source, || {
             if tx.send(msg).is_ok() {
-                *self.pending_getheaders.lock() = Some(PendingHeaderRequest {
+                self.frontier_state.lock().header_request = Some(PendingHeaderRequest {
                     source,
                     locator_tip_hash,
                     target_height,
@@ -332,9 +335,12 @@ impl BlockSync {
             // to this address dropped so a fast reconnect does not inherit a
             // stale deadline gate.
             if self.peer_table.disconnect_source(source) {
-                let mut pending = self.pending_getheaders.lock();
-                if pending.is_some_and(|request| request.source == source) {
-                    *pending = None;
+                let mut state = self.frontier_state.lock();
+                if state
+                    .header_request
+                    .is_some_and(|request| request.source == source)
+                {
+                    state.header_request = None;
                 }
             }
             return false;
@@ -350,7 +356,7 @@ impl BlockSync {
     }
 
     pub(super) fn has_pending_getheaders(&self, now: Instant) -> bool {
-        let pending = *self.pending_getheaders.lock();
+        let pending = self.frontier_state.lock().header_request;
         let Some(pending) = pending else {
             return false;
         };

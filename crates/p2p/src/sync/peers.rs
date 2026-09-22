@@ -95,12 +95,12 @@ impl BlockSync {
         // under the window can deadlock behind a queued table writer while
         // an existing table reader waits for this window.
         self.peer_table.with_current(source, || {
-            self.body_sync.lock().window.forget_peer(source.addr);
-            let mut pending = self.pending_getheaders.lock();
-            if pending.is_some_and(|request| {
+            let mut state = self.frontier_state.lock();
+            state.window.forget_peer(source.addr);
+            if state.header_request.is_some_and(|request| {
                 request.source.addr == source.addr && request.source != source
             }) {
-                *pending = None;
+                state.header_request = None;
             }
         });
     }
@@ -112,30 +112,35 @@ impl BlockSync {
         self.peer_table
             .disconnect_matching(|_, lease| lease.is_cancelled());
         let live = self.peer_table.live_connections();
-        {
-            let mut pending = self.pending_getheaders.lock();
-            if pending.is_some_and(|request| {
+        let mut state = self.frontier_state.lock();
+        if state.header_request.is_some_and(|request| {
                 !live.iter().any(|(addr, id)| {
                     *addr == request.source.addr && *id == request.source.connection_id()
                 })
             }) {
-                *pending = None;
-            }
+            state.header_request = None;
         }
-        let mut body_sync = self.body_sync.lock();
-        let window = &mut body_sync.window;
-        let mut known = self.known_sessions.lock();
         for (addr, id) in &live {
-            if known.insert(*addr, *id).is_some_and(|prev| prev != *id) {
-                window.forget_peer(*addr);
-                let mut pending = self.pending_getheaders.lock();
-                if pending.is_some_and(|request| request.source.addr == *addr) {
-                    *pending = None;
+            if state
+                .known_sessions
+                .insert(*addr, *id)
+                .is_some_and(|prev| prev != *id)
+            {
+                state.window.forget_peer(*addr);
+                if state
+                    .header_request
+                    .is_some_and(|request| request.source.addr == *addr)
+                {
+                    state.header_request = None;
                 }
             }
         }
-        known.retain(|addr, _| live.iter().any(|(a, _)| a == addr));
-        window.release_disconnected_peers(|peer| live.iter().any(|(a, _)| a == peer));
+        state
+            .known_sessions
+            .retain(|addr, _| live.iter().any(|(a, _)| a == addr));
+        state
+            .window
+            .release_disconnected_peers(|peer| live.iter().any(|(a, _)| a == peer));
     }
 
     pub(super) fn sync_peer_selection(
@@ -179,8 +184,8 @@ impl BlockSync {
         }
         drop(tree);
         let (request_peer_limit, fanout_active, cold_preferred) = {
-            let mut body_sync = self.body_sync.lock();
-            let window = &mut body_sync.window;
+            let mut frontier_state = self.frontier_state.lock();
+            let window = &mut frontier_state.window;
             for candidate in &mut candidates {
                 candidate.soft_blocked = window.peer_has_expired_pending(candidate.peer.addr, now)
                     || window.peer_in_staller_cooldown(candidate.peer.addr, now);
@@ -274,7 +279,7 @@ impl BlockSync {
         // the window lock, and tree->window is the codebase's lock order.
         let frontier_hash = self.next_expected_block_hash();
         let apply_side_busy =
-            frontier_hash.is_some_and(|hash| self.body_sync.lock().stager.contains(&hash));
+            frontier_hash.is_some_and(|hash| self.frontier_state.lock().stager.contains(&hash));
         let mut cold_hedge = None;
         let mut apply_side_escalation = None;
         let mut fired = false;
@@ -318,7 +323,7 @@ impl BlockSync {
             && let Some(alternate) =
                 self.send_cold_front_hedge(owner, front_hash, next_apply_height, now)
         {
-            self.body_sync
+            self.frontier_state
                 .lock()
                 .window
                 .confirm_cold_front_hedge(owner, alternate, front_hash);
@@ -357,7 +362,7 @@ impl BlockSync {
             return;
         }
         let evicted = self
-            .body_sync
+            .frontier_state
             .lock()
             .stager
             .drain_expected_prefix(&[frontier_hash]);
@@ -373,13 +378,13 @@ impl BlockSync {
                 .map(|node| node.height)
         };
         {
-            let mut body_sync = self.body_sync.lock();
+            let mut frontier_state = self.frontier_state.lock();
             if let Some(height) = height {
-                body_sync
+                frontier_state
                     .window
                     .update_received_height(&frontier_hash, height);
             }
-            body_sync.window.drop_received_for_retry(&frontier_hash);
+            frontier_state.window.drop_received_for_retry(&frontier_hash);
         }
         metrics::counter!("node.sync.apply_side_stall_escalations").increment(1);
         tracing::warn!(
@@ -393,7 +398,7 @@ impl BlockSync {
     pub(super) fn disconnect_timed_out_peer(&self, now: Instant) -> bool {
         let apply_side_busy = self
             .next_expected_block_hash()
-            .is_some_and(|hash| self.body_sync.lock().stager.contains(&hash));
+            .is_some_and(|hash| self.frontier_state.lock().stager.contains(&hash));
         let Some(peer_addr) = self.select_and_evict_window_peer(|window| {
             window.observe_pending_timeout(apply_side_busy, now)
         }) else {
@@ -414,19 +419,27 @@ impl BlockSync {
         select: impl FnOnce(&mut DownloadWindow) -> Option<SocketAddr>,
     ) -> Option<SocketAddr> {
         let peer_addr = {
-            let mut body_sync = self.body_sync.lock();
-            select(&mut body_sync.window)?
+            let mut frontier_state = self.frontier_state.lock();
+            select(&mut frontier_state.window)?
         };
-        let connection_id = self.known_sessions.lock().get(&peer_addr).copied()?;
+        let connection_id = self
+            .frontier_state
+            .lock()
+            .known_sessions
+            .get(&peer_addr)
+            .copied()?;
         if !self
             .peer_table
             .disconnect_connection(peer_addr, connection_id)
         {
             return None;
         }
-        let mut pending = self.pending_getheaders.lock();
-        if pending.is_some_and(|request| request.source.addr == peer_addr) {
-            *pending = None;
+        let mut state = self.frontier_state.lock();
+        if state
+            .header_request
+            .is_some_and(|request| request.source.addr == peer_addr)
+        {
+            state.header_request = None;
         }
         Some(peer_addr)
     }
