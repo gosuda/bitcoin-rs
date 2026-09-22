@@ -162,7 +162,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
 
 #[test]
 fn clean_checkpoint_lifecycle_is_backend_neutral() -> anyhow::Result<()> {
-    let backends: Vec<&str> = vec![
+    let backends = vec![
         #[cfg(feature = "fjall")]
         "fjall",
         #[cfg(feature = "rocksdb")]
