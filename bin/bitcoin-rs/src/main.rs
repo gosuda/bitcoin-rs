@@ -115,7 +115,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
 
-    use bitcoin_rs_node::{Auth, Network, ScriptIndexMode, ValidationMode};
+    use bitcoin_rs_chainstate::ValidationMode;
+    use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
     #[test]
     fn bitcoin_conf_is_applied_before_environment_and_cli() {

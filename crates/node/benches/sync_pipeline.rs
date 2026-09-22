@@ -60,12 +60,12 @@ use bitcoin::{
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::BlockSource;
-use bitcoin_rs_mempool::{Mempool, MempoolLimits};
 pub mod evidence;
 
+use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::metrics::{CorpusIdentity, EvidenceIdentity, Sha256Hex};
 use bitcoin_rs_node::{
-    BlockSync, DerivedIndexRuntime, Network, NodeConfig, apply::Chainstate, state::NodeState,
+    BlockSync, DerivedIndexRuntime, Network, NodeConfig, state::NodeState,
     sync::default_sync_budget,
 };
 use bitcoin_rs_p2p::Message;
@@ -124,7 +124,8 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
                 }
                 black_box(
                     state
-                        .applied_tip()
+                        .chainstate()
+                        .applied_tip_handle()
                         .load_full()
                         .unwrap_or_else(|| panic!("proxy apply did not publish a tip"))
                         .height,
@@ -145,7 +146,8 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
                         .unwrap_or_else(|error| panic!("pruned proxy apply failed: {error}"));
                 }
                 let tip = state
-                    .applied_tip()
+                    .chainstate()
+                    .applied_tip_handle()
                     .load_full()
                     .unwrap_or_else(|| panic!("pruned proxy apply did not publish a tip"));
                 let record = state
@@ -173,7 +175,8 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
                 }
                 black_box(
                     state
-                        .applied_tip()
+                        .chainstate()
+                        .applied_tip_handle()
                         .load_full()
                         .unwrap_or_else(|| panic!("spend-heavy proxy did not publish a tip"))
                         .height,
@@ -220,7 +223,8 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
                     .push((sweep_start.duration_since(origin), sweep_start.elapsed()));
                 black_box(
                     state
-                        .applied_tip()
+                        .chainstate()
+                        .applied_tip_handle()
                         .load_full()
                         .unwrap_or_else(|| panic!("signed-spend proxy did not publish a tip"))
                         .height,
@@ -496,7 +500,8 @@ fn print_proxy_summary(blocks: &[Block]) {
     }
     let elapsed = started.elapsed();
     let applied_height = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("proxy summary did not publish a tip"))
         .height;
@@ -523,7 +528,8 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
     }
     let elapsed = started.elapsed();
     let applied_height = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("spend-heavy proxy summary did not publish a tip"))
         .height;
@@ -644,7 +650,7 @@ impl SyncFixture {
         )
         .capturing(capture_rawtx, capture_block_bytes);
         let sync = bitcoin_rs_node::sync::block_sync(
-            handles,
+            Arc::new(handles),
             followers,
             Arc::clone(&peer_table),
             inbound_headers_rx,
@@ -974,7 +980,7 @@ impl ProductionStateSyncFixture {
             .start_index_workers()
             .unwrap_or_else(|error| panic!("start index workers failed: {error}"));
         let blocks = {
-            let block_tree = state.block_tree();
+            let block_tree = state.chainstate().block_tree_handle();
             let mut tree = block_tree.write();
             populate_blocks(&mut tree)
         };
@@ -1025,7 +1031,8 @@ impl ProductionStateSyncFixture {
             .unwrap_or_else(|error| panic!("send production contiguous block failed: {error}"));
         sync.tick();
         self.state
-            .applied_tip()
+            .chainstate()
+            .applied_tip_handle()
             .load_full()
             .unwrap_or_else(|| panic!("production sync proxy did not publish applied tip"))
             .height
@@ -1087,7 +1094,8 @@ impl ProductionStateSyncFixture {
     fn apply_staged(self) -> u32 {
         self.state.sync().tick();
         self.state
-            .applied_tip()
+            .chainstate()
+            .applied_tip_handle()
             .load_full()
             .unwrap_or_else(|| panic!("production sync proxy did not publish applied tip"))
             .height
@@ -1211,8 +1219,6 @@ fn apply_handles(
     let mut utxo = UtxoSet::new();
     utxo.set_listener(Box::new((*coin_stats).clone()));
     let utxo = Arc::new(utxo);
-    let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-    let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
     Chainstate::new(
         Network::Regtest,
         chain_tip,
@@ -1220,9 +1226,7 @@ fn apply_handles(
         block_tree,
         utxo,
         coin_stats,
-        mempool,
-        mempool_gateway,
-        Arc::new(bitcoin_rs_node::state::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     )
 }
 
@@ -1978,7 +1982,8 @@ fn print_signed_spend_proxy_summary(blocks: &[Block]) {
     }
     let elapsed = started.elapsed();
     let applied_height = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("signed-spend summary did not publish a tip"))
         .height;

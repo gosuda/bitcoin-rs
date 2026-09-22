@@ -232,7 +232,7 @@ fn embedded_config(data_dir: &std::path::Path) -> Result<NodeConfig> {
 /// Returns the final tip hash, the first seeded block's hash, and its
 /// consensus bytes for the read-back assertion.
 fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8>)> {
-    let applied = state.applied_tip();
+    let applied = state.chainstate().applied_tip_handle();
     let mut tip = applied
         .load_full()
         .ok_or_else(|| anyhow::anyhow!("genesis must publish an applied tip"))?;
@@ -446,7 +446,8 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
     // The released datadir reopens and resumes the seeded checkpoint.
     let resumed = NodeState::open(seed_config(&data_dir), None)?;
     let tip = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("seeded checkpoint must restore an applied tip"));
     assert_eq!(tip.height, 1);

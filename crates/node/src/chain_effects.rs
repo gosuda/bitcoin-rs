@@ -10,8 +10,10 @@ use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Txid};
 use parking_lot::RwLock;
 
-use crate::apply::{ConnectOutcome, DisconnectOutcome};
+use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
 use bitcoin_rs_index::runtime::DerivedIndexRuntime;
+use bitcoin_rs_mempool::AdmissionOrigin;
+use bitcoin_rs_mempool::ChainChangeGuard;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
@@ -196,6 +198,57 @@ pub struct ChainFollowers {
 }
 
 impl ChainFollowers {
+    pub(crate) fn begin_mempool_change(
+        &self,
+    ) -> core::result::Result<Option<ChainChangeGuard>, bitcoin_rs_chainstate::ApplyError> {
+        self.mempool
+            .as_ref()
+            .map(|gateway| {
+                gateway.begin_chain_change().map_err(|error| match error {
+                    bitcoin_rs_mempool::ChainChangeError::AlreadyActive
+                    | bitcoin_rs_mempool::ChainChangeError::GenerationMoved => {
+                        bitcoin_rs_chainstate::ApplyError::ConcurrentChainChange
+                    }
+                    bitcoin_rs_mempool::ChainChangeError::Overflow => {
+                        bitcoin_rs_chainstate::ApplyError::ChainChangeGenerationOverflow
+                    }
+                })
+            })
+            .transpose()
+    }
+
+    pub(crate) fn finish_transition(
+        handles: &bitcoin_rs_chainstate::Chainstate,
+        transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+        mempool_change: Option<ChainChangeGuard>,
+    ) -> core::result::Result<(), bitcoin_rs_chainstate::ApplyError> {
+        if let Some(change) = mempool_change
+            && change.finish().is_err()
+        {
+            handles.fail_closed_for_recovery();
+            return Err(bitcoin_rs_chainstate::ApplyError::Shutdown);
+        }
+        drop(transition);
+        Ok(())
+    }
+
+    pub(crate) fn mempool_gateway(&self) -> Option<&Arc<MempoolGateway>> {
+        self.mempool.as_ref()
+    }
+
+    pub(crate) fn committed_connect(&self, block: &Block, outcome: &ConnectOutcome) {
+        if let Some(gateway) = &self.mempool {
+            let block_txs: Vec<&bitcoin_rs_primitives::Tx> = block.txs.iter().collect();
+            gateway.remove_for_block(
+                AdmissionOrigin::Block,
+                &block_txs,
+                &outcome.txids,
+                outcome.height,
+            );
+        }
+        self.connected(block, outcome);
+    }
+
     /// Production follower set.
     #[must_use]
     pub fn new(
@@ -264,18 +317,42 @@ impl ChainFollowers {
     /// Connects `block` and dispatches this set before the transition ends.
     ///
     /// See `ARCH-07`: production single-block paths must not finish the
-    /// [`crate::apply::ChainTransition`] and then dispatch, or a later
+    /// [`bitcoin_rs_chainstate::ChainTransition`] and then dispatch, or a later
     /// connect or disconnect can publish derived effects first.
     pub fn apply_connect(
         &self,
-        handles: &crate::apply::Chainstate,
+        handles: &bitcoin_rs_chainstate::Chainstate,
         block: &Block,
-    ) -> core::result::Result<ConnectOutcome, crate::ApplyError> {
+    ) -> core::result::Result<ConnectOutcome, bitcoin_rs_chainstate::ApplyError> {
         let transition = handles.begin_transition()?;
-        let outcome = transition.connect(block)?;
-        self.connected(block, &outcome);
-        let _ = transition.finish();
-        Ok(outcome)
+        let mempool_change = self.begin_mempool_change()?;
+        match transition.connect(block) {
+            Ok(outcome) => {
+                self.committed_connect(block, &outcome);
+                Self::finish_transition(handles, transition, mempool_change)?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                if bitcoin_rs_chainstate::classify_apply_error(&error)
+                    == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
+                {
+                    drop(mempool_change);
+                    drop(transition);
+                    return Err(error);
+                }
+                if let Err(settlement) =
+                    Self::finish_transition(handles, transition, mempool_change)
+                {
+                    tracing::error!(
+                        original = %error,
+                        finish = %settlement,
+                        "chain transition could not be settled after connect refusal"
+                    );
+                    return Err(settlement);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Disconnects `block` and dispatches this set before the transition ends.
@@ -283,16 +360,55 @@ impl ChainFollowers {
     /// See `ARCH-07`. An admission failure is `DisconnectError::Refused`.
     pub fn apply_disconnect(
         &self,
-        handles: &crate::apply::Chainstate,
+        handles: &bitcoin_rs_chainstate::Chainstate,
         block: &Block,
-    ) -> core::result::Result<DisconnectOutcome, crate::DisconnectError> {
+    ) -> core::result::Result<DisconnectOutcome, bitcoin_rs_chainstate::DisconnectError> {
         let transition = handles
             .begin_transition()
-            .map_err(|error| crate::DisconnectError::Refused(Box::new(error)))?;
-        let outcome = transition.disconnect(block)?;
-        self.disconnected(&outcome);
-        let _ = transition.finish();
-        Ok(outcome)
+            .map_err(|error| bitcoin_rs_chainstate::DisconnectError::Refused(Box::new(error)))?;
+        let mempool_change = self
+            .begin_mempool_change()
+            .map_err(|error| bitcoin_rs_chainstate::DisconnectError::Refused(Box::new(error)))?;
+        match transition.disconnect(block) {
+            Ok(outcome) => {
+                self.disconnected(&outcome);
+                Self::finish_transition(handles, transition, mempool_change).map_err(|error| {
+                    bitcoin_rs_chainstate::DisconnectError::Fatal {
+                        hash: outcome.hash,
+                        height: outcome.parent_tip.height.saturating_add(1),
+                        source: Box::new(error),
+                    }
+                })?;
+                Ok(outcome)
+            }
+            Err(error @ bitcoin_rs_chainstate::DisconnectError::Refused(_)) => {
+                let hash = Hash256::from(block.block_hash());
+                let height = handles
+                    .applied_tip()
+                    .load_full()
+                    .map_or(0, |tip| tip.height);
+                if let Err(settlement) =
+                    Self::finish_transition(handles, transition, mempool_change)
+                {
+                    tracing::error!(
+                        original = %error,
+                        finish = %settlement,
+                        "chain transition could not be settled after disconnect refusal"
+                    );
+                    return Err(bitcoin_rs_chainstate::DisconnectError::Fatal {
+                        hash,
+                        height,
+                        source: Box::new(settlement),
+                    });
+                }
+                Err(error)
+            }
+            Err(error) => {
+                drop(mempool_change);
+                drop(transition);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -554,5 +670,26 @@ mod tests {
     fn disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry()
     -> anyhow::Result<()> {
         assert_admission_followers_after_chain_change(false)
+    }
+
+    #[test]
+    fn active_chain_change_is_retryable_not_shutdown() -> anyhow::Result<()> {
+        let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
+            MempoolLimits::default(),
+        ))));
+        let followers = ChainFollowers::new(
+            ChainEffects::noop(),
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
+            Some(Arc::clone(&gateway)),
+        );
+        let active = gateway.begin_chain_change()?;
+
+        assert!(matches!(
+            followers.begin_mempool_change(),
+            Err(bitcoin_rs_chainstate::ApplyError::ConcurrentChainChange)
+        ));
+        active.finish()?;
+        assert!(followers.begin_mempool_change()?.is_some());
+        Ok(())
     }
 }

@@ -7,16 +7,17 @@ Performance claims require measured evidence, not a source-shape assertion.
 
 ## Retained proof owners
 
-These are suite families, not a claim that every individual test has been
-reviewed. Changes to a family must retain its independent reference and its
-failure-path evidence. Tests may move with their owner without preserving an
-old module layout.
+The current suite is classified by owner family below. Every surviving test
+belongs to one of these current-contract or externally anchored evidence
+families. Tests may move with their owner without preserving an old module
+layout; a new test that does not fit one of these families needs a contract or
+regression invariant before it is retained.
 
 | Owner | Contract and failure boundary | Disposition |
 | --- | --- | --- |
 | Primitives parsing, encoding, layout, arithmetic | Bitcoin wire identities, canonical bytes, malformed and truncated input; `P2P-01`, `VAL-02` | Keep independent golden/rust-bitcoin comparisons and rejection boundaries. Internal layout is not a public contract. |
 | Script and consensus | `VAL-02`; Core vectors, signed-spend parity, witness and Merkle commitments, activation, missing coins and duplicate inputs | Keep. Remove lookup-count and parser-shape assertions when the same result has independent evidence. |
-| Chain and UTXO | `RCV-01`..`RCV-11`; ancestry, branch selection, coin state, connect/disconnect and crash outcomes | Keep behavioral, differential and property tests. Do not replace corruption refusals with fixture round trips. |
+| Chain, chainstate and UTXO | `ARCH-07`, `RCV-01`..`RCV-14`, `EVT-01`..`EVT-05`; ancestry, authoritative mutation, branch selection, coin state, connect/disconnect, recovery and crash outcomes | Keep behavioral, differential and property tests with the owning crate. Do not retain node-local apply-shape tests or replace corruption refusals with fixture round trips. |
 | Storage and index | `IDX-01`..`IDX-08`, `FP-01`..`FP-04`, recovery; backend persistence, capability errors, cursor/reorg recovery | Keep. Backend and restart tests cannot be replaced by in-memory mocks. |
 | Mempool | `MPL-01`..`MPL-04`, `POL-01`..`POL-06`; admission, replacement, dependencies, sequence, fencing and bounded orphans | Keep mutation and concurrency scenarios; reorg admission must use the same current-chain evaluator. |
 | P2P | `P2P-01`..`P2P-05`; independent wire envelopes, live peer identity, budgets, body attribution, stalled requests and branch recovery | Keep. Assert peer-visible requests and eventual application, not incidental message ordering. |
@@ -27,6 +28,11 @@ old module layout.
 | Reference custody | `REF-*`, `CORP-*`, `QAC-01`; artifact identity and unavailable inputs | Keep typed refusal cases and real process/corpus custody. Mutate parsed fields rather than matching historical TOML text. |
 | Benchmark evidence | `HPA-*`; identities, overlap and repeated samples | Run evidence-tool tests with `--bench evidence`; measured campaigns remain separate. No frozen path/cell inventory in normal Cargo tests. |
 | Formal models | `CONSTRAINTS.md` proof inventory | Run `scripts/check_models.py` in the manual lane. Custody checks and runner regressions are not model proofs. |
+
+This table is the contract → proof matrix at suite-family granularity. Exact
+test names are intentionally not normative: the executable evidence may be
+consolidated or rewritten as long as the row's independent reference,
+failure-path coverage, and named contracts remain proved.
 
 ## Reviewed deletion and replacement
 
@@ -47,18 +53,22 @@ old module layout.
 | Exact input lookup counters | Delete both the integration assertion and duplicate inline counting-view test. Keep multi-input verification, missing-coin and duplicate-input errors. |
 | `prepared_facts_survive_source_record_replacement` | Delete: it dropped a view and re-parsed a transaction, never testing record replacement. It supplied no lifetime evidence. |
 | `sighash_variants_match_reference_oracle` | Rename to the transaction-identity behavior it actually checks. Signed-spend/Core suites, not this fixture, own sighash evidence. |
+| Node `apply::consensus_rule_tests` fixture tree | Delete the node-level duplicate consensus/apply matrix. Consensus rules stay with consensus/script/vector owners; authoritative mutation/recovery tests move to `bitcoin-rs-chainstate`; node keeps only cross-domain behavior. `crates/chainstate/tests/unit/apply/persistence_tests.rs` retains the mutation failure boundaries that are not consensus duplicates: failed undo persistence is atomic and BIP30 overwrite undo restores the original coin. |
+| `chain_generation_tests`, old reorg settlement tests, sync generation-settlement tests | Delete implementation-shape assertions around `ChainChangeProof`, `Chainstate.mempool_gateway`, odd/even generation internals, and no-op transition finish. Node integration/mining/reorg tests retain observable mempool fencing and reorg behavior. |
+| Node checkpoint/journal/event/recovery owner-unit modules | Move the retained checkpoint, journal, admission, chain-tx-count and event-state proofs to `crates/chainstate`. Delete node copies and forwarding modules. |
+| Test-only backend row injection, metrics recorder, scratch constructors, checkpoint failpoint forwarding | Delete after the reset left no contract test consumer. Production no longer exposes these seams solely for fixtures. |
 
 The sync recovery cut also replaces four fake-application fixture paths
 with delivered blocks through the ordinary binding/apply path. The old
 `DownloadWindow::mark_applied` shortcut is private to its unit tests and no
 longer a production API.
 
-## Evidence still required
+## Reset completion rule
 
-The retained families above are not an exhaustive test-function audit. In
-particular, a full contract-first reset still needs individual review of
-node/P2P private-state assertions and a complete clause-to-scenario gap
-check. This page does not mark that broader work complete.
+The contract-first reset is complete when all retained suites fit the proof
+matrix above, the full dependency/feature/process/recovery lanes pass, and no
+production API remains solely because a deleted test called it. Future tests
+follow the same rule: current contract proof or promoted real regression.
 
 A formal runner test uses a synthetic executable and cannot establish a
 model property. A successful evidence-parser test cannot establish a

@@ -1,22 +1,16 @@
 //! Integration crate for running a synchronous `bitcoin-rs` node.
 //!
 //! The crate owns process-level concerns: layered configuration, storage backend
-//! selection, signal bridging, metrics/tracing setup, crash recovery, the
-//! chainstate facade that serializes applied-tip mutation, and the central
-//! crossbeam-driven event loop that connects the subsystem crates.
+//! selection, signal bridging, metrics/tracing setup, and the central
+//! crossbeam-driven event loop that composes chainstate with peer, mempool,
+//! mining, index, and RPC services.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
 
-/// Authoritative chainstate mutation: connect, disconnect, and window apply.
-///
-/// See `ARCH-07` in `docs/contracts/architecture.md`.
-pub mod apply;
 /// Derived post-commit consumers of a committed chain transition.
 pub mod chain_effects;
-mod chainstate_journal;
-mod checkpoint;
 /// Layered node configuration.
 pub mod config;
 /// Typed in-process node lifecycle: the embedding surface over the same
@@ -53,11 +47,6 @@ pub mod storage_footprint;
 pub mod sync;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
-pub use apply::{
-    ChainTransition, Chainstate, ChainstateSnapshot, ConnectOutcome, DisconnectOutcome,
-    error::{ApplyError, DisconnectError},
-};
-
 pub use bitcoin_rs_primitives::Network;
 
 pub use bitcoin_rs_rpc::zmq::{
@@ -67,11 +56,10 @@ pub use bitcoin_rs_rpc::zmq::{
 pub use chain_effects::{ChainEffects, ChainFollowers};
 
 pub use config::{
-    Auth, ChainstateJournalConfig, ChainstateJournalOverrides, IndexConfig, IndexOverrides,
-    MiningConfig, MiningOverrides, NetworkSelection, NodeConfig, NotificationConfig,
-    ObservabilityConfig, ObservabilityOverrides, P2pConfig, P2pOverrides, RpcConfig, RpcOverrides,
-    RuntimeInputs, ScriptIndexMode, StorageConfig, StorageOverrides, UserConfig, ValidationConfig,
-    ValidationMode, ValidationOverrides, resolve,
+    Auth, ChainstateJournalOverrides, IndexConfig, IndexOverrides, MiningConfig, MiningOverrides,
+    NetworkSelection, NodeConfig, NotificationConfig, ObservabilityConfig, ObservabilityOverrides,
+    P2pConfig, P2pOverrides, RpcConfig, RpcOverrides, RuntimeInputs, ScriptIndexMode,
+    StorageConfig, StorageOverrides, UserConfig, ValidationConfig, ValidationOverrides, resolve,
 };
 
 pub use embed::{Node, NodeError, SyncProgress};

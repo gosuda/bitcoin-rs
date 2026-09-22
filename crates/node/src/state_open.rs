@@ -7,15 +7,6 @@ use super::P2P_OUTBOUND_QUEUE_LIMIT;
 use super::TxIndexSpawn;
 use super::build_derived_index_open_spec;
 use super::derived_index_capabilities;
-use super::events::ChainEventPublisher;
-use super::events::ChainSnapshot;
-use super::events::allocate_process_epoch;
-use super::restore::InitialChainstate;
-use super::restore::ResumeSource;
-use super::restore::STALE_RESTORE_ERROR_THRESHOLD;
-use super::restore::open_journal_dir;
-use super::restore::prepare_initial_chainstate;
-use super::restore::requires_full_revalidation;
 use super::storage::NodeStorage;
 use super::storage::StoredBlockBodySource;
 use crate::NodeConfig;
@@ -25,6 +16,12 @@ use anyhow::bail;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chainstate::ChainstateParts;
+use bitcoin_rs_chainstate::events::{ChainEventPublisher, ChainSnapshot, initialize_data_dir};
+use bitcoin_rs_chainstate::recovery::{
+    InitialChainstate, ResumeSource, STALE_RESTORE_ERROR_THRESHOLD, open_journal_dir,
+    prepare_initial_chainstate, requires_full_revalidation,
+};
 use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolLimits;
@@ -55,25 +52,9 @@ impl NodeState {
         config.validate()?;
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("create data_dir {}", config.data_dir.display()))?;
-        let checkpoint_data_dir =
-            bitcoin_rs_storage::checkpoint::fs::open_data_dir(&config.data_dir)
-                .with_context(|| format!("open data_dir {}", config.data_dir.display()))?;
-        bitcoin_rs_storage::checkpoint::fs::ensure_current_schema(&checkpoint_data_dir)
-            .with_context(|| {
-                format!(
-                    "validate CURRENT_SCHEMA for datadir {}",
-                    config.data_dir.display()
-                )
-            })?;
         // Allocate the process epoch before anything else can consume one:
         // durable, strictly greater than every earlier run of this data dir.
-        let epoch = allocate_process_epoch(&checkpoint_data_dir)?;
-        let checkpoint_config = crate::checkpoint::headers::HeaderCheckpointConfig {
-            network: config.network,
-            genesis: config.network.genesis_block_hash(),
-        };
-        let checkpoint_load =
-            crate::checkpoint::load_checkpoint_from_dir(&checkpoint_data_dir, checkpoint_config)?;
+        let epoch = initialize_data_dir(&config.data_dir)?;
 
         // Divide the process cache budget across the persistent namespaces
         // that exist in this deployment. A disabled txindex share redistributes
@@ -98,7 +79,8 @@ impl NodeState {
             .map_err(anyhow::Error::new)?
         {
             let force_full_revalidation = requires_full_revalidation(&config.data_dir);
-            if marker.phase == crate::apply::DisconnectPhase::RolledBack && force_full_revalidation
+            if marker.phase == bitcoin_rs_chainstate::DisconnectPhase::RolledBack
+                && force_full_revalidation
             {
                 undo_store.disarm_disconnect().map_err(anyhow::Error::new)?;
                 tracing::warn!(
@@ -153,10 +135,9 @@ impl NodeState {
             resume_source,
             journal_bootstrap,
         } = prepare_initial_chainstate(
-            checkpoint_load,
-            &checkpoint_data_dir,
-            checkpoint_config,
-            &config,
+            &config.data_dir,
+            config.network,
+            config.chainstate_journal,
         )?;
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
@@ -266,10 +247,28 @@ impl NodeState {
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         // Created before the txindex worker spawn: the worker mirrors this
         // publisher's snapshot into its persisted consumer cursor.
-        let chain_events_raw = ChainEventPublisher::new(epoch, initial_snapshot);
+        let chain_events_raw = ChainEventPublisher::new(initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
         let chain_events = Arc::new(chain_events_raw);
-        let chain_transition = Arc::new(parking_lot::Mutex::new(()));
+        let mut chainstate = bitcoin_rs_chainstate::Chainstate::from_parts(ChainstateParts {
+            network: config.network,
+            chain_tip: Arc::clone(&chain_tip),
+            applied_tip: Arc::clone(&applied_tip),
+            chain_tx_count: Arc::clone(&chain_tx_count),
+            block_tree: Arc::clone(&block_tree),
+            utxo: Arc::clone(&utxo),
+            coin_stats: Arc::clone(&coin_stats),
+            chain_events: Arc::clone(&chain_events),
+            block_body_store: Some(Arc::clone(&block_body_store)),
+            undo_store,
+            durable_head,
+            shutdown: Arc::clone(&shutdown),
+            assume_valid_height: config.validation.assume_valid_height,
+            validation_mode: config.validation.mode,
+            journal,
+            capture_rawtx: false,
+            capture_block_bytes: false,
+        });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
         let (
@@ -280,7 +279,7 @@ impl NodeState {
         ) = match derived_index_open_spec {
             Some(mut spec) => {
                 spec.utxo = Some(Arc::clone(&utxo));
-                spec.chain_transition = Some(Arc::clone(&chain_transition));
+                spec.chain_transition = Some(chainstate.transition_barrier());
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime =
                     Arc::new(bitcoin_rs_index::runtime::DerivedIndexRuntime::new(wake_tx));
@@ -397,77 +396,23 @@ impl NodeState {
             Some(Arc::clone(&mempool_gateway)),
         );
         let (capture_rawtx, capture_block_bytes) = followers.capture_flags();
-        // One retention registry per node: transitions pin old-branch bodies
-        // into it and the pruning pass folds the live floors into its line.
-        let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
-        let mut apply_handles = crate::apply::Chainstate {
-            network: config.network,
-            chain_tip: Arc::clone(&chain_tip),
-            applied_tip: Arc::clone(&applied_tip),
-            chain_tx_count: Arc::clone(&chain_tx_count),
-            applied_seq: Arc::new(AtomicU64::new(0)),
-            block_tree: Arc::clone(&block_tree),
-            utxo: Arc::clone(&utxo),
-            coin_stats: Arc::clone(&coin_stats),
-            mempool: Arc::clone(&mempool),
-            mempool_gateway: Arc::clone(&mempool_gateway),
-            chain_events: Arc::clone(&chain_events),
-            block_body_store: Some(Arc::clone(&block_body_store)),
-            undo_store,
-            durable_head,
-            admission: Arc::new(crate::apply::ApplyAdmission::new()),
-            shutdown: Arc::clone(&shutdown),
-            chain_transition,
-            assume_valid_height: config.validation.assume_valid_height,
-            assume_valid_gate: Arc::new(crate::apply::AssumeValidGate::new(
-                config.network,
-                config.validation.assume_valid_height,
-            )),
-            validation_mode: config.validation.mode,
-            journal,
-            checkpoint_publisher: None,
-            capture_rawtx,
-            capture_block_bytes,
-            retention: Arc::clone(&retention),
-        };
-        apply_handles.assume_valid_gate.evaluate(&block_tree.read());
+        chainstate.set_capture_flags(capture_rawtx, capture_block_bytes);
         // The durable head is the chain's commit point: an unreadable row
         // fails startup, and a committed-but-unpublished gap (crash between
         // the head batch and publication) is replayed here from the durable
         // bodies it certified, so ordinary operation starts on a state the
         // head fully names (#655). A gap that is not an ancestor prefix of
         // stored bodies fails startup closed.
-        crate::apply::reconcile_at_boot(&apply_handles).map_err(anyhow::Error::new)?;
+        bitcoin_rs_chainstate::reconcile_at_boot(&chainstate).map_err(anyhow::Error::new)?;
         // A restored checkpoint is durable at its own height by definition, so
         // start there rather than at zero, which would refuse all undo pruning.
         let durable_tip_height = Arc::new(AtomicU32::new(
             applied_tip.load().as_ref().map_or(0, |tip| tip.height),
         ));
-        apply_handles.checkpoint_publisher = Some(Arc::new(
-            crate::checkpoint::publisher::CheckpointPublisher {
-                admission: Arc::clone(&apply_handles.admission),
-                undo_store: Arc::clone(&apply_handles.undo_store),
-                durable_head: Arc::clone(&apply_handles.durable_head),
-                block_body_store: Arc::clone(&block_body_store),
-                applied_tip: Arc::clone(&applied_tip),
-                checkpoint_data_dir: bitcoin_rs_storage::checkpoint::fs::open_data_dir(
-                    &config.data_dir,
-                )
-                .with_context(|| format!("open data_dir {}", config.data_dir.display()))?,
-                network: config.network,
-                genesis_hash: config.network.genesis_block_hash(),
-                block_tree: Arc::clone(&block_tree),
-                utxo: Arc::clone(&utxo),
-                coin_stats: Arc::clone(&coin_stats),
-                chain_tx_count: Arc::clone(&chain_tx_count),
-                journal: apply_handles.journal.clone(),
-                data_dir: config.data_dir.clone(),
-                chain_events: Arc::clone(&chain_events),
-                durable_tip_height: Arc::clone(&durable_tip_height),
-            },
-        ));
+        chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
+        let chainstate = Arc::new(chainstate);
         let sync = Arc::new(crate::sync::block_sync(
-            apply_handles.clone(),
+            Arc::clone(&chainstate),
             followers.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
@@ -482,9 +427,9 @@ impl NodeState {
                 Arc::clone(&block_body_store),
                 Arc::clone(&blocks),
                 Arc::clone(&transactions),
-                apply_handles.prune_authority(),
+                chainstate.prune_authority(),
                 Arc::clone(&durable_tip_height),
-                Arc::clone(&retention),
+                chainstate.retention_handle(),
             )?)
         } else {
             None
@@ -497,17 +442,11 @@ impl NodeState {
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
-        let data_dir = config.data_dir.clone();
         Ok(Self {
-            durable_tip_height,
             config,
-            data_dir,
             #[cfg(test)]
             resume_source,
             storage,
-            block_body_store,
-            utxo,
-            coin_stats,
             derived_index_runtime,
             derived_index_spawn,
             derived_index_worker: None,
@@ -519,10 +458,6 @@ impl NodeState {
             mempool,
             mempool_gateway,
             mining_generation,
-            chain_tip,
-            applied_tip,
-            chain_tx_count: Arc::clone(&chain_tx_count),
-            block_tree,
             blocks,
             transactions,
             network,
@@ -534,8 +469,7 @@ impl NodeState {
             inbound_blocks_tx,
             inbound_tx_tx,
             inbound_tx_rx,
-            chain_events: Arc::clone(&chain_events),
-            apply_handles,
+            chainstate,
             followers,
             sync,
             recovery_reporter,

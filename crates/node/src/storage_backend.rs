@@ -127,23 +127,55 @@ fn unsupported(namespace: &str, backend: StorageBackend) -> StorageError {
 #[cfg(test)]
 mod tests {
     const RUNTIME_CONSUMERS: &[(&str, &str)] = &[
-        ("checkpoint.rs", include_str!("checkpoint.rs")),
-        (
-            "checkpoint_headers.rs",
-            include_str!("checkpoint_headers.rs"),
-        ),
-        (
-            "checkpoint_publisher.rs",
-            include_str!("checkpoint_publisher.rs"),
-        ),
         ("state.rs", include_str!("state.rs")),
-        ("state_events.rs", include_str!("state_events.rs")),
-        ("state_maintenance.rs", include_str!("state_maintenance.rs")),
         ("state_open.rs", include_str!("state_open.rs")),
         ("state_prune.rs", include_str!("state_prune.rs")),
-        ("state_restore.rs", include_str!("state_restore.rs")),
         ("state_storage.rs", include_str!("state_storage.rs")),
         ("storage_footprint.rs", include_str!("storage_footprint.rs")),
+        (
+            "chainstate/lib.rs",
+            include_str!("../../chainstate/src/lib.rs"),
+        ),
+        (
+            "chainstate/connect.rs",
+            include_str!("../../chainstate/src/connect.rs"),
+        ),
+        (
+            "chainstate/disconnect.rs",
+            include_str!("../../chainstate/src/disconnect.rs"),
+        ),
+        (
+            "chainstate/durable.rs",
+            include_str!("../../chainstate/src/durable.rs"),
+        ),
+        (
+            "chainstate/checkpoint.rs",
+            include_str!("../../chainstate/src/checkpoint.rs"),
+        ),
+        (
+            "chainstate/checkpoint_headers.rs",
+            include_str!("../../chainstate/src/checkpoint_headers.rs"),
+        ),
+        (
+            "chainstate/checkpoint_publisher.rs",
+            include_str!("../../chainstate/src/checkpoint_publisher.rs"),
+        ),
+        (
+            "chainstate/journal.rs",
+            include_str!("../../chainstate/src/journal.rs"),
+        ),
+        (
+            "chainstate/maintenance.rs",
+            include_str!("../../chainstate/src/maintenance.rs"),
+        ),
+        (
+            "chainstate/recovery.rs",
+            include_str!("../../chainstate/src/recovery.rs"),
+        ),
+        (
+            "chainstate/reorg.rs",
+            include_str!("../../chainstate/src/reorg.rs"),
+        ),
         (
             "index/runtime.rs",
             include_str!("../../index/src/runtime.rs"),
@@ -169,9 +201,6 @@ mod tests {
         "open_redb_tx_index_store",
     ];
 
-    // ARCH-03 in docs/contracts/architecture.md makes storage_backend.rs the
-    // sole owner of concrete backend construction. These consumers must only
-    // request capabilities from that owner, never open a backend themselves.
     #[test]
     fn runtime_backend_construction_has_one_owner() {
         for (name, source) in RUNTIME_CONSUMERS {

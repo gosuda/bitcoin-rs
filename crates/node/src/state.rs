@@ -4,14 +4,16 @@
 //! `NodeState`. Construction, recovery, storage, events, and pruning retain
 //! separate private implementations.
 
-use crate::ApplyError;
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
-use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chainstate::ApplyError;
+use bitcoin_rs_chainstate::events::ChainEventPublisher;
+#[cfg(test)]
+pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
 use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
@@ -25,41 +27,39 @@ use bitcoin_rs_rpc::context::NetworkState;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
-use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
-pub use events::ChainEventHint;
-pub use events::ChainEventPublisher;
-pub use events::ChainSnapshot;
-pub use events::HintKind;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 pub use prune::NodePruneService;
-#[cfg(test)]
-pub(crate) use restore::ResumeSource;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use storage::NodeStorage;
 use storage::StoredBlockBodySource;
 
-#[path = "state_events.rs"]
-mod events;
-#[path = "state_maintenance.rs"]
-pub(crate) mod maintenance;
 #[path = "state_open.rs"]
 mod open;
 #[path = "state_prune.rs"]
 mod prune;
-#[path = "state_restore.rs"]
-mod restore;
 #[path = "state_storage.rs"]
 mod storage;
+
+struct IndexChainCursorSource(Arc<ChainEventPublisher>);
+
+impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
+    fn cursor(&self) -> bitcoin_rs_index::reconcile::ConsumerCursor {
+        let snapshot = self.0.snapshot();
+        bitcoin_rs_index::reconcile::ConsumerCursor {
+            epoch: snapshot.epoch,
+            sequence: snapshot.sequence,
+            height: snapshot.tip_height,
+            hash: snapshot.tip_hash,
+        }
+    }
+}
 
 // One active generation of outbound requests is enough to keep the drain fed;
 // extra backlog is overload and must fail fast at producers.
@@ -85,19 +85,10 @@ pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
 /// Aggregate handle to a running node.
 pub struct NodeState {
-    /// Height the last clean checkpoint would restore to, 0 when none exists.
-    ///
-    /// Published by `write_clean_checkpoint` and read by the pruner, which must
-    /// not delete an undo record a crash-restore would still need.
-    durable_tip_height: Arc<AtomicU32>,
     config: NodeConfig,
-    data_dir: PathBuf,
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
-    block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
-    utxo: Arc<UtxoSet>,
-    coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
     derived_index_runtime: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>>,
     derived_index_spawn: Option<TxIndexSpawn>,
     derived_index_worker: Option<bitcoin_rs_index::runtime::DerivedIndexWorker>,
@@ -114,12 +105,8 @@ pub struct NodeState {
     mempool_gateway: Arc<bitcoin_rs_mempool::MempoolGateway>,
     /// Template-coordinator wake for authoritative mutations and tip moves.
     mining_generation: Arc<crate::mining::MiningGenerationSignal>,
-    chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Cumulative transaction count through `applied_tip`, `0` when unknown.
     /// Shared with `Chainstate`, which maintains it, and with the RPC context.
-    chain_tx_count: Arc<AtomicU64>,
-    block_tree: Arc<RwLock<bitcoin_rs_chain::BlockTree>>,
     blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
     network: Arc<RwLock<NetworkState>>,
@@ -133,8 +120,7 @@ pub struct NodeState {
     inbound_blocks_tx: Sender<bitcoin_rs_p2p::InboundBlock>,
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
-    chain_events: Arc<ChainEventPublisher>,
-    apply_handles: crate::apply::Chainstate,
+    chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
@@ -144,7 +130,7 @@ pub struct NodeState {
 
 impl Drop for NodeState {
     fn drop(&mut self) {
-        let _admission = self.apply_handles.admission.close();
+        let _admission = self.chainstate.close();
         // Safety net: if `bounded_index_shutdown` was not called (e.g. in
         // tests that drop `NodeState` directly), request shutdown and join
         // any worker not already taken by `bounded_index_shutdown`.
@@ -167,7 +153,7 @@ impl NodeState {
     /// Returns the node's data directory.
     #[must_use]
     pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+        &self.config.data_dir
     }
 
     #[cfg(test)]
@@ -179,18 +165,6 @@ impl NodeState {
     #[must_use]
     pub const fn storage_kind(&self) -> &'static str {
         self.storage.kind()
-    }
-
-    /// Returns the shared UTXO set handle.
-    #[must_use]
-    pub fn utxo(&self) -> Arc<UtxoSet> {
-        Arc::clone(&self.utxo)
-    }
-
-    /// Returns the shared coinstats listener handle.
-    #[must_use]
-    pub fn coin_stats(&self) -> Arc<bitcoin_rs_utxo::stats::CoinStatsListener> {
-        Arc::clone(&self.coin_stats)
     }
 
     /// Returns the manual pruning service when pruning is enabled.
@@ -229,35 +203,6 @@ impl NodeState {
         Arc::clone(&self.mining_generation)
     }
 
-    /// Returns the shared best-chain tip handle.
-    #[must_use]
-    pub fn chain_tip(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
-        Arc::clone(&self.chain_tip)
-    }
-
-    /// Returns the shared best-applied-block tip handle.
-    ///
-    /// This handle lags `chain_tip()` when headers are accepted ahead of blocks
-    /// being downloaded and applied. RPC consumers showing user-visible state
-    /// (best block hash, block count) read this; sync-progress consumers read
-    /// `chain_tip()`.
-    #[must_use]
-    pub fn applied_tip(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
-        Arc::clone(&self.applied_tip)
-    }
-
-    /// Returns the shared block-tree handle.
-    #[must_use]
-    pub fn block_tree(&self) -> Arc<RwLock<bitcoin_rs_chain::BlockTree>> {
-        Arc::clone(&self.block_tree)
-    }
-
-    /// Shares the cumulative chain transaction-count handle with the RPC layer.
-    #[must_use]
-    pub fn chain_tx_count_handle(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.chain_tx_count)
-    }
-
     /// Returns the shared block-records handle exposed to RPC handlers.
     #[must_use]
     pub fn blocks(&self) -> Arc<RwLock<BlockLog>> {
@@ -265,11 +210,12 @@ impl NodeState {
     }
 
     /// Returns a durable block body reader for metadata-only block records.
-    #[must_use]
-    pub(crate) fn block_body_source(&self) -> Arc<dyn BlockBodySource> {
-        Arc::new(StoredBlockBodySource::new(Arc::clone(
-            &self.block_body_store,
-        )))
+    pub(crate) fn block_body_source(&self) -> Result<Arc<dyn BlockBodySource>> {
+        let store = self
+            .chainstate
+            .block_body_store_handle()
+            .context("running node has no block body store")?;
+        Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
     /// Returns the shared txid → transaction map exposed to RPC handlers.
@@ -343,13 +289,6 @@ impl NodeState {
         Arc::clone(&self.inbound_tx_rx)
     }
 
-    /// Returns the current coherent chain snapshot: the applied tip stamped
-    /// with the process epoch and the commit sequence.
-    #[must_use]
-    pub fn active_chain_snapshot(&self) -> ChainSnapshot {
-        self.chain_events.snapshot()
-    }
-
     /// Returns the shared block-download orchestrator.
     #[must_use]
     pub fn sync(&self) -> Arc<crate::BlockSync> {
@@ -359,13 +298,13 @@ impl NodeState {
     /// Returns the process-wide shutdown signal shared by all runtime workers.
     #[must_use]
     pub fn shutdown(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.apply_handles.shutdown)
+        self.chainstate.shutdown_handle()
     }
 
     /// Clone of the chainstate facade used by apply, reorg, and sync.
     #[must_use]
-    pub fn chainstate(&self) -> crate::apply::Chainstate {
-        self.apply_handles.clone()
+    pub fn chainstate(&self) -> Arc<bitcoin_rs_chainstate::Chainstate> {
+        Arc::clone(&self.chainstate)
     }
 
     /// Clone of the derived-consumer set used after committed transitions.
@@ -378,7 +317,7 @@ impl NodeState {
     ///
     /// Holds the chain transition through follower dispatch (`ARCH-07`).
     pub fn apply_block(&self, block: &Block) -> core::result::Result<TipSnapshot, ApplyError> {
-        let outcome = self.followers.apply_connect(&self.apply_handles, block)?;
+        let outcome = self.followers.apply_connect(&self.chainstate, block)?;
         Ok(outcome.tip)
     }
 
@@ -389,53 +328,18 @@ impl NodeState {
     /// keeps `CheckpointWrite`, `CheckpointError`, and the checkpoint module
     /// internal to the crate.
     pub fn publish_checkpoint(&self) -> Result<u64> {
-        match self.write_clean_checkpoint()? {
-            crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
-                bail!("checkpoint refused: no applied tip to publish")
-            }
-            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(generation),
-        }
+        self.chainstate
+            .publish_checkpoint()?
+            .context("checkpoint refused: no applied tip to publish")
     }
 
-    /// Creates a [`crate::checkpoint::publisher::CheckpointPublisher`] from
-    /// this state's shared handles, for the maintenance and publication
-    /// paths that move it into a background thread.
-    ///
-    /// The publisher owns its own `Dir` handle (reopened from the data-dir
-    /// path) and cloned `Arc`s, so it can be moved into a background thread
-    /// without borrowing from `self`.
-    pub(crate) fn checkpoint_publisher(
-        &self,
-    ) -> core::result::Result<
-        crate::checkpoint::publisher::CheckpointPublisher,
-        crate::checkpoint::CheckpointError,
-    > {
-        Ok(crate::checkpoint::publisher::CheckpointPublisher {
-            admission: Arc::clone(&self.apply_handles.admission),
-            undo_store: Arc::clone(&self.apply_handles.undo_store),
-            durable_head: Arc::clone(&self.apply_handles.durable_head),
-            block_body_store: Arc::clone(&self.block_body_store),
-            applied_tip: Arc::clone(&self.applied_tip),
-            checkpoint_data_dir: bitcoin_rs_storage::checkpoint::fs::open_data_dir(&self.data_dir)
-                .map_err(crate::checkpoint::CheckpointError::Io)?,
-            network: self.config.network,
-            genesis_hash: self.config.network.genesis_block_hash(),
-            block_tree: Arc::clone(&self.block_tree),
-            utxo: Arc::clone(&self.utxo),
-            coin_stats: Arc::clone(&self.coin_stats),
-            chain_tx_count: Arc::clone(&self.chain_tx_count),
-            journal: self.apply_handles.journal.clone(),
-            data_dir: self.data_dir.clone(),
-            chain_events: Arc::clone(&self.chain_events),
-            durable_tip_height: Arc::clone(&self.durable_tip_height),
-        })
+    pub(crate) fn write_clean_checkpoint(&self) -> anyhow::Result<Option<u64>> {
+        Ok(self.chainstate.publish_checkpoint()?)
     }
 
-    pub(crate) fn write_clean_checkpoint(
-        &self,
-    ) -> core::result::Result<crate::checkpoint::CheckpointWrite, crate::checkpoint::CheckpointError>
-    {
-        self.checkpoint_publisher()?.publish()
+    /// Starts chainstate journal and retention maintenance.
+    pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
+        self.chainstate.start_maintenance()
     }
 
     /// Returns the node-owned complete transaction-index query adapter.
@@ -498,14 +402,16 @@ impl NodeState {
             spawn.spec,
             Arc::clone(lifecycle),
             spawn.generation,
-            Arc::clone(&self.applied_tip),
-            Arc::clone(&self.block_tree),
-            Some(Arc::clone(&self.block_body_store)),
+            self.chainstate.applied_tip_handle(),
+            self.chainstate.block_tree_handle(),
+            self.chainstate.block_body_store_handle(),
             spawn.block_source,
             Some(spawn.body_source),
-            self.chain_events.clone(),
+            Arc::new(IndexChainCursorSource(
+                self.chainstate.chain_events_handle(),
+            )),
             spawn.recovery_reporter,
-            Arc::clone(&self.apply_handles.shutdown),
+            self.chainstate.shutdown_handle(),
             spawn.wake_rx,
         )
         .context("spawn txindex worker")?;

@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Result, bail, ensure};
+use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::{
     IndexOverrides, MiningOverrides, NetworkSelection, ObservabilityOverrides, P2pOverrides,
-    RpcOverrides, ScriptIndexMode, StorageOverrides, UserConfig, ValidationMode,
-    ValidationOverrides,
+    RpcOverrides, ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;

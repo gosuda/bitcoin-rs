@@ -19,7 +19,12 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
         Some(consensus_bytes(&block).len())
     );
     assert_eq!(
-        state.block_body_store.load_block_body(0, hash)?.as_deref(),
+        state
+            .chainstate()
+            .block_body_store()
+            .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
+            .load_block_body(0, hash)?
+            .as_deref(),
         Some(consensus_bytes(&block).as_slice())
     );
     Ok(())
@@ -50,80 +55,18 @@ fn apply_block_with_serialized_persists_same_body_as_apply_block() -> anyhow::Re
         .apply_block_with_serialized(&block, serialized)?;
 
     let body_a = state_a
-        .block_body_store
+        .chainstate()
+        .block_body_store()
+        .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
         .load_block_body(0, hash)?
         .ok_or_else(|| anyhow::anyhow!("apply_block body missing"))?;
     let body_b = state_b
-        .block_body_store
+        .chainstate()
+        .block_body_store()
+        .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
         .load_block_body(0, hash)?
         .ok_or_else(|| anyhow::anyhow!("apply_block_with_serialized body missing"))?;
     assert_eq!(body_a, body_b);
-    Ok(())
-}
-
-#[test]
-fn manual_prune_removes_pruned_block_transactions_from_cache() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = dir.path().join("node");
-    config.p2p.listen.clear();
-    config.storage.prune_target_mb = 1;
-    let state = NodeState::open(config, None)?;
-    publish_applied_tip_height(&state, 11 + CORE_REORG_SAFETY_MARGIN);
-
-    let pruned_block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
-    let pruned_hash = Hash256::from_le_bytes(pruned_block.block_hash().as_bytes());
-    state
-        .block_body_store
-        .persist_block_body(10, pruned_hash, &consensus_bytes(&pruned_block))?;
-    state
-        .chainstate()
-        .undo_store
-        .persist_undo(10, pruned_hash, b"undo-body")?;
-    state
-        .blocks
-        .write()
-        .push(BlockRecord::from_block(10, &pruned_block));
-
-    let pruned_tx = pruned_block.txs[0].clone();
-    let pruned_txid = pruned_tx.txid();
-    let unrelated_tx = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(0),
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-    };
-    let unrelated_txid = unrelated_tx.txid();
-
-    {
-        let mut transactions = state.transactions.write();
-        transactions.insert(pruned_txid, pruned_tx);
-        transactions.insert(unrelated_txid, unrelated_tx);
-    }
-
-    let Some(service) = state.prune_service() else {
-        anyhow::bail!("prune service should exist when prune_target_mb > 0");
-    };
-    // Pruning cannot evict cached transactions while their block still lies
-    // above the durable checkpoint's reorg-retention floor (ARCH-08).
-    service
-        .prune_to_height(11)
-        .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
-    assert!(state.transactions.read().contains_key(&pruned_txid));
-    assert!(state.transactions.read().contains_key(&unrelated_txid));
-
-    // The synthetic applied-tip fixture must also publish durability before
-    // any block below the requested height becomes eligible for pruning.
-    state
-        .durable_tip_height
-        .store(11 + CORE_REORG_SAFETY_MARGIN, Ordering::Release);
-    service
-        .prune_to_height(11)
-        .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
-
-    let transactions = state.transactions.read();
-    assert!(!transactions.contains_key(&pruned_txid));
-    assert!(transactions.contains_key(&unrelated_txid));
     Ok(())
 }
 
@@ -143,7 +86,8 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
     };
 
     let handles = state.chainstate();
-    let transition = handles.chain_transition.lock();
+    let barrier = handles.transition_barrier();
+    let transition = barrier.lock();
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
     let (done_while_locked, result) = std::thread::scope(|scope| -> anyhow::Result<_> {
@@ -205,7 +149,7 @@ fn prune_refuses_after_apply_admission_closes() -> anyhow::Result<()> {
         anyhow::bail!("prune service should exist when prune_target_mb > 0");
     };
 
-    state.apply_handles.admission.close_permanently();
+    state.chainstate().fail_closed_for_recovery();
     let result = service.prune_to_height(11);
 
     assert!(

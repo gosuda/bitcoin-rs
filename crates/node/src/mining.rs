@@ -3,11 +3,7 @@
 //! Header admission and proposal/submission projection over the authoritative
 //! chainstate. Candidate lifecycle lives in `bitcoin_rs_mining`.
 
-use crate::ApplyError;
-use crate::apply::Chainstate;
-use crate::apply::prepare::bytes_are_block;
 use crate::chain_effects::ChainFollowers;
-use crate::checkpoint::hex_encode;
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
@@ -17,6 +13,9 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::accept_headers;
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::signalling_deployments;
+use bitcoin_rs_chainstate::ApplyError;
+use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_chainstate::bytes_are_block;
 use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mining::AppliedTipSource;
@@ -55,10 +54,7 @@ use std::sync::atomic::Ordering;
 
 /// Production mining coordinator owned by the node process.
 pub struct MiningCoordinator {
-    network: Network,
-    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    block_tree: Arc<RwLock<BlockTree>>,
-    apply_handles: Chainstate,
+    chainstate: Arc<Chainstate>,
     followers: ChainFollowers,
     shutdown: Arc<AtomicBool>,
     service: MiningService,
@@ -68,15 +64,15 @@ impl MiningCoordinator {
     /// Builds a coordinator over the shared applied-chain and mempool handles.
     #[must_use]
     pub fn new(
-        network: Network,
-        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-        block_tree: Arc<RwLock<BlockTree>>,
         mempool: Arc<RwLock<Mempool>>,
-        apply_handles: Chainstate,
+        chainstate: Arc<Chainstate>,
         followers: ChainFollowers,
         coinbase_script: Vec<u8>,
-        shutdown: Arc<AtomicBool>,
     ) -> Self {
+        let network = chainstate.network();
+        let applied_tip = chainstate.applied_tip_handle();
+        let block_tree = chainstate.block_tree_handle();
+        let shutdown = chainstate.shutdown_handle();
         let service = MiningService::new(
             network,
             Arc::new(AppliedTipAdapter {
@@ -91,10 +87,7 @@ impl MiningCoordinator {
             Arc::clone(&shutdown),
         );
         Self {
-            network,
-            applied_tip,
-            block_tree,
-            apply_handles,
+            chainstate,
             followers,
             shutdown,
             service,
@@ -114,7 +107,7 @@ impl MiningCoordinator {
         if let Some(known) = self.known_block_result(block.block_hash().into()) {
             return Ok(known);
         }
-        match self.apply_handles.validate_block(block) {
+        match self.chainstate.validate_block(block) {
             Ok(()) => Ok(BlockValidationResult::Accepted),
             Err(error) => map_apply_error(error),
         }
@@ -127,14 +120,15 @@ impl MiningCoordinator {
     /// tree entry, including a header-only `Active` tip, is still
     /// inconclusive — `NodeStatus::Active` is the header chain, not scripts.
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
-        let tree = self.block_tree.read();
+        let tree = self.chainstate.block_tree().read();
         let node_id = tree.lookup(block_hash)?;
         let node = tree.node(node_id).ok()?;
         if node.status == NodeStatus::Invalid {
             return Some(BlockValidationResult::DuplicateInvalid);
         }
         let on_applied = self
-            .applied_tip
+            .chainstate
+            .applied_tip()
             .load_full()
             .is_some_and(|tip| tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id));
         if on_applied || node.chain_tx_count != 0 {
@@ -146,7 +140,7 @@ impl MiningCoordinator {
     /// Core `submitblock` fills the coinbase reserved nonce when the block
     /// already has a BIP141 commitment but no coinbase witness. Proposal skips this.
     fn fill_uncommitted_witness(&self, block: &mut Block) -> bool {
-        let tree = self.block_tree.read();
+        let tree = self.chainstate.block_tree().read();
         let Some(prev_id) = tree.lookup(block.header.prev_blockhash.into()) else {
             return false;
         };
@@ -154,7 +148,7 @@ impl MiningCoordinator {
             return false;
         };
         let height = prev.height.saturating_add(1);
-        let segwit_active = self.network.is_segwit_active(height);
+        let segwit_active = self.chainstate.network().is_segwit_active(height);
         drop(tree);
         let witness_len = block
             .txs
@@ -178,7 +172,7 @@ impl MiningCoordinator {
         let block_hash: Hash256 = block.block_hash().into();
         // Duplicate classification and apply observe the same serialized chain state.
         // Reserve a generation only after ruling out an already accepted body.
-        let lock = match self.apply_handles.lock_transition() {
+        let lock = match self.chainstate.lock_transition() {
             Ok(lock) => lock,
             Err(error) => return map_apply_error(error),
         };
@@ -193,31 +187,36 @@ impl MiningCoordinator {
             return Ok(BlockValidationResult::Duplicate);
         }
 
-        let transition = match self.apply_handles.begin_transition_locked(lock) {
-            Ok(transition) => transition,
+        let mempool_change = match self.followers.begin_mempool_change() {
+            Ok(change) => change,
             Err(error) => return map_apply_error(error),
         };
+        let transition = lock.into_transition();
         let connect = match serialized {
             Some(raw) => transition.connect_serialized(block, raw),
             None => transition.connect(block),
         };
         match connect {
             Ok(outcome) => {
-                self.followers.connected(block, &outcome);
+                self.followers.committed_connect(block, &outcome);
                 let tip = outcome.tip;
-                let Some(visible) = self.applied_tip.load_full() else {
-                    self.apply_handles.fail_closed_for_recovery();
+                let Some(visible) = self.chainstate.applied_tip().load_full() else {
+                    self.chainstate.fail_closed_for_recovery();
                     return Err(MiningControlError::Failed(CompactString::from(
                         "applied tip missing after accepted submission",
                     )));
                 };
                 if visible.hash != tip.hash {
-                    self.apply_handles.fail_closed_for_recovery();
+                    self.chainstate.fail_closed_for_recovery();
                     return Err(MiningControlError::Failed(CompactString::from(
                         "applied tip was not published before submit_block returned",
                     )));
                 }
-                if let Err(error) = transition.finish() {
+                if let Err(error) = crate::chain_effects::ChainFollowers::finish_transition(
+                    &self.chainstate,
+                    transition,
+                    mempool_change,
+                ) {
                     return Err(MiningControlError::Failed(CompactString::from(
                         error.to_string(),
                     )));
@@ -225,11 +224,16 @@ impl MiningCoordinator {
                 Ok(BlockValidationResult::Accepted)
             }
             Err(error) => {
-                if crate::apply::window::classify_apply_error(&error)
-                    == crate::apply::WindowApplyDisposition::Fatal
+                if bitcoin_rs_chainstate::classify_apply_error(&error)
+                    == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
                 {
-                    self.apply_handles.fail_closed_for_recovery();
-                } else if let Err(finish_error) = transition.finish() {
+                } else if let Err(finish_error) =
+                    crate::chain_effects::ChainFollowers::finish_transition(
+                        &self.chainstate,
+                        transition,
+                        mempool_change,
+                    )
+                {
                     return Err(MiningControlError::Failed(CompactString::from(
                         finish_error.to_string(),
                     )));
@@ -347,15 +351,15 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
-        let tip = self.applied_tip.load_full();
+        let tip = self.chainstate.applied_tip().load_full();
         let network_hashes_per_second = {
-            let tree = self.block_tree.read();
+            let tree = self.chainstate.block_tree().read();
             tip.as_ref().map_or(0.0, |tip| {
                 bitcoin_rs_mining::estimate_network_hashps(
                     &tree,
                     Some(tip.tip_id),
                     120,
-                    self.network,
+                    self.chainstate.network(),
                 )
             })
         };
@@ -365,9 +369,15 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
-        let tree = self.block_tree.read();
-        let tip = self.applied_tip.load_full();
-        bitcoin_rs_mining::network_hash_ps(&tree, tip.as_deref(), lookup, height, self.network)
+        let tree = self.chainstate.block_tree().read();
+        let tip = self.chainstate.applied_tip().load_full();
+        bitcoin_rs_mining::network_hash_ps(
+            &tree,
+            tip.as_deref(),
+            lookup,
+            height,
+            self.chainstate.network(),
+        )
     }
 
     fn submit_block(&self, mut block: Block) -> Result<BlockValidationResult, MiningControlError> {
@@ -396,10 +406,10 @@ impl MiningControl for MiningCoordinator {
 
     /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
-        let _transition = self.apply_handles.lock_transition().map_err(|error| {
+        let _transition = self.chainstate.lock_transition().map_err(|error| {
             MiningControlError::Unavailable(CompactString::from(error.to_string()))
         })?;
-        let mut tree = self.block_tree.write();
+        let mut tree = self.chainstate.block_tree().write();
         // Preserve accept_headers' idempotent duplicate path, including genesis.
         if tree.lookup(header.compute_hash().into()).is_none() {
             let parent = tree.lookup(header.prev_blockhash.into()).ok_or_else(|| {
@@ -419,7 +429,7 @@ impl MiningControl for MiningCoordinator {
         accept_headers(
             &mut tree,
             std::slice::from_ref(&header),
-            self.network,
+            self.chainstate.network(),
             current_unix_seconds(),
         )
         .map(|_| ())
@@ -469,7 +479,7 @@ impl MiningControl for MiningCoordinator {
             let mut block = candidate.into_unsolved_block();
             if matches!(request.selection, GenerateSelection::Ordered(_)) {
                 // CONTRACT: docs/contracts/external-api.md#API-30
-                self.apply_handles
+                self.chainstate
                     .validate_block(&block)
                     .map_err(|error| test_block_validity_error(&error))?;
             }
@@ -495,7 +505,7 @@ impl MiningControl for MiningCoordinator {
             }
             generated.push(GeneratedBlock {
                 hash: block.block_hash(),
-                hex: hex_encode(&consensus_bytes(&block)),
+                hex: bitcoin_rs_storage::checkpoint::hex_encode(&consensus_bytes(&block)),
             });
         }
         Ok(generated)
@@ -507,6 +517,14 @@ fn map_apply_error(error: ApplyError) -> Result<BlockValidationResult, MiningCon
         ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
             Ok(BlockValidationResult::Inconclusive)
         }
+        ApplyError::ConcurrentChainChange => Err(MiningControlError::Unavailable(
+            CompactString::from(error.to_string()),
+        )),
+        // The generation counter cannot recover in-process; only a restart
+        // reserves another coordinated mutation.
+        ApplyError::ChainChangeGenerationOverflow => Err(MiningControlError::Failed(
+            CompactString::from(error.to_string()),
+        )),
         other => bip22_reject_reason(&other).map(BlockValidationResult::Rejected),
     }
 }
@@ -539,8 +557,8 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             CompactString::from("bad-txns-inputs-missingorspent")
         }
         ApplyError::Consensus(_)
-            if crate::apply::window::classify_apply_error(error)
-                == crate::apply::WindowApplyDisposition::Operational =>
+            if bitcoin_rs_chainstate::classify_apply_error(error)
+                == bitcoin_rs_chainstate::WindowApplyDisposition::Operational =>
         {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),
@@ -557,12 +575,15 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::TimestampTooEarly { .. }
             | ChainError::TimestampTooFarAhead { .. }),
         ) => bitcoin_rs_mining::chain_reject_reason(chain),
-        ApplyError::Shutdown | ApplyError::JournalBackpressure(_) => {
+        ApplyError::Shutdown
+        | ApplyError::JournalBackpressure(_)
+        | ApplyError::ConcurrentChainChange => {
             return Err(MiningControlError::Unavailable(CompactString::from(
                 error.to_string(),
             )));
         }
         ApplyError::HeightOverflow(_)
+        | ApplyError::ChainChangeGenerationOverflow
         | ApplyError::Chain(
             ChainError::NodeIdOverflow { .. }
             | ChainError::UnknownNode { .. }
@@ -579,6 +600,7 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DisconnectBodyMismatch { .. }
         | ApplyError::DurableHeadCommit(_)
         | ApplyError::DurableHeadLineage { .. }
+        | ApplyError::DisconnectOffDurableHead { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. }
         | ApplyError::CoinStatsRewind(_) => {
             return Err(MiningControlError::Failed(CompactString::from(

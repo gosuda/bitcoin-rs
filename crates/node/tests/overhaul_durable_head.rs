@@ -328,7 +328,8 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     // connect continues the commit-id sequence.
     let resumed = NodeState::open(test_config(data_dir.clone()), None)?;
     let restored = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| anyhow::anyhow!("restart must restore an applied tip"))?;
     assert_eq!(restored.hash, tip.hash);

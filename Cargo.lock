@@ -229,6 +229,7 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "bitcoin",
+ "bitcoin-rs-chainstate",
  "bitcoin-rs-node",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
@@ -259,6 +260,34 @@ dependencies = [
  "slab",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "bitcoin-rs-chainstate"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "bitcoin-rs-chain",
+ "bitcoin-rs-consensus",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-script",
+ "bitcoin-rs-storage",
+ "bitcoin-rs-utxo",
+ "bytes",
+ "cap-fs-ext",
+ "cap-std",
+ "hashbrown 0.17.1",
+ "metrics",
+ "parking_lot",
+ "quanta",
+ "rayon",
+ "rustix",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -356,6 +385,7 @@ dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
+ "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",
@@ -439,6 +469,7 @@ dependencies = [
  "arc-swap",
  "bitcoin",
  "bitcoin-rs-chain",
+ "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",

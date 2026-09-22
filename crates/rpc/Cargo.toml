@@ -44,6 +44,7 @@ zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
 toml.workspace = true
+bitcoin-rs-chainstate.workspace = true
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true

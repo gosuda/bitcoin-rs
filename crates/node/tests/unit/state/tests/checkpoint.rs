@@ -18,7 +18,10 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
     let expected = {
         let state = NodeState::open(config.clone(), None)?;
         assert_eq!(
-            state.chain_tx_count_handle().load(Ordering::Relaxed),
+            state
+                .chainstate()
+                .chain_tx_count_handle()
+                .load(Ordering::Relaxed),
             0,
             "a node that has applied nothing cannot know the count"
         );
@@ -26,13 +29,13 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let genesis_tx_count = u64::try_from(genesis.txs.len())?;
         let _tip = state.apply_block(&genesis)?;
-        let counted = state.chain_tx_count_handle().load(Ordering::Relaxed);
+        let counted = state
+            .chainstate()
+            .chain_tx_count_handle()
+            .load(Ordering::Relaxed);
         assert_eq!(counted, genesis_tx_count, "genesis establishes the count");
 
-        assert!(matches!(
-            state.write_clean_checkpoint()?,
-            crate::checkpoint::CheckpointWrite::Published { .. }
-        ));
+        assert!(state.write_clean_checkpoint()?.is_some());
         counted
     };
 
@@ -47,7 +50,10 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         "the record log really does start empty; the count cannot come from it"
     );
     assert_eq!(
-        resumed.chain_tx_count_handle().load(Ordering::Relaxed),
+        resumed
+            .chainstate()
+            .chain_tx_count_handle()
+            .load(Ordering::Relaxed),
         expected
     );
     Ok(())
@@ -68,12 +74,12 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     let genesis_tip = state.apply_block(&genesis)?;
-    let expected_utxo_hash = state.utxo().with_stable_view(stable_hash)?;
-    let expected_stats = state.coin_stats().snapshot();
-    assert!(matches!(
-        state.write_clean_checkpoint()?,
-        crate::checkpoint::CheckpointWrite::Published { .. }
-    ));
+    let expected_utxo_hash = state
+        .chainstate()
+        .utxo_handle()
+        .with_stable_view(stable_hash)?;
+    let expected_stats = state.chainstate().coin_stats_handle().snapshot();
+    assert!(state.write_clean_checkpoint()?.is_some());
     drop(state);
 
     let mut reopen_config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -82,20 +88,31 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
     let resumed = NodeState::open(reopen_config.clone(), None)?;
     assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
     let applied = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("checkpoint did not publish applied tip"))?;
     assert_eq!(applied.height, genesis_tip.height);
     assert_eq!(applied.hash, genesis_tip.hash);
     assert_eq!(
-        resumed.chain_tip().load_full().as_deref(),
+        resumed
+            .chainstate()
+            .chain_tip_handle()
+            .load_full()
+            .as_deref(),
         Some(applied.as_ref())
     );
     assert_eq!(
-        resumed.utxo().with_stable_view(stable_hash)?,
+        resumed
+            .chainstate()
+            .utxo_handle()
+            .with_stable_view(stable_hash)?,
         expected_utxo_hash
     );
-    assert_eq!(resumed.coin_stats().snapshot(), expected_stats);
+    assert_eq!(
+        resumed.chainstate().coin_stats_handle().snapshot(),
+        expected_stats
+    );
     assert!(resumed.blocks().read().is_empty());
     assert!(resumed.transactions().read().is_empty());
     assert!(resumed.mempool().read().is_empty());
@@ -107,10 +124,13 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
         next_tip.hash.to_le_bytes(),
         next.block_hash().0.to_le_bytes()
     );
-    let listener_after_apply = resumed.coin_stats().snapshot();
-    let mut rescanned = resumed.utxo().with_stable_view(|view| {
-        bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
-    })?;
+    let listener_after_apply = resumed.chainstate().coin_stats_handle().snapshot();
+    let mut rescanned = resumed
+        .chainstate()
+        .utxo_handle()
+        .with_stable_view(|view| {
+            bitcoin_rs_utxo::stats::scan_coin_stats(view, next_tip.height, true)
+        })?;
     rescanned.tx_count = listener_after_apply.tx_count;
     assert_eq!(
         listener_after_apply.total_amount, rescanned.total_amount,
@@ -133,7 +153,10 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
 
     let resumed_again = NodeState::open(reopen_config, None)?;
     assert_eq!(resumed_again.resume_source(), ResumeSource::Checkpoint);
-    assert_eq!(resumed_again.coin_stats().snapshot(), rescanned);
+    assert_eq!(
+        resumed_again.chainstate().coin_stats_handle().snapshot(),
+        rescanned
+    );
     Ok(())
 }
 
@@ -177,7 +200,7 @@ fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()>
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
-    let before = state.coin_stats().snapshot();
+    let before = state.chainstate().coin_stats_handle().snapshot();
     state.write_clean_checkpoint()?;
     drop(state);
 
@@ -185,12 +208,15 @@ fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()>
     reopen_config.data_dir = data_dir;
     reopen_config.p2p.listen.clear();
     let resumed = NodeState::open(reopen_config, None)?;
-    assert_eq!(resumed.coin_stats().snapshot(), before);
+    assert_eq!(resumed.chainstate().coin_stats_handle().snapshot(), before);
     resumed.apply_block(&mined_regtest_child(genesis.block_hash())?)?;
-    let rolling = resumed.coin_stats().snapshot();
-    let mut scanned = resumed.utxo().with_stable_view(|view| {
-        bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
-    })?;
+    let rolling = resumed.chainstate().coin_stats_handle().snapshot();
+    let mut scanned = resumed
+        .chainstate()
+        .utxo_handle()
+        .with_stable_view(|view| {
+            bitcoin_rs_utxo::stats::scan_coin_stats(view, rolling.height, true)
+        })?;
     scanned.tx_count = rolling.tx_count;
     // The listener is attached only after checkpoint/journal restoration,
     // then tracks subsequent live UTXO mutations without double-counting
@@ -229,22 +255,41 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
     assert_eq!(base.resume_source(), ResumeSource::Checkpoint);
     let child = mined_regtest_child(genesis.block_hash())?;
     let expected_tip = base.apply_block(&child)?;
-    let expected_utxo = base.utxo().with_stable_view(stable_hash)?;
-    let expected_stats = base.coin_stats().snapshot();
-    let expected_tx_count = base.chain_tx_count_handle().load(Ordering::Relaxed);
+    let expected_utxo = base
+        .chainstate()
+        .utxo_handle()
+        .with_stable_view(stable_hash)?;
+    let expected_stats = base.chainstate().coin_stats_handle().snapshot();
+    let expected_tx_count = base
+        .chainstate()
+        .chain_tx_count_handle()
+        .load(Ordering::Relaxed);
     drop(base);
 
     let resumed = NodeState::open(config, None)?;
     assert_eq!(resumed.resume_source(), ResumeSource::Journal);
     let resumed_tip = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
-    assert_eq!(resumed.utxo().with_stable_view(stable_hash)?, expected_utxo);
-    assert_eq!(resumed.coin_stats().snapshot(), expected_stats);
     assert_eq!(
-        resumed.chain_tx_count_handle().load(Ordering::Relaxed),
+        resumed
+            .chainstate()
+            .utxo_handle()
+            .with_stable_view(stable_hash)?,
+        expected_utxo
+    );
+    assert_eq!(
+        resumed.chainstate().coin_stats_handle().snapshot(),
+        expected_stats
+    );
+    assert_eq!(
+        resumed
+            .chainstate()
+            .chain_tx_count_handle()
+            .load(Ordering::Relaxed),
         expected_tx_count
     );
     Ok(())
@@ -287,7 +332,8 @@ fn publish_checkpoint_returns_generation_and_reopens() -> anyhow::Result<()> {
     let resumed = NodeState::open(config, None)?;
     assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
     let applied = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("checkpoint did not publish applied tip"))?;
     assert_eq!(applied.height, tip.height);

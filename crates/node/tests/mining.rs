@@ -46,14 +46,10 @@ fn open_regtest() -> anyhow::Result<NodeState> {
 fn coordinator(state: &NodeState) -> MiningCoordinator {
     // Empty template coinbase script matches transport-only GBT wiring.
     MiningCoordinator::new(
-        state.config().network,
-        state.applied_tip(),
-        state.block_tree(),
         state.mempool(),
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
-        state.shutdown(),
     )
 }
 
@@ -530,7 +526,8 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     mining.publish_generation();
     let before = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing before proposal"));
     let before_seq = state.mempool().read().sequence_number();
@@ -550,7 +547,8 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
     }
 
     let after = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after proposal"));
     assert_eq!(before.hash, after.hash);
@@ -566,7 +564,8 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     let mining = coordinator(&state);
     mining.publish_generation();
     let before = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing before proposal"));
     let before_seq = state.mempool().read().sequence_number();
@@ -588,7 +587,8 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     }
 
     let after = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after proposal"));
     assert_eq!(before.hash, after.hash);
@@ -753,7 +753,8 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
     let result = mining.submit_block(child)?;
     assert_eq!(result, BlockValidationResult::Accepted);
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after submit"));
     assert_eq!(tip.hash, Hash256::from(child_hash));
@@ -817,7 +818,8 @@ fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
     let block_hash = block.block_hash();
     assert_eq!(mining.submit_block(block)?, BlockValidationResult::Accepted);
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after submit"));
     assert_eq!(tip.hash, Hash256::from(block_hash));
@@ -867,11 +869,17 @@ fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> 
     mining.submit_header(child.header)?;
     mining.submit_header(child.header)?;
     assert!(
-        state.block_tree().read().lookup(child_hash).is_some(),
+        state
+            .chainstate()
+            .block_tree_handle()
+            .read()
+            .lookup(child_hash)
+            .is_some(),
         "submitted header must be in the tree"
     );
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing"));
     assert_eq!(
@@ -910,7 +918,7 @@ fn submit_header_rejects_an_invalid_parent_without_inserting_child() -> anyhow::
     let genesis = Network::Regtest.genesis_block();
     let invalid = mined_child(genesis.block_hash())?;
     let child = mined_child(invalid.block_hash())?;
-    let tree = state.block_tree();
+    let tree = state.chainstate().block_tree_handle();
     {
         let mut tree = tree.write();
         let genesis_id = tree
@@ -1022,16 +1030,12 @@ fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
 fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = state.shutdown();
     let mining = Arc::new(MiningCoordinator::new(
-        state.config().network,
-        state.applied_tip(),
-        state.block_tree(),
         state.mempool(),
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
-        Arc::clone(&shutdown),
     ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -1056,16 +1060,12 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
 fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = state.shutdown();
     let mining = Arc::new(MiningCoordinator::new(
-        state.config().network,
-        state.applied_tip(),
-        state.block_tree(),
         state.mempool(),
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
-        Arc::clone(&shutdown),
     ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -1210,7 +1210,7 @@ fn concurrent_duplicate_submissions_leave_admission_open() -> anyhow::Result<()>
     assert!(results.contains(&BlockValidationResult::Accepted));
     assert!(results.contains(&BlockValidationResult::Duplicate));
     assert!(state.mempool_gateway().stable_generation().is_some());
-    assert_eq!(state.active_chain_snapshot().tip_height, 1);
+    assert_eq!(state.chainstate().chain_snapshot().tip_height, 1);
     let mut next = mined_child_labeled(child.block_hash(), 2)?;
     next.header.time = child.header.time + 1;
     mine_block_to_regtest_target(&mut next)?;
@@ -1273,13 +1273,21 @@ fn duplicate_solved_submission_is_idempotent() -> anyhow::Result<()> {
         mining.submit_block(child.clone())?,
         BlockValidationResult::Accepted
     );
-    let height = state.applied_tip().load_full().map_or(0, |tip| tip.height);
+    let height = state
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .map_or(0, |tip| tip.height);
     assert_eq!(
         mining.submit_block(child)?,
         BlockValidationResult::Duplicate
     );
     assert_eq!(
-        state.applied_tip().load_full().map_or(0, |tip| tip.height),
+        state
+            .chainstate()
+            .applied_tip_handle()
+            .load_full()
+            .map_or(0, |tip| tip.height),
         height,
         "duplicate solved submission must not reapply"
     );
@@ -1392,7 +1400,7 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     let genesis_hash = genesis.block_hash();
     let invalid = mined_child_labeled(genesis.block_hash(), 2)?;
     {
-        let tree = state.block_tree();
+        let tree = state.chainstate().block_tree_handle();
         let genesis_id = tree
             .read()
             .lookup(Hash256::from(genesis_hash))
@@ -1421,7 +1429,7 @@ fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result
     let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_bytes());
     let side = mined_child_labeled(genesis.block_hash(), 3)?;
     {
-        let tree = state.block_tree();
+        let tree = state.chainstate().block_tree_handle();
         let genesis_id = tree
             .read()
             .lookup(genesis_hash)
@@ -1435,6 +1443,7 @@ fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result
     );
     Ok(())
 }
+
 fn disconnect_applied(state: &NodeState, block: &Block) -> anyhow::Result<()> {
     state
         .chain_followers()
@@ -1459,7 +1468,7 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Resu
     );
     disconnect_applied(&state, &child)?;
     let chain_tx_count = {
-        let tree = state.block_tree();
+        let tree = state.chainstate().block_tree_handle();
         tree.read()
             .node_by_hash(child_hash)
             .ok_or_else(|| anyhow::anyhow!("disconnected child missing from tree"))?
@@ -1470,7 +1479,8 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Resu
         "disconnect must keep the scripts-valid chain_tx_count"
     );
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after disconnect"));
     assert_eq!(tip.hash, Hash256::from(genesis.block_hash()));
@@ -1501,7 +1511,8 @@ fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result
         BlockValidationResult::Duplicate
     );
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after duplicate submit"));
     assert_eq!(tip.hash, genesis_hash);
@@ -1520,7 +1531,7 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> anyhow::Result<(
     let child = mined_child(genesis.block_hash())?;
     assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
     {
-        let tree = state.block_tree();
+        let tree = state.chainstate().block_tree_handle();
         let mut tree = tree.write();
         let genesis_id = tree
             .lookup(genesis_hash)
@@ -1550,7 +1561,8 @@ fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
     mining.submit_header(child.header)?;
     assert_eq!(mining.submit_block(child)?, BlockValidationResult::Accepted);
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after submit"));
     assert_eq!(tip.hash, child_hash);
@@ -1670,14 +1682,10 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
     // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
     // before returning on a mempool-only change. The fix returns immediately.
     let mining = Arc::new(MiningCoordinator::new(
-        state.config().network,
-        state.applied_tip(),
-        state.block_tree(),
         state.mempool(),
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
-        state.shutdown(),
     ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -1741,7 +1749,8 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
     })?;
     assert_eq!(hashes.len(), 2);
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after generate"));
     assert_eq!(tip.height, 2);
@@ -1847,7 +1856,8 @@ fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     mining.publish_generation();
     let before = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing before generate"));
     let generated = mining.generate(GenerateRequest {
@@ -1860,7 +1870,8 @@ fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
     assert_eq!(generated.len(), 1);
     assert!(!generated[0].hex.is_empty());
     let after = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .unwrap_or_else(|| panic!("applied tip missing after generate"));
     assert_eq!(after.height, before.height);

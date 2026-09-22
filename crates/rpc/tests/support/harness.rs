@@ -75,7 +75,8 @@ impl NodeHarness {
         let applied = current_tip(&self.state)?;
         let headers = self
             .state
-            .chain_tip()
+            .chainstate()
+            .chain_tip_handle()
             .load_full()
             .map_or(applied.height, |header| header.height);
         Ok(LiveChain {
@@ -104,15 +105,17 @@ impl ServerHarness {
     /// Propagates bind failures.
     pub(crate) fn start(node: &NodeHarness) -> GateResult<Self> {
         let state = &node.state;
+        let chainstate = state.chainstate();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
-                chain_tip: state.chain_tip(),
-                applied_tip: state.applied_tip(),
+                chain_tip: chainstate.chain_tip_handle(),
+                applied_tip: chainstate.applied_tip_handle(),
+                chain_tx_count: chainstate.chain_tx_count_handle(),
                 blocks: state.blocks(),
                 transactions: state.transactions(),
-                utxo: state.utxo(),
-                coin_stats: state.coin_stats(),
-                block_tree: state.block_tree(),
+                utxo: chainstate.utxo_handle(),
+                coin_stats: chainstate.coin_stats_handle(),
+                block_tree: chainstate.block_tree_handle(),
                 chain_network: state.config().network,
             },
             mempool: MempoolHandles {

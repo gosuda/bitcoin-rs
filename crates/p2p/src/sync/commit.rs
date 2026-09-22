@@ -170,13 +170,7 @@ impl BlockSync {
                         // from the window's pending/received maps; the
                         // expected-apply cache is dropped below because the
                         // round failed.
-                        {
-                            let mut body_sync = self.body_sync.lock();
-                            for invalid_hash in &error.invalidated {
-                                body_sync.stager.retire_applied(invalid_hash);
-                                body_sync.window.drop_for_retry(invalid_hash);
-                            }
-                        }
+                        self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
                     }

@@ -2,10 +2,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
+use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::{
     ChainstateJournalOverrides, IndexOverrides, MiningOverrides, NetworkSelection,
     NotificationConfig, ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode,
-    StorageOverrides, UserConfig, ValidationMode, ValidationOverrides,
+    StorageOverrides, UserConfig, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use serde::Deserialize;

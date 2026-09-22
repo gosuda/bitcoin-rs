@@ -240,6 +240,8 @@ pub struct ChainHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best fully-applied block tip.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Cumulative transaction count for the fully-applied chain.
+    pub chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
     /// Applied block metadata log.
     pub blocks: Arc<RwLock<BlockLog>>,
     /// Transactions retained for direct RPC lookup.
@@ -603,6 +605,7 @@ impl Context {
                 ChainHandles {
                     chain_tip,
                     applied_tip,
+                    chain_tx_count,
                     blocks,
                     transactions,
                     utxo,
@@ -632,7 +635,7 @@ impl Context {
             chain_tip,
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
+            chain_tx_count,
             left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             mempool,
             blocks,
@@ -723,6 +726,10 @@ impl Context {
         read()
     }
 
+    fn applied_progress_snapshot(&self) -> (Option<Arc<TipSnapshot>>, Option<u64>) {
+        self.with_stable_chainstate(|| (self.applied_tip.load_full(), self.chain_tx_count()))
+    }
+
     /// Attaches the live ZMQ publisher used by `getzmqnotifications`.
     #[must_use]
     pub fn with_zmq_publisher(mut self, publisher: Arc<dyn crate::zmq::ZmqPublisher>) -> Self {
@@ -761,7 +768,7 @@ impl Context {
     /// RPC JSON. Chainwork is the applied tip's when one exists.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
-        let applied_tip = self.applied_tip.load_full();
+        let (applied_tip, chain_tx_count) = self.applied_progress_snapshot();
         let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
         let headers = self.height();
         let (difficulty, time, median_time) =
@@ -779,7 +786,7 @@ impl Context {
         // Core's estimate when the verified-transaction count is known, the
         // height ratio when it is not; `None` is a pre-tracking datadir and
         // means unknown, never zero.
-        let verification_progress = self.chain_tx_count().map_or_else(
+        let verification_progress = chain_tx_count.map_or_else(
             || {
                 if headers > 0 {
                     (f64::from(applied) / f64::from(headers)).min(1.0)
@@ -1380,11 +1387,12 @@ mod tests {
     }
     #[test]
     #[allow(clippy::arc_with_non_send_sync)]
-    fn from_handles_shares_tip_handles_with_caller() {
+    fn from_handles_shares_chain_handles_with_caller() {
         use alloc::sync::Arc;
 
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
+        let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(1));
         let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
         let coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
@@ -1397,6 +1405,7 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: Arc::clone(&chain_tip),
                 applied_tip: Arc::clone(&applied_tip),
+                chain_tx_count: Arc::clone(&chain_tx_count),
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 transactions: Arc::new(RwLock::new(HashMap::new())),
                 utxo: Arc::clone(&utxo),
@@ -1434,6 +1443,9 @@ mod tests {
             Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
             "applied_tip must be shared with caller"
         );
+        assert_eq!(ctx.chain_tx_count(), Some(1));
+        chain_tx_count.store(42, core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(ctx.chain_tx_count(), Some(42));
         assert!(
             Arc::ptr_eq(&ctx.utxo, &utxo),
             "utxo must be shared with caller"
@@ -1458,6 +1470,58 @@ mod tests {
             Arc::ptr_eq(&ctx.added_nodes, &added_nodes),
             "added_nodes must be shared with caller"
         );
+    }
+
+    #[test]
+    fn progress_snapshot_waits_for_a_complete_chain_transition() -> anyhow::Result<()> {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let chain_tx_count = Arc::new(AtomicU64::new(1));
+        let barrier = Arc::new(Mutex::new(()));
+        let ctx = Arc::new(
+            Context::new()
+                .with_chain_tx_count(Arc::clone(&chain_tx_count))
+                .with_chain_transition(Arc::clone(&barrier)),
+        );
+        let genesis = Network::Regtest.genesis_block();
+        let tip = {
+            let mut tree = ctx.block_tree.write();
+            let tip_id = tree.insert_node(
+                None,
+                genesis.header,
+                bitcoin_rs_chain::node::NodeStatus::Active,
+            )?;
+            let node = tree.node(tip_id)?;
+            TipSnapshot {
+                tip_id,
+                height: node.height,
+                chainwork: node.chainwork,
+                hash: node.hash,
+            }
+        };
+
+        let transition = barrier.lock();
+        ctx.applied_tip.store(Some(Arc::new(tip.clone())));
+        let worker = Arc::clone(&ctx);
+        let (tx, rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let _ = tx.send(worker.applied_progress_snapshot());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "RPC progress must not observe a half-published transition"
+        );
+        chain_tx_count.store(42, Ordering::Release);
+        drop(transition);
+
+        let (published_tip, published_count) = rx.recv_timeout(Duration::from_secs(1))?;
+        join.join()
+            .map_err(|_| anyhow::anyhow!("snapshot worker panicked"))?;
+        assert_eq!(published_tip.as_deref(), Some(&tip));
+        assert_eq!(published_count, Some(42));
+        Ok(())
     }
 
     #[test]

@@ -1,6 +1,9 @@
 // CONTRACT: `docs/contracts/mempool-mutations.md#MPL-04` owns peer admission,
 // orphan/reject lifecycle, connection attribution, generation fencing, and retries.
 use super::*;
+use arc_swap::ArcSwapOption;
+use bitcoin_rs_chain::BlockTree;
+use bitcoin_rs_chainstate::events::ChainEventPublisher;
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
@@ -8,6 +11,7 @@ use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
 use bitcoin_rs_primitives::{
     Amount, Block, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::AtomicUsize;
@@ -144,16 +148,24 @@ fn make_consumer(gateway: &Arc<MempoolGateway>, mining: Arc<RecordingMining>) ->
     ));
     utxo.commit_block(&changes, &Hash256::from_le_bytes(&[0xBB; 32]))
         .expect("utxo commit must succeed");
+    let chainstate = Arc::new(bitcoin_rs_chainstate::Chainstate::new(
+        Network::Regtest,
+        Arc::new(ArcSwapOption::empty()),
+        Arc::new(ArcSwapOption::empty()),
+        Arc::new(RwLock::new(BlockTree::new())),
+        utxo,
+        Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_utxo::stats::CoinStats::default(),
+        )),
+        Arc::new(ChainEventPublisher::detached(0)),
+    ));
     let (relay, _relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
     TxIngressConsumer {
-        utxo,
+        chainstate,
         peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
         mempool_gateway: Arc::clone(gateway),
         mining_control: mining,
         relay,
-        applied_tip: Arc::new(ArcSwapOption::empty()),
-        block_tree: Arc::new(RwLock::new(BlockTree::new())),
-        network: Network::Regtest,
     }
 }
 

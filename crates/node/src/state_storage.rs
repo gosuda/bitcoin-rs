@@ -1,8 +1,5 @@
 //! Chainstate storage composition; backend-neutral capabilities share one store.
 
-#[cfg(test)]
-use bitcoin_rs_storage::{ColumnFamily, WriteBatch};
-
 use super::prune::NodePruneService;
 use crate::NodeConfig;
 use anyhow::Context as _;
@@ -24,12 +21,10 @@ use std::time::Duration;
 
 pub(super) struct NodeStorage {
     backend: StorageBackend,
-    undo_store: Arc<dyn crate::apply::UndoStore>,
+    undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
-    #[cfg(test)]
-    test_store: Arc<dyn TestStoreAccess>,
 }
 
 struct ChainstateComposer {
@@ -53,7 +48,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
         });
         Ok(NodeStorage {
             backend: self.backend,
-            undo_store: Arc::new(crate::apply::KvUndoStore::new(Arc::clone(&store))),
+            undo_store: Arc::new(bitcoin_rs_chainstate::KvUndoStore::new(Arc::clone(&store))),
             durable_head: Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
                 &store,
             ))),
@@ -62,8 +57,6 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
                 self.block_files,
             )),
             deferred,
-            #[cfg(test)]
-            test_store: Arc::new(TestStore { store }),
         })
     }
 }
@@ -108,29 +101,13 @@ impl NodeStorage {
     /// Mandatory rather than optional: without undo records the node cannot
     /// disconnect a block, so it could advance its tip into a chain it is
     /// unable to leave.
-    pub(super) fn undo_store(&self) -> Arc<dyn crate::apply::UndoStore> {
+    pub(super) fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
         Arc::clone(&self.undo_store)
     }
 
     pub(super) fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
         Arc::clone(&self.durable_head)
     }
-
-    #[cfg(test)]
-    pub(super) fn write_test_rows(&self, rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)]) -> Result<()> {
-        self.test_store.write_rows(rows).map_err(anyhow::Error::new)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct JournalBootstrap {
-    pub(super) open_existing: bool,
-    pub(super) base_generation: u64,
-    pub(super) height: u32,
-    pub(super) block_hash: [u8; 32],
-    pub(super) prev_hash: [u8; 32],
-    pub(super) chain_tx_count: u64,
-    pub(super) config: crate::config::ChainstateJournalConfig,
 }
 
 /// Capabilities whose inputs become available after the chainstate store is
@@ -143,14 +120,14 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
         block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-        authority: crate::apply::PruneAuthority,
+        authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>>;
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
-        bootstrap: JournalBootstrap,
+        bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
     ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>;
 }
 
@@ -165,7 +142,7 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
         block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-        authority: crate::apply::PruneAuthority,
+        authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>> {
@@ -184,43 +161,16 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
-        bootstrap: JournalBootstrap,
+        bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
     ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter> {
         build_journal_writer(dir, Arc::clone(&self.store), bootstrap)
-    }
-}
-
-#[cfg(test)]
-trait TestStoreAccess: Send + Sync {
-    fn write_rows(
-        &self,
-        rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)],
-    ) -> core::result::Result<(), bitcoin_rs_storage::StorageError>;
-}
-
-#[cfg(test)]
-struct TestStore<S> {
-    store: Arc<S>,
-}
-
-#[cfg(test)]
-impl<S: KvStore> TestStoreAccess for TestStore<S> {
-    fn write_rows(
-        &self,
-        rows: &[(ColumnFamily, Vec<u8>, Vec<u8>)],
-    ) -> core::result::Result<(), bitcoin_rs_storage::StorageError> {
-        let mut batch = self.store.new_batch();
-        for (cf, key, value) in rows {
-            batch.put(*cf, key, value);
-        }
-        self.store.write(batch)
     }
 }
 
 fn build_journal_writer<S: KvStore + 'static>(
     dir: cap_std::fs::Dir,
     store: Arc<S>,
-    bootstrap: JournalBootstrap,
+    bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
 ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter> {
     let mut writer = if bootstrap.open_existing {
         bitcoin_rs_storage::chainstate_journal::JournalWriter::open(dir, store)?

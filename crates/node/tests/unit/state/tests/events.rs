@@ -8,12 +8,17 @@ fn process_epoch_is_strictly_monotonic_across_restart() -> anyhow::Result<()> {
     config.p2p.listen.clear();
 
     let first = NodeState::open(config.clone(), None)?
-        .active_chain_snapshot()
+        .chainstate()
+        .chain_snapshot()
         .epoch;
     let second = NodeState::open(config.clone(), None)?
-        .active_chain_snapshot()
+        .chainstate()
+        .chain_snapshot()
         .epoch;
-    let third = NodeState::open(config, None)?.active_chain_snapshot().epoch;
+    let third = NodeState::open(config, None)?
+        .chainstate()
+        .chain_snapshot()
+        .epoch;
     assert!(first > 0, "a fresh data dir allocates epoch 1, got {first}");
     assert!(
         second > first,
@@ -34,9 +39,9 @@ fn active_chain_snapshot_starts_at_genesis_on_fresh_node() -> anyhow::Result<()>
     config.p2p.listen.clear();
 
     let state = NodeState::open(config.clone(), None)?;
-    let epoch = state.chain_events.epoch();
+    let epoch = state.chainstate().chain_events_handle().epoch();
     assert_eq!(
-        state.active_chain_snapshot(),
+        state.chainstate().chain_snapshot(),
         ChainSnapshot {
             epoch,
             sequence: 0,
@@ -59,16 +64,13 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> anyhow::Resu
         let state = NodeState::open(config.clone(), None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let tip = state.apply_block(&genesis)?;
-        assert!(matches!(
-            state.write_clean_checkpoint()?,
-            crate::checkpoint::CheckpointWrite::Published { .. }
-        ));
-        (tip, state.active_chain_snapshot().epoch)
+        assert!(state.write_clean_checkpoint()?.is_some());
+        (tip, state.chainstate().chain_snapshot().epoch)
     };
 
     let resumed = NodeState::open(config, None)?;
     assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
-    let snapshot = resumed.active_chain_snapshot();
+    let snapshot = resumed.chainstate().chain_snapshot();
     assert_eq!(snapshot.tip_hash, tip.hash);
     assert_eq!(snapshot.tip_height, tip.height);
     assert_eq!(

@@ -6,12 +6,12 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
     use bitcoin_rs_primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
+    let applied_tip = handles.applied_tip_handle();
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
 
     let fork_root_hash = main[99].block_hash();
     let mut fork_parent = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
@@ -21,7 +21,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let mut block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = handles.block_tree.write().insert_node(
+        fork_parent = handles.block_tree().write().insert_node(
             Some(fork_parent),
             block.header,
             NodeStatus::HeaderValid,
@@ -54,7 +54,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
                 ref disposition,
                 ref invalidated,
                 ..
-            }) if *disposition == crate::apply::WindowApplyDisposition::BodyMutated
+            }) if *disposition == bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated
                 && invalidated.is_empty()
         ),
         "the mutated second body must fail as BodyMutated after one committed connect, \
@@ -82,7 +82,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
     );
     assert_ne!(
         handles
-            .block_tree
+            .block_tree()
             .read()
             .node_by_hash(failed)
             .map(|node| node.status),
@@ -96,24 +96,24 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::error::Error>> {
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
+    let applied_tip = handles.applied_tip_handle();
 
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
     let fork_root_hash = main[99].block_hash();
     let fork_root_id = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
     let invalid = mined_block_with_prev_hash(fork_root_hash, 101, Vec::new());
-    let invalid_id = handles.block_tree.write().insert_node(
+    let invalid_id = handles.block_tree().write().insert_node(
         Some(fork_root_id),
         invalid.header,
         NodeStatus::HeaderValid,
     )?;
     let descendant =
         mined_block_with_prev_hash(invalid.block_hash(), 102, vec![coinbase_transaction(102)]);
-    let descendant_id = handles.block_tree.write().insert_node(
+    let descendant_id = handles.block_tree().write().insert_node(
         Some(invalid_id),
         descendant.header,
         NodeStatus::HeaderValid,
@@ -136,7 +136,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
         matches!(
             &outcome,
             Err(crate::reorg::ReorgError::ConnectFailed {
-                disposition: crate::apply::WindowApplyDisposition::Permanent,
+                disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Permanent,
                 invalidated,
                 ..
             }) if invalidated.len() == 2
@@ -146,7 +146,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
     );
 
     {
-        let tree = handles.block_tree.read();
+        let tree = handles.block_tree().read();
         assert_eq!(tree.node(invalid_id)?.status, NodeStatus::Invalid);
         assert_eq!(tree.node(descendant_id)?.status, NodeStatus::Invalid);
         assert_eq!(
@@ -155,118 +155,12 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
             "the valid main branch must win after subtree invalidation"
         );
     }
-    // MPL-04: rejecting the invalid branch must still allow the selected
-    // valid main branch to reconnect through ordinary forward apply.
-    assert!(handles.mempool_gateway.stable_generation().is_some());
+    // Rejecting the invalid branch must still allow the selected valid main
+    // branch to reconnect through ordinary forward apply.
     handles.apply_block(&main[100])?;
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.hash),
         Some(main_tip_hash)
-    );
-    assert!(handles.mempool_gateway.stable_generation().is_some());
-    Ok(())
-}
-
-/// Generation settlement: MPL-04 in docs/contracts/mempool-mutations.md.
-#[test]
-fn operational_reorg_failure_preserves_branch_and_retries_without_restart()
--> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin_rs_primitives::Script;
-    let (mut handles, main, mut bodies) = matured_chain(101)?;
-    let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
-    let fail_once_store = Arc::new(FailOnceBodyStore::new(101));
-    handles.block_body_store = Some(fail_once_store.clone());
-
-    let fork_root_hash = main[99].block_hash();
-    let fork_root_id = handles
-        .block_tree
-        .read()
-        .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
-        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
-    let mut fork_coinbase = coinbase_transaction(101);
-    fork_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
-    let fork = mined_block_with_prev_hash(fork_root_hash, 101, vec![fork_coinbase]);
-    let fork_id = handles.block_tree.write().insert_node(
-        Some(fork_root_id),
-        fork.header,
-        NodeStatus::HeaderValid,
-    )?;
-    let descendant =
-        mined_block_with_prev_hash(fork.block_hash(), 102, vec![coinbase_transaction(102)]);
-    let descendant_id = handles.block_tree.write().insert_node(
-        Some(fork_id),
-        descendant.header,
-        NodeStatus::HeaderValid,
-    )?;
-    let fork_hash = Hash256::from_le_bytes(fork.block_hash().as_bytes());
-    let descendant_hash = Hash256::from_le_bytes(descendant.block_hash().as_bytes());
-    for block in [&fork, &descendant] {
-        bodies.insert(
-            Hash256::from_le_bytes(block.block_hash().as_bytes()),
-            ((*block).clone(), bytes::Bytes::from(consensus_bytes(block))),
-        );
-    }
-
-    let outcome = crate::reorg::switch_to_branch(
-        &handles,
-        &followers,
-        descendant_id,
-        |hash| bodies.get(&hash).cloned(),
-        |_| {},
-    );
-    assert!(
-        matches!(
-            &outcome,
-            Err(crate::reorg::ReorgError::ConnectFailed {
-                disconnected: 1,
-                connected: 0,
-                source,
-                disposition: crate::apply::WindowApplyDisposition::Operational,
-                ..
-            }) if matches!(source.as_ref(), crate::ApplyError::BlockBodyPersistence(_))
-        ),
-        "the body-store refusal must follow a committed disconnect, got {outcome:?}"
-    );
-    assert_eq!(
-        applied_tip.load_full().map(|tip| tip.hash),
-        Some(Hash256::from_le_bytes(fork_root_hash.as_bytes())),
-        "a refused pre-UTXO connect leaves the fork point as the committed tip"
-    );
-
-    {
-        let tree = handles.block_tree.read();
-        assert_ne!(tree.node(fork_id)?.status, NodeStatus::Invalid);
-        assert_ne!(tree.node(descendant_id)?.status, NodeStatus::Invalid);
-        assert_eq!(tree.tip().map(|tip| tip.tip_id), Some(descendant_id));
-    }
-    assert!(
-        bodies.contains_key(&fork_hash) && bodies.contains_key(&descendant_hash),
-        "an operational refusal must not purge staged bodies"
-    );
-    // MPL-04: a known committed prefix must finish its generation, so a
-    // transient pre-UTXO refusal cannot wedge admission and later applies.
-    assert!(
-        handles.mempool_gateway.stable_generation().is_some(),
-        "admission must reopen after the clean connect refusal"
-    );
-
-    crate::reorg::switch_to_branch(
-        &handles,
-        &followers,
-        descendant_id,
-        |hash| bodies.get(&hash).cloned(),
-        |_| {},
-    )?;
-    assert_eq!(
-        applied_tip.load_full().map(|tip| tip.hash),
-        Some(descendant_hash),
-        "retrying the same reorg must reach the target without restarting"
-    );
-    assert!(handles.mempool_gateway.stable_generation().is_some());
-    assert!(
-        fail_once_store.persisted_height(101) && fail_once_store.persisted_height(102),
-        "the retried connect must persist both fork bodies"
     );
     Ok(())
 }
@@ -277,22 +171,22 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
+    let applied_tip = handles.applied_tip_handle();
     let applied_before = applied_tip
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-    let utxo_len_before = handles.utxo.len();
+    let utxo_len_before = handles.utxo().len();
 
     let fork_root_hash = main[99].block_hash();
     let fork_root_id = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
     let mut target_coinbase = coinbase_transaction(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
-    let target_id = handles.block_tree.write().insert_node(
+    let target_id = handles.block_tree().write().insert_node(
         Some(fork_root_id),
         target.header,
         NodeStatus::HeaderValid,
@@ -326,7 +220,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
         "a pre-mutation refusal must leave the applied tip untouched"
     );
     assert_eq!(
-        handles.utxo.len(),
+        handles.utxo().len(),
         utxo_len_before,
         "a pre-mutation refusal must leave the UTXO set untouched"
     );
@@ -339,22 +233,22 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
+    let applied_tip = handles.applied_tip_handle();
     let applied_before = applied_tip
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-    let utxo_len_before = handles.utxo.len();
+    let utxo_len_before = handles.utxo().len();
 
     let fork_root_hash = main[99].block_hash();
     let fork_root_id = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
     let mut target_coinbase = coinbase_transaction(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
-    let target_id = handles.block_tree.write().insert_node(
+    let target_id = handles.block_tree().write().insert_node(
         Some(fork_root_id),
         target.header,
         NodeStatus::HeaderValid,
@@ -389,7 +283,7 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
         "a pre-mutation refusal must leave the applied tip untouched"
     );
     assert_eq!(
-        handles.utxo.len(),
+        handles.utxo().len(),
         utxo_len_before,
         "a pre-mutation refusal must leave the UTXO set untouched"
     );

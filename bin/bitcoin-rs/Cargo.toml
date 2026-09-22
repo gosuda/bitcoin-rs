@@ -26,6 +26,7 @@ clap.workspace = true
 serde.workspace = true
 toml.workspace = true
 bitcoin-rs-node.workspace = true
+bitcoin-rs-chainstate.workspace = true
 bitcoin-rs-storage.workspace = true
 
 [dev-dependencies]

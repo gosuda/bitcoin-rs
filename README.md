@@ -92,7 +92,8 @@ risk of correlated implementation failures.
   transaction. `--features kernel` routes the same checks through
   `libbitcoinkernel` (Bitcoin Core's C++ engine) as an independent oracle.
 - Kernel feature: `--features kernel` enables `libbitcoinkernel`. The
-  `crates/consensus` and `crates/node` library crates still default to `kernel`;
+  `crates/consensus`, `crates/chainstate`, and `crates/node` library crates
+  default to `kernel`;
   the `bin/bitcoin-rs` binary defaults to `["fjall", "redb", "zmq"]` (no kernel)
   and does not link `libbitcoinkernel`. Issue #213 keeps that split until
   native wins the signed-spend and full-replay gates; see the
@@ -192,8 +193,8 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Setting | Default |
 |---|---|
 | Storage backend | `fjall` |
-| Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/node library default |
-| Kernel feature | Off in default binary build; on in `crates/consensus` and `crates/node` library defaults |
+| Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/chainstate/node library default |
+| Kernel feature | Off in default binary build; on in `crates/consensus`, `crates/chainstate`, and `crates/node` library defaults |
 | Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
 | Multi-peer download | On (8 outbound peers, 256-block window) |
 | Transaction index | Off |

@@ -212,6 +212,7 @@ struct FixtureConfig {
 
 struct QueryFixture {
     engine: DerivedIndexQueryEngine,
+    runtime: Arc<DerivedIndexRuntime>,
     body: Option<Arc<SingleBlockBody>>,
 }
 
@@ -316,7 +317,7 @@ impl QueryFixture {
             records.into_iter().collect::<crate::block_log::BlockLog>(),
         )));
         let engine = DerivedIndexQueryEngine::new(
-            runtime,
+            Arc::clone(&runtime),
             reader,
             block_source,
             tree,
@@ -328,7 +329,11 @@ impl QueryFixture {
                 enabled: IndexCapabilities::ALL,
             },
         );
-        Ok(Self { engine, body })
+        Ok(Self {
+            engine,
+            runtime,
+            body,
+        })
     }
 
     fn full_reads(&self) -> Result<usize, std::io::Error> {
@@ -337,6 +342,46 @@ impl QueryFixture {
             .map(|body| body.full_reads.load(Ordering::Relaxed))
             .ok_or_else(|| std::io::Error::other("body source"))
     }
+}
+
+#[test]
+fn failed_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans: Vec::new(),
+        aba_trigger: None,
+        watermark: None,
+    })?;
+    fixture.runtime.publish_failed("injected worker failure");
+
+    assert!(matches!(
+        fixture.engine.transaction(&txid),
+        Err(TxQueryError::Unavailable(reason)) if reason == "injected worker failure"
+    ));
+    Ok(())
+}
+
+#[test]
+fn stopped_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans: Vec::new(),
+        aba_trigger: None,
+        watermark: None,
+    })?;
+    fixture.runtime.request_shutdown();
+
+    assert!(matches!(
+        fixture.engine.transaction(&txid),
+        Err(TxQueryError::Unavailable(reason)) if reason == "txindex worker stopped"
+    ));
+    Ok(())
 }
 
 fn scan_response(

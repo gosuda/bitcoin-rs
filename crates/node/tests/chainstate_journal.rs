@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 
-use bitcoin_rs_node::{Network, NodeConfig, apply::error::ApplyError, state::NodeState};
+use bitcoin_rs_chainstate::ApplyError;
+use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
@@ -38,28 +39,45 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     // Publication must rebase the live writer in the same process.
     let child = mined_regtest_child(genesis.block_hash())?;
     let expected_tip = initial.apply_block(&child)?;
-    let expected_utxo = initial.utxo().with_stable_view(stable_utxo_hash)?;
-    let expected_stats = initial.coin_stats().snapshot();
-    let expected_tx_count = initial.chain_tx_count_handle().load(Ordering::Relaxed);
+    let expected_utxo = initial
+        .chainstate()
+        .utxo_handle()
+        .with_stable_view(stable_utxo_hash)?;
+    let expected_stats = initial.chainstate().coin_stats_handle().snapshot();
+    let expected_tx_count = initial
+        .chainstate()
+        .chain_tx_count_handle()
+        .load(Ordering::Relaxed);
     drop(initial);
 
     // No checkpoint was published for `child`: only the journal can recover it.
     let resumed = NodeState::open(config, None)?;
     let resumed_tip = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("journal replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
     assert_eq!(
-        resumed.utxo().with_stable_view(stable_utxo_hash)?,
+        resumed
+            .chainstate()
+            .utxo_handle()
+            .with_stable_view(stable_utxo_hash)?,
         expected_utxo
     );
     assert_eq!(
-        resumed.coin_stats().snapshot().to_bytes(),
+        resumed
+            .chainstate()
+            .coin_stats_handle()
+            .snapshot()
+            .to_bytes(),
         expected_stats.to_bytes()
     );
     assert_eq!(
-        resumed.chain_tx_count_handle().load(Ordering::Relaxed),
+        resumed
+            .chainstate()
+            .chain_tx_count_handle()
+            .load(Ordering::Relaxed),
         expected_tx_count
     );
     Ok(())
@@ -85,21 +103,31 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
     let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     state.apply_block(&block2)?;
     state.chainstate().disconnect_block(&block2)?;
-    let expected_utxo = state.utxo().with_stable_view(stable_utxo_hash)?;
-    let expected_stats = state.coin_stats().snapshot();
+    let expected_utxo = state
+        .chainstate()
+        .utxo_handle()
+        .with_stable_view(stable_utxo_hash)?;
+    let expected_stats = state.chainstate().coin_stats_handle().snapshot();
     drop(state);
 
     let resumed = NodeState::open(config.clone(), None)?;
     let resumed_tip = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("reorg replay did not publish a tip"))?;
     assert_eq!(resumed_tip.as_ref(), &tip1);
     assert_eq!(
-        resumed.utxo().with_stable_view(stable_utxo_hash)?,
+        resumed
+            .chainstate()
+            .utxo_handle()
+            .with_stable_view(stable_utxo_hash)?,
         expected_utxo
     );
-    assert_semantic_coin_stats_eq(&resumed.coin_stats().snapshot(), &expected_stats);
+    assert_semantic_coin_stats_eq(
+        &resumed.chainstate().coin_stats_handle().snapshot(),
+        &expected_stats,
+    );
 
     let mut replacement = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
     replacement.header.time = replacement.header.time.saturating_add(1);
@@ -120,7 +148,8 @@ fn disconnect_rewrites_durable_head_before_restart() -> Result<()> {
 
     let replaced = NodeState::open(config, None)?;
     let persisted_tip = replaced
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("replacement journal tip missing"))?;
     assert_eq!(persisted_tip.as_ref(), &replacement_tip);
@@ -138,7 +167,7 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
     let initial = NodeState::open(config.clone(), None)?;
-    initial.apply_block(&genesis)?;
+    let genesis_tip = initial.apply_block(&genesis)?;
     initial.apply_block(&block1)?;
     initial.publish_checkpoint()?;
     drop(initial);
@@ -148,25 +177,37 @@ fn disconnect_below_checkpoint_base_forces_full_validation() -> Result<()> {
     drop(state);
 
     let resumed = NodeState::open(config.clone(), None)?;
-    assert!(
-        resumed.applied_tip().load_full().is_none(),
-        "a checkpoint above the fork must not be trusted"
+    let resumed_tip = resumed
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("durable head replay did not publish a tip"))?;
+    assert_eq!(
+        resumed_tip.as_ref(),
+        &genesis_tip,
+        "a checkpoint above the fork must not be trusted; the node resumes on the durable head"
     );
     drop(resumed);
 
     let resumed_again = NodeState::open(config.clone(), None)?;
-    assert!(
-        resumed_again.applied_tip().load_full().is_none(),
+    let resumed_again_tip = resumed_again
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("durable head replay did not publish a tip"))?;
+    assert_eq!(
+        resumed_again_tip.as_ref(),
+        &genesis_tip,
         "full validation must remain sticky until a replacement checkpoint"
     );
-    resumed_again.apply_block(&genesis)?;
     let replacement_tip = resumed_again.apply_block(&block1)?;
     resumed_again.publish_checkpoint()?;
     drop(resumed_again);
 
     let recovered = NodeState::open(config, None)?;
     let recovered_tip = recovered
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("replacement checkpoint was ignored"))?;
     assert_eq!(recovered_tip.as_ref(), &replacement_tip);
@@ -199,7 +240,8 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
 
     let resumed = NodeState::open(config, None)?;
     let resumed_tip = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("idle journal record was not durable"))?;
     assert_eq!(resumed_tip.as_ref(), &expected_tip);
@@ -286,7 +328,8 @@ fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
         Err(ApplyError::JournalBackpressure(_))
     ));
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("genesis tip missing"))?;
     assert_eq!(tip.as_ref(), &genesis_tip);

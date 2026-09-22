@@ -4,17 +4,18 @@ The owner of which script engine the production path uses, and of the
 measured decision that is required to change it. A Rust constant is not promotion evidence.
 
 Owners:
-- `crates/consensus/Cargo.toml`, `crates/node/Cargo.toml`,
-  `bin/bitcoin-rs/Cargo.toml`
+- `crates/consensus/Cargo.toml`, `crates/chainstate/Cargo.toml`,
+  `crates/node/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
 - Decision evidence: `docs/benchmarks/native-validation-default.md`
 
 ## Clauses
 
 ### `VAL-01`: Library default stays on `kernel` until promotion
 
-- `bitcoin-rs-consensus` and `bitcoin-rs-node` default features include
-  `kernel` until the promotion evidence below is complete.
-- Promoting native changes those two manifests together, only after the
+- `bitcoin-rs-consensus`, `bitcoin-rs-chainstate`, and `bitcoin-rs-node`
+  default features include `kernel` until the promotion evidence below is
+  complete.
+- Promoting native changes those three manifests together, only after the
   measurement gates in
   [`docs/benchmarks/native-validation-default.md`](../benchmarks/native-validation-default.md)
   all pass: Core-vector parity, signed-spend **apply-path** native median
@@ -63,6 +64,7 @@ Owners:
 - `crates/consensus/tests/kernel_block_parity.rs`:
   `script_verdict_parity` (Taproot key-path differential),
   `differential_is_non_vacuous` (script-path non-vacuity).
-- Manifests: `crates/consensus/Cargo.toml` `default = ["kernel"]`,
+- Manifests: `crates/consensus/Cargo.toml` and
+  `crates/chainstate/Cargo.toml` `default = ["kernel"]`,
   `crates/node/Cargo.toml` `default = ["fjall", "kernel", "zmq"]`,
   `bin/bitcoin-rs/Cargo.toml` `default = ["fjall", "redb", "zmq"]`.

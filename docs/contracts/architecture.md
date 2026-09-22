@@ -13,7 +13,7 @@ Owners:
 | --- | --- | --- |
 | 4: Compose | `node`, `bitcoin-rs` | Runtime assembly and lifecycle |
 | 3: Surface | `rpc` | External protocol boundaries |
-| 2: Services | `chain`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
+| 2: Services | `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
 | 1: Storage | `storage` | Storage contracts and engine drivers |
 | 0: Core | `primitives`, `script`, `consensus` | Protocol types and validation, without storage or I/O |
 
@@ -36,9 +36,12 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     network, or filesystem I/O.
   - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
     batching primitives, and backend engine drivers.
-  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-utxo`,
+  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
     `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
     `bitcoin-rs-mining`. Domain services and capability runtimes.
+    `chainstate` is the authoritative applied-chain owner. It composes only
+    lower/same-layer protocol, chain, UTXO, and storage capabilities; it must
+    not depend on mempool, P2P, index, mining, RPC, node, or the binary.
     `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
     block index records, undo storage, and UTXO snapshots. `chain` also
     depends on `consensus` for BIP9 parameters and the BIP113 locktime
@@ -74,8 +77,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   confined to:
   1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
      backend selection to operators and packaging scripts.
-  2. Services-tier adapter crates (`bitcoin-rs-chain`, `bitcoin-rs-utxo`,
-     `bitcoin-rs-p2p`, `bitcoin-rs-index`) whose features exist solely so `-p`
+  2. Services-tier adapter crates (`bitcoin-rs-chain`, `bitcoin-rs-chainstate`,
+     `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-index`) whose features exist solely so `-p`
      package builds propagate backend selection into `bitcoin-rs-storage`.
   3. `bitcoin-rs-storage` itself, which owns the concrete backend engine
      dependencies and exposes them through the `KvStore` facade.
@@ -86,7 +89,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   counts as defining a backend feature and is forbidden.
 - `bitcoin-rs-node` and `bitcoin-rs` may forward backend selection only into
   engine-selecting crates (`bitcoin-rs-storage`, `bitcoin-rs-chain`,
-  `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-index`).
+  `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`, `bitcoin-rs-p2p`,
+  `bitcoin-rs-index`).
 - `fjall` is the default shipped product backend. `redb` and `rocksdb` are
   retained shipped alternatives and independent product-matrix comparisons.
   MDBX had only a diagnostic role and no current consumer; it is removed as a
@@ -150,7 +154,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   watch-only coinbase payout configuration (`MiningConfig::payout_script`), and
   process-level cache budgeting (`dbcache` distribution across chainstate and
   txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
-  TOML parsing. Applied-tip mutation is owned by the chainstate facade
+  TOML parsing. Applied-tip mutation, recovery, checkpoint publication,
+  retention, and branch switching are owned by `bitcoin-rs-chainstate`
   (`ARCH-07`), not by a public field bag of subsystem handles.
 - `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
   transport, mempool sequence projection, and live notifier enumeration.
@@ -178,15 +183,17 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 - Speculative or circular dependency edges that violate the one-way flow are
   rejected by automated gate enforcement in CI.
 
-### `ARCH-07`: Chainstate facade owns transition admission
+### `ARCH-07`: Chainstate owns authoritative applied-chain mutation
 
-- `bitcoin_rs_node::Chainstate` is the in-process owner of applied-tip
-  mutation. `NodeState`, `BlockSync`, mining, and RPC chain-control hold or
-  clone that facade; they do not assemble a transition from independent locks.
-- `Chainstate::begin_transition` is the only public constructor of a
-  `ChainTransition`. Reorg planning that must abort without mutating takes
-  `lock_transition` first and promotes it with `begin_transition_locked` only
-  after the authoritative plan matches the preloaded plan.
+- `bitcoin_rs_chainstate::Chainstate` is the in-process owner of applied-tip
+  mutation, recovery, branch switching, checkpoint publication, and retention.
+  `NodeState`, `BlockSync`, mining, and RPC chain-control hold or clone that
+  service; they do not assemble a transition from independent locks.
+- `Chainstate::begin_transition` and `TransitionLock::into_transition` are the
+  only constructors of a `ChainTransition`. Reorg planning that must abort
+  without mutating takes `lock_transition` first and promotes the lock with
+  `into_transition` only after the authoritative plan matches the preloaded
+  plan.
 - Snapshot reads (`Chainstate::snapshot`) copy the independently published
   header tip and a coherent applied-tip / chain-tx-count pair. They do not
   take the transition lock and cannot mutate chainstate. `ChainEventPublisher`
@@ -195,22 +202,27 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 - `Chainstate::validate_block` dry-runs the apply path's pre-write consensus
   gates under `lock_transition`. It does not take mempool generation and does
   not persist. BIP22 proposal omits proof-of-work; every other pre-write gate
-  is the same function commit runs. Owner: `crates/node/src/apply.rs`.
-- Authoritative apply still lives in `crates/node` because it composes chain,
-  consensus, utxo, and storage. `Chainstate` does not hold or import RPC,
-  ZMQ, TxIndex, mining, or P2P admission types. Apply publishes the tip and
+  is the same function commit runs. Owner: `crates/chainstate/src/lib.rs`.
+- Authoritative apply lives in `crates/chainstate`. The crate does not hold
+  or import mempool, RPC, ZMQ, index, mining, P2P, or node types. Apply publishes the tip and
   returns a `ConnectOutcome` or `DisconnectOutcome`. Capture flags
-  (`Chainstate::capturing`) are set at construction so apply can produce
+  are set at construction so apply can produce
   `rawtx` and canonical block bytes without holding the consumers.
-- The composition root (`NodeState`, `BlockSync`, reorg, mining) dispatches
-  `ChainFollowers` while the `ChainTransition` is still held, then calls
-  `finish`. Convenience methods that finish before returning
-  (`Chainstate::apply_block`, `disconnect_block`) do not dispatch followers.
+- Node owns cross-domain sequencing around a chain transition: it reserves the
+  mempool generation, dispatches `ChainFollowers`, then publishes the stable
+  mempool generation before the chain transition is dropped. Convenience
+  chainstate methods do not dispatch followers.
   RPC `BlockLog`, hash/raw ZMQ, TxIndex wake, sequence `C`/`D`, mining
-  generation, and admission run from that dispatch. Mempool eviction stays
-  inside apply. Consumer failure cannot invalidate chainstate. Issue #77
+  generation, admission, block-confirmation eviction, and reorg
+  reconsideration run from node-owned dispatch. Consumer failure cannot
+  invalidate chainstate. Issue #77
   owns the durable event journal; this is dependency direction, not a second
   event contract. Do not push cross-store ordering into `utxo` or `storage`.
+- Reorg planning, body retention/loading, disconnect/connect execution,
+  invalidation, and checkpoint-debt settlement live in chainstate. Node supplies
+  a `ReorgObserver` for mempool/follower effects and holds the mempool
+  generation fence around the operation. Reorg body memory is bounded by the
+  chainstate streaming window; no whole departed branch is retained.
 
 ### `ARCH-08`: Durable pruning and reorg retention
 
@@ -222,12 +234,13 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 
 ## Remaining composition boundary
 
-Authoritative apply and chain/UTXO checkpoint payloads remain in `crates/node`
-because they compose several domain owners. Storage owns the journal and
-checkpoint formats, filesystem operations, and durability; node owns payload
-assembly and runtime sequencing. Backend construction stays at the
-`ARCH-03` composition seam. There is no `crates/chainstate` workspace member;
-introducing one requires the `ARCH-06` review, not a speculative layer.
+`crates/chainstate` owns authoritative applied-chain mutation, recovery,
+checkpoint payload assembly/publication, reorg, and retention. Storage still
+owns generic journal/checkpoint formats, filesystem operations, backend
+drivers, and durability primitives. Node owns process configuration, concrete
+backend selection, mempool/P2P/index/mining/RPC wiring, and post-commit
+cross-domain effects. Backend construction stays at the `ARCH-03`
+composition seam.
 
 ## Proven by
 
@@ -248,19 +261,13 @@ introducing one requires the `ARCH-06` review, not a speculative layer.
   - `crates/rpc/Cargo.toml`: zero storage backend dependencies or features.
   - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
     operator-tier backend feature flags.
-- `crates/node/src/apply.rs` tests `snapshot_reads_applied_tip_without_taking_a_transition`,
-  `chain_transition_connect_and_finish_publish_the_new_tip`,
-  `proposal_rejects_excess_coinbase_without_persisting`,
-  `proposal_omits_proof_of_work`: the facade copies published tips without
-  reserving generation, connect/finish through `ChainTransition` is the
-  mutation path, and BIP22 proposal reuses the apply gates without persistence.
-- `crates/node/tests/unit/apply/consensus_rule_tests/` tests
-  `apply_block_publishes_rawtx_bytes_in_block_order`,
-  `connected_sequence_event_observes_the_published_applied_tip`,
-  `connect_and_disconnect_wake_the_mining_generation`,
-  `follower_dispatch_holds_the_chain_transition`: apply returns a committed outcome;
-  `ChainFollowers` consume it after the tip is published and while the
-  transition is still held; ZMQ publishers are configured outside apply.
+- `crates/chainstate/tests/unit/apply/admission_tests.rs` and
+  `crates/chainstate/tests/unit/apply/chain_tx_count_tests.rs` cover admission
+  shutdown and coherent chain transaction-count publication. Checkpoint and
+  journal tests moved with their owner under `crates/chainstate/tests/unit/`.
+- `crates/node/src/chain_effects.rs` and node mining/sync/reorg integration
+  tests prove that mempool/follower work consumes committed chainstate outcomes
+  without making chainstate depend on those consumers.
 - `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is

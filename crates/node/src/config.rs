@@ -1,6 +1,7 @@
 //! Node configuration DTOs, resolution, and validation.
 
 use anyhow::Result;
+use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
@@ -68,34 +69,6 @@ impl ScriptIndexMode {
             // distinct outcome.
             "full" | "true" | "1" | "yes" => Some(Self::Full),
             "false" | "0" | "no" => Some(Self::Disabled),
-            _ => None,
-        }
-    }
-}
-
-/// Which historical script verification the apply path may skip.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ValidationMode {
-    /// Every script executes; `assume_valid_height` is ignored.
-    Full,
-    /// Bitcoin Core `-assumevalid`: skip through the pinned anchor height
-    /// while the active chain contains the anchor block.
-    #[default]
-    AssumeValid,
-    /// Skip every block on the best header chain strictly below its tip;
-    /// only the tip block and competing branches run scripts. Trusts the
-    /// most-work header chain.
-    Fast,
-}
-
-impl ValidationMode {
-    /// Parses a mode from a configuration value, case-insensitively.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "full" => Some(Self::Full),
-            "assume-valid" | "assume_valid" | "assumevalid" => Some(Self::AssumeValid),
-            "fast" => Some(Self::Fast),
             _ => None,
         }
     }
@@ -655,45 +628,6 @@ impl ChainstateJournalOverrides {
         }
         if let Some(max_lag_seconds) = self.max_lag_seconds {
             config.max_lag_seconds = max_lag_seconds;
-        }
-    }
-}
-
-/// Chainstate journal settings (`[chainstate_journal]`, issue #230).
-///
-/// The journal bounds crash-recovery work between checkpoint publications:
-/// instead of re-validating the whole chain, boot replays only the records
-/// the durable head covers. `enabled = false` restores the checkpoint-only
-/// recovery behavior exactly as it was before the journal existed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChainstateJournalConfig {
-    /// Whether the journal is active. `false` = checkpoint-only recovery.
-    pub enabled: bool,
-    /// Durability batch size, in blocks (head advances at least this often).
-    pub blocks: u32,
-    /// Durability batch period, in seconds (time-based boundary trigger).
-    pub seconds: u64,
-    /// Active-segment rotation threshold, in MiB.
-    pub rotate_mib: u64,
-    /// Retention bound on total journal size, in MiB.
-    pub max_journal_mib: u64,
-    /// Backpressure threshold: max blocks applied beyond the durable head.
-    pub max_lag_blocks: u32,
-    /// Backpressure threshold: max seconds the head may lag the applied tip.
-    pub max_lag_seconds: u64,
-}
-
-impl Default for ChainstateJournalConfig {
-    fn default() -> Self {
-        let policy = bitcoin_rs_storage::chainstate_journal::JournalPolicy::default();
-        Self {
-            enabled: true,
-            blocks: policy.batch_blocks,
-            seconds: policy.batch_seconds.as_secs(),
-            rotate_mib: policy.rotate_mib,
-            max_journal_mib: policy.max_journal_mib,
-            max_lag_blocks: policy.max_lag_blocks,
-            max_lag_seconds: policy.max_lag_seconds.as_secs(),
         }
     }
 }

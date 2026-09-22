@@ -6,7 +6,7 @@ stable generation publication, and best-effort observer delivery.
 
 Owners:
 - Durable commit and stable publication:
-  `crates/node/src/apply.rs` and its connect/disconnect/window modules
+  `crates/chainstate/src/lib.rs` and its connect/disconnect/window modules
 - Mempool reconciliation and canonical lifecycle:
   `crates/mempool/src/gateway.rs`, `crates/mempool/src/mutation.rs`
 - Bounded observer delivery and gap accounting:
@@ -31,29 +31,41 @@ Owners:
 
 ### `EVT-02`: Ordered commit and best-effort observer delivery
 
-- The apply path runs in this order:
-  1. Hold the chain transition reservation; close admission and mixed reads
-     with the generation fence.
+- Before authoritative mutation, node holds both the mempool chain-change
+  generation fence and chainstate's transition reservation. Single-block,
+  window, and mining paths take the chainstate reservation first and then
+  reserve the mempool generation; reorg coordination reserves the mempool
+  generation before entering chainstate. `begin_chain_change` releases the
+  mempool writer before returning its guard, so neither ordering nests the
+  two domain locks.
+- With both fences held, the apply path runs in this order:
+  1. Begin the authoritative chainstate mutation.
   2. Build exact forward and undo facts without mutating the public stable view.
   3. Append required body and undo frames. Sync files and required directory
      entries.
   4. Apply one atomic storage batch containing coins, metadata, and the new
      durable head. Wait for durable completion.
   5. Publish the committed chain and coin view.
-  6. Feed the committed chain update into the mempool canonical lifecycle:
+  6. Return the committed outcome to node and feed it into the mempool canonical lifecycle:
      remove confirmed transactions, keep valid children of confirmed parents,
      remove mined conflicts and descendants, update graph and fee-delta state,
      and update the fee estimator.
-  7. Publish the stable coherent generation only after mempool alignment.
-  8. Dispatch notifications and relay in the declared observable order
-     outside all domain locks.
+  7. Dispatch the node-owned post-commit effects in commit order while the
+     chain transition still prevents a later block from overtaking them. Reorg
+     also finishes disconnected-transaction reconsideration before settling the
+     mempool generation.
+  8. Node publishes the stable coherent mempool generation only after mempool
+     alignment and reconsideration.
+  9. Release the chainstate transition. Any disconnect checkpoint debt is
+     published only after both the mempool generation and chain transition are
+     stable, so checkpoint I/O does not extend the mutation fence.
 - A failure before stable publication leaves the fence closed until explicit
   recovery. A guard destructor must never quietly reopen the fence after an
   error.
-- Observer delivery is bounded. The publish queue has a capacity and exposes
-  dropped or gap counters. A slow or blocked observer parks its own drain
-  thread; it never holds the mempool writer, the chain transition reservation,
-  or a storage lock.
+- Observer delivery is bounded. The commit path may enqueue an observer record
+  while the transition is held to preserve ordering, but a slow consumer drains
+  on its own thread. It never holds the mempool writer, chain transition
+  reservation, or a storage lock while doing slow downstream work.
 - Canonical estimator accounting is part of the mempool lifecycle in step 6.
   It is not an observer and is never dropped.
 
@@ -81,17 +93,17 @@ Owners:
   before the UTXO mutation, not on the error path. A process that dies during
   rollback writes no error; the marker detects the incomplete state.
 - The marker carries `(height, block_hash, phase)`.
-- `ChainChangeProof` binds a transition lock to the `ChainChangeGuard` that
-  reserved the active odd generation. The caller-facing mutation capability is
-  `ChainTransition`, which holds that proof.
+- `ChainTransition` is the chainstate mutation capability and owns only
+  chainstate admission/transition authority. The node separately owns the
+  mempool `ChainChangeGuard`; cross-domain coupling is composition, not a
+  chainstate dependency.
 - The `UndoStore` trait abstracts the durable marker over all retained
   backends.
 
 ## Startup crash recovery
 
-On daemon start, `NodeState::open` recovers the durable root from
-`crates/node/src/state_open.rs` and `crates/node/src/state_restore.rs`, and
-reconciles to the committed applied tip. Chain-event
+On daemon start, `NodeState::open` delegates authoritative recovery to
+`crates/chainstate/src/recovery.rs` and reconciles to the committed applied tip. Chain-event
 consumers therefore reconcile against the durable applied tip. System-level
 convergence after crash, lost write, and reorg is owned by
 [recovery.md](recovery.md). The recovery path does not restore an authenticated
@@ -99,7 +111,7 @@ checkpoint or replay a journal as an authority.
 
 ## Proven by
 
-- `crates/node/src/apply.rs` and its connect/disconnect/window modules own
+- `crates/chainstate/src/lib.rs` and its connect/disconnect/window modules own
   the ordered commit protocol and stable publication.
 - `crates/mempool/src/gateway.rs` and `crates/mempool/src/mutation.rs`: own the canonical mempool lifecycle and bounded observer delivery.
 - `crates/node/tests/overhaul_mempool_lifecycle.rs` (planned): tests that
@@ -111,11 +123,9 @@ checkpoint or replay a journal as an authority.
 - `scripts/check_models.py` (manual evidence lane): checks the
   `ChainAdmission` TLA+ model, which covers the durable commit, mempool
   reconciliation, and stable publication ordering.
-- `crates/node/src/apply.rs` existing tests:
-  - `a_clean_disconnect_leaves_no_in_flight_marker`;
-  - `chain_change_proof_finish_restores_even_generation`;
-  - `stable_generation_is_even_before_and_after_connect`;
-  - `stable_generation_is_even_after_disconnect`.
+- `crates/chainstate` checkpoint/journal tests cover durable ordering and
+  disconnect recovery; node mining/sync/reorg tests cover mempool generation
+  fencing and post-commit cross-domain dispatch.
 
 - `crates/node/tests/overhaul_fee_history.rs` (existing):
   - `reorg_reconfirm_records_exactly_one_observation` (`EVT-02` step 6).

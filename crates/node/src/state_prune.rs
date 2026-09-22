@@ -27,7 +27,7 @@ pub struct NodePruneService<S: KvStore> {
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
     blocks: Arc<RwLock<BlockLog>>,
     transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-    authority: crate::apply::PruneAuthority,
+    authority: bitcoin_rs_chainstate::PruneAuthority,
     pruneheight: Mutex<Option<u32>>,
     /// Height the last clean checkpoint would restore to, 0 when none exists.
     ///
@@ -47,7 +47,7 @@ impl<S: KvStore> NodePruneService<S> {
         block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
         blocks: Arc<RwLock<BlockLog>>,
         transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-        authority: crate::apply::PruneAuthority,
+        authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> anyhow::Result<Self> {

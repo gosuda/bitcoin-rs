@@ -13,7 +13,7 @@ const MEMPOOL_TICK: Duration = Duration::from_secs(1);
 const METRICS_TICK: Duration = Duration::from_secs(10);
 const SYNC_TICK: Duration = Duration::from_secs(1);
 /// Elapsed time owns telemetry cadence, independently of inbound wake volume.
-const SYNC_PROGRESS_INTERVAL: Duration = Duration::from_secs(60);
+const SYNC_PROGRESS_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Central v1 event loop for process-level tick coordination.
 ///
@@ -150,10 +150,10 @@ mod tests {
         for _ in 0..120 {
             assert!(!progress_due(start, start + Duration::from_secs(59)));
         }
-        assert!(progress_due(start, start + Duration::from_secs(60)));
+        assert!(progress_due(start, start + Duration::from_mins(1)));
         assert!(progress_due(start, start + Duration::from_secs(61)));
         assert!(!progress_due(
-            start + Duration::from_secs(60),
+            start + Duration::from_mins(1),
             start + Duration::from_secs(61)
         ));
     }

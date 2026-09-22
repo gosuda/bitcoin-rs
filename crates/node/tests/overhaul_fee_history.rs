@@ -102,7 +102,8 @@ fn fund_utxo(state: &NodeState, parent: Txid, value: u64) -> Result<()> {
         100,
     ));
     state
-        .utxo()
+        .chainstate()
+        .utxo_handle()
         .commit_block(&changes, &Hash256::from_le_bytes(&[0xBB; 32]))
         .map_err(|error| anyhow!("utxo commit failed: {error}"))
 }
@@ -135,9 +136,9 @@ fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
 /// Admits `tx` through the node's shared gateway exactly like production RPC
 /// ingress.
 fn admit(state: &NodeState, tx: Tx, time: u64) -> Result<SubmitOutcome> {
-    let utxo = state.utxo();
-    let applied_tip = state.applied_tip();
-    let block_tree = state.block_tree();
+    let utxo = state.chainstate().utxo_handle();
+    let applied_tip = state.chainstate().applied_tip_handle();
+    let block_tree = state.chainstate().block_tree_handle();
     let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree, Network::Regtest);
     state
         .mempool_gateway()
@@ -756,7 +757,8 @@ fn txids(txs: &[Tx]) -> Vec<Txid> {
 
 fn applied_tip_hash(state: &NodeState) -> Result<Hash256> {
     state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .map(|tip| tip.hash)
         .ok_or_else(|| anyhow!("applied tip must exist"))

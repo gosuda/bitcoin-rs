@@ -225,7 +225,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     );
 
     // --- tip advanced, mempool drained, next template rebased ----------------
-    let applied = state.applied_tip();
+    let applied = state.chainstate().applied_tip_handle();
     let loaded_tip = applied.load_full();
     let Some(tip) = loaded_tip.as_ref() else {
         bail!("applied tip must exist after an accepted submission");
@@ -402,7 +402,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
 }
 
 fn current_tip(state: &NodeState) -> Result<bitcoin_rs_chain::TipSnapshot> {
-    let applied = state.applied_tip();
+    let applied = state.chainstate().applied_tip_handle();
     let Some(tip) = applied.load_full() else {
         bail!("applied tip must exist");
     };
@@ -592,9 +592,9 @@ fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Bl
 /// `sendrawtransaction` does: full policy admission over the provisional
 #[allow(clippy::unnecessary_wraps)]
 fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
-    let utxo = state.utxo();
-    let applied_tip = state.applied_tip();
-    let block_tree = state.block_tree();
+    let utxo = state.chainstate().utxo_handle();
+    let applied_tip = state.chainstate().applied_tip_handle();
+    let block_tree = state.chainstate().block_tree_handle();
     let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree, Network::Regtest);
     let outcome = state.mempool_gateway().submit_transaction(
         Arc::new(tx.clone()),
@@ -664,25 +664,22 @@ fn mine_regtest_block(
 /// mining coordinator installed as the `MiningControl`.
 fn mining_handler(state: &NodeState) -> Handler {
     let coordinator = MiningCoordinator::new(
-        state.config().network,
-        state.applied_tip(),
-        state.block_tree(),
         state.mempool(),
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
-        state.shutdown(),
     );
     let mining_control: Arc<dyn MiningControl> = Arc::new(coordinator);
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
-            chain_tip: state.chain_tip(),
-            applied_tip: state.applied_tip(),
+            chain_tip: state.chainstate().chain_tip_handle(),
+            applied_tip: state.chainstate().applied_tip_handle(),
+            chain_tx_count: state.chainstate().chain_tx_count_handle(),
             blocks: state.blocks(),
             transactions: state.transactions(),
             utxo: Arc::new(UtxoSet::new()),
-            coin_stats: state.coin_stats(),
-            block_tree: state.block_tree(),
+            coin_stats: state.chainstate().coin_stats_handle(),
+            block_tree: state.chainstate().block_tree_handle(),
             chain_network: state.config().network,
         },
         mempool: MempoolHandles {

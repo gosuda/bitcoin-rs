@@ -7,6 +7,7 @@ members = [
     "crates/storage",
     "crates/utxo",
     "crates/chain",
+    "crates/chainstate",
     "crates/index",
 
     "crates/mempool",
@@ -41,6 +42,7 @@ bitcoin-rs-script     = { path = "crates/script",     version = "0.7.0", default
 bitcoin-rs-storage    = { path = "crates/storage",    version = "0.7.0", default-features = false }
 bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.7.0", default-features = false }
 bitcoin-rs-chain      = { path = "crates/chain",      version = "0.7.0", default-features = false }
+bitcoin-rs-chainstate = { path = "crates/chainstate", version = "0.7.0", default-features = false }
 bitcoin-rs-index      = { path = "crates/index",      version = "0.7.0" }
 
 bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.7.0" }

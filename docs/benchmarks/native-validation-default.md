@@ -4,13 +4,21 @@ This document is the promotion record for the native strict-Rust validation defa
 
 ## Decision it owns
 
-Whether `bitcoin-rs-consensus`, `bitcoin-rs-node`, `bin/bitcoin-rs` and the container image ship strict-Rust validation as their default. The decision is one coordinated cut across binary, library and image with matching manifests and packaging. `bitcoinkernel` remains an explicit opt-in oracle only. It is never a silent fallback and it is never the default after promotion.
+Whether `bitcoin-rs-consensus`, `bitcoin-rs-chainstate`, `bitcoin-rs-node`,
+`bin/bitcoin-rs` and the container image ship strict-Rust validation as their
+default. The decision is one coordinated cut across binary, library and image
+with matching manifests and packaging. `bitcoinkernel` remains an explicit
+opt-in oracle only. It is never a silent fallback and it is never the default
+after promotion.
 
 ## Ordering
 
 1. T16 (strict-Rust cryptography lane) must pass first. The verifier is one general BIP340 operation composed over maintained `k256 0.14.0` arithmetic and ECDSA primitives. The `k256` high-level Schnorr signature type is withdrawn because its `Signature` stores a `NonZeroScalar` and cannot represent the whole BIP340 input domain. No custom field or group arithmetic. Overflowing TapTweak is canonically rejected, never reduced. Hybrid-key parity and historical DER and high-S rules are preserved.
 2. T17 then measures the actual final strict artifact. Earlier candidate measurements, including every number in the prior-evidence section, are not promotion proof.
-3. Promotion happens in one changeset: complete the measured end-state cells below, drop `kernel` from the two library defaults, update `Dockerfile`, and prove kernel-free transitive closure in `bin/bitcoin-rs/tests/overhaul_default_closure.rs`.
+3. Promotion happens in one changeset: complete the measured end-state cells
+   below, drop `kernel` from all three validation-library defaults, update
+   `Dockerfile`, and prove kernel-free transitive closure with the explicit
+   `cargo tree` lane below plus the native profiles in `scripts/ci-pr.sh`.
 
 ## End-state cells
 
@@ -19,10 +27,10 @@ Whether `bitcoin-rs-consensus`, `bitcoin-rs-node`, `bin/bitcoin-rs` and the cont
 | Core vector parity | Zero mismatches on runnable rows; pinned skip counts and skip reasons per corpus | `cargo test --locked -p bitcoin-rs-script --test core_vectors` | `planned_not_executed` |
 | Contextual and script matrix (T15) | Every §5.1 family, active and inactive boundaries, mandatory versus policy flags; zero unexplained mismatches; every exclusion counted and classified | `cargo test --locked -p bitcoin-rs-consensus --test overhaul_consensus_matrix -- --nocapture` | `planned_not_executed` |
 | Strict-Rust crypto lane (T16) | Valid and invalid ECDSA, Schnorr and tweak vectors; integer and point boundary cases; independent oracle agreement; audited dependency closure | `cargo test --locked -p bitcoin-rs-script --test overhaul_native_crypto -- --nocapture` | `planned_not_executed` |
-| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | `cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test overhaul_default_closure -- --nocapture` | `planned_not_executed` |
+| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | Native: `CARGO_TARGET_DIR=target/signed-spend-native cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8`<br>Kernel: `CARGO_TARGET_DIR=target/signed-spend-kernel cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall,kernel -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8` | `planned_not_executed` |
 | Full mainnet replay | Genesis to the pinned stop identity with sampled and exact coin comparison against Core `v31.1` | offline comparator, see [`offline-full-validation.md`](offline-full-validation.md) | `planned_not_executed` |
 | Invalid and contextual corpora | Rejection parity on invalid local corpora; a passing valid chain alone does not prove rejection | T15 matrix | `planned_not_executed` |
-| Kernel-free closure | `cargo --locked tree -p bitcoin-rs --no-default-features --features fjall -e features` shows no `bitcoinkernel` on any transitive path; native and oracle lanes built under separate `CARGO_TARGET_DIR` | `overhaul_default_closure` | `planned_not_executed` |
+| Kernel-free closure | `cargo tree --locked -p bitcoin-rs --no-default-features --features fjall -e features` shows no `bitcoinkernel` on any transitive path; native and oracle lanes built under separate `CARGO_TARGET_DIR` | `cargo tree --locked -p bitcoin-rs --no-default-features --features fjall -e features` plus the native and kernel `sync_pipeline` lanes above, each under its own `CARGO_TARGET_DIR` | `planned_not_executed` |
 
 Reference identity for the comparison arm: Bitcoin Core release `v31.1`, commit `9be056a8a72b624dae9623b2f7bded92c2a21c91`, x86_64 linux archive SHA-256 `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`, `bitcoind` SHA-256 `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`. The kernel oracle is the `31.99.0` development tree through `bitcoinkernel 0.2.1` with `differential_harness = false`; it is oracle evidence only and never a policy pin.
 
@@ -54,6 +62,13 @@ Every sample in this cell records six identities. The T02 collector rejects a sa
 ## Status
 
 `planned_not_executed`. No end-state cell in this document has run. Every value in the end-state tables is a required contract value, not a measurement. The section `Prior candidate evidence` below is historical and unchanged; it does not prove any end-state cell.
+
+PR #1124's chainstate extraction is a structural ownership change, not a
+performance-promotion campaign. It carries no baseline-linked before/after
+samples for the extracted apply/reorg paths, so the applicable `CL-19` /
+`CL-20` performance cells remain **UNMEASURED**. No latency, RSS, retained-byte,
+storage, p99, or throughput non-regression verdict is inferred from functional
+tests or from the historical September 4 signed-spend run.
 
 ## Prior candidate evidence (2026-09-04 signed-spend run and earlier)
 

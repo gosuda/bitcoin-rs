@@ -8,16 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
-use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid};
+use bitcoin_rs_primitives::{Hash256, Txid, Wtxid};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
-use bitcoin_rs_utxo::UtxoSet;
 use crossbeam_channel::Receiver;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use crate::state::NodeState;
 
@@ -36,15 +34,13 @@ pub fn spawn_tx_ingress_consumer(
     tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let chainstate = state.chainstate();
     let consumer = TxIngressConsumer {
-        utxo: state.utxo(),
+        chainstate,
         peer_table: state.peer_table(),
         mempool_gateway: gateway,
         mining_control,
         relay,
-        applied_tip: state.applied_tip(),
-        block_tree: state.block_tree(),
-        network: state.config().network,
     };
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
@@ -73,23 +69,20 @@ pub fn spawn_tx_ingress_consumer(
 }
 
 struct TxIngressConsumer {
-    utxo: Arc<UtxoSet>,
+    chainstate: Arc<Chainstate>,
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     mempool_gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
     relay: TxRelayQueue,
-    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    block_tree: Arc<RwLock<BlockTree>>,
-    network: Network,
 }
 
 impl TxIngressConsumer {
     fn chain_view(&self) -> ChainAdmissionView<'_> {
         ChainAdmissionView::new(
-            &self.utxo,
-            &self.applied_tip,
-            &self.block_tree,
-            self.network,
+            self.chainstate.utxo(),
+            self.chainstate.applied_tip(),
+            self.chainstate.block_tree(),
+            self.chainstate.network(),
         )
     }
 

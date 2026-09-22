@@ -34,6 +34,8 @@ pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
 /// The mempool admission owner.
 pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
+/// The authoritative applied-chain owner.
+pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
 
 /// Crates the mempool owner must never depend on. The real edges point
 /// the other way: `p2p` consumes the mempool inventory view, `rpc` and
@@ -41,9 +43,10 @@ pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
     ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
 /// Crates permitted to define and forward storage backend feature selection.
-pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 7] = [
+pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 8] = [
     STORAGE_CRATE,
     "bitcoin-rs-chain",
+    CHAINSTATE_CRATE,
     "bitcoin-rs-utxo",
     "bitcoin-rs-p2p",
     "bitcoin-rs-index",
@@ -59,8 +62,8 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
         "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
-        "bitcoin-rs-chain" | "bitcoin-rs-utxo" | "bitcoin-rs-p2p" | "bitcoin-rs-mempool"
-        | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
+        "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
+        | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
         NODE_CRATE | BIN_CRATE => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),

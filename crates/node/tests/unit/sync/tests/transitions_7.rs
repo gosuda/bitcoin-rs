@@ -10,7 +10,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     // mismatch), so the connect stops on the first body. The descendant
     // header must remain eligible for a later delivery of the correct body.
     let fork_root_hash = main[49].block_hash();
-    let mut tree = handles.block_tree.write();
+    let mut tree = handles.block_tree().write();
     let mut fork_parent = tree
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
@@ -75,7 +75,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     assert_eq!(connected, 0, "nothing connected before the body mutation");
     assert_eq!(
         disposition,
-        crate::apply::WindowApplyDisposition::BodyMutated
+        bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated
     );
     assert!(
         invalidated.is_empty(),
@@ -83,7 +83,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     );
     // Both headers remain valid and may be retried with another body.
     {
-        let tree = handles.block_tree.read();
+        let tree = handles.block_tree().read();
         assert_eq!(tree.node(invalid_id)?.status, NodeStatus::HeaderValid);
         assert_eq!(tree.node(descendant_id)?.status, NodeStatus::HeaderValid);
     }
@@ -91,7 +91,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     // successful disconnect prefix.
     let fork_root_id_hash = Hash256::from_le_bytes(fork_root_hash.as_bytes());
     assert_eq!(
-        handles.applied_tip.load_full().map(|tip| tip.hash),
+        handles.applied_tip().load_full().map(|tip| tip.hash),
         Some(fork_root_id_hash),
         "the applied tip must be the fork root after disconnecting back to it"
     );

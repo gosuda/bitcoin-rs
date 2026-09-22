@@ -171,7 +171,8 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_hash = block1.block_hash().0;
     let tip = resumed
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("restarted node has no applied tip"))?;
     assert_eq!(tip.height, 1, "scenario {scenario}");
@@ -196,7 +197,8 @@ fn test_config(data_dir: PathBuf) -> NodeConfig {
 
 fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Result<()> {
     let tip = state
-        .applied_tip()
+        .chainstate()
+        .applied_tip_handle()
         .load_full()
         .ok_or_else(|| std::io::Error::other("recovered node has no applied tip"))?;
     assert_eq!(tip.as_ref(), expected);

@@ -15,7 +15,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::lifecycle::{DRAIN_DEADLINE, NodeServices, TeardownMode, start_node};
-use crate::state::{ChainSnapshot, NodeState};
+use crate::state::NodeState;
+use bitcoin_rs_chainstate::events::ChainSnapshot;
 
 /// Failure at the typed node boundary.
 #[derive(Debug, Error)]
@@ -74,7 +75,7 @@ impl Node {
     /// Returns the current coherent, generation-stamped chain snapshot.
     #[must_use]
     pub fn snapshot(&self) -> ChainSnapshot {
-        self.state.active_chain_snapshot()
+        self.state.chainstate().chain_snapshot()
     }
 
     /// Returns the live txindex capability report.
@@ -359,7 +360,8 @@ mod tests {
             ));
         }
         node.state
-            .utxo()
+            .chainstate()
+            .utxo_handle()
             .commit_block(&changes, &Hash256::from_le_bytes(&[0xAB; 32]))
             .map_err(|error| format!("fixture utxo commit failed: {error}"))
             .expect("fixture utxo commit");

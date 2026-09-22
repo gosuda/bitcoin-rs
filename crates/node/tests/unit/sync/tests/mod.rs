@@ -2,21 +2,16 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-use bitcoin_rs_mempool::{Mempool, MempoolLimits};
-use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
 use bitcoin_rs_script::push_int;
-use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_utxo::UtxoSet;
-use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
-use super::BlockSync;
-use crate::apply::Chainstate;
+use bitcoin_rs_chainstate::Chainstate;
 
 #[allow(clippy::arc_with_non_send_sync)]
 fn apply_handles(
@@ -24,8 +19,6 @@ fn apply_handles(
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
 ) -> Chainstate {
-    let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-    let mempool_gateway = bitcoin_rs_mempool::MempoolGateway::shared(Arc::clone(&mempool));
     Chainstate::new(
         Network::Regtest,
         chain_tip,
@@ -35,9 +28,7 @@ fn apply_handles(
         Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
         )),
-        mempool,
-        mempool_gateway,
-        Arc::new(crate::state::ChainEventPublisher::detached(0)),
+        Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     )
 }
 
@@ -128,67 +119,6 @@ fn coinbase_transaction(height: u32) -> Tx {
     }
 }
 
-#[allow(clippy::type_complexity)]
-fn sync_with_header_chain(
-    height: u32,
-) -> Result<
-    (
-        BlockSync,
-        Chainstate,
-        crate::chain_effects::ChainFollowers,
-        Arc<PeerTable>,
-        Arc<RwLock<BlockTree>>,
-        Arc<ArcSwapOption<TipSnapshot>>,
-        Vec<BlockHash>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let mut tree = BlockTree::new();
-    let genesis = Network::Regtest.genesis_block().header;
-    let mut node_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-    let mut expected = Vec::new();
-    for height in 1..=height {
-        let header = mined_block_with_prev_hash(
-            BlockHash::from(tree.node(node_id)?.hash),
-            height,
-            Vec::new(),
-        )
-        .header;
-        node_id = tree.insert_node(Some(node_id), header, NodeStatus::HeaderValid)?;
-        expected.push(BlockHash::from(tree.node(node_id)?.hash));
-    }
-    let chain_tip = tree.tip_handle();
-    let block_tree = Arc::new(RwLock::new(tree));
-    let applied_tip = Arc::new(ArcSwapOption::empty());
-    let peers = Arc::new(PeerTable::new());
-    let (_headers_tx, headers_rx) = unbounded::<InboundHeaders>();
-    let headers_rx = Arc::new(Mutex::new(headers_rx));
-    let (_blocks_tx, blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let blocks_rx = Arc::new(Mutex::new(blocks_rx));
-    let handles = apply_handles(
-        Arc::clone(&chain_tip),
-        Arc::clone(&applied_tip),
-        Arc::clone(&block_tree),
-    );
-    let followers = crate::chain_effects::ChainFollowers::noop();
-    let sync = crate::sync::block_sync(
-        handles.clone(),
-        followers.clone(),
-        Arc::clone(&peers),
-        headers_rx,
-        blocks_rx,
-    );
-    Ok((
-        sync,
-        handles,
-        followers,
-        peers,
-        block_tree,
-        applied_tip,
-        expected,
-    ))
-}
-
 type MaturedChain = (
     Chainstate,
     Vec<Block>,
@@ -252,100 +182,11 @@ fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>>
     Ok((handles, blocks, bodies))
 }
 
-struct DisarmFailsUndoStore {
-    inner: Arc<dyn crate::apply::UndoStore>,
-}
-
-impl crate::apply::UndoStore for DisarmFailsUndoStore {
-    fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
-        self.inner.persist_undo(height, hash, record)
-    }
-
-    fn load_undo(&self, height: u32, hash: Hash256) -> Result<Option<Vec<u8>>, StorageError> {
-        self.inner.load_undo(height, hash)
-    }
-
-    fn arm_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError> {
-        self.inner.arm_disconnect(height, hash)
-    }
-
-    fn complete_disconnect(&self, _height: u32, _hash: Hash256) -> Result<(), StorageError> {
-        Err(StorageError::backend("injected marker-clear failure"))
-    }
-
-    fn disarm_disconnect(&self) -> Result<(), StorageError> {
-        self.inner.disarm_disconnect()
-    }
-
-    fn load_disconnect_marker(
-        &self,
-    ) -> Result<Option<bitcoin_rs_storage::DisconnectMarker>, StorageError> {
-        self.inner.load_disconnect_marker()
-    }
-}
-
-/// Block-body store that fails persistence once at `fail_height`, then
-/// behaves like an in-memory store — used to drive `BlockBodyPersistence`
-/// refusals inside a reorg connect walk.
-struct FailOnceBodyStore {
-    fail_height: u32,
-    failed: Mutex<bool>,
-    persisted: Mutex<HashMap<u32, Vec<u8>>>,
-}
-
-impl FailOnceBodyStore {
-    fn new(fail_height: u32) -> Self {
-        Self {
-            fail_height,
-            failed: Mutex::new(false),
-            persisted: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn persisted_height(&self, height: u32) -> bool {
-        self.persisted.lock().contains_key(&height)
-    }
-}
-
-impl bitcoin_rs_storage::block_body::BlockBodyStore for FailOnceBodyStore {
-    fn persist_block_body(
-        &self,
-        height: u32,
-        _hash: Hash256,
-        body: &[u8],
-    ) -> Result<(), StorageError> {
-        let mut failed = self.failed.lock();
-        if height == self.fail_height && !*failed {
-            *failed = true;
-            return Err(StorageError::backend("fail-once block body store"));
-        }
-        drop(failed);
-        self.persisted.lock().insert(height, body.to_vec());
-        Ok(())
-    }
-
-    fn load_block_body(
-        &self,
-        height: u32,
-        _hash: Hash256,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.persisted.lock().get(&height).cloned())
-    }
-
-    fn sync(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod transitions_2;
 
 #[cfg(test)]
 mod transitions_3;
 
-#[cfg(test)]
-mod transitions_5;
-#[cfg(test)]
-mod transitions_6;
 #[cfg(test)]
 mod transitions_7;

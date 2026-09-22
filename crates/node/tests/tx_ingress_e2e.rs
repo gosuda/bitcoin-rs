@@ -115,7 +115,8 @@ fn fund_utxo_script(
         100,
     ));
     state
-        .utxo()
+        .chainstate()
+        .utxo_handle()
         .commit_block(&changes, &Hash256::from_le_bytes(&[0xBB; 32]))
         .map_err(|error| anyhow!("utxo commit failed: {error}"))
 }

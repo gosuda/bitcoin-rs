@@ -77,15 +77,7 @@ impl BlockSync {
                 }
                 // Invalid descendants cannot occupy bounded download state or
                 // they can prevent the newly selected valid branch from refilling.
-                if !invalidated.is_empty() {
-                    {
-                        let mut body_sync = self.body_sync.lock();
-                        for invalid_hash in &invalidated {
-                            body_sync.stager.retire_applied(invalid_hash);
-                            body_sync.window.drop_for_retry(invalid_hash);
-                        }
-                    }
-                }
+                self.purge_invalidated(&invalidated);
                 tracing::warn!(
                     failed_hash = %hash,
                     invalidated = invalidated.len(),
@@ -113,6 +105,20 @@ impl BlockSync {
         let mut body_sync = self.body_sync.lock();
         body_sync.window.mark_received_applied(&hash);
         body_sync.stager.retire_applied(&hash);
+    }
+
+    /// Frees every bounded download slot held by an invalidated hash under
+    /// one `body_sync` acquisition.
+    #[doc(hidden)]
+    pub fn purge_invalidated(&self, hashes: &[Hash256]) {
+        if hashes.is_empty() {
+            return;
+        }
+        let mut body_sync = self.body_sync.lock();
+        for hash in hashes {
+            body_sync.stager.retire_applied(hash);
+            body_sync.window.drop_for_retry(hash);
+        }
     }
 
     /// Returns the header tip when the applied chain is not on its branch.

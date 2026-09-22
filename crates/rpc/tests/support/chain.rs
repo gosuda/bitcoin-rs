@@ -103,7 +103,7 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
 /// # Errors
 /// Fails when no tip has been published yet.
 pub(crate) fn current_tip(state: &NodeState) -> GateResult<bitcoin_rs_chain::TipSnapshot> {
-    let applied = state.applied_tip();
+    let applied = state.chainstate().applied_tip_handle();
     let Some(tip) = applied.load_full() else {
         return Err(fail("applied tip must exist"));
     };

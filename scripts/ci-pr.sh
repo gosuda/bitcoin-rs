@@ -37,15 +37,19 @@ finish() {
 }
 
 clippy_profiles() {
-  # Three kernel-free all-target profiles; consensus and node have
+  # Four kernel-free all-target profiles; consensus, chainstate, and node have
   # kernel-enabled defaults, so they are checked separately without it.
   profile "clippy: workspace (kernel-free)" \
     cargo clippy --locked --workspace --all-targets \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node \
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
+      --exclude bitcoin-rs-node \
       -- -D warnings
   profile "clippy: bitcoin-rs-consensus (native)" \
     cargo clippy --locked -p bitcoin-rs-consensus \
       --no-default-features --all-targets -- -D warnings
+  profile "clippy: bitcoin-rs-chainstate (native,fjall)" \
+    cargo clippy --locked -p bitcoin-rs-chainstate \
+      --no-default-features --features fjall --all-targets -- -D warnings
   profile "clippy: bitcoin-rs-node (fjall,zmq)" \
     cargo clippy --locked -p bitcoin-rs-node \
       --no-default-features --features fjall,zmq --all-targets -- -D warnings
@@ -56,6 +60,9 @@ test_crates_profiles() {
   # Core fixture. Smallest first.
   profile "test: bitcoin-rs-consensus (native)" \
     cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+  profile "test: bitcoin-rs-chainstate (native,fjall)" \
+    cargo test --locked -p bitcoin-rs-chainstate \
+      --no-default-features --features fjall --no-fail-fast
   profile "test: bitcoin-rs-node (fjall,zmq)" \
     cargo test --locked -p bitcoin-rs-node \
       --no-default-features --features fjall,zmq --no-fail-fast
@@ -77,7 +84,8 @@ test_workspace_profiles() {
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
     cargo test --locked --workspace --no-fail-fast \
-      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-node
+      --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
+      --exclude bitcoin-rs-node
 }
 
 case "$1" in

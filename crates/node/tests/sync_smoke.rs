@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
-use bitcoin_rs_node::{Network, apply::Chainstate};
+use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_node::Network;
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, encode::double_sha256,
@@ -40,7 +40,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         Arc::clone(&block_tree),
     );
     let sync = bitcoin_rs_node::sync::block_sync(
-        handles,
+        Arc::new(handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
@@ -94,7 +94,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         Arc::clone(&block_tree),
     );
     let sync = bitcoin_rs_node::sync::block_sync(
-        handles,
+        Arc::new(handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
@@ -258,9 +258,7 @@ fn apply_handles_with_coin_stats_and_utxo(
     let mut utxo = UtxoSet::new();
     utxo.set_listener(Box::new((*coin_stats).clone()));
     let utxo = Arc::new(utxo);
-    let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-    let mempool_gateway = MempoolGateway::shared(Arc::clone(&mempool));
-    let chain_events = bitcoin_rs_node::state::ChainEventPublisher::detached(0);
+    let chain_events = bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0);
     let handles = Chainstate::new(
         network,
         chain_tip,
@@ -268,8 +266,6 @@ fn apply_handles_with_coin_stats_and_utxo(
         block_tree,
         Arc::clone(&utxo),
         Arc::clone(&coin_stats),
-        mempool,
-        mempool_gateway,
         Arc::new(chain_events),
     );
     (handles, coin_stats, utxo)

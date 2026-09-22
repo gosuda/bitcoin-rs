@@ -8,17 +8,17 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     assert!(
-        handles.block_body_store.is_none(),
+        handles.block_body_store().is_none(),
         "fixture must not fall back to durable body storage"
     );
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
+    let applied_tip = handles.applied_tip_handle();
 
     // Fork rooted one below the tip: three blocks of work outweigh the
     // main chain's one-block lead.
     let fork_root_hash = main[99].block_hash();
     let mut fork_parent = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
@@ -28,7 +28,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = handles.block_tree.write().insert_node(
+        fork_parent = handles.block_tree().write().insert_node(
             Some(fork_parent),
             block.header,
             NodeStatus::HeaderValid,
@@ -73,7 +73,7 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     // The reverse switch resolves all disconnect and connect bodies from
     // the same bounded staging, without durable storage or fixture lookup.
     let main_target = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(main_tip_hash)
         .ok_or_else(|| std::io::Error::other("missing original branch tip"))?;
@@ -108,11 +108,11 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
     use bitcoin_rs_primitives::Script;
     let (handles, main, mut bodies) = matured_chain(101)?;
     let followers = crate::chain_effects::ChainFollowers::noop();
-    let applied_tip = Arc::clone(&handles.applied_tip);
+    let applied_tip = handles.applied_tip_handle();
 
     let fork_root_hash = main[99].block_hash();
     let mut fork_parent = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
@@ -122,7 +122,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = handles.block_tree.write().insert_node(
+        fork_parent = handles.block_tree().write().insert_node(
             Some(fork_parent),
             block.header,
             NodeStatus::HeaderValid,
@@ -136,14 +136,14 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
     }
 
     let main_tip_id = handles
-        .block_tree
+        .block_tree()
         .read()
         .lookup(Hash256::from_le_bytes(main[100].block_hash().as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing main branch tip"))?;
     let mut racing_coinbase = coinbase_transaction(102);
     racing_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let racing = mined_block_with_prev_hash(main[100].block_hash(), 102, vec![racing_coinbase]);
-    handles.block_tree.write().insert_node(
+    handles.block_tree().write().insert_node(
         Some(main_tip_id),
         racing.header,
         NodeStatus::HeaderValid,

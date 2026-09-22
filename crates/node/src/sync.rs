@@ -22,18 +22,18 @@ use parking_lot::Mutex;
 
 pub use bitcoin_rs_p2p::sync::{BlockSync, SyncBudget, default_sync_budget};
 
-/// The [`SyncChain`] implementation over [`crate::apply::Chainstate`]:
+/// The [`SyncChain`] implementation over [`bitcoin_rs_chainstate::Chainstate`]:
 /// applied-tip mutation behind the chain-transition lock plus the derived
 /// consumers that must fire inside it.
 pub struct NodeSyncChain {
-    handles: crate::apply::Chainstate,
+    handles: Arc<bitcoin_rs_chainstate::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
 }
 
 /// Constructs the download executor over the applied-chain seam.
 #[must_use]
 pub fn block_sync(
-    handles: crate::apply::Chainstate,
+    handles: Arc<bitcoin_rs_chainstate::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
@@ -48,24 +48,26 @@ pub fn block_sync(
 }
 
 pub(crate) fn settle_window_failure(
-    transition: crate::apply::ChainTransition<'_>,
-    mut error: crate::apply::WindowApplyError,
-) -> crate::apply::WindowApplyError {
+    transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+    mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
+    mut error: bitcoin_rs_chainstate::WindowApplyError,
+) -> bitcoin_rs_chainstate::WindowApplyError {
     let handles = transition.chainstate();
-    if error.disposition == crate::apply::WindowApplyDisposition::Fatal
-        || crate::apply::window::classify_apply_error(&error.source)
-            == crate::apply::WindowApplyDisposition::Fatal
+    if error.disposition == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
+        || bitcoin_rs_chainstate::classify_apply_error(&error.source)
+            == bitcoin_rs_chainstate::WindowApplyDisposition::Fatal
     {
-        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
-        handles.fail_closed_for_recovery();
-    } else if let Err(finish_source) = transition.finish() {
+        error.disposition = bitcoin_rs_chainstate::WindowApplyDisposition::Fatal;
+    } else if let Err(finish_source) =
+        crate::chain_effects::ChainFollowers::finish_transition(handles, transition, mempool_change)
+    {
         tracing::error!(
             original = %error.source,
             finish = %finish_source,
             "chain transition could not be settled after a window failure; \
              mempool admission stays closed until recovery or restart"
         );
-        error.disposition = crate::apply::WindowApplyDisposition::Fatal;
+        error.disposition = bitcoin_rs_chainstate::WindowApplyDisposition::Fatal;
     }
     error
 }
@@ -79,11 +81,17 @@ pub(crate) fn settle_window_failure(
 /// stops retrying instead of wedging on an odd generation.
 #[allow(clippy::result_large_err)]
 pub(crate) fn settle_window_success(
-    transition: crate::apply::ChainTransition<'_>,
+    transition: bitcoin_rs_chainstate::ChainTransition<'_>,
+    mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
     applied: usize,
-    committed: Vec<crate::apply::ConnectOutcome>,
-) -> core::result::Result<usize, crate::apply::WindowApplyError> {
-    match transition.finish() {
+    committed: Vec<bitcoin_rs_chainstate::ConnectOutcome>,
+) -> core::result::Result<usize, bitcoin_rs_chainstate::WindowApplyError> {
+    let handles = transition.chainstate();
+    match crate::chain_effects::ChainFollowers::finish_transition(
+        handles,
+        transition,
+        mempool_change,
+    ) {
         Ok(()) => Ok(applied),
         Err(finish_source) => {
             tracing::error!(
@@ -91,56 +99,62 @@ pub(crate) fn settle_window_success(
                 "chain transition could not be settled after a committed window; \
                  mempool admission stays closed until recovery or restart"
             );
-            Err(crate::apply::WindowApplyError {
+            Err(bitcoin_rs_chainstate::WindowApplyError {
                 applied,
                 committed,
                 source: finish_source,
-                disposition: crate::apply::WindowApplyDisposition::Fatal,
+                disposition: bitcoin_rs_chainstate::WindowApplyDisposition::Fatal,
                 invalidated: Box::default(),
             })
         }
     }
 }
 
-impl From<crate::apply::WindowApplyDisposition> for WindowCommitDisposition {
-    fn from(disposition: crate::apply::WindowApplyDisposition) -> Self {
-        match disposition {
-            crate::apply::WindowApplyDisposition::Permanent => Self::Permanent,
-            crate::apply::WindowApplyDisposition::BodyMutated => Self::BodyMutated,
-            crate::apply::WindowApplyDisposition::Operational => Self::Operational,
-            crate::apply::WindowApplyDisposition::Fatal => Self::Fatal,
+fn window_disposition(
+    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
+) -> WindowCommitDisposition {
+    match disposition {
+        bitcoin_rs_chainstate::WindowApplyDisposition::Permanent => {
+            WindowCommitDisposition::Permanent
         }
+        bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated => {
+            WindowCommitDisposition::BodyMutated
+        }
+        bitcoin_rs_chainstate::WindowApplyDisposition::Operational => {
+            WindowCommitDisposition::Operational
+        }
+        bitcoin_rs_chainstate::WindowApplyDisposition::Fatal => WindowCommitDisposition::Fatal,
     }
 }
 
 impl SyncChain for NodeSyncChain {
     fn network(&self) -> Network {
-        self.handles.network
+        self.handles.network()
     }
 
     fn block_tree(&self) -> &parking_lot::RwLock<bitcoin_rs_chain::BlockTree> {
-        &self.handles.block_tree
+        self.handles.block_tree()
     }
 
     fn chain_tip(&self) -> &arc_swap::ArcSwapOption<TipSnapshot> {
-        &self.handles.chain_tip
+        self.handles.chain_tip()
     }
 
     fn applied_tip(&self) -> &arc_swap::ArcSwapOption<TipSnapshot> {
-        &self.handles.applied_tip
+        self.handles.applied_tip()
     }
 
     fn bootstrap_genesis(&self) {
-        if self.handles.applied_tip.load_full().is_some() {
+        if self.handles.applied_tip().load_full().is_some() {
             return;
         }
 
-        let had_chain_tip = self.handles.chain_tip.load_full().is_some();
-        let genesis = self.handles.network.genesis_block();
+        let had_chain_tip = self.handles.chain_tip().load_full().is_some();
+        let genesis = self.handles.network().genesis_block();
         match self.followers.apply_connect(&self.handles, &genesis) {
             Ok(outcome) => {
                 if !had_chain_tip {
-                    self.handles.chain_tip.store(Some(Arc::new(outcome.tip)));
+                    self.handles.chain_tip().store(Some(Arc::new(outcome.tip)));
                 }
             }
             // Genesis apply failed before an applied tip could be published.
@@ -158,11 +172,11 @@ impl SyncChain for NodeSyncChain {
             // The transition lock is unavailable, so admission is refused.
             Err(error) => return HeaderAdmission::Refused(Box::new(error)),
         };
-        let mut tree = self.handles.block_tree.write();
+        let mut tree = self.handles.block_tree().write();
         let acceptance = bitcoin_rs_chain::accept_headers(
             &mut tree,
             headers,
-            self.handles.network,
+            self.handles.network(),
             bitcoin_rs_chain::current_unix_seconds(),
         );
         match acceptance {
@@ -178,7 +192,7 @@ impl SyncChain for NodeSyncChain {
                         tree.active_height_of(active_tip.tip_id, hash)
                             .and_then(|height| i32::try_from(height).ok())
                     });
-                self.handles.assume_valid_gate.evaluate(&tree);
+                self.handles.reevaluate_assume_valid_with(&tree);
                 drop(tree);
                 drop(transition);
                 HeaderAdmission::Accepted {
@@ -199,13 +213,13 @@ impl SyncChain for NodeSyncChain {
     fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
         let hash = Hash256::from(block.block_hash());
         let segwit_active = {
-            let tree = self.handles.block_tree.read();
+            let tree = self.handles.block_tree().read();
             tree.lookup(hash)
                 .and_then(|node_id| tree.node(node_id).ok())
                 .is_none_or(|node| {
                     bitcoin_rs_chain::softfork_state(
                         &tree,
-                        self.handles.network,
+                        self.handles.network(),
                         node.parent,
                         node.height,
                     )
@@ -217,7 +231,7 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
-        crate::apply::window_len(serialized_sizes)
+        bitcoin_rs_chainstate::window_len(serialized_sizes)
     }
 
     fn commit_window(
@@ -235,25 +249,34 @@ impl SyncChain for NodeSyncChain {
                 invalidated: Box::default(),
                 source: Box::new(source),
             })?;
+        let mempool_change =
+            self.followers
+                .begin_mempool_change()
+                .map_err(|source| WindowCommitError {
+                    applied: 0,
+                    disposition: WindowCommitDisposition::Operational,
+                    invalidated: Box::default(),
+                    source: Box::new(source),
+                })?;
         let result = match transition.connect_window(blocks, bodies) {
             Ok(outcomes) => {
                 for (block, outcome) in blocks.iter().zip(&outcomes) {
-                    self.followers.connected(block, outcome);
+                    self.followers.committed_connect(block, outcome);
                 }
                 let applied = outcomes.len();
-                settle_window_success(transition, applied, outcomes)
+                settle_window_success(transition, mempool_change, applied, outcomes)
             }
             Err(error) => {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
-                    self.followers.connected(block, outcome);
+                    self.followers.committed_connect(block, outcome);
                 }
                 // A connect failure settles according to its disposition.
-                Err(settle_window_failure(transition, error))
+                Err(settle_window_failure(transition, mempool_change, error))
             }
         };
         result.map_err(|error| WindowCommitError {
             applied: error.applied,
-            disposition: error.disposition.into(),
+            disposition: window_disposition(error.disposition),
             invalidated: error.invalidated,
             source: Box::new(error.source),
         })
@@ -279,13 +302,6 @@ impl SyncChain for NodeSyncChain {
             }
             // A disconnect failure left chainstate torn and requires shutdown.
             Err(error @ crate::reorg::ReorgError::Fatal(_)) => {
-                // The disconnect died partway; chainstate is torn. Close
-                // admission and request shutdown here, where the typed cause
-                // still exists.
-                self.handles.admission.close_permanently();
-                self.handles
-                    .shutdown
-                    .store(true, std::sync::atomic::Ordering::Release);
                 Err(BranchSwitchError::Fatal(Box::new(error)))
             }
             // The transition generation could not be settled after reorg work.
@@ -293,7 +309,7 @@ impl SyncChain for NodeSyncChain {
                 Err(BranchSwitchError::TransitionSettlement(Box::new(error)))
             }
             // The checkpoint settlement failed after reorg mutation.
-            Err(error @ crate::reorg::ReorgError::CheckpointSettlement(_)) => {
+            Err(error @ crate::reorg::ReorgError::CheckpointSettlement { .. }) => {
                 Err(BranchSwitchError::CheckpointSettlement(Box::new(error)))
             }
             // A target-branch body failed while connecting the branch.
@@ -306,13 +322,11 @@ impl SyncChain for NodeSyncChain {
                 if !invalidated.is_empty() {
                     // Invalidation can move the active branch away from the
                     // pinned assume-valid anchor.
-                    self.handles
-                        .assume_valid_gate
-                        .evaluate(&self.handles.block_tree.read());
+                    self.handles.reevaluate_assume_valid();
                 }
                 Err(BranchSwitchError::ConnectFailed {
                     hash,
-                    disposition: disposition.into(),
+                    disposition: window_disposition(disposition),
                     invalidated: invalidated.into_boxed_slice(),
                 })
             }

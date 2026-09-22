@@ -1,0 +1,58 @@
+[package]
+name = "bitcoin-rs-chainstate"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: authoritative chainstate"
+
+[lints]
+workspace = true
+
+[features]
+default = ["kernel"]
+kernel = ["bitcoin-rs-consensus/kernel"]
+rocksdb = [
+    "bitcoin-rs-chain/rocksdb",
+    "bitcoin-rs-storage/rocksdb",
+    "bitcoin-rs-utxo/rocksdb",
+]
+fjall = [
+    "bitcoin-rs-chain/fjall",
+    "bitcoin-rs-storage/fjall",
+    "bitcoin-rs-utxo/fjall",
+]
+redb = [
+    "bitcoin-rs-chain/redb",
+    "bitcoin-rs-storage/redb",
+    "bitcoin-rs-utxo/redb",
+]
+
+[dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-consensus.workspace = true
+bitcoin-rs-script.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin-rs-utxo.workspace = true
+bitcoin-rs-chain.workspace = true
+
+anyhow.workspace = true
+arc-swap.workspace = true
+bytes.workspace = true
+cap-fs-ext.workspace = true
+cap-std.workspace = true
+hashbrown.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+quanta.workspace = true
+rayon.workspace = true
+rustix.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = ">=3.20.0, <4"

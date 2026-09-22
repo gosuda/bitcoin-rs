@@ -17,7 +17,7 @@ use core::mem::size_of;
 
 use hashbrown::HashMap;
 
-use super::{events::*, restore::*};
+use bitcoin_rs_chainstate::{events::*, recovery::*};
 
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -42,18 +42,22 @@ use bitcoin_rs_primitives::TxOut;
 use bitcoin_rs_primitives::consensus_bytes;
 
 use bitcoin_rs_primitives::encode::double_sha256;
+use bitcoin_rs_script::push_int;
 
 use bitcoin_rs_index::block_log::BlockRecord;
 
 fn publish_applied_tip_height(state: &NodeState, height: u32) {
     let mut hash = [0_u8; 32];
     hash[..size_of::<u32>()].copy_from_slice(&height.to_le_bytes());
-    state.applied_tip.store(Some(Arc::new(TipSnapshot {
-        tip_id: bitcoin_rs_chain::node::NodeId::new(height),
-        height,
-        chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
-        hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&hash),
-    })));
+    state
+        .chainstate()
+        .applied_tip()
+        .store(Some(Arc::new(TipSnapshot {
+            tip_id: bitcoin_rs_chain::node::NodeId::new(height),
+            height,
+            chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
+            hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&hash),
+        })));
 }
 
 #[test]
@@ -74,7 +78,7 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let epoch = super::events::allocate_process_epoch(&dir)?;
+        let epoch = allocate_process_epoch(&dir)?;
         std::fs::write(
             data_dir.join(format!("epoch-{}", std::process::id())),
             format!("{epoch}\n"),
@@ -172,8 +176,7 @@ fn mined_regtest_child_at(
     time: u32,
     height: u32,
 ) -> anyhow::Result<Block> {
-    let mut script_sig = vec![8];
-    script_sig.extend_from_slice(&height.to_le_bytes());
+    let mut script_sig = push_int(i64::from(height));
     script_sig.extend_from_slice(&time.to_le_bytes());
     let coinbase = Tx {
         version: 2,

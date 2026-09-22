@@ -2,9 +2,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use bitcoin_rs_node::{
-    ChainstateJournalOverrides, NetworkSelection, ScriptIndexMode, UserConfig, ValidationMode,
-};
+use bitcoin_rs_chainstate::ValidationMode;
+use bitcoin_rs_node::{ChainstateJournalOverrides, NetworkSelection, ScriptIndexMode, UserConfig};
 use bitcoin_rs_storage::StorageBackend;
 
 use crate::cli::{parse_bool, parse_connect_list, parse_p2p_magic, parse_socket_list};
