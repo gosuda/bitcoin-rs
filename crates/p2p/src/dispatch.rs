@@ -10,7 +10,7 @@ use crate::fsm::step;
 use crate::handshake::feature_messages;
 use crate::inv::{
     inventory_tx_hash, is_within_inventory_bound, request_inventory, request_inventory_filtered,
-    request_transaction_witness,
+    request_witness,
 };
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
@@ -205,7 +205,7 @@ pub fn dispatch_inbound_full<S>(
                         version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64()
                             != 0
                     });
-                    request_transaction_witness(items, witness);
+                    request_witness(items, witness);
                 }
                 send(response)?;
             }
@@ -1111,10 +1111,13 @@ mod tests {
                 let txid = bitcoin::Txid::from_byte_array([1; 32]);
                 let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
                 let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
-                let requested = if witness {
-                    Inventory::WitnessTransaction(txid)
+                let (requested, block_requested) = if witness {
+                    (
+                        Inventory::WitnessTransaction(txid),
+                        Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array([3; 32])),
+                    )
                 } else {
-                    Inventory::Transaction(txid)
+                    (Inventory::Transaction(txid), block)
                 };
                 let view: Option<&dyn TxInventory> = filtered.then_some(&inventory);
                 assert_eq!(
@@ -1124,7 +1127,7 @@ mod tests {
                         None,
                         view,
                     ),
-                    vec![Message::GetData(vec![requested, wtxid, block])],
+                    vec![Message::GetData(vec![requested, wtxid, block_requested])],
                 );
             }
         }

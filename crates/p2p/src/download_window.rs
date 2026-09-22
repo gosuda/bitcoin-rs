@@ -1453,6 +1453,14 @@ impl DownloadWindow {
         self.received.len()
     }
 
+    /// Returns the recorded height of a received block: the tree height for
+    /// tracked deliveries, `0` when the tree could not resolve an untracked
+    /// one. Test-only accessor.
+    #[cfg(test)]
+    pub(crate) fn received_height(&self, hash: &Hash256) -> Option<u32> {
+        self.received.get(hash).map(|received| received.height)
+    }
+
     /// Returns `true` if `hash` is currently pending. Test-only accessor.
     pub fn contains_pending(&self, hash: &Hash256) -> bool {
         self.pending.contains_key(hash)

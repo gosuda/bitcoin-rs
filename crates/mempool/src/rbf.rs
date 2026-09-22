@@ -26,6 +26,12 @@ pub struct ReplacementCandidate {
     /// acceptance would give it. Zero when the candidate was built without
     /// resolved prevouts, which means unknown rather than none.
     pub sigop_cost: u32,
+    /// Whether the committed entry registers with the fee estimator.
+    ///
+    /// Reorg re-admissions set this false: the transaction already spent its
+    /// time in the pool before the disconnect, matching Core's
+    /// `validForFeeEstimation=false` on reorg re-acceptance.
+    pub fee_estimate: bool,
 }
 
 impl ReplacementCandidate {
@@ -38,6 +44,7 @@ impl ReplacementCandidate {
             fee,
             min_relay_fee_rate,
             sigop_cost: 0,
+            fee_estimate: true,
         }
     }
 
@@ -45,6 +52,13 @@ impl ReplacementCandidate {
     #[must_use]
     pub const fn with_sigop_cost(mut self, sigop_cost: u32) -> Self {
         self.sigop_cost = sigop_cost;
+        self
+    }
+
+    /// Sets whether the committed entry registers with the fee estimator.
+    #[must_use]
+    pub const fn with_fee_estimate(mut self, fee_estimate: bool) -> Self {
+        self.fee_estimate = fee_estimate;
         self
     }
 
@@ -163,6 +177,7 @@ pub(crate) struct ReplacementInputs {
     projected_vsize: u64,
     max_vsize: u64,
     limits: crate::MempoolLimits,
+    fee_estimate: bool,
 }
 
 pub(crate) struct PreparedPoolChange {
@@ -170,6 +185,7 @@ pub(crate) struct PreparedPoolChange {
     pub(crate) evicted: Vec<EntryId>,
     pub(crate) removals: Vec<(EntryId, RemovalReason)>,
     pub(crate) entry: Option<crate::pool::PreparedInsert>,
+    pub(crate) fee_estimate: bool,
 }
 
 impl ReplacementInputs {
@@ -182,6 +198,7 @@ impl ReplacementInputs {
                 evicted: Vec::new(),
                 removals: Vec::new(),
                 entry: Some(self.entry),
+                fee_estimate: self.fee_estimate,
             });
         };
         after_graph.check_limits(self.limits)?;
@@ -253,6 +270,7 @@ impl ReplacementInputs {
             evicted,
             removals,
             entry: Some(self.entry),
+            fee_estimate: self.fee_estimate,
         })
     }
 }
@@ -262,7 +280,7 @@ impl Mempool {
         &self,
         entry: MempoolEntry,
     ) -> Result<ReplacementInputs, RbfError> {
-        self.capture_pool_change(entry, Vec::new(), 0, false)
+        self.capture_pool_change(entry, Vec::new(), 0, false, true)
     }
 
     pub(crate) fn capture_replacement(
@@ -286,6 +304,7 @@ impl Mempool {
             conflicts,
             candidate.min_relay_fee_rate,
             sibling_eviction,
+            candidate.fee_estimate,
         )
     }
 
@@ -295,6 +314,7 @@ impl Mempool {
         conflicts: Vec<EntryId>,
         incremental_fee_rate: u64,
         sibling_eviction: bool,
+        fee_estimate: bool,
     ) -> Result<ReplacementInputs, RbfError> {
         if !u32::try_from(self.conflicting_cluster_count(&conflicts)?)
             .is_ok_and(|count| count <= self.limits.max_replacement_clusters)
@@ -366,6 +386,7 @@ impl Mempool {
             projected_vsize,
             max_vsize: self.limits.max_total_bytes,
             limits: self.limits,
+            fee_estimate,
         })
     }
 
@@ -394,7 +415,11 @@ impl Mempool {
         if replacement {
             self.remove_entries_with_reasons(&prepared.removals, &mut changes);
         }
-        let arrival = prepared.entry.as_ref().map(|insert| insert.entry.txid);
+        let arrival = prepared
+            .entry
+            .as_ref()
+            .map(|insert| insert.entry.txid)
+            .filter(|_| prepared.fee_estimate);
         if let Some(entry) = prepared.entry {
             changes.extend(self.commit_insert(entry).changes);
         }

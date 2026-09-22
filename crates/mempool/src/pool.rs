@@ -1626,6 +1626,22 @@ impl Mempool {
         self.finish_mutation(changes)
     }
 
+    /// Removes the entries named by `txids`, each with its descendants, as
+    /// `Removed(Reorg)` changes in commit order.
+    ///
+    /// The gateway decides which resident entries the current chain no
+    /// longer supports; this method owns only the reason-carrying removal.
+    /// Unknown txids are ignored.
+    pub fn remove_for_reorg(&mut self, txids: &[Txid]) -> MutationResult {
+        let mut changes = Vec::new();
+        for txid in txids {
+            if let Some(id) = self.entry_id_by_txid(txid) {
+                self.remove_entry_and_descendants_into(id, RemovalReason::Reorg, &mut changes);
+            }
+        }
+        self.finish_mutation(changes)
+    }
+
     /// Removes every entry whose `fee_rate` (sat/kvB) is strictly below
     /// `threshold_sat_per_kvb`. Every evicted entry — and each descendant
     /// swept with it — commits as one `Removed(PolicyEviction)` change.

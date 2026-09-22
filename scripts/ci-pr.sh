@@ -36,6 +36,20 @@ finish() {
   fi
 }
 
+# CI test lanes install cargo-nextest (.github/workflows/ci.yml,
+# .github/actions/test-deps): its pooled scheduler runs test binaries
+# concurrently instead of serially, which removes the long tail of
+# process-harness binaries on the 4-vCPU runners. There are no doctests in
+# the tree, so the two runners execute the same tests. Environments without
+# nextest (local, pre-commit) fall back to `cargo test --no-fail-fast`.
+cargo_test() {
+  if command -v cargo-nextest >/dev/null 2>&1; then
+    cargo nextest run --locked --no-fail-fast "$@"
+  else
+    cargo test --locked --no-fail-fast "$@"
+  fi
+}
+
 clippy_profiles() {
   # Four kernel-free all-target profiles; consensus, chainstate, and node have
   # kernel-enabled defaults, so they are checked separately without it.
@@ -59,22 +73,22 @@ test_crates_profiles() {
   # Fixture-free per-crate profiles; only the binary's tests read the pinned
   # Core fixture. Smallest first.
   profile "test: bitcoin-rs-consensus (native)" \
-    cargo test --locked -p bitcoin-rs-consensus --no-default-features --no-fail-fast
+    cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-chainstate (native,fjall)" \
-    cargo test --locked -p bitcoin-rs-chainstate \
-      --no-default-features --features fjall --no-fail-fast
+    cargo_test -p bitcoin-rs-chainstate \
+      --no-default-features --features fjall
   profile "test: bitcoin-rs-node (fjall,zmq)" \
-    cargo test --locked -p bitcoin-rs-node \
-      --no-default-features --features fjall,zmq --no-fail-fast
+    cargo_test -p bitcoin-rs-node \
+      --no-default-features --features fjall,zmq
   # Isolated so node's default zmq feature cannot unify this package on.
   profile "test: bitcoin-rs-rpc (no default features)" \
-    cargo test --locked -p bitcoin-rs-rpc --no-default-features --no-fail-fast
+    cargo_test -p bitcoin-rs-rpc --no-default-features
 }
 
 test_binary_profiles() {
   # Requires the pinned Core fixture. Formal checks have their own workflow.
   profile "test: bitcoin-rs binary (rocksdb,fjall,redb)" \
-    cargo test --locked -p bitcoin-rs --no-fail-fast \
+    cargo_test -p bitcoin-rs \
       --no-default-features --features "rocksdb,fjall,redb"
 }
 
@@ -83,7 +97,7 @@ test_workspace_profiles() {
   # so this profile runs its default-feature (fjall,redb,zmq) test binaries,
   # including the process-harness suite that launches the pinned bitcoind.
   profile "test: workspace (kernel-free)" \
-    cargo test --locked --workspace --no-fail-fast \
+    cargo_test --workspace \
       --exclude bitcoin-rs-consensus --exclude bitcoin-rs-chainstate \
       --exclude bitcoin-rs-node
 }

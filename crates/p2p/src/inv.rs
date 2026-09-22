@@ -44,7 +44,7 @@ pub fn request_missing_parents(
     if items.is_empty() {
         return false;
     }
-    request_transaction_witness(&mut items, witness);
+    request_witness(&mut items, witness);
     // Capability metadata belongs to the same connection as the token. The
     // table rechecks that identity and pins it through the nonblocking enqueue,
     // so a replacement cannot inherit either the request or its service choice.
@@ -57,16 +57,25 @@ pub fn request_missing_parents(
     }
 }
 
-/// Applies BIP144's transaction witness request flag without changing hashes.
-/// Only getdata requests use this flag; announcements retain their own types.
-pub(crate) fn request_transaction_witness(items: &mut [Inventory], witness: bool) {
+/// Applies BIP144's witness request flag without changing hashes. Only
+/// getdata requests use this flag; announcements retain their own types.
+///
+/// Both transaction and block vectors upgrade to their witness variants:
+/// `MSG_WITNESS_BLOCK` is the only block fetch that returns witness data.
+/// A plain `MSG_BLOCK` request is served witness-stripped, and a stripped
+/// segwit body fails the body/header binding check — its witness
+/// commitment no longer matches — surfacing as a consensus connect
+/// failure, which marks the header subtree Permanent rather than retryable.
+pub(crate) fn request_witness(items: &mut [Inventory], witness: bool) {
     if !witness {
         return;
     }
     for item in items {
-        if let Inventory::Transaction(txid) = item {
-            *item = Inventory::WitnessTransaction(*txid);
-        }
+        *item = match *item {
+            Inventory::Transaction(txid) => Inventory::WitnessTransaction(txid),
+            Inventory::Block(hash) => Inventory::WitnessBlock(hash),
+            other => other,
+        };
     }
 }
 
@@ -215,6 +224,46 @@ mod tests {
                 assert!(!lease.is_cancelled());
             }
         }
+    }
+
+    // BIP144: announced `MSG_BLOCK` inventory must be requested as
+    // `MSG_WITNESS_BLOCK` alongside `MSG_TX` -> `MSG_WITNESS_TX`; a plain
+    // block request is served stripped, and a stripped segwit body fails
+    // the header binding at connect. All other inv types pass through.
+    #[test]
+    fn witness_flag_upgrades_blocks_and_transactions_only() {
+        let txid = bitcoin::Txid::from_byte_array(*parent(1).as_bytes());
+        let hash = bitcoin::BlockHash::from_byte_array([2; 32]);
+        let mut items = vec![
+            Inventory::Transaction(txid),
+            Inventory::Block(hash),
+            Inventory::CompactBlock(hash),
+            Inventory::WitnessBlock(hash),
+            Inventory::WitnessTransaction(txid),
+            Inventory::Unknown {
+                inv_type: 7,
+                hash: [3; 32],
+            },
+        ];
+        let unchanged = items.clone();
+        request_witness(&mut items, false);
+        assert_eq!(items, unchanged);
+
+        request_witness(&mut items, true);
+        assert_eq!(
+            items,
+            vec![
+                Inventory::WitnessTransaction(txid),
+                Inventory::WitnessBlock(hash),
+                Inventory::CompactBlock(hash),
+                Inventory::WitnessBlock(hash),
+                Inventory::WitnessTransaction(txid),
+                Inventory::Unknown {
+                    inv_type: 7,
+                    hash: [3; 32],
+                },
+            ]
+        );
     }
 
     // P2P-02: a stale source cannot target or cancel its successor.

@@ -247,9 +247,6 @@ impl BlockSync {
         let Some(applied_tip) = applied_tip else {
             return false;
         };
-        let Some(next_apply_height) = applied_tip.height.checked_add(1) else {
-            return false;
-        };
         // Snapshot the apply frontier once, before the window lock: the hash
         // keys the stuck-clock episode and gates the escalation's final
         // equality check, and `apply_side_busy` derives from the same
@@ -257,7 +254,20 @@ impl BlockSync {
         // reads `block_tree`, so it must stay outside
         // [`Self::select_and_evict_window_peer`] — its callback runs under
         // the window lock, and tree->window is the codebase's lock order.
-        let frontier_hash = self.next_expected_block_hash();
+        //
+        // The frontier is the first connect height, not `applied_tip + 1`:
+        // while a heavier branch is pending, the body the chain needs is
+        // the first connect node above the common ancestor, and the
+        // observations below must measure that body rather than a mid-path
+        // successor on the winner branch. With no frontier (applied tip
+        // equals the chain tip), `applied_tip.height + 1` stays the sentinel
+        // the observations already use.
+        let frontier = self.next_expected_block();
+        let next_apply_height = frontier.map_or_else(
+            || applied_tip.height.saturating_add(1),
+            |(height, _)| height,
+        );
+        let frontier_hash = frontier.map(|(_, hash)| hash);
         let apply_side_busy =
             frontier_hash.is_some_and(|hash| self.body_sync.lock().stager.contains(&hash));
         let mut cold_hedge = None;

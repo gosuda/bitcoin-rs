@@ -37,12 +37,18 @@ env:
 jobs:
   full-node:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The kernel engine is built from C++ and rocksdb's bindgen needs
       # libclang; install the native prerequisites up front.
       - uses: ./.github/actions/native-deps
         id: native_deps
+      # nextest + mold guard for the binary test pass (mold itself is
+      # already installed by native-deps).
+      - uses: ./.github/actions/test-deps
+        id: test_deps
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         id: toolchain
         with:
@@ -73,11 +79,12 @@ jobs:
       - name: Kernel consensus Clippy
         if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --locked -p bitcoin-rs-consensus --all-targets -- -D warnings
-      # Formal checks run independently in model-check-manual.
+      # Formal checks run independently in model-check-manual. Runs under
+      # cargo-nextest's pooled scheduler like the PR test lanes.
       - name: Full-node binary tests
-        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.native_deps.outcome == 'success' && steps.toolchain.outcome == 'success' && steps.fixtures.outcome == 'success' && steps.test_deps.outcome == 'success' }}
         run: |
-          cargo test --locked -p bitcoin-rs --no-fail-fast \
+          cargo nextest run --locked --no-fail-fast -p bitcoin-rs \
             --no-default-features --features "${FULL_NODE_FEATURES}"
       - name: Preserve public process compatibility evidence
         if: ${{ always() }}
@@ -90,6 +97,8 @@ jobs:
 
   bench-smoke:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -99,7 +108,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       # The default feature set includes the C++ kernel engine, so every
-      # production lane installs the native prerequisites up front.
+      # production lane installs the native prerequisites up front (mold is
+      # included for the linker).
       - name: Kernel prerequisites
         id: kernel_deps
         uses: ./.github/actions/native-deps
@@ -110,16 +120,23 @@ jobs:
         run: |
           cargo test --locked -p bitcoin-rs-consensus \
             --no-default-features --features kernel --test witness_sigop_activation
+      # The `--no-run` passes below are compile-and-link gates only --
+      # measured executions remain release evidence outside CI. They build
+      # under the `quickstart` profile (opt-level 3, no fat LTO, 16
+      # codegen-units) rather than `bench` (fat LTO, codegen-units 1): the
+      # fat-LTO merge serializes the whole full-node graph and alone cost
+      # ~14 minutes, while `--profile dev` would not catch optimization-level
+      # build errors. `cargo bench` accepts any named profile.
       - run: |
-          cargo bench --locked -p bitcoin-rs --no-run \
+          cargo bench --locked -p bitcoin-rs --no-run --profile quickstart \
             --no-default-features --features "${FULL_NODE_FEATURES}"
       # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
       # the production-allocator benchmark so bench breakage is visible to CI.
-      - run: cargo bench --locked -p bitcoin-rs-utxo --no-run
+      - run: cargo bench --locked -p bitcoin-rs-utxo --no-run --profile quickstart
       # The chainstate replay gate is an explicit harness: compile it on every
       # main push, while measured executions remain release evidence.
       - run: |
-          cargo bench --locked -p bitcoin-rs-node --no-run \
+          cargo bench --locked -p bitcoin-rs-node --no-run --profile quickstart \
             --no-default-features --features fjall --bench chainstate_journal
       - name: Benchmark evidence validation
         run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --bench evidence
@@ -127,10 +144,10 @@ jobs:
       # whole content): merkle, utxo_commit under fjall, sync_pipeline, and
       # the mining candidate are not covered by the compiles above.
       - run: |
-          cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
-          cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit
-          cargo bench --locked -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate
-          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline
+          cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
+          cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit --profile quickstart
+          cargo bench --locked -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate --profile quickstart
+          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline --profile quickstart
 
       # Native script tests do not compile this feature-gated oracle. Exercise
       # it on `main`, with separate build output and retained diagnostics.
@@ -174,6 +191,9 @@ jobs:
   # The imported qa-assets corpora (fuzz/corpus/, provenance in
   # fuzz/CORPUS_PROVENANCE.md) only pay off if they are exercised: build every
   # target and give each 10k executions against its corpus.
+  # cargo-fuzz composes its own RUSTFLAGS (env RUSTFLAGS is appended, but a
+  # sanitizer+linker combination is untested) -- this lane keeps the default
+  # linker instead of mold.
   fuzz-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -223,9 +243,15 @@ jobs:
 
   # Main-only (issue #174 / FEAT-01): the named combinations in
   # scripts/feature-matrix.tsv, not a cargo-hack powerset. `--each-feature`
-  # enables empty markers and illegal singles (zmq-only).
+  # enables empty markers and illegal singles (zmq-only). The TSV's two
+  # lanes run as a matrix: `pure` needs no C++ toolchain or kernel/rocksdb
+  # compile, so it skips native-deps entirely.
   feature-combinations:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [pure, native]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -233,7 +259,8 @@ jobs:
       # Kernel and rocksdb rows need the C++ toolchain; the TSV's
       # native lane is why this job lives in main.yml.
       - uses: ./.github/actions/native-deps
-      - run: scripts/check-feature-matrix.sh
+        if: matrix.lane == 'native'
+      - run: scripts/check-feature-matrix.sh ${{ matrix.lane }}
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build
   # on the declared MSRV. A second compile graph, so it runs on `main` only;
@@ -353,10 +380,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: mold linker
+        run: command -v mold >/dev/null || { sudo apt-get update && sudo apt-get install -y mold; }
       - name: Install pinned bitcoind 31.1
         run: scripts/install-bitcoind.sh --print-path
       - name: Build bitcoin-rs (quickstart, portable)

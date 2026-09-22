@@ -146,6 +146,92 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Builds a live-tip race: the applied tip sits two deep on a losing
+/// branch while a heavier three-block branch heads the tree. Winning
+/// bodies are real mined blocks so they pass the binding gate when staged.
+fn pending_reorg_fixture()
+-> Result<(SyncHarness, TipSnapshot, Vec<Block>), Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let genesis_id = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
+    let losing1 = test_header(genesis_header().compute_hash(), 1);
+    let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
+    let losing2 = test_header(losing1.compute_hash(), 2);
+    let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
+    let applied = {
+        let node = tree.node(losing2_id)?;
+        TipSnapshot {
+            tip_id: losing2_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+
+    let mut winning = Vec::new();
+    let mut parent = genesis_id;
+    let mut prev = genesis_header().compute_hash();
+    for tag in 101..=103_u32 {
+        let block = mined_block_with_prev_hash(prev, tag, vec![coinbase_transaction(tag)]);
+        parent = tree.insert_node(Some(parent), block.header, NodeStatus::HeaderValid)?;
+        prev = block.block_hash();
+        winning.push(block);
+    }
+
+    let harness = SyncHarness::new(tree);
+    harness.applied_tip.store(Some(Arc::new(applied.clone())));
+    Ok((harness, applied, winning))
+}
+
+// SYNC-FRONTIER-01: while a heavier branch is pending, the apply-side
+// frontier is the first connect node above the common ancestor — not the
+// winner-branch node at `applied_height + 1`.
+#[test]
+fn pending_reorg_frontier_is_first_connect_node() -> Result<(), Box<dyn std::error::Error>> {
+    let (harness, _applied, winning) = pending_reorg_fixture()?;
+    let first_connect = Hash256::from(winning[0].block_hash());
+    assert_eq!(
+        harness.sync.next_expected_block(),
+        Some((1, first_connect)),
+        "the connect frontier must name the winner's first block, not the winner at applied+1"
+    );
+    Ok(())
+}
+
+// A winning-branch body staged above the fork must wait for the branch
+// switch instead of churning through the extension commit: its parent lies
+// on the winning branch — never on the applied tip — so the commit could
+// never consume it and would restore-drop and re-request it every tick.
+#[test]
+fn apply_buffered_blocks_waits_for_pending_reorg() -> Result<(), Box<dyn std::error::Error>> {
+    let (harness, applied, winning) = pending_reorg_fixture()?;
+    let sync = &harness.sync;
+    let head = &winning[2];
+    let head_hash = Hash256::from(head.block_hash());
+
+    sync.buffer_received_block_chunk(
+        &mut vec![crate::InboundBlock::from_decoded(head.clone())],
+        Some(head_hash),
+    );
+    assert!(sync.body_sync.lock().stager.contains(&head_hash));
+
+    let first_connect = Hash256::from(winning[0].block_hash());
+    assert_eq!(sync.apply_buffered_blocks(Some(first_connect)), (0, 0));
+    assert!(
+        sync.body_sync.lock().stager.contains(&head_hash),
+        "an uncommittable winner body must stay staged for the branch switch"
+    );
+    assert_eq!(
+        sync.chain
+            .applied_tip()
+            .load_full()
+            .ok_or("missing applied tip")?
+            .hash,
+        applied.hash,
+        "the losing applied tip must not be displaced by the extension path"
+    );
+    Ok(())
+}
+
 #[test]
 fn tick_does_not_resend_same_getheaders_while_pending() -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(3)?;

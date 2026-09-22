@@ -20,7 +20,7 @@ pub use error::StorageError;
 pub use footprint::{
     DataDirAnchor, FootprintError, LogicalLedger, LogicalOwner, PhysicalCategory, PhysicalLedger,
     PhysicalNamespace, PhysicalObservationKind, dir_has_entries, logical_column_family,
-    logical_store_owners, measure_physical_tree, opened_fd_path,
+    logical_store_owners, measure_physical_tree, opened_fd_path, opened_path_matches_fd,
 };
 
 pub use trait_::{

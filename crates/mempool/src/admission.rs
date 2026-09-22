@@ -16,6 +16,31 @@ use crate::{
 
 pub(crate) const MAX_ADMISSION_RETRIES: usize = 4;
 
+/// Which chain-generation a submission attempt must observe.
+///
+/// Ordinary submissions fence on the stable even value; a chain change
+/// re-admission runs under the guard's reserved odd value. Both fences
+/// resolve through the same raw load, so a request is usable exactly when
+/// it was prepared under the current generation.
+#[derive(Clone, Copy)]
+pub(crate) enum AdmissionFence {
+    /// The even value returned by `stable_generation`.
+    Stable,
+    /// The exact odd value held by an active `ChainChangeGuard`.
+    ChainChange(u64),
+}
+
+impl AdmissionFence {
+    /// The generation this fence currently admits under, or `None` when
+    /// the chain moved (odd fence mismatched, or stable fence saw odd).
+    pub(crate) fn current(self, gateway: &MempoolGateway) -> Option<u64> {
+        match self {
+            Self::Stable => gateway.stable_generation(),
+            Self::ChainChange(odd) => (gateway.chain_generation() == odd).then_some(odd),
+        }
+    }
+}
+
 /// Provisional applied-chain facts collected during one submission attempt.
 ///
 /// Height and median time past refer to one sampled applied tip. Coin reads
@@ -326,7 +351,71 @@ impl MempoolGateway {
         time: u64,
         chain: &dyn AdmissionChain,
     ) -> Result<SubmitOutcome, SubmitError> {
-        self.submit_transaction_claimed(tx, origin, max_feerate_sat_per_kvb, time, chain, None)
+        self.submit_transaction_claimed(
+            tx,
+            origin,
+            max_feerate_sat_per_kvb,
+            time,
+            chain,
+            None,
+            AdmissionFence::Stable,
+        )
+    }
+
+    /// Re-admits transactions displaced by disconnected blocks through the
+    /// shared admission evaluator while `change` holds the chain fence.
+    /// `txs` must arrive parents before children. A refused candidate, and any
+    /// later candidate spending it or spending a txid an earlier commit
+    /// removed, is withheld so a refused parent never leaves a partial family.
+    /// A guard issued by a different gateway admits nothing and returns an
+    /// empty result: the odd value alone is not authority.
+    pub fn reconsider_disconnected(
+        &self,
+        change: &crate::gateway::ChainChangeGuard,
+        chain: &dyn AdmissionChain,
+        time: u64,
+        txs: impl IntoIterator<Item = Arc<Tx>>,
+    ) -> Vec<MutationResult> {
+        if !change.owns(self) {
+            return Vec::new();
+        }
+        let fence = AdmissionFence::ChainChange(change.odd_generation());
+        let mut refused: HashSet<Txid> = HashSet::new();
+        let mut committed = Vec::new();
+        for tx in txs {
+            let txid = tx.txid();
+            let spends_refused = tx
+                .inputs
+                .iter()
+                .any(|input| refused.contains(&input.previous_output.txid));
+            if spends_refused {
+                refused.insert(txid);
+                continue;
+            }
+            match self.submit_transaction_claimed(
+                tx,
+                AdmissionOrigin::Reorg,
+                None,
+                time,
+                chain,
+                None,
+                fence,
+            ) {
+                Ok(SubmitOutcome::Committed(result)) => {
+                    // An earlier parent evicted to make room is unavailable
+                    // to later spenders, just like a refused parent.
+                    for removed in result.removed_txids() {
+                        refused.insert(removed);
+                    }
+                    committed.push(result);
+                }
+                Ok(SubmitOutcome::AlreadyKnown | SubmitOutcome::AlreadyConfirmed) => {}
+                Ok(SubmitOutcome::Held { .. }) | Err(_) => {
+                    refused.insert(txid);
+                }
+            }
+        }
+        committed
     }
 
     fn submit_transaction_claimed(
@@ -337,16 +426,17 @@ impl MempoolGateway {
         time: u64,
         chain: &dyn AdmissionChain,
         claim: Option<&crate::orphan::HeldOrphan>,
+        fence: AdmissionFence,
     ) -> Result<SubmitOutcome, SubmitError> {
         let txid = tx.txid();
         let peer = matches!(origin, AdmissionOrigin::Peer(_));
         for _ in 0..MAX_ADMISSION_RETRIES {
-            let Some(generation) = self.stable_generation() else {
+            let Some(generation) = fence.current(self) else {
                 continue;
             };
             let (sequence, mempool_prevouts, holdable) = {
                 let pool = self.pool.read();
-                if self.stable_generation() != Some(generation) {
+                if fence.current(self) != Some(generation) {
                     continue;
                 }
                 if pool.contains_txid(&txid) {
@@ -375,9 +465,7 @@ impl MempoolGateway {
             };
             if peer && snapshot.as_ref().is_some_and(|snapshot| snapshot.confirmed) {
                 let pool = self.pool.read();
-                if self.stable_generation() != Some(generation)
-                    || pool.sequence_number() != sequence
-                {
+                if fence.current(self) != Some(generation) || pool.sequence_number() != sequence {
                     continue;
                 }
                 let mut lifecycle = self.lifecycle.lock();
@@ -424,7 +512,7 @@ impl MempoolGateway {
                 expected_generation: generation,
                 expected_sequence: sequence,
             };
-            match self.admit_transaction_claimed(&request, claim) {
+            match self.admit_transaction_claimed(&request, claim, fence) {
                 Ok(AdmitOutcome::Committed(result)) => return Ok(SubmitOutcome::Committed(result)),
                 Ok(AdmitOutcome::AlreadyKnown) => return Ok(SubmitOutcome::AlreadyKnown),
                 Err(AdmitError::GenerationChanged | AdmitError::MempoolChanged) => {
@@ -465,6 +553,7 @@ impl MempoolGateway {
                 time,
                 chain,
                 Some(&held),
+                AdmissionFence::Stable,
             );
             if matches!(result, Err(SubmitError::RetryExhausted)) {
                 let mut lifecycle = self.lifecycle.lock();
@@ -986,7 +1075,8 @@ mod tests {
                 None,
                 3,
                 &Unavailable,
-                Some(&claim)
+                Some(&claim),
+                AdmissionFence::Stable,
             ),
             Ok(SubmitOutcome::AlreadyKnown)
         );
@@ -2138,5 +2228,345 @@ mod tests {
         assert_eq!(gateway.orphan_count(), 0);
         assert!(gateway.read().is_empty());
         assert_eq!(gateway.read().sequence_number(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Reorg lifecycle: shared admission under the chain fence + sweep.
+    // -----------------------------------------------------------------
+
+    #[derive(Default)]
+    struct ReorgRecording(Mutex<Vec<(Txid, AdmissionOrigin)>>);
+
+    impl crate::MempoolObserver for ReorgRecording {
+        fn on_mutation(&self, envelope: &crate::MutationEnvelope) {
+            let mut seen = self.0.lock();
+            for change in &envelope.result.changes {
+                seen.push((Txid::from(change.txid), envelope.origin));
+            }
+        }
+    }
+
+    fn observed_gateway(observer: &Arc<ReorgRecording>) -> Arc<MempoolGateway> {
+        let leg: Arc<dyn crate::MempoolObserver> = observer.clone();
+        Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
+            Some(leg),
+        ))
+    }
+
+    fn funded_chain(outpoint: OutPoint, value: u64) -> Coins {
+        Coins(vec![(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )])
+    }
+
+    /// MPL-04: the guard's odd fence re-admits a dependency-ordered batch
+    /// through the shared evaluator, publishing `Reorg` in order.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reconsider_disconnected_admits_parent_then_child_under_the_guard() {
+        let observer = Arc::new(ReorgRecording::default());
+        let gateway = observed_gateway(&observer);
+        let (parent, child) = witness_parent_and_child();
+        let parent_txid = parent.txid();
+        let child_txid = child.txid();
+        let chain = funded_chain(parent.inputs[0].previous_output, 20_000);
+        let change = gateway.begin_chain_change().expect("fence");
+        assert!(gateway.stable_generation().is_none());
+
+        let committed = gateway.reconsider_disconnected(
+            &change,
+            &chain,
+            1,
+            [Arc::new(parent), Arc::clone(&child)],
+        );
+        change.finish().expect("finish");
+
+        assert_eq!(committed.len(), 2, "one committed result per candidate");
+        for result in &committed {
+            assert_eq!(result.changes.len(), 1);
+        }
+        assert_eq!(gateway.read().sequence_number(), 2);
+        assert_eq!(
+            *observer.0.lock(),
+            vec![
+                (parent_txid, AdmissionOrigin::Reorg),
+                (child_txid, AdmissionOrigin::Reorg)
+            ],
+            "commits publish Reorg in dependency order"
+        );
+    }
+
+    /// MPL-04: a parent that is not final at the lower tip is refused and its
+    /// descendant withheld, so no partial family is left behind.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reconsider_disconnected_withholds_descendants_of_a_refused_parent() {
+        let observer = Arc::new(ReorgRecording::default());
+        let gateway = observed_gateway(&observer);
+        let (mut parent, child) = witness_parent_and_child();
+        parent.lock_time = LockTime::from_consensus(5);
+        // A non-final sequence makes the unmet locktime binding.
+        parent.inputs[0].sequence = Sequence::from_consensus(0);
+        let child_txid = child.txid();
+        let chain = funded_chain(parent.inputs[0].previous_output, 20_000);
+        let change = gateway.begin_chain_change().expect("fence");
+
+        let committed =
+            gateway.reconsider_disconnected(&change, &chain, 1, [Arc::new(parent), child]);
+        change.finish().expect("finish");
+
+        assert!(
+            committed.is_empty(),
+            "a refused parent must keep its descendant out"
+        );
+        assert!(!gateway.read().contains_txid(&child_txid));
+        assert!(observer.0.lock().is_empty());
+    }
+
+    /// MPL-04: reorg re-admission runs script verification like any other
+    /// admission — a bad-witness candidate is refused, not force-inserted.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reconsider_disconnected_refuses_a_script_failure() {
+        let gateway = gateway();
+        let (parent, valid) = witness_parent_and_child();
+        let mut bad = (*valid).clone();
+        bad.inputs[0].witness = Witness::from_stack(vec![vec![0x00]]);
+        let chain = Coins(vec![(
+            bad.inputs[0].previous_output,
+            parent.outputs[0].clone(),
+        )]);
+        let change = gateway.begin_chain_change().expect("fence");
+
+        let committed = gateway.reconsider_disconnected(&change, &chain, 1, [Arc::new(bad)]);
+        change.finish().expect("finish");
+
+        assert!(committed.is_empty(), "script failure must refuse");
+        assert!(gateway.read().is_empty());
+    }
+
+    /// Reorg re-admission is not new fee evidence: the estimator must not see
+    /// the re-entered transaction, matching Core's `validForFeeEstimation=false`.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reconsider_disconnected_does_not_register_with_the_estimator() {
+        let gateway = gateway();
+        let (parent, child) = witness_parent_and_child();
+        let chain = funded_chain(parent.inputs[0].previous_output, 20_000);
+        let before = gateway.read().estimator_history();
+        let change = gateway.begin_chain_change().expect("fence");
+
+        let committed = gateway.reconsider_disconnected(
+            &change,
+            &chain,
+            1,
+            [Arc::new(parent), Arc::clone(&child)],
+        );
+        change.finish().expect("finish");
+
+        assert_eq!(committed.len(), 2);
+        assert_eq!(
+            gateway.read().estimator_history(),
+            before,
+            "reorg re-admission must not touch estimator state"
+        );
+
+        // Control: an ordinary submission does register with the estimator.
+        let control = standard_spend(
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[60; 32])), 0),
+            12,
+        );
+        let control_chain = funded_chain(control.inputs[0].previous_output, 20_000);
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::new(control),
+                AdmissionOrigin::Rpc,
+                None,
+                1,
+                &control_chain
+            ),
+            Ok(SubmitOutcome::Committed(_))
+        ));
+        assert_ne!(gateway.read().estimator_history(), before);
+    }
+
+    /// The sweep removes residents the lower tip no longer supports �� a
+    /// missing-input parent together with its descendant, and a resident whose
+    /// locktime is no longer final — while a supported entry stays.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn remove_for_reorg_sweeps_only_unsupported_residents() {
+        let gateway = gateway();
+        let (parent, child) = parent_and_child();
+        let parent_txid = parent.txid();
+        let child_txid = child.txid();
+        // A resident entry whose locktime is not final at the snapshot's
+        // next height (height 1 -> next 2).
+        let locktime_out = OutPoint::new(Txid(Hash256::from_le_bytes(&[41; 32])), 0);
+        let mut locked = standard_spend(locktime_out, 9);
+        locked.lock_time = LockTime::from_consensus(5);
+        locked.inputs[0].sequence = Sequence::from_consensus(0);
+        let locked_txid = locked.txid();
+        // A supported resident whose input is a live coin and stays.
+        let valid_out = OutPoint::new(Txid(Hash256::from_le_bytes(&[42; 32])), 0);
+        let valid = standard_spend(valid_out, 10);
+        let valid_txid = valid.txid();
+        for tx in [parent, (*child).clone(), locked, valid] {
+            gateway
+                .insert_entry(
+                    AdmissionOrigin::Rpc,
+                    MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 1),
+                )
+                .expect("fixture entry");
+        }
+        let chain = Coins(vec![
+            (
+                valid_out,
+                TxOut {
+                    value: Amount::from_sat(20_000),
+                    script_pubkey: Script::from_bytes(vec![0x51]),
+                },
+            ),
+            (
+                locktime_out,
+                TxOut {
+                    value: Amount::from_sat(20_000),
+                    script_pubkey: Script::from_bytes(vec![0x51]),
+                },
+            ),
+        ]);
+        let change = gateway.begin_chain_change().expect("fence");
+
+        let result = gateway
+            .remove_for_reorg(&change, &chain)
+            .expect("generation held");
+        change.finish().expect("finish");
+
+        let removed: HashSet<Txid> = result.removed_txids().into_iter().collect();
+        assert!(removed.contains(&parent_txid), "missing-input parent");
+        assert!(removed.contains(&child_txid), "its descendant");
+        assert!(removed.contains(&locked_txid), "no-longer-final entry");
+        assert!(!removed.contains(&valid_txid));
+        assert!(
+            result.changes.iter().all(|c| matches!(
+                c.outcome,
+                crate::MutationOutcome::Removed(crate::RemovalReason::Reorg)
+            )),
+            "every swept entry carries the Reorg reason"
+        );
+        assert!(gateway.read().contains_txid(&valid_txid));
+        assert_eq!(gateway.read().len(), 1);
+    }
+
+    /// A moved fence sweeps nothing: the commit re-checks the exact odd value.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn remove_for_reorg_refuses_a_moved_generation() {
+        let gateway = gateway();
+        let (parent, _child) = parent_and_child();
+        let parent_txid = parent.txid();
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1),
+            )
+            .expect("fixture entry");
+        let change = gateway.begin_chain_change().expect("fence");
+        gateway.force_chain_generation(2);
+
+        assert_eq!(
+            gateway.remove_for_reorg(&change, &Coins(vec![])),
+            Err(crate::ChainChangeError::GenerationMoved)
+        );
+        assert!(gateway.read().contains_txid(&parent_txid));
+    }
+
+    /// The admission gate compares the token through the fence: an even
+    /// token is refused while the generation is odd, an odd token under the
+    /// stable fence is refused too — the integer alone is not authority —
+    /// and the guard's chain-change fence admits only its own odd value.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn admission_state_accepts_only_the_current_generation() {
+        let gateway = gateway();
+        let change = gateway.begin_chain_change().expect("fence");
+        let request = AdmissionRequest {
+            tx: Arc::new(standard_spend(
+                OutPoint::new(Txid(Hash256::from_le_bytes(&[50; 32])), 0),
+                11,
+            )),
+            context: crate::standardness::PackageTxContext {
+                fee: 1_000,
+                vsize: 100,
+                sigop_cost: 0,
+                missing_inputs: false,
+            },
+            prevouts: vec![],
+            prevout_meta: HashMap::new(),
+            csv_active: false,
+            locktime_cutoff: 0,
+            max_feerate_sat_per_kvb: None,
+            time: 1,
+            height: 1,
+            origin: AdmissionOrigin::Rpc,
+            expected_generation: 0,
+            expected_sequence: gateway.read().sequence_number(),
+        };
+        let pool = gateway.read();
+        assert_eq!(
+            gateway.check_admission_state(&pool, &request, AdmissionFence::Stable),
+            Err(AdmitError::GenerationChanged),
+            "an even token cannot admit while the change fence is held"
+        );
+        let mut odd_request = request;
+        odd_request.expected_generation = change.odd_generation();
+        assert_eq!(
+            gateway.check_admission_state(&pool, &odd_request, AdmissionFence::Stable),
+            Err(AdmitError::GenerationChanged),
+            "the odd integer without the guard's fence is refused"
+        );
+        assert_eq!(
+            gateway.check_admission_state(
+                &pool,
+                &odd_request,
+                AdmissionFence::ChainChange(change.odd_generation()),
+            ),
+            Ok(()),
+            "the guard's exact odd value admits under its own fence"
+        );
+        drop(pool);
+        change.finish().expect("finish");
+    }
+
+    /// A guard issued by another gateway carries no authority here:
+    /// `remove_for_reorg` fails fast with `ForeignGuard` before any pool
+    /// read, and `reconsider_disconnected` inserts nothing.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reorg_methods_refuse_a_guard_from_another_gateway() {
+        let gateway_a = gateway();
+        let gateway_b = gateway();
+        let (parent, _child) = parent_and_child();
+        insert_parent(&gateway_b, parent.clone(), AdmissionOrigin::Rpc);
+        let guard_b = gateway_b.begin_chain_change().expect("fence on b");
+
+        assert_eq!(
+            gateway_a.remove_for_reorg(&guard_b, &Coins(vec![])),
+            Err(crate::ChainChangeError::ForeignGuard),
+            "a foreign guard cannot sweep this gateway's pool"
+        );
+        assert!(
+            gateway_a
+                .reconsider_disconnected(&guard_b, &Coins(vec![]), 1, [Arc::new(parent)])
+                .is_empty(),
+            "a foreign guard admits nothing"
+        );
+        assert!(gateway_a.read().iter_entries().next().is_none());
+        guard_b.finish().expect("finish b");
     }
 }

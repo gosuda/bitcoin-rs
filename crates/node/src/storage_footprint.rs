@@ -35,8 +35,8 @@ pub use bitcoin_rs_storage::footprint::evidence::StorageFootprintEvidence;
 use bitcoin_rs_storage::footprint::evidence::WatermarkEvidence;
 pub use bitcoin_rs_storage::footprint::evidence::storage_footprint_json;
 use bitcoin_rs_storage::logical_store_owners;
-use bitcoin_rs_storage::opened_fd_path;
 use bitcoin_rs_storage::split_cache_budget;
+use bitcoin_rs_storage::{opened_fd_path, opened_path_matches_fd};
 use sha2::Digest;
 use sha2::Sha256;
 use std::io;
@@ -271,7 +271,10 @@ fn collect_logical(
     {
         if dir_has_entries(chainstate.as_fd()).map_err(|error| io_from_footprint(&error))? {
             let path = opened_fd_path(chainstate.as_fd());
-            // Hold `chainstate` until the backend has opened `/proc/self/fd/N`.
+            // Hold `chainstate` until the backend has opened the store and the
+            // pathname is verified to still resolve to the held inode: a
+            // rename-and-replace would leave this ledger reading a different
+            // store than the physical ledger's anchored inode.
             let owners = crate::storage_backend::open_store_inspection(
                 backend,
                 &path,
@@ -279,6 +282,9 @@ fn collect_logical(
                     namespace: "chainstate",
                 },
             )?;
+            if !opened_path_matches_fd(chainstate.as_fd(), &path)? {
+                bail!("chainstate store directory replaced during footprint scan");
+            }
             drop(chainstate);
             for owner in owners {
                 logical.push(owner);
@@ -297,9 +303,13 @@ fn collect_logical(
     {
         if dir_has_entries(txindex.as_fd()).map_err(|error| io_from_footprint(&error))? {
             let path = opened_fd_path(txindex.as_fd());
-            // Hold `txindex` until the backend has opened `/proc/self/fd/N`.
+            // Hold `txindex` until the backend has opened the store and the
+            // pathname is verified to still resolve to the held inode.
             let (owners, found) =
                 crate::storage_backend::open_store_inspection(backend, &path, TxIndexScan)?;
+            if !opened_path_matches_fd(txindex.as_fd(), &path)? {
+                bail!("txindex store directory replaced during footprint scan");
+            }
             drop(txindex);
             for owner in owners {
                 logical.push(owner);

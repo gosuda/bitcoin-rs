@@ -169,13 +169,33 @@ fn maximum_priority_delta_does_not_break_candidate_construction() -> Result<(), 
     Ok(())
 }
 
+struct ReorgCoins {
+    funding: OutPoint,
+    confirmed: TxOut,
+}
+
+impl bitcoin_rs_mempool::AdmissionChain for ReorgCoins {
+    fn snapshot(&self, tx: &Tx) -> Option<bitcoin_rs_mempool::ChainAdmissionSnapshot> {
+        Some(bitcoin_rs_mempool::ChainAdmissionSnapshot {
+            prevouts: tx
+                .inputs
+                .iter()
+                .filter(|input| input.previous_output == self.funding)
+                .map(|input| (input.previous_output, self.confirmed.clone()))
+                .collect(),
+            height: 100,
+            ..bitcoin_rs_mempool::ChainAdmissionSnapshot::default()
+        })
+    }
+}
+
 /// The reserved reorg batch must store resolved BIP141 cost all the way
 /// through the real gateway and mining snapshot; template selection consumes it.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box<dyn Error>> {
     use bitcoin::hashes::{hash160, sha256};
-    use bitcoin_rs_mempool::reconsider::DisconnectedCandidates;
-    use bitcoin_rs_mempool::{AdmissionOrigin, Mempool, MempoolGateway, MempoolLimits};
+    use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
 
     // Both scripts succeed without signatures. Sigops in an unexecuted branch
     // are still counted: one legacy CHECKSIG costs 4, two-key witness multisig 2.
@@ -223,19 +243,20 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(8_000),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![0x22; 32]].concat()),
         }],
         lock_time: LockTime::from_consensus(0),
     };
-    let mut batch = DisconnectedCandidates::new(0, 100);
-    assert!(batch.offer(&parent, |outpoint| {
-        (*outpoint == funding).then(|| confirmed.clone())
-    }));
-    assert!(batch.offer(&child, |_| None));
+    let chain = ReorgCoins { funding, confirmed };
     let gateway = MempoolGateway::shared(Arc::new(Mempool::new(MempoolLimits::default()).into()));
     let transition = gateway.begin_chain_change()?;
     assert!(gateway.stable_generation().is_none());
-    let changes = gateway.reconsider_disconnected(AdmissionOrigin::Reorg, batch.into_entries());
+    let changes = gateway.reconsider_disconnected(
+        &transition,
+        &chain,
+        0,
+        [Arc::new(parent.clone()), Arc::new(child.clone())],
+    );
     assert_eq!(changes.len(), 2);
     transition.finish()?;
     let snapshot = gateway.read().mining_snapshot();

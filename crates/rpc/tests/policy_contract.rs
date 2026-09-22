@@ -13,8 +13,8 @@ extern crate alloc;
 use alloc::sync::Arc;
 
 use bitcoin_rs_mempool::{
-    AdmissionOrigin, Mempool, MempoolEntry, MempoolGateway, MempoolLimits, MempoolObserver,
-    MutationEnvelope, MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
+    Mempool, MempoolEntry, MempoolGateway, MempoolLimits, MempoolObserver, MutationEnvelope,
+    MutationOutcome, PolicyError, RbfError, RemovalReason, ReplacementCandidate,
     eviction::mempool_min_fee_sat_per_kvb,
 };
 
@@ -1515,7 +1515,11 @@ fn reorg_seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REORG_SUBSIDY_SATS - fee_sats),
-            script_pubkey: Script::from_bytes(vec![0x51]),
+            // A standard P2SH output: re-admission runs the same
+            // standardness rules as ingress.
+            script_pubkey: Script::from_bytes(
+                [vec![0xa9, 0x14], vec![0x22; 20], vec![0x87]].concat(),
+            ),
         }],
         lock_time: LockTime::from_consensus(0),
     }
@@ -1728,24 +1732,26 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
     let gateway = MempoolGateway::shared(Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),
     ))));
+    let chainstate = state.chainstate();
+    let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+        chainstate.utxo(),
+        chainstate.applied_tip(),
+        chainstate.block_tree(),
+        chainstate.network(),
+    );
+    let change = gateway.begin_chain_change()?;
     let committed = gateway.reconsider_disconnected(
-        AdmissionOrigin::Reorg,
+        &change,
+        &chain,
+        1,
         mined_block
             .txs
             .iter()
             .filter(|tx| !is_coinbase(tx))
-            .map(|tx| {
-                let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-                MempoolEntry::new(
-                    Arc::new(tx.clone()),
-                    vsize,
-                    REORG_SPEND_FEE_SATS,
-                    1,
-                    REORG_SEED_BLOCKS,
-                )
-            }),
+            .map(|tx| Arc::new(tx.clone())),
     );
     assert_eq!(committed.len(), 1, "one admitted candidate: the spend");
+    change.finish()?;
     assert!(gateway.read().contains_txid(&spend_txid));
     Ok(())
 }

@@ -270,7 +270,7 @@ pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) ->
 /// resolved input not present there (mempool/package parents) is encoded as the
 /// next block, so any positive relative lock fails. Missing inputs are not
 /// checked here; callers must reject those first.
-fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>) -> bool {
+pub(crate) fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>) -> bool {
     if !finality.csv_active || tx.version < 2 {
         return true;
     }

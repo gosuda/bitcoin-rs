@@ -1,19 +1,33 @@
 //! Node-owned coordination around authoritative chainstate reorgs.
 
+use std::sync::Arc;
+
 use crate::chain_effects::ChainFollowers;
 use bitcoin_rs_chain::NodeId;
 pub use bitcoin_rs_chainstate::reorg::ReorgError;
 use bitcoin_rs_chainstate::reorg::ReorgObserver;
 use bitcoin_rs_chainstate::{ApplyError, Chainstate, ConnectOutcome, DisconnectOutcome};
-use bitcoin_rs_mempool::AdmissionOrigin;
-use bitcoin_rs_primitives::{Block, Hash256, Txid};
+use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
 use hashbrown::HashSet;
+
+/// Core's `MAX_DISCONNECTED_TX_POOL_BYTES`: the serialized-byte ceiling on
+/// the reorg re-admission candidate set.
+///
+/// Once the cap is hit the observer stops collecting for the rest of the
+/// reorg. Blocks stream oldest-first so parents arrive before their
+/// descendants; the candidates dropped are therefore the newest
+/// descendants, which later fail admission as missing inputs — that is the
+/// defined overload outcome, never a partially admitted family root.
+const MAX_DISCONNECTED_TX_BYTES: usize = 20_000_000;
 
 struct NodeReorgObserver<'a> {
     followers: &'a ChainFollowers,
     connected_body: &'a mut dyn FnMut(Hash256),
     reconnected: HashSet<Txid>,
-    candidates: Option<bitcoin_rs_mempool::reconsider::DisconnectedCandidates>,
+    disconnected: Vec<Arc<Tx>>,
+    disconnected_bytes: usize,
+    disconnected_full: bool,
+    disconnected_blocks: usize,
 }
 
 impl<'a> NodeReorgObserver<'a> {
@@ -22,27 +36,17 @@ impl<'a> NodeReorgObserver<'a> {
             followers,
             connected_body,
             reconnected: HashSet::new(),
-            candidates: None,
+            disconnected: Vec::new(),
+            disconnected_bytes: 0,
+            disconnected_full: false,
+            disconnected_blocks: 0,
         }
-    }
-
-    fn finish_reconsideration(&mut self) {
-        let Some(candidates) = self.candidates.take() else {
-            return;
-        };
-        if let Some(gateway) = self.followers.mempool_gateway() {
-            let _ =
-                gateway.reconsider_disconnected(AdmissionOrigin::Reorg, candidates.into_entries());
-        }
-    }
-
-    fn discard_reconsideration(&mut self) {
-        self.candidates = None;
     }
 }
 
 impl ReorgObserver for NodeReorgObserver<'_> {
     fn disconnected(&mut self, outcome: &DisconnectOutcome) {
+        self.disconnected_blocks += 1;
         self.followers.disconnected(outcome);
     }
 
@@ -53,26 +57,32 @@ impl ReorgObserver for NodeReorgObserver<'_> {
         (self.connected_body)(outcome.hash);
     }
 
-    fn reconsider_disconnected(
-        &mut self,
-        block: &Block,
-        utxo: &bitcoin_rs_utxo::UtxoSet,
-        height: u32,
-        time: u64,
-    ) {
-        let candidates = self.candidates.get_or_insert_with(|| {
-            bitcoin_rs_mempool::reconsider::DisconnectedCandidates::new(time, height)
-        });
+    fn reconsider_disconnected(&mut self, block: &Block) {
+        if self.disconnected_full {
+            return;
+        }
         for tx in &block.txs {
-            if self.reconnected.contains(&tx.txid()) {
+            let coinbase = tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null();
+            if self.reconnected.contains(&tx.txid()) || coinbase {
                 continue;
             }
-            candidates.offer(tx, |outpoint| utxo.get(outpoint));
+            let tx_size = tx.total_size();
+            if self.disconnected_bytes + tx_size > MAX_DISCONNECTED_TX_BYTES {
+                self.disconnected_full = true;
+                return;
+            }
+            self.disconnected_bytes += tx_size;
+            self.disconnected.push(Arc::new(tx.clone()));
         }
     }
 }
 
+/// Settles one reorg outcome while the mempool fence is held. A settle that
+/// disconnected nothing leaves the pool untouched: `switch_to_branch` is
+/// polled while a heavier branch is still downloading, and the resident
+/// sweep costs a chain snapshot per resident entry.
 fn settle_node_reorg(
+    handles: &Chainstate,
     observer: &mut NodeReorgObserver<'_>,
     mempool_change: &mut Option<bitcoin_rs_mempool::ChainChangeGuard>,
     outcome: core::result::Result<(), ReorgError>,
@@ -82,17 +92,42 @@ fn settle_node_reorg(
         return outcome;
     }
 
-    if outcome
-        .as_ref()
-        .is_err_and(ReorgError::reconsideration_failed)
-    {
-        observer.discard_reconsideration();
-    } else {
-        observer.finish_reconsideration();
-    }
-    if let Some(change) = mempool_change.take()
-        && change.finish().is_err()
-    {
+    let settlement_failed = (|| {
+        if observer.disconnected_blocks == 0 {
+            return mempool_change
+                .take()
+                .is_some_and(|change| change.finish().is_err());
+        }
+        if let (Some(change), Some(gateway)) = (
+            mempool_change.as_ref(),
+            observer.followers.mempool_gateway(),
+        ) {
+            let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+                handles.utxo(),
+                handles.applied_tip(),
+                handles.block_tree(),
+                handles.network(),
+            );
+            if !outcome
+                .as_ref()
+                .is_err_and(ReorgError::reconsideration_failed)
+            {
+                let _ = gateway.reconsider_disconnected(
+                    change,
+                    &chain,
+                    crate::tx_ingress::unix_time_secs(),
+                    observer.disconnected.drain(..),
+                );
+            }
+            if gateway.remove_for_reorg(change, &chain).is_err() {
+                return true;
+            }
+        }
+        mempool_change
+            .take()
+            .is_some_and(|change| change.finish().is_err())
+    })();
+    if settlement_failed {
         return Err(ReorgError::TransitionSettlement {
             source: Box::new(ApplyError::Shutdown),
             original: outcome.err().map(Box::new),
@@ -142,7 +177,7 @@ pub fn invalidate_block(
         handles,
         &mut observer,
         hash,
-        |observer, outcome| settle_node_reorg(observer, &mut mempool_change, outcome),
+        |observer, outcome| settle_node_reorg(handles, observer, &mut mempool_change, outcome),
     );
     let invalidated = outcome.as_ref().ok().cloned().unwrap_or_default();
     settle_checkpoint_debt(handles, outcome.map(|_| ())).map(|()| invalidated)
@@ -169,7 +204,7 @@ where
         target,
         &mut staged_body,
         &mut observer,
-        |observer, outcome| settle_node_reorg(observer, &mut mempool_change, outcome),
+        |observer, outcome| settle_node_reorg(handles, observer, &mut mempool_change, outcome),
     );
     settle_checkpoint_debt(handles, outcome)
 }

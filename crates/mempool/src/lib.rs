@@ -35,8 +35,6 @@ mod policy;
 pub mod pool;
 /// Core 31.1 replacement fee and graph policy.
 mod rbf;
-/// Preparation of disconnected transactions for the existing reorg batch.
-pub mod reconsider;
 /// Transaction relay standardness policy.
 pub mod standardness;
 /// BIP431 topology policy.

@@ -1,7 +1,7 @@
 name: Native build prerequisites
-description: cmake + libboost-dev for libbitcoinkernel-sys (C++ kernel engine), libclang-dev for rust-librocksdb-sys bindgen (clang-sys).
+description: cmake + libboost-dev for libbitcoinkernel-sys (C++ kernel engine), libclang-dev for rust-librocksdb-sys bindgen (clang-sys), and the mold linker used by the lanes that link binaries.
 runs:
   using: composite
   steps:
     - shell: bash
-      run: sudo apt-get update && sudo apt-get install -y cmake libboost-dev libclang-dev
+      run: sudo apt-get update && sudo apt-get install -y cmake libboost-dev libclang-dev mold

@@ -331,10 +331,44 @@ pub fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
     {
         std::path::PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // `/dev/fd/N` dup-opens the descriptor itself but cannot be
+        // descended into — `F_GETPATH` returns the real path, the same
+        // resolved path `/proc/self/fd/N` yields on Linux.
+        rfs::getpath(fd).map_or_else(
+            |_| std::path::PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd())),
+            |path| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path.as_bytes())),
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
     {
         std::path::PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd()))
     }
+}
+
+/// Whether `path` currently resolves to the same inode `fd` holds.
+///
+/// Backends that can only open a pathname lose descriptor anchoring on
+/// platforms without `/proc/self/fd` descent (macOS's `/dev/fd` opens the
+/// descriptor itself but cannot be descended into): a rename-and-replace of
+/// the data directory mid-scan would leave the physical ledger anchored to
+/// the held inode while the logical scan reads its successor. Callers must
+/// check this identity while they still hold `fd` and fail the scan on
+/// mismatch rather than emit incoherent evidence. Fails closed — open and
+/// stat errors propagate.
+pub fn opened_path_matches_fd(fd: BorrowedFd<'_>, path: &Path) -> io::Result<bool> {
+    let held = rfs::fstat(fd)?;
+    let resolved = rfs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let resolved = rfs::fstat(&resolved)?;
+    Ok(u64_from_stat(held.st_dev) == u64_from_stat(resolved.st_dev)
+        && u64_from_stat(held.st_ino) == u64_from_stat(resolved.st_ino))
 }
 
 /// Whether `dir` contains any entry other than `.` and `..`.
@@ -418,8 +452,8 @@ struct InodeSnapshot {
 impl InodeSnapshot {
     fn from_stat(stat: &Stat) -> Self {
         Self {
-            dev: stat.st_dev,
-            ino: stat.st_ino,
+            dev: u64_from_stat(stat.st_dev),
+            ino: u64_from_stat(stat.st_ino),
             nlink: u64_from_stat(stat.st_nlink),
             blocks: u64_from_stat(stat.st_blocks),
             size: u64_from_stat(stat.st_size),

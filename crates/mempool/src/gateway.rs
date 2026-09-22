@@ -58,6 +58,9 @@ pub enum ChainChangeError {
     /// failed because the generation moved underneath the guard.
     #[error("chain generation changed before finish")]
     GenerationMoved,
+    /// The guard was issued by a different gateway.
+    #[error("chain change guard belongs to another gateway")]
+    ForeignGuard,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +109,12 @@ pub struct AdmissionRequest {
     pub height: u32,
     /// How the transaction entered the node.
     pub origin: AdmissionOrigin,
-    /// Exact even chain generation the caller captured before admission.
+    /// Exact chain generation the caller captured before admission.
+    /// Ordinary submitters only ever hold an even value obtained from
+    /// [`MempoolGateway::stable_generation`]; requests prepared under a
+    /// [`ChainChangeGuard`] carry its odd value. The token alone grants no
+    /// authority — `check_admission_state` accepts it only under the
+    /// matching [`crate::admission::AdmissionFence`].
     pub expected_generation: u64,
     /// Exact mempool sequence the caller captured before admission.
     pub expected_sequence: u64,
@@ -336,6 +344,7 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
 /// pool alive. Handoff note for ING-R34: once `Chainstate` gains a
 /// `mempool_gateway` field, the reorg caller can read the handle instead
 /// and `shared` shrinks to run-time composition plus tests.
+#[cfg(any(test, feature = "test-seam"))]
 use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
@@ -635,6 +644,12 @@ impl MempoolGateway {
         value.is_multiple_of(2).then_some(value)
     }
 
+    /// The raw generation value, even or odd, for same-crate fence checks.
+    /// Callers compare only for exact equality — never order or subtract.
+    pub(crate) fn chain_generation(&self) -> u64 {
+        self.chain_generation.load(Ordering::Acquire)
+    }
+
     /// Reserves the next chain-change generation and returns a guard that
     /// owns the exact odd value and the reserved next even value.
     ///
@@ -668,7 +683,10 @@ impl MempoolGateway {
         })
     }
 
-    /// Prepares insertion outside the writer and publishes one atomic result.
+    /// Cross-crate test seam: prepares insertion outside the writer and
+    /// publishes one atomic result. No production caller; fixtures use it to
+    /// stage entries without resolving a chain snapshot.
+    #[cfg(any(test, feature = "test-seam"))]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "the consuming mutation API retains the entry across bounded optimistic attempts"
@@ -694,55 +712,6 @@ impl MempoolGateway {
             }
         }
         Err(MempoolError::StalePolicy)
-    }
-
-    /// Reconsiders transactions that left the pool with a disconnected block.
-    ///
-    /// `entries` must arrive in dependency order — parents before the
-    /// transactions spending them — which is the order the reversed
-    /// disconnect walk produces. Each candidate gets exactly one
-    /// commit-and-publish insert; a candidate the pool refuses (policy,
-    /// duplicate, or mempool-full after size-limit eviction) is recorded,
-    /// and any later candidate spending a refused txid is withheld, so a
-    /// rejected parent can never leave a partially admitted family behind.
-    /// Every `Removed` change a committed insert reports marks that txid
-    /// unavailable to the rest of the batch, including earlier parents
-    /// evicted to make room. An empty iterator is a
-    /// no-op: nothing is committed, nothing is published, and the mempool
-    /// sequence does not move.
-    pub fn reconsider_disconnected(
-        &self,
-        origin: AdmissionOrigin,
-        entries: impl IntoIterator<Item = MempoolEntry>,
-    ) -> Vec<MutationResult> {
-        let mut refused: HashSet<Txid> = HashSet::new();
-        let mut committed = Vec::new();
-        for entry in entries {
-            let txid = entry.txid;
-            let spends_refused = entry
-                .tx
-                .inputs
-                .iter()
-                .any(|input| refused.contains(&input.previous_output.txid));
-            if spends_refused {
-                refused.insert(txid);
-                continue;
-            }
-            match self.insert_entry(origin, entry) {
-                Ok(outcome) => {
-                    // An earlier parent evicted to make room is unavailable
-                    // to later spenders, just like a refused parent.
-                    for removed in outcome.removed_txids() {
-                        refused.insert(removed);
-                    }
-                    committed.push(outcome);
-                }
-                Err(_) => {
-                    refused.insert(txid);
-                }
-            }
-        }
-        committed
     }
 
     /// Verifies replacement outside the writer, then commits and publishes
@@ -780,7 +749,7 @@ impl MempoolGateway {
     // borrows it so the shared retry owner can recover the Arc after a mismatch.
     #[allow(clippy::needless_pass_by_value)]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
-        self.admit_transaction_claimed(&request, None)
+        self.admit_transaction_claimed(&request, None, crate::admission::AdmissionFence::Stable)
     }
 
     /// A private resident-body claim joins generation/sequence validation.
@@ -792,10 +761,11 @@ impl MempoolGateway {
         &self,
         request: &AdmissionRequest,
         claim: Option<&crate::orphan::HeldOrphan>,
+        fence: crate::admission::AdmissionFence,
     ) -> Result<AdmitOutcome, AdmitError> {
         let mut prepared = {
             let pool = self.pool.read();
-            self.check_admission_state(&pool, request)?;
+            self.check_admission_state(&pool, request, fence)?;
             Self::prepare_admission(&pool, request, AdmissionMode::Single)
         };
         prepared.verify(request);
@@ -807,7 +777,7 @@ impl MempoolGateway {
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
         let mut pool = self.pool.write();
-        self.check_admission_state(&pool, request)?;
+        self.check_admission_state(&pool, request, fence)?;
         if !prepared.matches_pool(&pool) {
             return Err(AdmitError::MempoolChanged);
         }
@@ -859,12 +829,20 @@ impl MempoolGateway {
         Ok(AdmitOutcome::Committed(result))
     }
 
+    /// Rejects a request whose captured generation no longer matches.
+    ///
+    /// Authority to admit comes from the fence, not from a caller-supplied
+    /// integer: the stable fence admits only the even value returned by
+    /// [`Self::stable_generation`], and the chain-change fence admits only
+    /// the odd value reserved by its own [`ChainChangeGuard`]. A request
+    /// carrying the right number under the wrong fence is refused.
     pub(crate) fn check_admission_state(
         &self,
         pool: &Mempool,
         request: &AdmissionRequest,
+        fence: crate::admission::AdmissionFence,
     ) -> Result<(), AdmitError> {
-        if self.stable_generation() != Some(request.expected_generation) {
+        if fence.current(self) != Some(request.expected_generation) {
             return Err(AdmitError::GenerationChanged);
         }
         if pool.sequence_number() != request.expected_sequence {
@@ -995,7 +973,10 @@ impl MempoolGateway {
                 prepared.fact.base_fee.unwrap_or(0),
                 policy.incremental_relay_fee_sat_per_kvb,
             )
-            .with_sigop_cost(prepared.fact.sigop_cost);
+            .with_sigop_cost(prepared.fact.sigop_cost)
+            // Reorg re-admissions must not double-count the estimator: the
+            // transaction already spent time in the pool before disconnect.
+            .with_fee_estimate(!matches!(request.origin, AdmissionOrigin::Reorg));
             match pool.capture_replacement(&candidate, request.time, request.height) {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
@@ -1019,6 +1000,88 @@ impl MempoolGateway {
             }
         }
         prepared
+    }
+
+    /// Removes resident entries the current chain no longer supports after a
+    /// disconnect: an input that is neither a live coin nor a resident parent,
+    /// an immature coinbase input, or locktime/BIP68 no longer final at the
+    /// next block. Descendants leave with `RemovalReason::Reorg`.
+    ///
+    /// Snapshot reads happen outside every pool lock while `change` holds
+    /// the chain fence; the commit re-checks the exact odd generation so a
+    /// fence that moved underneath preparation removes nothing.
+    pub fn remove_for_reorg(
+        &self,
+        change: &ChainChangeGuard,
+        chain: &dyn crate::admission::AdmissionChain,
+    ) -> Result<MutationResult, ChainChangeError> {
+        if !change.owns(self) {
+            return Err(ChainChangeError::ForeignGuard);
+        }
+        let residents: Vec<Arc<Tx>> = {
+            let pool = self.pool.read();
+            pool.iter_entries()
+                .map(|entry| Arc::clone(&entry.tx))
+                .collect()
+        };
+        let mut failing = Vec::new();
+        for tx in residents {
+            let Some(snapshot) = chain.snapshot(&tx) else {
+                // An unavailable chain view keeps the entry rather than
+                // sweeping the pool on missing evidence.
+                continue;
+            };
+            let next_height = snapshot.height.saturating_add(1);
+            let fails = {
+                let pool = self.pool.read();
+                let missing_input = tx.inputs.iter().any(|input| {
+                    !pool.contains_txid(&input.previous_output.txid)
+                        && !snapshot
+                            .prevouts
+                            .iter()
+                            .any(|(outpoint, _)| *outpoint == input.previous_output)
+                });
+                let nonfinal = !bitcoin_rs_consensus::verify_tx::is_final_tx(
+                    &tx,
+                    next_height,
+                    snapshot.locktime_cutoff,
+                );
+                let immature = tx.inputs.iter().any(|input| {
+                    snapshot
+                        .prevout_meta
+                        .get(&input.previous_output)
+                        .is_some_and(|meta| {
+                            bitcoin_rs_consensus::check_coinbase_maturity(
+                                meta.coinbase,
+                                meta.height,
+                                next_height,
+                            )
+                            .is_err()
+                        })
+                });
+                let bip68 = !crate::standardness::bip68_final(
+                    &pool,
+                    &tx,
+                    &crate::standardness::Bip68Admission {
+                        csv_active: snapshot.csv_active,
+                        next_height,
+                        next_mtp: snapshot.locktime_cutoff,
+                        prevout_meta: Some(&snapshot.prevout_meta),
+                        resolved_prevouts: None,
+                    },
+                );
+                missing_input || nonfinal || immature || bip68
+            };
+            if fails {
+                failing.push(tx.txid());
+            }
+        }
+        self.commit(AdmissionOrigin::Reorg, |pool| {
+            if self.chain_generation.load(Ordering::Acquire) != change.odd_generation() {
+                return Err(ChainChangeError::GenerationMoved);
+            }
+            Ok(pool.remove_for_reorg(&failing))
+        })
     }
 
     /// Commits `pool.remove_for_block` and publishes its result.
@@ -1269,6 +1332,11 @@ impl ChainChangeGuard {
     #[must_use]
     pub fn reserved_even(&self) -> u64 {
         self.even
+    }
+
+    /// Whether this guard was issued by `gateway` itself.
+    pub(crate) fn owns(&self, gateway: &MempoolGateway) -> bool {
+        core::ptr::eq(Arc::as_ptr(&self.gateway), gateway)
     }
 
     /// Compare-exchanges the exact odd value to the reserved even value.
@@ -2202,105 +2270,6 @@ mod tests {
         );
         let expected: Vec<u64> = (1..=total).collect();
         assert_eq!(*stream, expected, "publish order must equal commit order");
-    }
-
-    #[test]
-    fn reconsider_disconnected_admits_in_order_once_per_candidate() {
-        let observer = Arc::new(RecordingObserver::default());
-        let gateway = gateway_with(Some(dyn_observer(&observer)));
-        let parent = tx(30);
-        let parent_txid = parent.txid();
-        let mut child = tx(31);
-        child.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
-
-        let committed =
-            gateway.reconsider_disconnected(AdmissionOrigin::Rpc, [entry(&parent), entry(&child)]);
-
-        assert_eq!(committed.len(), 2, "one committed result per candidate");
-        for result in &committed {
-            assert_eq!(result.changes.len(), 1);
-        }
-        assert_eq!(gateway.read().sequence_number(), 2);
-        let seen = observer.seen.lock();
-        assert_eq!(seen.len(), 2, "one publish per committed candidate");
-        assert_eq!(seen[0].0, hash(&parent_txid), "parent commits first");
-        assert_eq!(seen[1].0, hash(&child.txid()), "child commits second");
-    }
-
-    #[test]
-    fn reconsider_disconnected_withholds_descendants_of_a_refused_parent() {
-        let gateway = gateway_with(None);
-        let parent = tx(32);
-        let parent_txid = parent.txid();
-        let mut child = tx(33);
-        child.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
-        // Fee 50 over 100 vbytes is 500 sat/kvB, under the 1 000 sat/kvB
-        // floor; the child itself is fine and only the refused parent can
-        // keep it out.
-        let refused_parent = MempoolEntry::new(Arc::new(parent), 100, 50, 1, 7);
-
-        let committed =
-            gateway.reconsider_disconnected(AdmissionOrigin::Rpc, [refused_parent, entry(&child)]);
-
-        assert!(
-            committed.is_empty(),
-            "a refused parent must keep its descendant out"
-        );
-        assert!(!gateway.read().contains_txid(&parent_txid));
-        assert!(!gateway.read().contains_txid(&child.txid()));
-    }
-    #[test]
-    fn reconsider_disconnected_withholds_descendants_of_a_capacity_refused_parent() {
-        let observer = Arc::new(RecordingObserver::default());
-        // A low-fee parent cannot enter the full pool; its child stays out too.
-        let gateway = MempoolGateway::new(
-            Arc::new(RwLock::new(Mempool::new(MempoolLimits {
-                min_relay_fee_sat_per_kvb: 0,
-                max_total_bytes: 150,
-                ..MempoolLimits::default()
-            }))),
-            Some(dyn_observer(&observer)),
-        );
-        let filler_txid = tx(36).txid();
-        gateway
-            .insert_entry(
-                AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(tx(36)), 100, 9_000, 1, 7),
-            )
-            .expect("filler in");
-        // The filler's own publication predates the scenario under test.
-        observer.seen.lock().clear();
-
-        let parent = tx(34);
-        let parent_txid = parent.txid();
-        let mut child = tx(35);
-        child.inputs[0].previous_output = OutPoint::new(parent_txid, 0);
-        let child_txid = child.txid();
-        let parent = MempoolEntry::new(Arc::new(parent), 100, 100, 1, 7);
-        let child = MempoolEntry::new(Arc::new(child), 100, 9_000, 1, 7);
-
-        let committed = gateway.reconsider_disconnected(AdmissionOrigin::Rpc, [parent, child]);
-
-        assert!(committed.is_empty());
-        let pool = gateway.read();
-        assert!(!pool.contains_txid(&parent_txid));
-        assert!(!pool.contains_txid(&child_txid));
-        assert!(pool.contains_txid(&filler_txid));
-        assert_eq!(pool.sequence_number(), 1);
-        assert!(observer.seen.lock().is_empty());
-    }
-
-    #[test]
-    fn reconsider_disconnected_no_ops_on_an_empty_batch() {
-        let observer = Arc::new(RecordingObserver::default());
-        let gateway = gateway_with(Some(dyn_observer(&observer)));
-        let before = gateway.read().sequence_number();
-
-        let committed = gateway.reconsider_disconnected(AdmissionOrigin::Rpc, []);
-
-        assert!(committed.is_empty());
-        assert_eq!(gateway.read().sequence_number(), before);
-        assert!(observer.seen.lock().is_empty(), "nothing may publish");
     }
 
     /// A refused insertion preserves state and publishes no mutation.

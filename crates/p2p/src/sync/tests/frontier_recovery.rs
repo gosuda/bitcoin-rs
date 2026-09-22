@@ -475,3 +475,24 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     );
     Ok(())
 }
+
+// P2P-05: an out-of-band delivery (no pending request) must still record
+// the canonical tree height. A height-0 entry would rewind the request
+// cursor to genesis on retry and misorder stale-receive eviction.
+#[test]
+fn untracked_delivery_records_tree_height() -> Result<(), Box<dyn std::error::Error>> {
+    let (sync, _peers, _applied, blocks, _incoming) = sync_with_mined_chain(2)?;
+    let block = &blocks[1];
+    let hash = Hash256::from(block.block_hash());
+    let mut inbound = vec![crate::InboundBlock::from_decoded(block.clone())];
+    assert_eq!(
+        sync.buffer_received_block_chunk(&mut inbound, Some(hash)),
+        1
+    );
+    assert_eq!(
+        sync.body_sync.lock().window.received_height(&hash),
+        Some(2),
+        "an untracked tree-known body must carry its canonical height"
+    );
+    Ok(())
+}

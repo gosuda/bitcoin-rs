@@ -40,6 +40,13 @@ concurrency:
 # scripts/ci-pr.sh. The kernel C++ surface, MSRV compile, native-script
 # evidence, comparator corpus, and bench smoke are deep lanes in main.yml and
 # run on `main` only.
+#
+# Test lanes link with mold (`-C link-arg=-fuse-ld=mold` via RUSTFLAGS) and
+# schedule tests under cargo-nextest, both installed by
+# .github/actions/test-deps; ci-pr.sh falls back to `cargo test` where
+# nextest is absent. The flag changes every crate fingerprint, so the first
+# run after enabling it recompiles dependencies once per lane -- the lane
+# cache then stores the mold-linked artifacts for later runs.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
@@ -87,18 +94,23 @@ jobs:
 
   test-crates:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           cache-on-failure: true
+      - uses: ./.github/actions/test-deps
       # The consensus, node, and rpc profiles are fixture-free: only the
       # binary's tests read the pinned Core fixtures.
       - run: ./scripts/ci-pr.sh test-crates
 
   test-binary:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -106,8 +118,10 @@ jobs:
         with:
           cache-on-failure: true
       # The rocksdb feature compiles rust-librocksdb-sys, whose build runs
-      # bindgen via clang-sys and needs libclang.
+      # bindgen via clang-sys and needs libclang. native-deps also provides
+      # mold; the nextest install lives in test-deps.
       - uses: ./.github/actions/native-deps
+      - uses: ./.github/actions/test-deps
       - name: Provision pinned Core
         run: bash scripts/provision-ci-reference-fixtures.sh core
       - run: ./scripts/ci-pr.sh test-binary
@@ -122,12 +136,15 @@ jobs:
 
   test-workspace:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           cache-on-failure: true
+      - uses: ./.github/actions/test-deps
       # bin/bitcoin-rs is a workspace member, so the kernel-free workspace
       # pass runs its default-feature test binaries, including the
       # process-harness suite that launches the pinned bitcoind.

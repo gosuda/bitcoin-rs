@@ -66,6 +66,17 @@ impl BlockSync {
             metrics::counter!("node.sync.apply_halted_ticks").increment(1);
             return (0, 0);
         }
+        // The extension path commits only blocks whose parent is the applied
+        // tip. While a heavier branch is pending, the applied tip sits on the
+        // losing side and the connect path below the fork belongs to
+        // `switch_branch_if_outweighed`: a run drained here cannot extend the
+        // applied tip, so every commit fails `PrevHashMismatch` and the round
+        // restore-drops and re-requests the head block. The window's
+        // observation machinery still watches the real connect frontier via
+        // `next_expected_block`.
+        if !self.applied_is_chain_ancestor() {
+            return (0, 0);
+        }
         let mut applied = 0_usize;
         let mut failed = 0_usize;
         let Some(staged_count) = self
@@ -370,15 +381,46 @@ impl BlockSync {
         }
     }
 
-    pub(super) fn next_expected_block_hash(&self) -> Option<Hash256> {
+    /// True while the applied tip lies on the active chain, so the extension
+    /// path can commit (every connect must extend the applied tip). A
+    /// heavier pending branch leaves the applied tip on the losing side
+    /// until the switch connects across the fork.
+    fn applied_is_chain_ancestor(&self) -> bool {
+        let (Some(chain_tip), Some(applied_tip)) = (
+            self.chain.chain_tip().load_full(),
+            self.chain.applied_tip().load_full(),
+        ) else {
+            return false;
+        };
+        let tree = self.chain.block_tree().read();
+        Self::is_ancestor_at_height(
+            &tree,
+            applied_tip.tip_id,
+            applied_tip.height,
+            chain_tip.tip_id,
+        )
+    }
+
+    /// The next block the chain must connect: the applied tip's successor
+    /// on the active chain during an extension, or the first connect node
+    /// above the common ancestor while a heavier branch is pending.
+    ///
+    /// `first_connect_height` is the ancestor-aware derivation the request
+    /// path already uses (`send_getdata_for_pending_blocks`,
+    /// `probe_idle_frontier`); the observation and staging sites that call
+    /// this must name the same block — during a header-first reorg the
+    /// applied tip sits on the losing side, so `applied_tip.height + 1`
+    /// names a mid-path winner node rather than the connect frontier.
+    pub(super) fn next_expected_block(&self) -> Option<(u32, Hash256)> {
         let chain_tip = self.chain.chain_tip().load_full()?;
         let applied_tip = self.chain.applied_tip().load_full()?;
-        let height = applied_tip.height.checked_add(1)?;
-        if height > chain_tip.height {
-            return None;
-        }
         let tree = self.chain.block_tree().read();
+        let height = Self::first_connect_height(&tree, applied_tip.hash, chain_tip.tip_id)?;
         let node_id = tree.node_at_height_from(chain_tip.tip_id, height)?;
-        Some(tree.node(node_id).ok()?.hash)
+        Some((height, tree.node(node_id).ok()?.hash))
+    }
+
+    pub(super) fn next_expected_block_hash(&self) -> Option<Hash256> {
+        self.next_expected_block().map(|(_, hash)| hash)
     }
 }

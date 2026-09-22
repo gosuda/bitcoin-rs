@@ -124,8 +124,6 @@ dependencies = [
  "hashbrown",
  "rayon",
  "secp256k1",
- "serde",
- "serde_json",
  "sha2",
  "thiserror",
 ]
@@ -156,7 +154,6 @@ dependencies = [
  "metrics",
  "parking_lot",
  "sha2",
- "slab",
  "thiserror",
  "tracing",
 ]
@@ -170,7 +167,6 @@ dependencies = [
  "bitcoin-rs-chain",
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
- "bitcoin-rs-storage",
  "bytes",
  "crossbeam-channel",
  "hashbrown",

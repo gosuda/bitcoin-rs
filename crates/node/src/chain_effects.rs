@@ -206,7 +206,8 @@ impl ChainFollowers {
             .map(|gateway| {
                 gateway.begin_chain_change().map_err(|error| match error {
                     bitcoin_rs_mempool::ChainChangeError::AlreadyActive
-                    | bitcoin_rs_mempool::ChainChangeError::GenerationMoved => {
+                    | bitcoin_rs_mempool::ChainChangeError::GenerationMoved
+                    | bitcoin_rs_mempool::ChainChangeError::ForeignGuard => {
                         bitcoin_rs_chainstate::ApplyError::ConcurrentChainChange
                     }
                     bitcoin_rs_mempool::ChainChangeError::Overflow => {
@@ -366,12 +367,33 @@ impl ChainFollowers {
         let transition = handles
             .begin_transition()
             .map_err(|error| bitcoin_rs_chainstate::DisconnectError::Refused(Box::new(error)))?;
-        let mempool_change = self
+        let mut mempool_change = self
             .begin_mempool_change()
             .map_err(|error| bitcoin_rs_chainstate::DisconnectError::Refused(Box::new(error)))?;
         match transition.disconnect(block) {
             Ok(outcome) => {
                 self.disconnected(&outcome);
+                // Resident entries the lower tip no longer supports leave
+                // before the fence finishes, through the same shared view.
+                if let (Some(change), Some(gateway)) =
+                    (mempool_change.as_ref(), self.mempool_gateway())
+                {
+                    let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
+                        handles.utxo(),
+                        handles.applied_tip(),
+                        handles.block_tree(),
+                        handles.network(),
+                    );
+                    if gateway.remove_for_reorg(change, &chain).is_err() {
+                        drop(mempool_change.take());
+                        drop(transition);
+                        return Err(bitcoin_rs_chainstate::DisconnectError::Fatal {
+                            hash: outcome.hash,
+                            height: outcome.parent_tip.height.saturating_add(1),
+                            source: Box::new(bitcoin_rs_chainstate::ApplyError::Shutdown),
+                        });
+                    }
+                }
                 Self::finish_transition(handles, transition, mempool_change).map_err(|error| {
                     bitcoin_rs_chainstate::DisconnectError::Fatal {
                         hash: outcome.hash,

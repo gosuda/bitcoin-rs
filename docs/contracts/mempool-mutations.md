@@ -201,20 +201,32 @@ state (`crates/mempool/src/orphan.rs`).
   parents ready. Generation remains odd until the transition finishes, so
   that notification cannot prematurely consume the ready work.
 - `reconsider_disconnected` re-admits transactions displaced by a reorg
-  through the same `commit` path with `AdmissionOrigin::Reorg`. It processes
-  candidates in order and withholds descendants of a refused or
-  immediately-evicted parent, so a reorg sweep cannot create orphaned
-  ancestry.
-  `DisconnectedCandidates` in `crates/mempool/src/reconsider.rs` owns
-  candidate accounting and an index into earlier offered transaction bodies.
-  It resolves full previous outputs, including scripts, from restored coins
-  or those retained bodies and uses the shared fee/vsize preparation and
-  consensus-owned transaction sigop accounting.
-  Node supplies ordered transactions and its coin view while retaining the
-  chain transition.
-  The batch deliberately runs under the reserved odd generation rather
-  than ordinary submission. Its existing validation scope is unchanged;
-  current-chain revalidation of the reorg batch is tracked by #640.
+  through the shared submission evaluator — the same policy, finality,
+  BIP68, coinbase-maturity and script checks an ingress submission gets —
+  while the node holds the `ChainChangeGuard` fence. Requests prepared
+  under the guard's reserved odd generation commit exactly where ordinary
+  submissions commit under the stable even value. The odd fence is derived
+  from the gateway's own `ChainChangeGuard`, never from a caller-supplied
+  generation token: a request carrying the active odd value under the
+  stable fence is refused, and a guard issued by a different gateway
+  admits nothing and sweeps nothing. Candidates arrive
+  parents before children; a refused candidate, and any later candidate
+  spending it or spending a txid an earlier commit removed, is withheld so
+  a refused parent never leaves a partial family. Commits publish with
+  `AdmissionOrigin::Reorg` and do not register with the fee estimator,
+  matching Core's `validForFeeEstimation=false` re-acceptance. Node
+  streams disconnected bodies oldest-first and bounds the candidate set
+  at 20,000,000 serialized bytes (Core's
+  `MAX_DISCONNECTED_TX_POOL_BYTES`); once the cap is hit the newest
+  descendants are the ones dropped, and they later fail admission as
+  missing inputs — the defined overload outcome.
+- `remove_for_reorg` sweeps resident entries the current chain no longer
+  supports while the same guard is held: an input that is neither a live
+  coin nor a resident parent, an immature coinbase input, or
+  locktime/BIP68 no longer final at the next block. Each failure removes
+  the entry and its descendants as `Removed(Reorg)` in commit order; the
+  commit re-checks the exact odd generation so a moved fence removes
+  nothing.
 
 ## Proven by
 
@@ -229,9 +241,7 @@ state (`crates/mempool/src/orphan.rs`).
   `observer_panic_does_not_roll_back_the_mutation`,
   `insert_reports_accepted_then_policy_evictions`,
   `sequence_base_matches_per_change_assignment`,
-  `stable_generation_reads_even_values`,
-  `reconsider_disconnected_admits_in_order_once_per_candidate`,
-  `reconsider_disconnected_withholds_descendants_of_a_refused_parent`.
+  `stable_generation_reads_even_values`.
 - `crates/node/tests/unit/sync/tests/transitions_3.rs` and
   `transitions_7.rs`: permanent and mutated-body reorg outcomes preserve the
   committed-prefix and invalidation semantics while the node owns
@@ -262,7 +272,15 @@ state (`crates/mempool/src/orphan.rs`).
   `rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid`,
   `rejected_stripped_body_does_not_suppress_its_valid_witness_variant`,
   `zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint`,
-  `null_input_in_a_non_coinbase_transaction_is_not_held`.
+  `null_input_in_a_non_coinbase_transaction_is_not_held`,
+  `reconsider_disconnected_admits_parent_then_child_under_the_guard`,
+  `reconsider_disconnected_withholds_descendants_of_a_refused_parent`,
+  `reconsider_disconnected_refuses_a_script_failure`,
+  `reconsider_disconnected_does_not_register_with_the_estimator`,
+  `remove_for_reorg_sweeps_only_unsupported_residents`,
+  `remove_for_reorg_refuses_a_moved_generation`,
+  `reorg_methods_refuse_a_guard_from_another_gateway`,
+  `admission_state_accepts_only_the_current_generation`.
 - `crates/rpc/src/context.rs` (`admission_chain_tests`):
   `stable_chainstate_reader_does_not_block_transaction_admission`,
   `cached_unconfirmed_transaction_is_still_admitted_from_a_peer`,
@@ -279,12 +297,6 @@ state (`crates/mempool/src/orphan.rs`).
   `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`,
   `rejecting_another_witness_preserves_the_resident_body_and_ready_work`,
   `transaction_scoped_rejection_releases_the_resident_variants_weight`.
-- `crates/mempool/src/reconsider.rs` (inline tests):
-  `restored_coins_and_ordered_candidates_price_the_batch`,
-  `unavailable_parent_never_offers_outputs_to_a_child`,
-  `restored_coin_takes_precedence_over_an_offered_output`,
-  `coinbase_does_not_become_a_reconsideration_candidate`,
-  `bip141_sigops_are_preserved_from_restored_coins_and_offered_outputs`.
 - `crates/node/src/chain_effects.rs` (inline tests):
   `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
   `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`:

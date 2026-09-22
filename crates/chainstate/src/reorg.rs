@@ -14,7 +14,6 @@ use crate::DisconnectError;
 use crate::DisconnectOutcome;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::ReorgPlan;
-use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::DecodeError;
@@ -46,14 +45,9 @@ pub trait ReorgObserver {
     fn connected(&mut self, block: &Block, outcome: &ConnectOutcome);
 
     /// Revisit one disconnected block in dependency order after a coherent
-    /// branch switch. Bodies are streamed one at a time.
-    fn reconsider_disconnected(
-        &mut self,
-        block: &Block,
-        utxo: &bitcoin_rs_utxo::UtxoSet,
-        height: u32,
-        time: u64,
-    );
+    /// branch switch. Bodies are streamed one at a time. The observer reads
+    /// any chain facts it needs through its own admission view.
+    fn reconsider_disconnected(&mut self, block: &Block);
 }
 
 /// Invalidates `hash` and its descendants, then moves applied chainstate to the
@@ -1033,14 +1027,9 @@ where
     F: FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
     O: ReorgObserver + ?Sized,
 {
-    let height = handles
-        .applied_tip()
-        .load_full()
-        .map_or(0, |tip| tip.height);
-    let time = u64::from(current_unix_seconds());
     for (hash, block_height) in disconnect_nodes[..disconnected_count].iter().rev() {
         let body = load_branch_body(handles, *hash, *block_height, staged_body)?;
-        observer.reconsider_disconnected(&body.block, handles.utxo(), height, time);
+        observer.reconsider_disconnected(&body.block);
     }
     Ok(())
 }
@@ -1137,7 +1126,7 @@ mod tests {
 
         fn connected(&mut self, _: &Block, _: &ConnectOutcome) {}
 
-        fn reconsider_disconnected(&mut self, _: &Block, _: &UtxoSet, _: u32, _: u64) {}
+        fn reconsider_disconnected(&mut self, _: &Block) {}
     }
 
     fn chainstate() -> Chainstate {

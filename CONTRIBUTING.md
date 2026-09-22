@@ -59,6 +59,11 @@ cannot drift:
 ./scripts/ci-pr.sh all            # fmt + deep + deny
 ```
 
+In CI the test lanes run under cargo-nextest's pooled scheduler and link
+with mold (`.github/actions/test-deps` installs both); where nextest is not
+installed the script falls back to `cargo test --no-fail-fast`, so local
+runs and hooks need no extra tooling.
+
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
 library defaults and therefore build the C++ kernel. The script passes the
 kernel-free feature selection. The binary and workspace test lanes expect the
@@ -122,16 +127,19 @@ them rather than run the oracle checks.
 
 ### Benchmark compilation check
 
-The main workflow compiles the retained crate-level benchmarks without kernel:
+The main workflow compiles the retained crate-level benchmarks without kernel,
+under the `quickstart` profile (the `bench` profile's fat-LTO build is too
+expensive for a compile-only gate):
 
 ```sh
-cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle
+cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
+cargo bench -p bitcoin-rs-mining --no-run --no-default-features --bench candidate --profile quickstart
 cargo bench -p bitcoin-rs-utxo --no-run \
-  --no-default-features --features fjall --bench utxo_commit
+  --no-default-features --features fjall --bench utxo_commit --profile quickstart
 cargo bench -p bitcoin-rs-node --no-run \
-  --no-default-features --features fjall --bench sync_pipeline
+  --no-default-features --features fjall --bench sync_pipeline --profile quickstart
 cargo bench -p bitcoin-rs-node --no-run \
-  --no-default-features --features fjall --bench chainstate_journal
+  --no-default-features --features fjall --bench chainstate_journal --profile quickstart
 ```
 
 `--no-run` checks compilation; it produces no performance measurement.
