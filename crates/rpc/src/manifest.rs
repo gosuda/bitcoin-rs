@@ -113,6 +113,20 @@ impl Status {
     }
 }
 
+/// The compatibility manifest source, embedded so it cannot drift.
+///
+/// Reference identity parsing and custody validation are owned by
+/// `bin/bitcoin-rs/tests/support/reference_set.rs`; the admission-profile
+/// evidence is read from the `[admission_profile]` table.
+///
+/// PRE: the embedded file parses as TOML and carries the `[reference]` and
+///   `[admission_profile]` tables.
+/// POST: the constant is the exact bytes of `docs/api/core-compat.toml` at
+///   compile time.
+/// INVARIANT: it carries no external-surface row arrays; REGISTRY in
+///   [`crate::registry`] is the only owner of surface claims.
+pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+
 /// One declared surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Entry {

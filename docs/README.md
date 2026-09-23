@@ -28,7 +28,10 @@ owns format changes. Detailed admission and peer matrices live in
 
 Treat [core-compat.toml](api/core-compat.toml),
 [core-rpc-schema.json](api/core-rpc-schema.json), and the
-[hot-path ledger](benchmarks/hot-path-ledger.toml) as machine-consumed inputs.
+[hot-path ledger](benchmarks/hot-path-ledger.toml) as machine-consumed inputs:
+core-compat.toml carries the reference-set pins and admission-profile
+evidence. Every RPC, REST, and ZMQ compatibility claim is owned by REGISTRY
+in `crates/rpc/src/registry.rs`. The
 [RPC reference](rpc-reference.md) is generated from
 `crates/rpc/src/manifest.rs`; do not edit it by hand.
 

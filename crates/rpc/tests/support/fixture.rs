@@ -1005,8 +1005,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(FIXTURE_NAME), CAPTURED_FIXTURE)?;
-        let reference =
-            reference_set::load_reference_set(bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML)?;
+        let reference = reference_set::load_reference_set(bitcoin_rs_rpc::manifest::MANIFEST_TOML)?;
         for (field, reason) in [
             ("core_version", "pinned version"),
             ("source_commit", "pinned source commit"),

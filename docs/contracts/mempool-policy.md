@@ -3,8 +3,8 @@
 The mempool owner implements the selected Core 31.1 replacement and preview
 profile. [The policy matrix](../policies/mempool-policy.md) records behavior,
 reference evidence and intentional unsupported cases. Compatibility claims are
-owned by [core-compat.toml](../api/core-compat.toml); admission registry metadata
-is checked against its status and rationale.
+owned by REGISTRY in `crates/rpc/src/registry.rs`; admission rows carry
+their deviation notes there.
 
 ## Clauses
 

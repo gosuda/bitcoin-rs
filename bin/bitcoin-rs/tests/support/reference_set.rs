@@ -2,7 +2,7 @@
 //! The production RPC module owns the embedded manifest, not test orchestration.
 
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
+use bitcoin_rs_rpc::manifest::MANIFEST_TOML;
 
 /// The corpus identifiers every reference set must carry.
 const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
