@@ -168,6 +168,11 @@ impl ConnectionShared {
         wake_sync(self.wake_tx.as_ref());
     }
 
+    fn with_ibd(mut self, ibd: Option<Arc<bitcoin_rs_chain::InitialBlockDownload>>) -> Self {
+        self.ibd = ibd;
+        self
+    }
+
     fn notify_peer_ready(&self, source: crate::PeerSource) {
         if let Some(peer_ready) = &self.peer_ready {
             peer_ready(source);
@@ -1228,6 +1233,13 @@ fn forward_tx_if_relay_open(
         // them unpunished while in initial block download (:4716).
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }
+}
+
+/// UNIX seconds for the chain-owned initial-block-download latch.
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// UNIX seconds for the chain-owned initial-block-download latch.

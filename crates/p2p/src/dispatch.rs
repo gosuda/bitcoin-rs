@@ -1458,6 +1458,93 @@ mod tests {
         }
     }
 
+    /// A closed transaction-relay gate suppresses every tx-typed vector in a
+    /// mixed `inv` while block vectors are still requested (unfiltered
+    /// fallback branch).
+    #[test]
+    fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
+        let txid = bitcoin::Txid::from_byte_array([1; 32]);
+        let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+
+        let mut peer = ready_peer();
+        let gated = dispatch_collect_gated(
+            &mut peer,
+            &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            gated,
+            vec![Message::GetData(vec![block])],
+            "a closed relay gate must request the block but no announced tx"
+        );
+
+        let mut peer = ready_peer();
+        let open = dispatch_collect_gated(
+            &mut peer,
+            &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            open,
+            vec![Message::GetData(vec![
+                Inventory::Transaction(txid),
+                wtxid,
+                block
+            ])],
+            "an open relay gate must request every announced vector"
+        );
+    }
+
+    /// Same suppression on the filtered branch: a closed gate wins over the
+    /// have-filter, so an unknown wtxid is never requested either.
+    #[test]
+    fn inv_wtx_vectors_not_requested_while_tx_relay_closed() {
+        let inventory = FakeTxInventory::empty();
+        let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
+        let witness_txid = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([1; 32]));
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+
+        let mut peer = ready_peer();
+        let gated = dispatch_collect_gated(
+            &mut peer,
+            &Message::Inv(vec![witness_txid, wtxid, block]),
+            None,
+            Some(&inventory),
+            false,
+        );
+        assert_eq!(
+            gated,
+            vec![Message::GetData(vec![block])],
+            "a closed relay gate must suppress txid and wtxid vectors the node does not hold"
+        );
+    }
+
+    /// Block announcements stay admissible while the relay gate is closed,
+    /// and `request_witness` still upgrades the remaining block vectors.
+    #[test]
+    fn inv_block_vectors_requested_while_tx_relay_closed() {
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+        let mut peer = ready_peer();
+        let mut version = crate::handshake::version_message(1, 0);
+        version.services = bitcoin::p2p::ServiceFlags::WITNESS;
+        peer.remote_version = Some(version);
+
+        let gated =
+            dispatch_collect_gated(&mut peer, &Message::Inv(vec![block]), None, None, false);
+        assert_eq!(
+            gated,
+            vec![Message::GetData(vec![Inventory::WitnessBlock(
+                bitcoin::BlockHash::from_byte_array([3; 32])
+            )])],
+            "a closed relay gate must not change block announcement handling"
+        );
+    }
+
     /// P2P-01 / BIP144 / BIP339: requested serialization must preserve stored witnesses.
     #[test]
     fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
