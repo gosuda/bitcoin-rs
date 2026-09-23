@@ -166,6 +166,29 @@ impl RetentionLease {
         self.lease.as_ref().map_or(0, |&(_, floor)| floor)
     }
 
+    /// Raises the pinned floor, returning the effective floor.
+    ///
+    /// A holder that made durable progress past its oldest required row can
+    /// move its pin forward so pruning reclaims what it no longer needs.
+    /// The move is monotonic: a request at or below the current floor is a
+    /// no-op, so a floor only ever rises under a live lease. Raising is
+    /// always grantable while the lease is held — a prune pass cannot cross
+    /// a live floor, so the recorded prune line never passes the floor being
+    /// raised from, let alone the one being raised to.
+    pub fn advance(&mut self, floor: u32) -> u32 {
+        let Some((ticket, current)) = self.lease.as_mut() else {
+            return 0;
+        };
+        if floor > *current {
+            *current = floor;
+            let mut inner = self.registry.inner.lock();
+            if let Some(pinned) = inner.floors.get_mut(ticket) {
+                *pinned = floor;
+            }
+        }
+        *current
+    }
+
     /// Releases the pin, returning the retention authority to pruning.
     pub fn release(mut self) {
         self.release_once();
@@ -254,5 +277,37 @@ mod tests {
         registry.record_pruned_below(100);
         assert_eq!(registry.pruned_below(), 500);
         assert!(registry.acquire(499).is_err());
+    }
+
+    #[test]
+    fn advance_moves_the_pin_forward_and_is_monotonic() {
+        let registry = Arc::new(RetentionRegistry::new());
+        let mut lease = held(registry.acquire(100));
+        assert_eq!(registry.retention_floor(), Some(100));
+
+        // Raising the floor moves the registry's binding constraint so a
+        // prune pass reclaims everything below the holder's durable
+        // progress.
+        assert_eq!(lease.advance(300), 300);
+        assert_eq!(registry.retention_floor(), Some(300));
+        assert_eq!(lease.floor(), 300);
+
+        // A floor only rises: a stale caller re-advancing from an old
+        // watermark cannot un-pin rows the holder already released.
+        assert_eq!(lease.advance(200), 300);
+        assert_eq!(registry.retention_floor(), Some(300));
+    }
+
+    #[test]
+    fn advanced_floor_keeps_binding_the_prune_line() {
+        let registry = Arc::new(RetentionRegistry::new());
+        let mut lease = held(registry.acquire(50));
+        lease.advance(500);
+
+        // The prune line folds the live floor: while the lease lives, no
+        // pass may record a line at or above it.
+        assert_eq!(registry.retention_floor(), Some(500));
+        drop(lease);
+        assert_eq!(registry.retention_floor(), None);
     }
 }
