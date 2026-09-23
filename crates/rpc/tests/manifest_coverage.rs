@@ -18,8 +18,8 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
 use bitcoin_rs_rpc::context::Context;
+use bitcoin_rs_rpc::manifest::MANIFEST_TOML;
 use bitcoin_rs_rpc::manifest::{self, Entry, Status, SurfaceKind};
 use bitcoin_rs_rpc::{Handler, RpcError};
 use sonic_rs::json;

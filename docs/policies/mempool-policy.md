@@ -4,7 +4,8 @@
 
 The [policy contract](../contracts/mempool-policy.md) owns the rules below;
 this page maps them to evidence and intentional compatibility differences.
-[core-compat.toml](../api/core-compat.toml) owns the Core source and binary pins.
+[core-compat.toml](../api/core-compat.toml) carries the Core source and
+binary pins.
 
 The process policy tests explicitly configure Core with
 `-acceptnonstdtxn=0 -minrelaytxfee=0.00001000
