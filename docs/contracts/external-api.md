@@ -29,18 +29,21 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-01`: Single manifest owner
 
 
-- `MANIFEST` in `crates/rpc/src/manifest.rs` is the single source of truth
+- `MANIFEST` in `crates/rpc/src/manifest.rs`, projected from REGISTRY in
+  `crates/rpc/src/registry.rs`, is the single source of truth
   for RPC, REST, and ZMQ external interfaces. A JSON-RPC method answers
   only when a non-`Unimplemented` row carries its name. No second route
   inventory exists.
 - Each `Entry` row carries `name`, `kind` (`Rpc`, `Rest`, `Zmq`),
   `status`, `feature`, `core_version`, `notes`, and `since`, extended
   with required capabilities, error behavior, consistency class, resource
-  budget, and evidence scenario. The `Status` vocabulary is unchanged:
-  `Implemented`, `Deviation`, `Extension`, `Unimplemented`.
+  budget, and evidence scenario.
 - Compatibility class, runtime readiness, and observed proof stay
-  separate row facts. An unverified implementation never reads as
-  verified parity.
+  separate row facts. The `Status` vocabulary is: `Supported`,
+  `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`,
+  `Unimplemented`. `Supported` is claimable only while
+  `[reference].differential_harness` in `docs/api/core-compat.toml` is
+  enabled; an unverified implementation never reads as verified parity.
 - Unsupported Core surfaces stay declared `Unimplemented` and answer
   `RpcError::MethodNotFound` (code `-32601`). No wallet-only RPC is a
   disguised successful no-op.
