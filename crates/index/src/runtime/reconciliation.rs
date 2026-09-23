@@ -142,9 +142,13 @@ impl Worker {
         {
             return Ok(ReconcileAction::Progressed);
         }
-        self.runtime.publish_phase(ReconcilePhase::FORWARD);
-        // Fully caught up: the backfill requires no more history, so its
-        // retention authority returns to pruning exactly once here (#1120).
+        self.runtime.publish_phase(
+            ReconcilePhase::FORWARD
+                .with_leg(self.runtime.terminal_families(), ReconcileLeg::Failed),
+        );
+        // Fully caught up over the still-active families: the backfill
+        // requires no more history, so its retention authority returns to
+        // pruning exactly once here (#1120).
         self.release_retention();
         Ok(ReconcileAction::CaughtUp)
     }
@@ -279,8 +283,24 @@ impl Worker {
         self.catch_up_forward(&target, fence, watermarks, watermark, capabilities, pending)
     }
 
-    /// Runs the forward leg against `target`, classifying a terminal
-    /// missing-body outcome per capability (#1120).
+    /// Families still maintained: `enabled` minus terminally failed ones.
+    /// A family whose required history is permanently gone stops being
+    /// selected, so the worker keeps reconciling and serving the rest
+    /// (#1120, #645).
+    pub(super) fn active(&self) -> IndexCapabilities {
+        let terminal = self.runtime.terminal_families();
+        IndexCapabilities {
+            tx_lookup: self.enabled.tx_lookup && !terminal.tx_lookup,
+            script_history: self.enabled.script_history && !terminal.script_history,
+            script_live: self.enabled.script_live && !terminal.script_live,
+        }
+    }
+
+    /// Runs the forward leg against `target`, splitting a permanent
+    /// missing-history outcome by capability (#1120): history-requiring
+    /// families become terminally failed; a current-state family in the
+    /// same selection resets and reseeds from the authoritative UTXO view.
+    /// The worker stays up so surviving families keep serving.
     fn catch_up_forward(
         &self,
         target: &TipSnapshot,
@@ -290,24 +310,40 @@ impl Worker {
         capabilities: IndexCapabilities,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
-        match self.catch_up_to(target, fence, watermarks, watermark, capabilities, pending) {
-            Err(error @ DerivedIndexWorkerError::MissingBody { .. })
-                if capabilities == IndexCapabilities::SCRIPT_LIVE =>
-            {
-                // ScriptLive is a current-state capability: unlike the
-                // history-requiring families it can rebuild from the
-                // authoritative UTXO view instead of dying on pruned
-                // blocks (#1120). The reset routes the next pass through
-                // the UTXO seed.
-                tracing::warn!(
-                    error = %error,
-                    "rebuilding ScriptLive from the authoritative UTXO view after pruned history"
-                );
-                self.reset_for_rebuild(capabilities)?;
-                Ok(ReconcileAction::Progressed)
-            }
-            other => other,
+        let result = self.catch_up_to(target, fence, watermarks, watermark, capabilities, pending);
+        let Err(error) = result else {
+            return result;
+        };
+        if !error.missing_required_history() {
+            return Err(error);
         }
+        let rest = IndexCapabilities {
+            tx_lookup: capabilities.tx_lookup,
+            script_history: capabilities.script_history,
+            script_live: false,
+        };
+        let live = IndexCapabilities {
+            tx_lookup: false,
+            script_history: false,
+            script_live: capabilities.script_live,
+        };
+        if rest != IndexCapabilities::NONE {
+            self.runtime.fail_families(rest, error.to_string());
+        }
+        if live != IndexCapabilities::NONE {
+            tracing::warn!(
+                error = %error,
+                "rebuilding ScriptLive from the authoritative UTXO view after pruned history"
+            );
+            self.reset_for_rebuild(live)?;
+        }
+        if rest != IndexCapabilities::NONE {
+            // No surviving family in this selection reads bodies anymore;
+            // the retention authority returns to pruning and surviving
+            // legs re-pin their own history on their next pass.
+            self.release_retention();
+        }
+        Ok(ReconcileAction::Progressed)
     }
 
     pub(super) fn reconcile_pending(
@@ -394,18 +430,13 @@ impl Worker {
         watermarks: IndexWatermarks,
         target: Option<&TipSnapshot>,
     ) -> Option<(IndexCapabilities, IndexWatermark)> {
-        let tx = self
-            .enabled
-            .tx_lookup
-            .then_some(watermarks.tx_lookup)
-            .flatten();
-        let script_index = self
-            .enabled
+        let enabled = self.active();
+        let tx = enabled.tx_lookup.then_some(watermarks.tx_lookup).flatten();
+        let script_index = enabled
             .script_history
             .then_some(watermarks.script_history)
             .flatten();
-        let script_live = self
-            .enabled
+        let script_live = enabled
             .script_live
             .then_some(watermarks.script_live)
             .flatten();
@@ -432,12 +463,10 @@ impl Worker {
         watermarks: IndexWatermarks,
         target: &TipSnapshot,
     ) -> Option<(IndexCapabilities, Option<IndexWatermark>)> {
-        let tx = self.enabled.tx_lookup.then_some(watermarks.tx_lookup);
-        let script_index = self
-            .enabled
-            .script_history
-            .then_some(watermarks.script_history);
-        let script_live = self.enabled.script_live.then_some(watermarks.script_live);
+        let enabled = self.active();
+        let tx = enabled.tx_lookup.then_some(watermarks.tx_lookup);
+        let script_index = enabled.script_history.then_some(watermarks.script_history);
+        let script_live = enabled.script_live.then_some(watermarks.script_live);
         let needs_forward = |watermark: Option<IndexWatermark>| {
             watermark.is_none_or(|watermark| watermark.height < target.height)
         };

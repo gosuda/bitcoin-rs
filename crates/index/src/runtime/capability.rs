@@ -57,6 +57,17 @@ impl DerivedIndexCapability {
                 to_height,
             };
         }
+        // A terminally failed family outranks progress reporting: the
+        // namespace must never claim Ready or CatchingUp while indexed
+        // history is permanently incomplete, even though the surviving
+        // families keep serving (#1120).
+        if runtime.terminal_families() != IndexCapabilities::NONE
+            && let Some(reason) = runtime.terminal_message()
+        {
+            return CapabilityState::Failed {
+                reason: reason.to_string(),
+            };
+        }
         let rebuilding = phase.rebuilding();
         if rebuilding != IndexCapabilities::NONE {
             return match Self::progress(engine, rebuilding) {

@@ -94,6 +94,10 @@ pub enum ReconcileLeg {
     },
     /// The rows were reset and rebuild from genesis.
     Rebuilding,
+    /// Rows cannot be rebuilt: required history is permanently gone. The
+    /// family stays failed until the index is reset or re-enabled; other
+    /// families keep reconciling and serving (#1120).
+    Failed,
 }
 
 /// Reconciliation legs of every capability the worker owns.
@@ -152,7 +156,7 @@ impl ReconcilePhase {
                     from_height,
                     to_height,
                 } => Some((from_height, to_height)),
-                ReconcileLeg::Forward | ReconcileLeg::Rebuilding => None,
+                ReconcileLeg::Forward | ReconcileLeg::Rebuilding | ReconcileLeg::Failed => None,
             })
             .reduce(|(from_a, to_a), (from_b, to_b)| (from_a.max(from_b), to_a.min(to_b)))
     }

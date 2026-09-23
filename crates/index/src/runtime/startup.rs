@@ -532,7 +532,9 @@ mod tests {
             open_store: std::sync::Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
             utxo: None,
             chain_transition: None,
-            retention: std::sync::Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
+            retention: std::sync::Arc::new(bitcoin_rs_storage::RetentionAccess::new(
+                std::sync::Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
+            )),
         };
         let result =
             open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);

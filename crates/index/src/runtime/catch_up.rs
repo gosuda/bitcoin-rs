@@ -41,20 +41,32 @@ impl Worker {
         floor: u32,
         first: &BlockIdentity,
     ) -> Result<(), DerivedIndexWorkerError> {
+        let terminal = |pruned_below| DerivedIndexWorkerError::MissingRequiredHistory {
+            height: first.height,
+            hash: Hash256::from_le_bytes(&first.hash),
+            pruned_below,
+        };
         let mut lease = self.retention_lease.lock();
-        // A rebuild can move the required start backwards; a pin above the
-        // needed floor would hold the wrong window, so re-acquire. The gap
-        // between that release and the re-acquire below is the one window a
-        // prune pass can cross the old floor: a refusal on the new acquire
-        // is the defined result — the history the reset rebuild still needs
-        // is gone, and the caller surfaces it as terminal (#1120).
-        if lease.as_ref().is_some_and(|held| held.floor() > floor) {
-            if let Some(held) = lease.take() {
-                held.release();
-            }
-        }
         if let Some(held) = lease.as_mut() {
-            held.advance(floor);
+            if held.floor() <= floor {
+                held.advance(floor);
+                return Ok(());
+            }
+            // A rebuild moved the required start backwards. Acquire the new
+            // pin BEFORE releasing the old one: the two leases share one
+            // instant, so the binding constraint — the lower floor — never
+            // lapses and a concurrent prune pass cannot cross the history
+            // the reset rebuild still needs. A refusal is the defined
+            // result: that history is already gone (#1120).
+            let replacement = self.retention.acquire(floor).map_err(
+                |bitcoin_rs_storage::RetentionError::PrunedBelow { pruned_below, .. }| {
+                    terminal(pruned_below)
+                },
+            )?;
+            if let Some(old) = lease.take() {
+                old.release();
+            }
+            *lease = Some(replacement);
             return Ok(());
         }
         match self.retention.acquire(floor) {
@@ -63,11 +75,7 @@ impl Worker {
                 Ok(())
             }
             Err(bitcoin_rs_storage::RetentionError::PrunedBelow { pruned_below, .. }) => {
-                Err(DerivedIndexWorkerError::MissingBody {
-                    height: first.height,
-                    hash: Hash256::from_le_bytes(&first.hash),
-                    pruned_below,
-                })
+                Err(terminal(pruned_below))
             }
         }
     }
@@ -151,10 +159,6 @@ impl Worker {
             |endpoint| endpoint.height.saturating_add(1),
         );
         if start_height > target.height {
-            // The leg is complete: no further history is required, so the
-            // backfill hands retention authority back to pruning exactly
-            // once (#1120).
-            self.release_retention();
             return if self.sync_and_commit(state)?.is_some() {
                 Ok(ReconcileAction::CaughtUp)
             } else {
@@ -169,11 +173,19 @@ impl Worker {
         if self.runtime.should_stop() {
             return Ok(ReconcileAction::Stalled);
         }
-        // Bound the backfill's retention before any body I/O: a concurrent
-        // prune pass must not cross the history this leg still needs, and a
-        // start below the already-pruned line fails closed right here
-        // instead of stalling forever (#1120).
-        self.hold_retention(start_height, &identities[0])?;
+        // Bound the backfill's retention before any body I/O, one past the
+        // DURABLE watermark — not past an in-flight batch endpoint: if the
+        // worker stops and the pending batch is discarded, the restart
+        // resumes at the durable watermark and its bodies must still exist
+        // (#1120). A start already below the pruned frontier fails closed
+        // right here instead of stalling forever.
+        let durable_floor = watermark.map_or(0, |w| w.height.saturating_add(1));
+        let first = watermark.map_or(identities[0], |w| BlockIdentity {
+            height: w.height,
+            hash: w.hash,
+            parent_hash: [0_u8; 32],
+        });
+        self.hold_retention(durable_floor, &first)?;
         let Some(body_store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
         };
@@ -253,7 +265,7 @@ impl Worker {
                 // writer may not have landed yet) and stays a bounded stall.
                 let pruned_below = self.retention.pruned_below();
                 if identity.height < pruned_below {
-                    return Err(DerivedIndexWorkerError::MissingBody {
+                    return Err(DerivedIndexWorkerError::MissingRequiredHistory {
                         height: identity.height,
                         hash: Hash256::from_le_bytes(&identity.hash),
                         pruned_below,

@@ -221,7 +221,9 @@ impl Harness {
             rollback_rebuild_cutover,
             utxo,
             chain_transition,
-            retention: Arc::clone(&retention),
+            retention: Arc::new(bitcoin_rs_storage::RetentionAccess::new(Arc::clone(
+                &retention,
+            ))),
             retention_lease: parking_lot::Mutex::new(None),
         };
         Self {
@@ -354,7 +356,7 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 }
 
-/// `#1120`: a body missing above the prune line is transient absence. The
+/// `IDX-10`: a body missing above the prune line is transient absence. The
 /// pass stalls — the bounded quiet-period retry — no terminal failure is
 /// raised, the required history stays pinned by a live retention lease, and
 /// completion releases that authority exactly once.
@@ -394,12 +396,11 @@ fn transient_missing_body_stalls_under_a_live_retention_lease() {
     assert_eq!(h.retention.retention_floor(), None);
 }
 
-/// `#1120`: a required body below the recorded prune line is permanently
-/// gone. The first catch-up pass fails closed with a typed `MissingBody`
-/// naming the first required height, hash, and the prune line — instead of
-/// entering the retry-forever stall loop. A worker exit surfaces the same
-/// text through the `Failed` lifecycle state, so index APIs report an
-/// actionable unavailable reason rather than silent partial history.
+/// `IDX-10`: a required body below the recorded prune line is permanently
+/// gone. The first catch-up pass fails the affected families with an
+/// actionable reason naming the first required height and the prune line —
+/// never a retry-forever stall — and no lease is granted for history that
+/// cannot exist.
 #[test]
 fn backfill_below_prune_line_fails_closed_on_first_pass() {
     let f = ForkFixture::new(3);
@@ -411,31 +412,108 @@ fn backfill_below_prune_line_fails_closed_on_first_pass() {
     let a3 = f.tip(f.a[2]);
     h.set_tip(&a3);
 
-    let error = h
+    let action = h
         .worker
         .reconcile_once(&mut pending)
-        .expect_err("pruned required history is terminal");
-    assert!(
-        matches!(
-            error,
-            DerivedIndexWorkerError::MissingBody {
-                height: 0,
-                pruned_below: 2,
-                ..
-            }
-        ),
-        "got {error:?}"
+        .expect("the leg splits terminally; the worker does not crash");
+    assert!(matches!(action, ReconcileAction::Progressed));
+    // Every enabled family is history-requiring, so all of them go
+    // terminal and the published leg marks them Failed.
+    assert_eq!(h.runtime.terminal_families(), IndexCapabilities::HISTORICAL);
+    assert_eq!(
+        h.runtime.phase(),
+        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Failed)
     );
-    let message = error.to_string();
+    let message = h.runtime.terminal_message().expect("actionable reason");
     assert!(
-        message.contains("permanently unavailable") && message.contains("pruned below line 2"),
-        "actionable reason must name the prune line: {message}"
+        message.contains("permanently unavailable")
+            && message.contains("height 0, hash")
+            && message.contains("pruned below line 2"),
+        "reason must name the first required height and the prune line: {message}"
+    );
+    // The first required height is genesis: bind the hash so incorrect
+    // diagnostics cannot pass the test.
+    assert!(
+        message.contains(&genesis_hash_be_string(&f)),
+        "reason must name the genesis hash: {message}"
     );
     // No lease was granted for history that cannot exist.
     assert_eq!(h.retention.active_leases(), 0);
 }
 
-/// `#1120`: every worker exit releases the retention authority exactly once
+/// Big-endian hex of the fixture's genesis hash, as the missing-history
+/// reason renders it.
+fn genesis_hash_be_string(f: &ForkFixture) -> String {
+    let (a0, _) = f.a[0];
+    let tree = f.tree.read();
+    let parent = tree
+        .parent_id(a0)
+        .expect("parent lookup")
+        .expect("genesis id");
+    let node = tree.node(parent).expect("genesis node");
+    Hash256::from_le_bytes(node.hash.as_byte_array()).to_string_be()
+}
+
+/// `IDX-10`: in a Full-mode forward leg over permanently pruned history,
+/// the history-requiring families go `Failed` while `ScriptLive` resets,
+/// reseeds from the authoritative UTXO view, and keeps serving. The worker
+/// stays up: capability independence (#645) survives a terminal family.
+#[test]
+fn full_mode_pruned_history_fails_families_but_keeps_serving_script_live() {
+    let f = ForkFixture::new(3);
+    let all = IndexCapabilities {
+        tx_lookup: true,
+        script_history: true,
+        script_live: true,
+    };
+    let h = Harness::with_enabled(&f, u32::MAX, all);
+    let mut pending = None;
+
+    h.retention.record_pruned_below(2);
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+
+    // Pass 1: the seed gate reseeds ScriptLive from the UTXO view — live
+    // is the only family without a durable watermark, so no forward leg
+    // runs yet.
+    let action = h.worker.reconcile_once(&mut pending).expect("seed pass");
+    assert!(matches!(action, ReconcileAction::Progressed));
+    assert_eq!(h.runtime.terminal_families(), IndexCapabilities::NONE);
+
+    // Pass 2: the historical leg (start 0, below the frontier) hits the
+    // missing genesis body and splits — the history-requiring families go
+    // terminal while live keeps serving.
+    let action = h.worker.reconcile_once(&mut pending).expect("leg split");
+    assert!(matches!(action, ReconcileAction::Progressed));
+    let historical_only = IndexCapabilities {
+        tx_lookup: true,
+        script_history: true,
+        script_live: false,
+    };
+    assert_eq!(h.runtime.terminal_families(), historical_only);
+    assert_eq!(
+        h.runtime.phase(),
+        ReconcilePhase::FORWARD.with_leg(historical_only, ReconcileLeg::Failed)
+    );
+
+    // Remaining passes: the failed families are never selected again and
+    // the worker converges over the surviving live family.
+    h.settle(&mut pending);
+
+    let watermarks = h.watermarks();
+    assert_eq!(
+        watermarks.script_live,
+        Some(IndexWatermark {
+            height: a3.height,
+            hash: a3.hash.to_le_bytes(),
+        }),
+        "live reseeded at the tip"
+    );
+    assert_eq!(watermarks.tx_lookup, None, "failed family stays failed");
+    assert_eq!(h.retention.active_leases(), 0, "authority fully released");
+}
+
+/// `IDX-10`: every worker exit releases the retention authority exactly once
 /// through the `Drop` fallback — cancellation and worker replacement cannot
 /// leak a pin.
 #[test]

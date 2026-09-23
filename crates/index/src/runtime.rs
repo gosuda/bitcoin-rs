@@ -97,6 +97,11 @@ pub struct DerivedIndexRuntime {
     wake_tx: Sender<()>,
     failure_message: RwLock<Option<CompactString>>,
     phase: arc_swap::ArcSwap<ReconcilePhase>,
+    /// Families whose required history is permanently gone: the worker
+    /// stops selecting them and the capability projection reports `Failed`,
+    /// while surviving families keep serving (#1120, #645).
+    terminal: Mutex<IndexCapabilities>,
+    terminal_message: RwLock<Option<CompactString>>,
 }
 
 impl DerivedIndexRuntime {
@@ -110,7 +115,49 @@ impl DerivedIndexRuntime {
             wake_tx,
             failure_message: RwLock::new(None),
             phase: arc_swap::ArcSwap::from_pointee(ReconcilePhase::FORWARD),
+            terminal: Mutex::new(IndexCapabilities::NONE),
+            terminal_message: RwLock::new(None),
         }
+    }
+
+    /// Marks `capabilities` terminally failed with an actionable reason.
+    ///
+    /// Unlike [`Self::publish_failed`], the worker keeps running: a
+    /// history-requiring family that cannot rebuild over pruned bodies is
+    /// failed alone, and the remaining families (a current-state view
+    /// reseeded from the authoritative UTXO set) continue to reconcile and
+    /// serve. The first reason wins — it names the pruned position the
+    /// families stopped at.
+    pub(super) fn fail_families(
+        &self,
+        capabilities: IndexCapabilities,
+        reason: impl Into<CompactString>,
+    ) {
+        {
+            let mut terminal = self.terminal.lock();
+            *terminal = IndexCapabilities {
+                tx_lookup: terminal.tx_lookup || capabilities.tx_lookup,
+                script_history: terminal.script_history || capabilities.script_history,
+                script_live: terminal.script_live || capabilities.script_live,
+            };
+            let mut message = self.terminal_message.write();
+            if message.is_none() {
+                *message = Some(reason.into());
+            }
+        }
+        self.publish_leg(capabilities, ReconcileLeg::Failed);
+    }
+
+    /// Families terminally failed by [`Self::fail_families`].
+    #[must_use]
+    pub fn terminal_families(&self) -> IndexCapabilities {
+        *self.terminal.lock()
+    }
+
+    /// The reason the first terminal family failed, if any.
+    #[must_use]
+    pub fn terminal_message(&self) -> Option<CompactString> {
+        self.terminal_message.read().clone()
     }
 
     /// Publishes the reconciliation phase. Only the worker thread writes it.
@@ -410,8 +457,9 @@ pub struct DerivedIndexOpenSpec {
     /// Retention authority the backfill holds its bounded lease against:
     /// the lease floor advances with durable progress, and the recorded
     /// prune line classifies a missing body as transient or permanently
-    /// pruned (#1120).
-    pub retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    /// pruned (#1120). Narrowed to lease-granting reads — recording the
+    /// prune line stays with the storage layer.
+    pub retention: Arc<bitcoin_rs_storage::RetentionAccess>,
 }
 
 /// Handle used to spawn and join the supervised reconciliation worker.
@@ -570,7 +618,7 @@ struct Worker {
     /// Chain transition authority shared with apply and RPC reads.
     chain_transition: Option<Arc<Mutex<()>>>,
     /// Retention authority the backfill pins its required history against.
-    retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    retention: Arc<bitcoin_rs_storage::RetentionAccess>,
     /// Live backfill lease, held from the first required height until the
     /// leg completes; released exactly once by `Drop` on every other exit.
     /// Worker methods take `&self`, so the lease sits behind a mutex.
@@ -664,20 +712,31 @@ pub enum DerivedIndexWorkerError {
     /// The index writer or reader reported a failure.
     #[error("txindex index error: {0}")]
     Index(#[from] IndexError),
-    /// A block body needed for indexing or rollback was absent, and the
-    /// recorded prune line proves the store can never serve it again: rows
-    /// below the line are deleted, so no retry can succeed.
-    #[error(
-        "txindex worker: required history permanently unavailable at height {height}, hash {hash} \
-         (pruned below line {pruned_below}) — derived capability cannot backfill over pruned \
-         blocks; it must be rebuilt against retained history or disabled"
-    )]
+    /// A block body needed for indexing or rollback was absent. Raised from
+    /// a rollback rewind, where the cause — pruned versus not yet
+    /// delivered — is not decided at the load site; the rebuild gate
+    /// classifies the outcome per capability.
+    #[error("txindex worker: missing body at height {height}, hash {hash}")]
     MissingBody {
         /// Block height whose body is missing.
         height: u32,
         /// Active-chain hash of the missing body.
         hash: Hash256,
-        /// Highest prune line already executed; `height` is below it.
+    },
+    /// A body the forward leg requires is permanently gone: the recorded
+    /// prune line proves rows below it are deleted, so no retry can
+    /// succeed (#1120).
+    #[error(
+        "txindex worker: required history permanently unavailable at height {height}, hash {hash} \
+         (pruned below line {pruned_below}) — the affected families cannot backfill over pruned \
+         blocks and are failed; rebuild against retained history or re-enable the index"
+    )]
+    MissingRequiredHistory {
+        /// First required height whose body is gone.
+        height: u32,
+        /// Active-chain hash of the missing body.
+        hash: Hash256,
+        /// Recorded prune line the height sits below.
         pruned_below: u32,
     },
     /// A capability requiring bodies was enabled without a body store.
@@ -712,6 +771,12 @@ impl DerivedIndexWorkerError {
     /// The backend open thread may still hold or acquire the store after this error.
     fn abandoned_open(&self) -> bool {
         matches!(self, Self::OpenStopped | Self::OpenTimeout { .. })
+    }
+
+    /// The forward leg proved the required history is permanently gone:
+    /// the classification the leg-splitting handler routes by (#1120).
+    pub(super) fn missing_required_history(&self) -> bool {
+        matches!(self, Self::MissingRequiredHistory { .. })
     }
 
     fn requires_capability_rebuild(&self) -> bool {

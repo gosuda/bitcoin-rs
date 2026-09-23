@@ -38,9 +38,10 @@ impl Worker {
             height: snapshot.height,
             hash: snapshot.hash.to_le_bytes(),
         };
-        if (self.enabled.tx_lookup && watermarks.tx_lookup != Some(expected))
-            || (self.enabled.script_history && watermarks.script_history != Some(expected))
-            || (self.enabled.script_live && watermarks.script_live != Some(expected))
+        let active = self.active();
+        if (active.tx_lookup && watermarks.tx_lookup != Some(expected))
+            || (active.script_history && watermarks.script_history != Some(expected))
+            || (active.script_live && watermarks.script_live != Some(expected))
         {
             return Ok(CursorCommit::NotAligned);
         }

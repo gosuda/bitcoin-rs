@@ -56,7 +56,7 @@ impl DerivedIndexWorker {
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
         reporter: Arc<dyn crate::runtime::IndexAheadSink>,
         rollback_rebuild_cutover: u32,
-        retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+        retention: Arc<bitcoin_rs_storage::RetentionAccess>,
         wake_rx: Receiver<()>,
     ) -> std::io::Result<Self> {
         let worker = Worker {
