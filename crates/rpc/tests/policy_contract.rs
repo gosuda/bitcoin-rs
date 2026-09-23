@@ -1633,12 +1633,18 @@ fn applied_tip_pair(state: &NodeState) -> Result<(Hash256, u32), Box<dyn Error>>
 
 fn invalidation_handler(state: &NodeState) -> Handler {
     let chainstate = state.chainstate();
+    let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+        chainstate.applied_tip_handle(),
+        chainstate.block_tree_handle(),
+        Network::Regtest,
+    ));
     Handler::new(Arc::new(
         Context::from_handles(ContextHandles {
             chain: ChainHandles {
                 chain_tip: chainstate.chain_tip_handle(),
                 applied_tip: chainstate.applied_tip_handle(),
                 chain_tx_count: chainstate.chain_tx_count_handle(),
+                ibd,
                 blocks: state.blocks(),
                 transactions: state.transactions(),
                 utxo: chainstate.utxo_handle(),
