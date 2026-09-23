@@ -45,8 +45,6 @@ pub mod socket;
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
-/// Download planner: window, staging, and conviction policy.
-pub mod sync_planner;
 /// Bounded transaction announcements and their peer relay worker.
 pub mod tx_relay;
 /// Bitcoin P2P wire codec.
@@ -87,4 +85,3 @@ pub use download_window::{
     DownloadWindow, FanoutCandidate, RejectDelivery, SyncBudget, SyncPeer, SyncPeerSelection,
     configure_request_mode, default_sync_budget, statically_fanout_eligible,
 };
-pub use sync_planner::{ColdFrontHedge, SyncAction, SyncDisconnectReason, SyncPlanner};
