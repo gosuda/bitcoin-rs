@@ -276,14 +276,7 @@ impl Worker {
         let Some((capabilities, watermark)) = self.forward_selection(watermarks, &target) else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        self.catch_up_forward(
-            &target,
-            fence,
-            watermarks,
-            watermark,
-            capabilities,
-            pending,
-        )
+        self.catch_up_forward(&target, fence, watermarks, watermark, capabilities, pending)
     }
 
     /// Runs the forward leg against `target`, classifying a terminal

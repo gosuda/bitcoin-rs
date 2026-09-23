@@ -130,10 +130,7 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
     /// would let leases pin history an earlier process already deleted until
     /// some later prune happened to run. Seeding makes the recorded line
     /// bind lease grants and prune-line folding from boot on (#1120).
-    fn seed_retention(
-        &self,
-        retention: &Arc<bitcoin_rs_storage::RetentionRegistry>,
-    ) -> Result<()>;
+    fn seed_retention(&self, retention: &Arc<bitcoin_rs_storage::RetentionRegistry>) -> Result<()>;
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
@@ -146,10 +143,7 @@ struct ChainstateStoreServices<S> {
 }
 
 impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
-    fn seed_retention(
-        &self,
-        retention: &Arc<bitcoin_rs_storage::RetentionRegistry>,
-    ) -> Result<()> {
+    fn seed_retention(&self, retention: &Arc<bitcoin_rs_storage::RetentionRegistry>) -> Result<()> {
         let line = bitcoin_rs_storage::pruning::load_pruneheight(&*self.store)
             .context("load persisted prune height for retention seeding")?
             .unwrap_or(0);

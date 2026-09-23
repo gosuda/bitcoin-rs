@@ -365,11 +365,7 @@ fn transient_missing_body_stalls_under_a_live_retention_lease() {
     let mut pending = None;
 
     let a2_hash = f.a[1].1;
-    let removed = f
-        .bodies
-        .bodies
-        .lock()
-        .remove(&(2, a2_hash.to_le_bytes()));
+    let removed = f.bodies.bodies.lock().remove(&(2, a2_hash.to_le_bytes()));
     assert!(removed.is_some(), "fixture body at height 2");
 
     let a3 = f.tip(f.a[2]);
@@ -432,8 +428,7 @@ fn backfill_below_prune_line_fails_closed_on_first_pass() {
     );
     let message = error.to_string();
     assert!(
-        message.contains("permanently unavailable")
-            && message.contains("pruned below line 2"),
+        message.contains("permanently unavailable") && message.contains("pruned below line 2"),
         "actionable reason must name the prune line: {message}"
     );
     // No lease was granted for history that cannot exist.
@@ -451,11 +446,7 @@ fn worker_drop_releases_retention_authority_once() {
     let mut pending = None;
 
     let a2_hash = f.a[1].1;
-    let removed = f
-        .bodies
-        .bodies
-        .lock()
-        .remove(&(2, a2_hash.to_le_bytes()));
+    let removed = f.bodies.bodies.lock().remove(&(2, a2_hash.to_le_bytes()));
     assert!(removed.is_some(), "fixture body at height 2");
     let a3 = f.tip(f.a[2]);
     h.set_tip(&a3);
