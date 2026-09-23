@@ -93,7 +93,7 @@ curl -s --user bitcoin-rs:bitcoin-rs \
 
 For the tip hash only, use `getbestblockhash` with the same empty parameter list.
 
-[rpc-reference.md](rpc-reference.md) is generated from the live RPC manifest and records implemented, deviating, and unimplemented methods. The node has no in-tree wallet or private-key custody; key-free descriptor/PSBT helpers remain available for external signers.
+[rpc-reference.md](rpc-reference.md) is generated from the live registry and labels every method Supported, Deviation, Implemented (unverified), Extension, Disabled, or Unimplemented. The node has no in-tree wallet or private-key custody; key-free descriptor/PSBT helpers remain available for external signers.
 
 ## Capability state
 
