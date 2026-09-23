@@ -155,7 +155,7 @@ pub fn dispatch_inbound_with_chain<S>(
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
-    dispatch_inbound_full(peer, message, chain, None, headroom, send)
+    dispatch_inbound_full(peer, message, chain, None, &|| true, headroom, send)
 }
 
 /// Dispatch with an active-chain view and a transaction-inventory filter.
@@ -170,11 +170,17 @@ pub fn dispatch_inbound_with_chain<S>(
 /// recent-rejects) and the `getdata` arm serves tx bodies for tx-typed
 /// items the node has, reporting the rest as `notfound`. Inventory types
 /// identify txids or wtxids independently of the peer's outbound preference.
+///
+/// `tx_relay_open` reports whether the node accepts transaction relay from
+/// peers (it is not in initial block download). While it returns `false`,
+/// the `inv` arm requests block-typed vectors only and every other arm is
+/// unchanged. The gate is evaluated lazily per `inv` message.
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
     chain: Option<&dyn ChainQuery>,
     tx_inventory: Option<&dyn TxInventory>,
+    tx_relay_open: &dyn Fn() -> bool,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
@@ -192,12 +198,20 @@ pub fn dispatch_inbound_full<S>(
         }
         Message::Inv(items) => {
             step(peer, message)?;
+            // Evaluated once per `inv`. While the relay gate is closed no
+            // tx-typed vector is ever requested, in either inventory branch
+            // (Core 31.1 net_processing.cpp:4401-4404).
+            let relay_open = tx_relay_open();
             let response = match tx_inventory {
                 Some(inv) => request_inventory_filtered(items, &|item| {
-                    inventory_tx_hash(item)
-                        .is_some_and(|hash| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
+                    inventory_tx_hash(item).is_some_and(|hash| {
+                        !relay_open || inv.have_tx(hash, matches!(item, Inventory::WTx(_)))
+                    })
                 }),
-                None => request_inventory(items),
+                None if relay_open => request_inventory(items),
+                None => {
+                    request_inventory_filtered(items, &|item| inventory_tx_hash(item).is_some())
+                }
             };
             if let Some(mut response) = response {
                 if let Message::GetData(items) = &mut response {
@@ -1133,6 +1147,93 @@ mod tests {
         }
     }
 
+    /// A closed transaction-relay gate suppresses every tx-typed vector in a
+    /// mixed `inv` while block vectors are still requested (unfiltered
+    /// fallback branch).
+    #[test]
+    fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
+        let txid = bitcoin::Txid::from_byte_array([1; 32]);
+        let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+
+        let mut peer = ready_peer();
+        let gated = dispatch_collect_gated(
+            &mut peer,
+            &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+            None,
+            None,
+            false,
+        );
+        assert_eq!(
+            gated,
+            vec![Message::GetData(vec![block])],
+            "a closed relay gate must request the block but no announced tx"
+        );
+
+        let mut peer = ready_peer();
+        let open = dispatch_collect_gated(
+            &mut peer,
+            &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            open,
+            vec![Message::GetData(vec![
+                Inventory::Transaction(txid),
+                wtxid,
+                block
+            ])],
+            "an open relay gate must request every announced vector"
+        );
+    }
+
+    /// Same suppression on the filtered branch: a closed gate wins over the
+    /// have-filter, so an unknown wtxid is never requested either.
+    #[test]
+    fn inv_wtx_vectors_not_requested_while_tx_relay_closed() {
+        let inventory = FakeTxInventory::empty();
+        let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
+        let witness_txid = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([1; 32]));
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+
+        let mut peer = ready_peer();
+        let gated = dispatch_collect_gated(
+            &mut peer,
+            &Message::Inv(vec![witness_txid, wtxid, block]),
+            None,
+            Some(&inventory),
+            false,
+        );
+        assert_eq!(
+            gated,
+            vec![Message::GetData(vec![block])],
+            "a closed relay gate must suppress txid and wtxid vectors the node does not hold"
+        );
+    }
+
+    /// Block announcements stay admissible while the relay gate is closed,
+    /// and `request_witness` still upgrades the remaining block vectors.
+    #[test]
+    fn inv_block_vectors_requested_while_tx_relay_closed() {
+        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+        let mut peer = ready_peer();
+        let mut version = crate::handshake::version_message(1, 0);
+        version.services = bitcoin::p2p::ServiceFlags::WITNESS;
+        peer.remote_version = Some(version);
+
+        let gated =
+            dispatch_collect_gated(&mut peer, &Message::Inv(vec![block]), None, None, false);
+        assert_eq!(
+            gated,
+            vec![Message::GetData(vec![Inventory::WitnessBlock(
+                bitcoin::BlockHash::from_byte_array([3; 32])
+            )])],
+            "a closed relay gate must not change block announcement handling"
+        );
+    }
+
     /// P2P-01 / BIP144 / BIP339: requested serialization must preserve stored witnesses.
     #[test]
     fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
@@ -1441,12 +1542,25 @@ mod tests {
         chain: Option<&dyn ChainQuery>,
         tx_inventory: Option<&dyn TxInventory>,
     ) -> Vec<Message> {
+        dispatch_collect_gated(peer, message, chain, tx_inventory, true)
+    }
+
+    /// Same helper with the transaction-relay gate under test control.
+    #[allow(clippy::expect_used)]
+    fn dispatch_collect_gated<S>(
+        peer: &mut Peer<S>,
+        message: &Message,
+        chain: Option<&dyn ChainQuery>,
+        tx_inventory: Option<&dyn TxInventory>,
+        relay_open: bool,
+    ) -> Vec<Message> {
         let collected = RefCell::new(Vec::new());
         dispatch_inbound_full(
             peer,
             message,
             chain,
             tx_inventory,
+            &|| relay_open,
             &|| true,
             &mut |response| {
                 collected.borrow_mut().push(response);

@@ -60,8 +60,12 @@ with graceful shutdown. A connection negotiates version/verack in
 codec, decoding `Message` values and reporting `PeerError`. Inbound traffic reaches
 the host through `dispatch_inbound_full`, which streams getdata responses
 block by block behind the outbound budget's pre-load production headroom gate,
-filters transaction inventory through the `TxInventory` trait, and reads the
-active chain through the `ChainQuery` trait; `inbound` hands over `InboundBlock`,
+filters transaction inventory through the `TxInventory` trait, reads the
+active chain through the `ChainQuery` trait, and consults the chain-owned
+initial-block-download latch shared with RPC: while it is active,
+transaction-typed `inv` vectors are never requested and `tx` bodies are
+dropped before ingress (Core 31.1 `net_processing.cpp:4401-4404`,
+`:4713-4716`); `inbound` hands over `InboundBlock`,
 `InboundHeaders`, and `InboundTx` with their delivering peer stamped. Misbehaving peers
 are tracked via the file-persisted `BanList` of the `banlist` module, whole subnets are
 excluded as a `BannedSubnet` built from an `IpSubnet`, and BIP155 addrv2 and BIP339
