@@ -972,6 +972,7 @@ mod manifest_tests {
             published, declared,
             "published ZMQ topics and the declared ZMQ rows must name the same set"
         );
+
     }
 
     #[derive(Default)]
