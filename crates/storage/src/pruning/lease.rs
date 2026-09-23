@@ -207,6 +207,44 @@ impl Drop for RetentionLease {
     }
 }
 
+/// Read-side retention authority for consumers that pin required history.
+///
+/// Wraps a [`RetentionRegistry`] without the prune-line recording side:
+/// holders can acquire, advance, and release leases and inspect the
+/// recorded frontier, but can never claim rows are gone. Handing this to a
+/// subsystem instead of the raw registry keeps `record_pruned_below` — the
+/// authority to say what pruning deleted — owned by the storage layer that
+/// actually deletes.
+#[derive(Clone, Debug)]
+pub struct RetentionAccess {
+    registry: Arc<RetentionRegistry>,
+}
+
+impl RetentionAccess {
+    /// Wraps a registry's lease-granting surface.
+    #[must_use]
+    pub fn new(registry: Arc<RetentionRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Acquires a lease pinning rows at `floor` and above against pruning.
+    ///
+    /// Fails when the floor is below the highest prune line already
+    /// executed: those rows are gone, and a lease cannot resurrect them.
+    pub fn acquire(&self, floor: u32) -> Result<RetentionLease, RetentionError> {
+        self.registry.acquire(floor)
+    }
+
+    /// The highest prune line a completed pass has recorded.
+    ///
+    /// Monotonic: pruning only moves forward. Floors at or below it can no
+    /// longer be acquired.
+    #[must_use]
+    pub fn pruned_below(&self) -> u32 {
+        self.registry.pruned_below()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
