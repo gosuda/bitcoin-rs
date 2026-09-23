@@ -24,12 +24,6 @@ use crate::compat::convert::hex_encode;
 #[cfg(test)]
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
-/// How stale the applied tip may be while the node still counts as synced.
-///
-/// Bitcoin Core's `DEFAULT_MAX_TIP_AGE`, 24 hours. Core exposes it as
-/// `-maxtipage`; this node has no such option yet, so the default stands.
-const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;
-
 /// Core `sendrawtransaction` default `maxfeerate`: 0.1 BTC/kvB in sat/kvB.
 ///
 /// The node applies the identical cap to every admission surface, including
@@ -243,6 +237,9 @@ pub struct ChainHandles {
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Cumulative transaction count for the fully-applied chain.
     pub chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
+    /// Process-wide initial-block-download latch over the applied chain,
+    /// shared with P2P so both surfaces answer identically.
+    pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     /// Applied block metadata log.
     pub blocks: Arc<RwLock<BlockLog>>,
     /// Transactions retained for direct RPC lookup.
@@ -405,16 +402,9 @@ pub struct Context {
     /// [`Self::chain_tx_count`], which turns Bitcoin Core's zero-means-unset
     /// encoding into an `Option`.
     chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
-    /// Whether this node has ever observed itself to be out of initial block
-    /// download. Once set it is never cleared.
-    ///
-    /// Bitcoin Core latches the same way (`m_cached_is_ibd`, cleared once by
-    /// `UpdateIBDStatus` and never set again) and logs "Leaving
-    /// `InitialBlockDownload (latching to false)`" when it happens. Without the
-    /// latch the answer oscillates: a synced node that has not seen a block for
-    /// longer than the tip-age window would announce that it is back in initial
-    /// sync, and callers treat that as "do not trust this node's data yet".
-    left_initial_block_download: Arc<core::sync::atomic::AtomicBool>,
+    /// Process-wide initial-block-download latch over the applied chain,
+    /// shared with P2P so RPC and P2P answer identically.
+    pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     /// Mempool mutation gateway: the only production route that takes the
     /// pool write lock, publishing ordered mutation events to observers.
     pub mempool: Arc<MempoolGateway>,
@@ -518,12 +508,19 @@ impl Context {
         let mempool = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
             MempoolLimits::default(),
         ))));
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+            Network::Mainnet,
+        ));
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
-            applied_tip: Arc::new(ArcSwapOption::empty()),
+            applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
-            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            ibd,
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -540,7 +537,7 @@ impl Context {
             mining_control: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
             chain_network: Network::Mainnet,
-            block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
+            block_tree,
             block_body_source: None,
             p2p_outbound_sender: None,
             banned: Arc::new(RwLock::new(Vec::new())),
@@ -571,12 +568,19 @@ impl Context {
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             observer,
         );
+        let applied_tip = Arc::new(ArcSwapOption::empty());
+        let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+            Network::Mainnet,
+        ));
         Self {
             chain_tip: Arc::new(ArcSwapOption::empty()),
-            applied_tip: Arc::new(ArcSwapOption::empty()),
+            applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
-            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            ibd,
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
             transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -593,7 +597,7 @@ impl Context {
             mining_control: None,
             network: Arc::new(RwLock::new(NetworkState::default())),
             chain_network: Network::Mainnet,
-            block_tree: Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
+            block_tree,
             block_body_source: None,
             p2p_outbound_sender: None,
             banned: Arc::new(RwLock::new(Vec::new())),
@@ -614,6 +618,7 @@ impl Context {
                     chain_tip,
                     applied_tip,
                     chain_tx_count,
+                    ibd,
                     blocks,
                     transactions,
                     utxo,
@@ -644,7 +649,7 @@ impl Context {
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
             chain_tx_count,
-            left_initial_block_download: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            ibd,
             mempool,
             blocks,
             transactions,
@@ -838,7 +843,7 @@ impl Context {
             time,
             median_time,
             verification_progress,
-            initial_block_download: self.is_initial_block_download(now),
+            initial_block_download: self.ibd.is_active(now),
             chain_work: applied_tip
                 .as_deref()
                 .map_or_else(|| self.chainwork_hex(), Self::tip_chainwork_hex),
@@ -982,64 +987,6 @@ impl Context {
             0 => None,
             count => Some(count),
         }
-    }
-
-    /// Answers Bitcoin Core's `IsInitialBlockDownload()` for the applied tip.
-    ///
-    /// A node has left initial block download once its applied tip has at least
-    /// the network's `nMinimumChainWork` **and** carries a timestamp no older
-    /// than `max_tip_age` (Core's 24-hour default). Both are required: work
-    /// alone would trust a stale chain, and recency alone would trust a cheap
-    /// one that simply claims a recent timestamp.
-    ///
-    /// The answer latches. Once this returns `false` it returns `false` for the
-    /// life of the process, exactly as Core's `m_cached_is_ibd` does, so a
-    /// synced node that goes an hour without a block does not announce that it
-    /// is resyncing.
-    ///
-    /// `now` is UNIX seconds, taken by the caller so the decision itself stays a
-    /// pure function of observable state.
-    #[must_use]
-    pub fn is_initial_block_download(&self, now: u64) -> bool {
-        use core::sync::atomic::Ordering;
-
-        if self.left_initial_block_download.load(Ordering::Acquire) {
-            return false;
-        }
-        if self.still_in_initial_block_download(now) {
-            // A concurrent caller may have latched "left IBD" while the
-            // predicate's unlocked reads ran; the latch wins so that once a
-            // caller observes false, no caller ever answers true again.
-            return !self.left_initial_block_download.load(Ordering::Acquire);
-        }
-        self.left_initial_block_download
-            .store(true, Ordering::Release);
-        false
-    }
-
-    /// The unlocked IBD predicate behind [`Self::is_initial_block_download`]:
-    /// minimum work, then tip freshness against the caller's clock.
-    fn still_in_initial_block_download(&self, now: u64) -> bool {
-        let Some(tip) = self.applied_tip.load_full() else {
-            return true;
-        };
-        // Big-endian, fixed width: byte order is numeric order.
-        let work: [u8; 32] = tip.chainwork.to_be_bytes();
-        if work < self.chain_network.minimum_chain_work() {
-            return true;
-        }
-        // `TipSnapshot` carries no timestamp, so the tip's header supplies it —
-        // the same route `getdifficulty` takes to the tip's `bits`.
-        let Some(tip_time) = self
-            .block_tree
-            .read()
-            .node(tip.tip_id)
-            .ok()
-            .map(|node| node.header.time)
-        else {
-            return true;
-        };
-        u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS)
     }
 
     /// Returns the current best-applied-block hash.
@@ -1420,6 +1367,11 @@ mod tests {
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(1));
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            Arc::clone(&applied_tip),
+            Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new())),
+            Network::Mainnet,
+        ));
         let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
         let coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
@@ -1433,6 +1385,7 @@ mod tests {
                 chain_tip: Arc::clone(&chain_tip),
                 applied_tip: Arc::clone(&applied_tip),
                 chain_tx_count: Arc::clone(&chain_tx_count),
+                ibd: Arc::clone(&ibd),
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 transactions: Arc::new(RwLock::new(HashMap::new())),
                 utxo: Arc::clone(&utxo),
@@ -1473,6 +1426,10 @@ mod tests {
         assert_eq!(ctx.chain_tx_count(), Some(1));
         chain_tx_count.store(42, core::sync::atomic::Ordering::Relaxed);
         assert_eq!(ctx.chain_tx_count(), Some(42));
+        assert!(
+            Arc::ptr_eq(&ctx.ibd, &ibd),
+            "ibd must be shared with caller"
+        );
         assert!(
             Arc::ptr_eq(&ctx.utxo, &utxo),
             "utxo must be shared with caller"
