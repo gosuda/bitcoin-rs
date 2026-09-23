@@ -44,7 +44,7 @@ pub mod policy;
 pub mod undo_pruner;
 
 pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
-pub use lease::{RetentionError, RetentionLease, RetentionRegistry};
+pub use lease::{RetentionAccess, RetentionError, RetentionLease, RetentionRegistry};
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};
 
@@ -52,6 +52,12 @@ use crate::{StorageError, WriteBatch as _};
 use thiserror::Error;
 
 const PRUNEHEIGHT_METADATA_KEY: &[u8] = b"node:pruneheight";
+/// One past the highest row a completed pass actually deleted, persisted in
+/// the same atomic batch as the deletion itself. Unlike the requested
+/// `pruneheight`, this frontier can sit lower: a live lease or an early
+/// byte target stops the pass above the request. Retention seeding must
+/// use this value — the request line may name rows that still exist.
+const PRUNE_FRONTIER_METADATA_KEY: &[u8] = b"node:prunefrontier";
 
 /// Loads the persisted manual-prune line.
 pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
@@ -61,6 +67,27 @@ pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, Sto
     if bytes.len() != size_of::<u32>() {
         return Err(StorageError::IncompatibleData(format!(
             "invalid persisted pruneheight length {}",
+            bytes.len()
+        )));
+    }
+    let mut encoded = [0_u8; size_of::<u32>()];
+    encoded.copy_from_slice(&bytes);
+    Ok(Some(u32::from_be_bytes(encoded)))
+}
+
+/// Loads the persisted executed-prune frontier: one past the highest row a
+/// completed pass actually deleted. `None` when no pass has deleted
+/// anything.
+///
+/// This is the value retention seeding must record — the requested
+/// `pruneheight` can name rows a clamped pass left in place.
+pub fn load_pruned_frontier<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
+    let Some(bytes) = store.get(crate::ColumnFamily::UtxoMeta, PRUNE_FRONTIER_METADATA_KEY)? else {
+        return Ok(None);
+    };
+    if bytes.len() != size_of::<u32>() {
+        return Err(StorageError::IncompatibleData(format!(
+            "invalid persisted prune frontier length {}",
             bytes.len()
         )));
     }
@@ -130,6 +157,16 @@ pub fn prune_to_height<S: crate::KvStore>(
         PRUNEHEIGHT_METADATA_KEY,
         &pruneheight.to_be_bytes(),
     );
+    // The executed frontier lands in the same atomic batch as the deletion:
+    // a crash must never leave the request line recorded without the
+    // frontier that says how much of it actually ran.
+    if staged.pruned_below > 0 {
+        batch.put(
+            crate::ColumnFamily::UtxoMeta,
+            PRUNE_FRONTIER_METADATA_KEY,
+            &staged.pruned_below.to_be_bytes(),
+        );
+    }
     store.write(batch)?;
     // Record before reclaim: acquiring a lease takes no transition lock,
     // so a lease granted between the committing write and this record
