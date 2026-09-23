@@ -10,11 +10,16 @@
 //! `docs/rpc-reference.md` from this table.
 //!
 //! Row semantics:
-//! - `status`: [`Status::Implemented`] ships shape-compatible with Core;
+//! - `status`: [`Status::Supported`] is differentially verified against the
+//!   pinned reference (no rows qualify yet; the
+//!   `[reference].differential_harness` flag gates the claim);
 //!   [`Status::Deviation`] ships with a recorded difference (the `notes`
-//!   field cites the source file carrying it); [`Status::Extension`] has no
-//!   Core counterpart; [`Status::Unimplemented`] is Core surface this node
-//!   does not expose.
+//!   field cites the source file carrying it);
+//!   [`Status::ImplementedUnverified`] ships but nothing has compared it to
+//!   the pinned reference; [`Status::Extension`] has no Core counterpart;
+//!   [`Status::Disabled`] is reserved for parameter-level refusals with a
+//!   stable error (zero genuine rows); [`Status::Unimplemented`] is Core
+//!   surface this node does not expose.
 //! - `feature`: cargo feature that must be active for the surface to exist
 //!   (empty for always-compiled surfaces).
 //! - `core_version`: the Core contract version the row is declared against.
@@ -72,24 +77,37 @@ impl SurfaceKind {
 /// Declaration order is also the section order of the generated reference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Status {
-    /// Shipped and shape-compatible with the Core contract.
-    Implemented,
+    /// Implemented and differentially verified against the pinned
+    /// reference. Nothing qualifies while
+    /// `[reference].differential_harness` is false; the coverage gate
+    /// rejects the claim.
+    Supported,
     /// Shipped with a recorded difference from Core; notes cite the source.
     Deviation,
+    /// Shipped; nothing has compared it to the pinned reference.
+    ImplementedUnverified,
     /// bitcoin-rs-specific surface with no Core counterpart.
     Extension,
+    /// Shipped surface refused at the parameter level with a stable error.
+    /// Reserved; zero genuine rows carry it today.
+    Disabled,
     /// Core surface this node does not expose.
     Unimplemented,
 }
 
 impl Status {
-    /// Label used in the generated reference.
+    /// PRE: `self` is one of the six Status variants.
+    /// POST: returns the exact label used in the generated reference legend,
+    ///   section headings, and footer.
+    /// INVARIANT: labels are unique and match the legend order.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Implemented => "Implemented",
+            Self::Supported => "Supported",
             Self::Deviation => "Deviation",
+            Self::ImplementedUnverified => "Implemented (unverified)",
             Self::Extension => "Extension",
+            Self::Disabled => "Disabled",
             Self::Unimplemented => "Unimplemented",
         }
     }
@@ -186,7 +204,7 @@ pub fn render_reference() -> String {
     let mut out = String::new();
     out.push_str("# External API Compatibility Reference\n\n");
     out.push_str("<!-- GENERATED FILE - do not edit by hand.\n");
-    out.push_str("     Source of truth: MANIFEST in crates/rpc/src/manifest.rs.\n");
+    out.push_str("     Source of truth: REGISTRY in crates/rpc/src/registry.rs.\n");
     out.push_str(
         "     Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference\n",
     );
@@ -196,18 +214,22 @@ pub fn render_reference() -> String {
     out.push_str("Surface contract of bitcoin-rs against Bitcoin Core ");
     out.push_str(CORE_VERSION);
     out.push_str(".\n\n");
-    out.push_str("- **Implemented** - shipped and shape-compatible with the Core contract.\n");
+    out.push_str("- **Supported** - implemented and differentially verified against the pinned reference. Nothing qualifies while `[reference].differential_harness` is false.\n");
     out.push_str("- **Deviation** - shipped with a recorded difference from Core; notes cite the source file.\n");
+    out.push_str("- **Implemented (unverified)** - shipped; nothing has compared it to the pinned reference.\n");
     out.push_str("- **Extension** - bitcoin-rs-specific surface with no Core counterpart.\n");
+    out.push_str("- **Disabled** - shipped surface refused at the parameter level with a stable error. Reserved; no row carries it today.\n");
     out.push_str("- **Unimplemented** - Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404.\n\n");
     out.push_str("`since` is the bitcoin-rs version whose surface a row describes; `pending` marks a row whose implementation lands in a later change. Rows naming a cargo feature exist only when that feature is compiled.\n\n");
     out.push_str("Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source command tables (src/rpc/*.cpp, src/wallet/rpc/*.cpp, src/rest.cpp StartREST, src/zmq/zmqpublishnotifier.cpp) - the same registrations Core's `help` output prints. Hidden test/administration commands are intentionally absent.\n");
     for kind in [SurfaceKind::Rpc, SurfaceKind::Rest, SurfaceKind::Zmq] {
         let mut printed_heading = false;
         for status in [
-            Status::Implemented,
+            Status::Supported,
             Status::Deviation,
+            Status::ImplementedUnverified,
             Status::Extension,
+            Status::Disabled,
             Status::Unimplemented,
         ] {
             let rows: Vec<&Entry> = entries_of_kind(kind)
@@ -240,9 +262,11 @@ pub fn render_reference() -> String {
     }
     out.push_str("\nRow counts: ");
     for (index, status) in [
-        Status::Implemented,
+        Status::Supported,
         Status::Deviation,
+        Status::ImplementedUnverified,
         Status::Extension,
+        Status::Disabled,
         Status::Unimplemented,
     ]
     .into_iter()

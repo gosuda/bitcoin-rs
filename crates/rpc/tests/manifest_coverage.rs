@@ -1,6 +1,6 @@
 //! Compatibility-manifest coverage gate (issue #78).
 //!
-//! Proves three invariants:
+//! Proves the registry's invariants:
 //! 1. the dispatcher's live dispatch registry and the shipped manifest rows
 //!    are set-equal in both directions (REST and ZMQ likewise against their
 //!    live registrations), and every `Unimplemented` row really answers
@@ -9,12 +9,16 @@
 //! 3. `docs/rpc-reference.md` is byte-identical to a regeneration of the
 //!    manifest; drift names the delta and the regen command. Regeneration
 //!    is a separate ignored test, so a coverage run never writes and a
-//!    regen run never passes silently.
+//!    regen run never passes silently;
+//! 4. every Deviation row states its difference, and no row claims
+//!    `Supported` while `[reference].differential_harness` is false;
+//! 5. the pinned Core reference identities match `Cargo.lock`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::manifest::{self, Entry, Status, SurfaceKind};
 use bitcoin_rs_rpc::{Handler, RpcError};
@@ -113,11 +117,23 @@ fn rest_rows_and_router_registrations_agree_both_ways() {
     );
 }
 
-/// Invariant 1 (ZMQ): topic rows are valid Core topics, and each carries an
-/// implementation reference in its notes.
+/// Invariant 1 (ZMQ): the manifest's ZMQ topic rows are exactly the five
+/// valid Core topics, in both directions, and each carries an activation
+/// reference in its notes. Rows are compared regardless of the build's
+/// feature set: the claim exists even where the topic is compiled out.
 #[test]
 fn zmq_rows_are_valid_core_topics() {
-    for entry in shipped(SurfaceKind::Zmq) {
+    let rows: BTreeSet<&str> = manifest::entries_of_kind(SurfaceKind::Zmq)
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        CORE_ZMQ_TOPICS.len(),
+        "the manifest carries {} ZMQ rows; Core registers {}",
+        rows.len(),
+        CORE_ZMQ_TOPICS.len()
+    );
+    for entry in manifest::entries_of_kind(SurfaceKind::Zmq) {
         assert!(
             CORE_ZMQ_TOPICS.contains(&entry.name),
             "`{}` is not a Bitcoin Core ZMQ topic",
@@ -127,6 +143,12 @@ fn zmq_rows_are_valid_core_topics() {
             !entry.notes.is_empty(),
             "ZMQ topic `{}` must name its activation requirements",
             entry.name
+        );
+    }
+    for topic in CORE_ZMQ_TOPICS {
+        assert!(
+            rows.contains(topic),
+            "`{topic}` is a Bitcoin Core ZMQ topic but carries no manifest row"
         );
     }
 }
@@ -192,6 +214,113 @@ fn notes_are_markdown_table_safe() {
             !entry.notes.contains('\n'),
             "row `{}` notes contain a newline",
             entry.name
+        );
+    }
+}
+
+/// Invariant 4: a Deviation row has to say what the deviation is.
+///
+/// The status alone tells a client that this node differs and not how, which
+/// is the least useful thing a compatibility claim can say.
+#[test]
+fn every_registry_deviation_states_itself() {
+    let mut deviations = 0_usize;
+    for entry in manifest::MANIFEST {
+        if entry.status != Status::Deviation {
+            continue;
+        }
+        assert!(
+            entry.notes.len() > 40,
+            "row `{}` claims a deviation in {} characters, which cannot describe one",
+            entry.name,
+            entry.notes.len()
+        );
+        deviations = deviations.saturating_add(1);
+    }
+    assert!(deviations > 0, "the registry must record its deviations");
+}
+
+/// Invariant 5: nothing may claim `Supported` until something can verify it.
+///
+/// `Supported` in this vocabulary means differentially verified against the
+/// pinned reference, and the harness that would do the verifying does not
+/// exist yet. The manifest carries a flag for whether it does, and this
+/// refuses the claim while the flag is false. Without it, `Supported` becomes
+/// a synonym for "implemented" one row at a time, which is the failure mode
+/// the whole claim surface exists to prevent.
+#[test]
+fn supported_is_not_claimable_without_the_harness() {
+    let table: toml::Table = toml::from_str(MANIFEST_TOML)
+        .unwrap_or_else(|err| panic!("the compatibility manifest must parse: {err}"));
+    let reference = table
+        .get("reference")
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("the manifest must carry a `reference` table"));
+    let harness = reference
+        .get("differential_harness")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or_else(|| panic!("`reference.differential_harness` must be a boolean"));
+    if harness {
+        return;
+    }
+    for entry in manifest::MANIFEST {
+        assert_ne!(
+            entry.status,
+            Status::Supported,
+            "row `{}` claims `Supported` while no differential harness exists to have \
+             verified it",
+            entry.name
+        );
+    }
+}
+
+/// The pinned reference is pinned to something the build actually links.
+///
+/// The Core revision in the manifest comes from the kernel crate's vendored
+/// tree, so the claim is only as good as that version staying put. Checked
+/// against `Cargo.lock` rather than against a comment: a dependency bump that
+/// moves the Core source has to come back through this file, which is exactly
+/// when the compatibility claims need re-reading.
+#[test]
+fn the_pinned_core_reference_matches_the_locked_kernel() {
+    /// `Cargo.lock`, so the pinned reference cannot quietly stop being pinned.
+    const CARGO_LOCK: &str = include_str!("../../../Cargo.lock");
+
+    let table: toml::Table = toml::from_str(MANIFEST_TOML)
+        .unwrap_or_else(|err| panic!("the compatibility manifest must parse: {err}"));
+    let reference = table
+        .get("reference")
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("the manifest must carry a `reference` table"));
+
+    for (name_key, version_key) in [
+        ("kernel_crate", "kernel_crate_version"),
+        ("kernel_sys_crate", "kernel_sys_crate_version"),
+    ] {
+        let name = reference
+            .get(name_key)
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("`reference.{name_key}` must be a string"));
+        let version = reference
+            .get(version_key)
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| panic!("`reference.{version_key}` must be a string"));
+        let needle = format!("name = \"{name}\"");
+        let Some(at) = CARGO_LOCK.find(&needle) else {
+            panic!("`{name}` is pinned in the manifest but absent from Cargo.lock");
+        };
+        let locked = CARGO_LOCK[at..]
+            .lines()
+            .nth(1)
+            .and_then(|line| line.strip_prefix("version = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("Cargo.lock entry for `{name}` has no version line"));
+        assert_eq!(
+            locked, version,
+            "`{name}` is locked at {locked} but the compatibility manifest is \
+             written against {version}. The pinned Bitcoin Core revision comes \
+             from this crate's vendored tree, so a bump means the claims in \
+             docs/api/core-compat.toml need re-reading, not just this line."
         );
     }
 }

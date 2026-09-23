@@ -8,7 +8,7 @@
 mod reference_set;
 
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin_rs_rpc::compat_manifest::{MANIFEST_TOML, Status};
+use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
 use reference_set::{CorpusCustody, ReferenceError, load_reference_set, reference_set};
 
 fn edit_reference(section: Option<&str>, edit: impl FnOnce(&mut toml::Table)) -> String {
@@ -190,14 +190,17 @@ fn corpus_custody_distinguishes_missing_unpinned_and_pinned() {
 /// REF-07: a declared public deviation must explain its different behavior.
 #[test]
 fn every_deviation_entry_states_its_deviation() {
-    let table: toml::Table = toml::from_str(MANIFEST_TOML).expect("manifest parses");
-    for kind in ["rpc", "rest", "zmq"] {
-        for entry in table[kind].as_array().expect("surface entries") {
-            let status = entry["status"].as_str().expect("entry status");
-            if Status::parse(status) == Some(Status::Deviation) {
-                let deviation = entry["deviation"].as_str().expect("deviation explanation");
-                assert!(!deviation.trim().is_empty(), "{kind}: {entry:?}");
-            }
+    let mut deviations = 0_usize;
+    for entry in bitcoin_rs_rpc::manifest::MANIFEST {
+        if entry.status != bitcoin_rs_rpc::manifest::Status::Deviation {
+            continue;
         }
+        assert!(
+            !entry.notes.trim().is_empty(),
+            "row `{}` claims a deviation without stating it",
+            entry.name
+        );
+        deviations = deviations.saturating_add(1);
     }
+    assert!(deviations > 0, "the registry must record its deviations");
 }
