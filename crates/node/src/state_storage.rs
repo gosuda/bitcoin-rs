@@ -124,6 +124,16 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     ) -> Result<Arc<dyn PruneService>>;
+    /// Records the persisted manual-prune line into the retention registry.
+    ///
+    /// The registry starts a process at line zero, so without this a restart
+    /// would let leases pin history an earlier process already deleted until
+    /// some later prune happened to run. Seeding makes the recorded line
+    /// bind lease grants and prune-line folding from boot on (#1120).
+    fn seed_retention(
+        &self,
+        retention: &Arc<bitcoin_rs_storage::RetentionRegistry>,
+    ) -> Result<()>;
     fn journal_writer(
         &self,
         dir: cap_std::fs::Dir,
@@ -136,6 +146,17 @@ struct ChainstateStoreServices<S> {
 }
 
 impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
+    fn seed_retention(
+        &self,
+        retention: &Arc<bitcoin_rs_storage::RetentionRegistry>,
+    ) -> Result<()> {
+        let line = bitcoin_rs_storage::pruning::load_pruneheight(&*self.store)
+            .context("load persisted prune height for retention seeding")?
+            .unwrap_or(0);
+        retention.record_pruned_below(line);
+        Ok(())
+    }
+
     fn prune_service(
         &self,
         block_files: Arc<FlatFileBlockStore>,

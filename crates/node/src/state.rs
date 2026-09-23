@@ -489,6 +489,7 @@ fn build_derived_index_open_spec(
     config: &NodeConfig,
     txindex_cache_bytes: u64,
     epoch: u64,
+    retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
 ) -> Result<Option<bitcoin_rs_index::runtime::DerivedIndexOpenSpec>> {
     let enabled = derived_index_capabilities(config);
     if enabled.is_empty() {
@@ -521,6 +522,7 @@ fn build_derived_index_open_spec(
         }),
         utxo: None,
         chain_transition: None,
+        retention,
     }))
 }
 

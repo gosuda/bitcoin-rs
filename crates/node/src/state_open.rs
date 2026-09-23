@@ -269,8 +269,12 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
         });
-        let derived_index_open_spec =
-            build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
+        let derived_index_open_spec = build_derived_index_open_spec(
+            &config,
+            txindex_cache_bytes,
+            epoch,
+            chainstate.retention_handle(),
+        )?;
         let (
             derived_index_runtime,
             derived_index_spawn,
@@ -411,6 +415,12 @@ impl NodeState {
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
         let chainstate = Arc::new(chainstate);
+        // History an earlier process pruned must bind leases from boot: the
+        // registry starts at line zero, and without the persisted line a
+        // lease could pin rows that no longer exist (#1120).
+        storage
+            .deferred
+            .seed_retention(&chainstate.retention_handle())?;
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
             followers.clone(),
