@@ -33,29 +33,40 @@ Owners:
 
 - A forward leg that requires historical block bodies holds exactly one
   retention lease from the registry in the open spec for the history it still
-  needs: pinned at the next unindexed height before any body I/O of the pass,
-  advanced to one past the durable watermark on every committed batch, and
-  released exactly once when the worker concludes `CaughtUp` or exits.
+  needs: pinned one past the durable watermark before any body I/O of the
+  pass, advanced to one past the durable watermark on every committed batch,
+  and released exactly once when the worker concludes `CaughtUp` or exits.
   Completion, cancellation, failure, and worker replacement each release
-  through the lease or its `Drop` — never both — so a backfill pins only the
-  history between its durable watermark and the tip, and a prune pass can
-  never cross the pin.
-- A missing body at or above the recorded prune line is transient absence:
-  the pass stalls under the bounded quiet-period retry and must not fail the
-  capability.
-- A missing body below the recorded prune line — including a backfill whose
-  first required height is already below the line — is permanently
-  unavailable: the worker surfaces a typed missing-body failure naming the
-  first required height, hash, and prune line. Retries never resurrect the
-  capability; the published `Failed` lifecycle state (hence
-  `getcapabilities`, readiness metrics, and the esplora 503 gate) carries the
-  actionable reason and never claims complete partial history.
-- A capability able to rebuild without historical bodies (`ScriptLive`)
-  routes the same failure into the durable reset and reseeds from the
-  authoritative UTXO view instead of failing.
-- Node boot records the persisted prune height into the retention registry
-  before any worker or prune service runs, so lease grants and prune-line
-  folding respect history a previous process already deleted.
+  through the lease or its `Drop` — never both. A rebuild that moves the
+  required start backwards acquires the new pin before releasing the old
+  one, so the binding floor never lapses. A prune pass can never cross the
+  history the backlog still needs, and the pin never extends past the tip.
+- A missing body at or above the recorded prune frontier is transient
+  absence: the pass stalls under the bounded quiet-period retry and must not
+  fail the capability.
+- A missing body below the recorded prune frontier — including a backfill
+  whose first required height is already below the line — is permanently
+  unavailable: the affected families are failed with an actionable reason
+  naming the first required height, hash, and prune frontier. Retries never
+  resurrect them; the capability projection reports `Failed` (hence
+  `getcapabilities`, readiness metrics, and the esplora 503 gate) and never
+  claims complete partial history.
+- The failure splits by capability. History-requiring families
+  (`TxLookup`, `ScriptHistory`) become terminally failed; a current-state
+  family (`ScriptLive`) selected into the same forward leg resets and
+  reseeds from the authoritative UTXO view and keeps serving. The worker
+  stops selecting failed families; it does not exit while a surviving
+  family remains (#1120, #645).
+- Node boot records the persisted executed-prune frontier — one past the
+  highest row a completed pass actually deleted, persisted atomically with
+  the deletion — into the retention registry before any worker or prune
+  service runs. The requested `pruneheight` is not seed material: a lease
+  clamp or early byte target can stop a pass above its request. Lease
+  grants and prune-line folding therefore respect history a previous
+  process already deleted without forbidding rows that still exist.
+- The index runtime receives a narrow retention authority — lease
+  acquire/advance/release plus frontier reads — not the raw registry:
+  recording what pruning deleted stays owned by the storage layer.
 - Authoritative chainstate, P2P, and unrelated RPC remain unaffected: the
   derived capability fails alone.
 
