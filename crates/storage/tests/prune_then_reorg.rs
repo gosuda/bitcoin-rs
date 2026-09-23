@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
-    BLOCK_DATA_CF, BlockPruner, PrunePolicy, RetentionRegistry, block_body_key, load_pruneheight,
-    prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
+    BLOCK_DATA_CF, BlockPruner, PrunePolicy, RetentionError, RetentionRegistry, block_body_key,
+    load_pruned_frontier, load_pruneheight, prune_to_height, reclaim_staged_flat_block_files,
+    stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, KvUndoStore,
@@ -656,4 +657,83 @@ impl KvSnapshot for MemorySnapshot {
             .collect::<Vec<_>>();
         Ok(Box::new(rows.into_iter()))
     }
+}
+
+/// `IDX-10`: the executed prune frontier is persisted atomically with the
+/// deletion and sits below the requested pruneheight whenever a lease
+/// clamps the pass. Retention seeding must record the frontier — the
+/// request line can name rows that still exist.
+#[test]
+fn executed_frontier_is_persisted_below_the_requested_line_when_clamped()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = MemoryStore::default();
+    let data_dir = tempdir()?;
+    let old_hash = fake_hash(1);
+    let leased_hash = fake_hash(2);
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    let old_position = block_files.append(1, *old_hash.as_byte_array(), b"old body")?;
+    let leased_position = block_files.append(2, *leased_hash.as_byte_array(), b"leased body")?;
+    let mut initial_batch = store.new_batch();
+    initial_batch.put(
+        BLOCK_DATA_CF,
+        &block_body_key(1, old_hash),
+        &old_position.encode(),
+    );
+    initial_batch.put(
+        BLOCK_DATA_CF,
+        &block_body_key(2, leased_hash),
+        &leased_position.encode(),
+    );
+    initial_batch.put(
+        BLOCK_DATA_CF,
+        &block_file_max_height_key(old_position.file_no),
+        &encode_block_file_max_height(2),
+    );
+    store.write(initial_batch)?;
+
+    let retention = Arc::new(RetentionRegistry::new());
+    let lease = retention.acquire(2)?;
+
+    // Applied/durable tip 1188 clears the reorg margin for a request at
+    // 900; the lease clamps the executed line down to 2, so only row 1
+    // deletes.
+    prune_to_height(&store, &block_files, &retention, 1_188, 1_188, 900, |_| {
+        Ok(())
+    })?;
+
+    // The request line and the executed frontier are distinct records.
+    assert_eq!(load_pruneheight(&store)?, Some(900));
+    assert_eq!(load_pruned_frontier(&store)?, Some(2));
+    assert!(
+        store
+            .get(BLOCK_DATA_CF, &block_body_key(1, old_hash))?
+            .is_none()
+    );
+    assert!(
+        store
+            .get(BLOCK_DATA_CF, &block_body_key(2, leased_hash))?
+            .is_some()
+    );
+
+    // Seeding from the frontier keeps the surviving row leasable while
+    // refusing floors the pass really deleted.
+    let frontier = load_pruned_frontier(&store)?;
+    let frontier = match frontier {
+        Some(frontier) => frontier,
+        None => panic!("the committed pass must persist its frontier"),
+    };
+    retention.record_pruned_below(frontier);
+    lease.release();
+    assert!(
+        retention.acquire(2).is_ok(),
+        "rows the clamp left must stay leasable after a reopen"
+    );
+    assert!(matches!(
+        retention.acquire(1),
+        Err(RetentionError::PrunedBelow {
+            pruned_below: 2,
+            ..
+        })
+    ));
+    Ok(())
 }
