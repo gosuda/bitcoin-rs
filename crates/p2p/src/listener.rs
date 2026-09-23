@@ -1159,6 +1159,13 @@ fn unix_time_secs() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+/// UNIX seconds for the chain-owned initial-block-download latch.
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 fn wake_sync(sync_wake_tx: Option<&Sender<()>>) {
     if let Some(tx) = sync_wake_tx {
         let _ = tx.try_send(());
