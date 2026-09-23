@@ -144,8 +144,12 @@ struct ChainstateStoreServices<S> {
 
 impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
     fn seed_retention(&self, retention: &Arc<bitcoin_rs_storage::RetentionRegistry>) -> Result<()> {
-        let line = bitcoin_rs_storage::pruning::load_pruneheight(&*self.store)
-            .context("load persisted prune height for retention seeding")?
+        // Seed from the executed frontier, not the requested pruneheight: a
+        // lease clamp or early byte target can stop a pass above its
+        // request, so the request line may name rows that still exist and
+        // must not forbid leases on them (#1120 review round).
+        let line = bitcoin_rs_storage::pruning::load_pruned_frontier(&*self.store)
+            .context("load persisted prune frontier for retention seeding")?
             .unwrap_or(0);
         retention.record_pruned_below(line);
         Ok(())

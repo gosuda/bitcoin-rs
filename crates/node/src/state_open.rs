@@ -273,7 +273,9 @@ impl NodeState {
             &config,
             txindex_cache_bytes,
             epoch,
-            chainstate.retention_handle(),
+            Arc::new(bitcoin_rs_storage::RetentionAccess::new(
+                chainstate.retention_handle(),
+            )),
         )?;
         let (
             derived_index_runtime,
