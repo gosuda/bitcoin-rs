@@ -171,6 +171,7 @@ struct Harness {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
     evidence: Arc<RecordedIndexAhead>,
+    retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     worker: Worker,
 }
 
@@ -203,6 +204,7 @@ impl Harness {
             .script_live
             .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
         let chain_transition = enabled.script_live.then(|| Arc::new(Mutex::new(())));
+        let retention = Arc::new(bitcoin_rs_storage::RetentionRegistry::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
@@ -219,6 +221,8 @@ impl Harness {
             rollback_rebuild_cutover,
             utxo,
             chain_transition,
+            retention: Arc::clone(&retention),
+            retention_lease: parking_lot::Mutex::new(None),
         };
         Self {
             _index_dir: index_dir,
@@ -226,6 +230,7 @@ impl Harness {
             applied_tip,
             runtime,
             evidence,
+            retention,
             worker,
         }
     }
@@ -347,4 +352,123 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     h.settle(&mut pending);
     h.assert_at(&b3);
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
+}
+
+/// `#1120`: a body missing above the prune line is transient absence. The
+/// pass stalls — the bounded quiet-period retry — no terminal failure is
+/// raised, the required history stays pinned by a live retention lease, and
+/// completion releases that authority exactly once.
+#[test]
+fn transient_missing_body_stalls_under_a_live_retention_lease() {
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+
+    let a2_hash = f.a[1].1;
+    let removed = f
+        .bodies
+        .bodies
+        .lock()
+        .remove(&(2, a2_hash.to_le_bytes()));
+    assert!(removed.is_some(), "fixture body at height 2");
+
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    let stalled = h
+        .worker
+        .reconcile_once(&mut pending)
+        .expect("transient absence is not an error");
+    assert!(matches!(stalled, ReconcileAction::Stalled));
+
+    // The backfill pinned the history it still needs...
+    assert_eq!(h.retention.active_leases(), 1);
+    assert_eq!(h.retention.retention_floor(), Some(0));
+    // ...and nothing was marked permanently lost.
+    assert_eq!(h.retention.pruned_below(), 0);
+
+    // The body returns (writer lag resolves); the backfill converges and
+    // hands retention authority back exactly once.
+    f.bodies
+        .bodies
+        .lock()
+        .insert((2, a2_hash.to_le_bytes()), removed.expect("removed body"));
+    h.settle(&mut pending);
+    h.assert_at(&a3);
+    assert_eq!(h.retention.active_leases(), 0);
+    assert_eq!(h.retention.retention_floor(), None);
+}
+
+/// `#1120`: a required body below the recorded prune line is permanently
+/// gone. The first catch-up pass fails closed with a typed `MissingBody`
+/// naming the first required height, hash, and the prune line — instead of
+/// entering the retry-forever stall loop. A worker exit surfaces the same
+/// text through the `Failed` lifecycle state, so index APIs report an
+/// actionable unavailable reason rather than silent partial history.
+#[test]
+fn backfill_below_prune_line_fails_closed_on_first_pass() {
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+
+    // History through height 1 was pruned before the index ever ran.
+    h.retention.record_pruned_below(2);
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+
+    let error = h
+        .worker
+        .reconcile_once(&mut pending)
+        .expect_err("pruned required history is terminal");
+    assert!(
+        matches!(
+            error,
+            DerivedIndexWorkerError::MissingBody {
+                height: 0,
+                pruned_below: 2,
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("permanently unavailable")
+            && message.contains("pruned below line 2"),
+        "actionable reason must name the prune line: {message}"
+    );
+    // No lease was granted for history that cannot exist.
+    assert_eq!(h.retention.active_leases(), 0);
+}
+
+/// `#1120`: every worker exit releases the retention authority exactly once
+/// through the `Drop` fallback — cancellation and worker replacement cannot
+/// leak a pin.
+#[test]
+fn worker_drop_releases_retention_authority_once() {
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let retention = Arc::clone(&h.retention);
+    let mut pending = None;
+
+    let a2_hash = f.a[1].1;
+    let removed = f
+        .bodies
+        .bodies
+        .lock()
+        .remove(&(2, a2_hash.to_le_bytes()));
+    assert!(removed.is_some(), "fixture body at height 2");
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    let stalled = h
+        .worker
+        .reconcile_once(&mut pending)
+        .expect("transient absence is not an error");
+    assert!(matches!(stalled, ReconcileAction::Stalled));
+    assert_eq!(retention.active_leases(), 1);
+
+    // Replacing (dropping) the worker releases its pin; no explicit release
+    // ran on this path.
+    drop(h);
+    assert_eq!(retention.active_leases(), 0);
+    assert_eq!(retention.retention_floor(), None);
 }

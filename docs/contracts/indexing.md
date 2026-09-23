@@ -1,13 +1,14 @@
 # Indexing contract
 
-**Contract version: 1.1** (2025-02-14)
+**Contract version: 1.2** (2026-09-23)
 
 The normative contract for node-owned indexing runtimes, capability gating, and
 asynchronous reconciliation across restarts, reorganizations, and selective
 rebuilds.
 
-This version adds the scheduling requirements in `IDX-08`; changes to those
-requirements must update this clause and its executable proof together.
+This version adds the backfill retention and missing-history requirements in
+`IDX-10`; changes to those requirements must update this clause and its
+executable proof together.
 
 Owners:
 - `DerivedIndexRuntime` and worker state in `crates/index/src/runtime.rs`;
@@ -27,6 +28,36 @@ Owners:
   status enum.
 
 ## Clauses
+
+### `IDX-10`: Backfill retention authority and missing-history classification
+
+- A forward leg that requires historical block bodies holds exactly one
+  retention lease from the registry in the open spec for the history it still
+  needs: pinned at the next unindexed height before any body I/O of the pass,
+  advanced to one past the durable watermark on every committed batch, and
+  released exactly once when the worker concludes `CaughtUp` or exits.
+  Completion, cancellation, failure, and worker replacement each release
+  through the lease or its `Drop` — never both — so a backfill pins only the
+  history between its durable watermark and the tip, and a prune pass can
+  never cross the pin.
+- A missing body at or above the recorded prune line is transient absence:
+  the pass stalls under the bounded quiet-period retry and must not fail the
+  capability.
+- A missing body below the recorded prune line — including a backfill whose
+  first required height is already below the line — is permanently
+  unavailable: the worker surfaces a typed missing-body failure naming the
+  first required height, hash, and prune line. Retries never resurrect the
+  capability; the published `Failed` lifecycle state (hence
+  `getcapabilities`, readiness metrics, and the esplora 503 gate) carries the
+  actionable reason and never claims complete partial history.
+- A capability able to rebuild without historical bodies (`ScriptLive`)
+  routes the same failure into the durable reset and reseeds from the
+  authoritative UTXO view instead of failing.
+- Node boot records the persisted prune height into the retention registry
+  before any worker or prune service runs, so lease grants and prune-line
+  folding respect history a previous process already deleted.
+- Authoritative chainstate, P2P, and unrelated RPC remain unaffected: the
+  derived capability fails alone.
 
 ### `IDX-08`: Worker wake scheduling
 

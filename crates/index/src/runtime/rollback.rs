@@ -197,7 +197,11 @@ impl Worker {
         store
             .load_block_body(height, hash)
             .map_err(DerivedIndexWorkerError::Storage)?
-            .ok_or(DerivedIndexWorkerError::MissingBody { height, hash })
+            .ok_or(DerivedIndexWorkerError::MissingBody {
+                height,
+                hash,
+                pruned_below: self.retention.pruned_below(),
+            })
     }
 
     pub(super) fn live_anchor(

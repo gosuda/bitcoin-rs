@@ -106,6 +106,13 @@ impl Worker {
             }
             Err(error) => return Err(DerivedIndexWorkerError::Index(error)),
         };
+        // Durable progress moves the backfill's retention floor: pruning may
+        // reclaim everything at or below the committed watermark, while the
+        // history the remaining backlog needs stays pinned (#1120).
+        self.retention_lease
+            .lock()
+            .as_mut()
+            .map(|lease| lease.advance(watermark.height.saturating_add(1)));
         Ok(Some(watermark))
     }
 

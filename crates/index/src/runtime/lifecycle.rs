@@ -56,6 +56,7 @@ impl DerivedIndexWorker {
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
         reporter: Arc<dyn crate::runtime::IndexAheadSink>,
         rollback_rebuild_cutover: u32,
+        retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
         wake_rx: Receiver<()>,
     ) -> std::io::Result<Self> {
         let worker = Worker {
@@ -74,6 +75,8 @@ impl DerivedIndexWorker {
             batch_delay: FORWARD_BATCH_DELAY,
             utxo: None,
             chain_transition: None,
+            retention,
+            retention_lease: parking_lot::Mutex::new(None),
         };
         let runtime_for_error = Arc::clone(&runtime);
         let join_handle = thread::Builder::new()

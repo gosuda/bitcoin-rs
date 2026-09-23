@@ -28,6 +28,60 @@ use rayon::prelude::*;
 use std::time::{Duration, Instant};
 
 impl Worker {
+    /// Pins the backfill's required history at `floor` (the next unindexed
+    /// height) so a concurrent prune pass cannot cross it, advancing any
+    /// live pin forward (#1120).
+    ///
+    /// Terminal on refusal: a floor at or below the recorded prune line
+    /// names rows that no longer exist, so the backfill can never run —
+    /// the caller surfaces [`DerivedIndexWorkerError::MissingBody`] naming
+    /// the first required height instead of stalling forever.
+    pub(super) fn hold_retention(
+        &self,
+        floor: u32,
+        first: &BlockIdentity,
+    ) -> Result<(), DerivedIndexWorkerError> {
+        let mut lease = self.retention_lease.lock();
+        // A rebuild can move the required start backwards; a pin above the
+        // needed floor would hold the wrong window, so re-acquire. The gap
+        // between that release and the re-acquire below is the one window a
+        // prune pass can cross the old floor: a refusal on the new acquire
+        // is the defined result — the history the reset rebuild still needs
+        // is gone, and the caller surfaces it as terminal (#1120).
+        if lease.as_ref().is_some_and(|held| held.floor() > floor) {
+            if let Some(held) = lease.take() {
+                held.release();
+            }
+        }
+        if let Some(held) = lease.as_mut() {
+            held.advance(floor);
+            return Ok(());
+        }
+        match self.retention.acquire(floor) {
+            Ok(held) => {
+                *lease = Some(held);
+                Ok(())
+            }
+            Err(bitcoin_rs_storage::RetentionError::PrunedBelow { pruned_below, .. }) => {
+                Err(DerivedIndexWorkerError::MissingBody {
+                    height: first.height,
+                    hash: Hash256::from_le_bytes(&first.hash),
+                    pruned_below,
+                })
+            }
+        }
+    }
+
+    /// Releases the backfill's retention authority exactly once; a no-op
+    /// when no leg is in flight. Drop remains the fallback for every exit
+    /// that skips this call.
+    pub(super) fn release_retention(&self) {
+        let held = self.retention_lease.lock().take();
+        if let Some(held) = held {
+            held.release();
+        }
+    }
+
     /// Copies one bounded chunk of active-chain identities under one short
     /// read lock.
     pub(super) fn collect_target_chain(
@@ -97,6 +151,10 @@ impl Worker {
             |endpoint| endpoint.height.saturating_add(1),
         );
         if start_height > target.height {
+            // The leg is complete: no further history is required, so the
+            // backfill hands retention authority back to pruning exactly
+            // once (#1120).
+            self.release_retention();
             return if self.sync_and_commit(state)?.is_some() {
                 Ok(ReconcileAction::CaughtUp)
             } else {
@@ -111,6 +169,11 @@ impl Worker {
         if self.runtime.should_stop() {
             return Ok(ReconcileAction::Stalled);
         }
+        // Bound the backfill's retention before any body I/O: a concurrent
+        // prune pass must not cross the history this leg still needs, and a
+        // start below the already-pruned line fails closed right here
+        // instead of stalling forever (#1120).
+        self.hold_retention(start_height, &identities[0])?;
         let Some(body_store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
         };
@@ -176,15 +239,31 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        let Some(bodies) = load_body_prefix(body_reader.as_mut(), identities, &|| {
+        let prefix = load_body_prefix(body_reader.as_mut(), identities, &|| {
             self.runtime.should_stop()
         })
-        .map_err(DerivedIndexWorkerError::Storage)?
-        else {
-            if !state.batch.is_empty() {
-                *pending = Some(state.take(self.batch_limits));
+        .map_err(DerivedIndexWorkerError::Storage)?;
+        let bodies = match prefix {
+            BodyPrefix::Loaded(bodies) => bodies,
+            BodyPrefix::Missing(identity) => {
+                // The prune line decides: rows below it are deleted, so a
+                // missing body there can never appear — retrying forever
+                // would silently wedge the capability behind the tip
+                // (#1120). Above the line, absence is transient (the body
+                // writer may not have landed yet) and stays a bounded stall.
+                let pruned_below = self.retention.pruned_below();
+                if identity.height < pruned_below {
+                    return Err(DerivedIndexWorkerError::MissingBody {
+                        height: identity.height,
+                        hash: Hash256::from_le_bytes(&identity.hash),
+                        pruned_below,
+                    });
+                }
+                if !state.batch.is_empty() {
+                    *pending = Some(state.take(self.batch_limits));
+                }
+                return Ok(ChunkAction::Stalled);
             }
-            return Ok(ChunkAction::Stalled);
         };
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
@@ -310,18 +389,28 @@ impl Worker {
     }
 }
 
+/// Outcome of one bounded body-prefix load.
+enum BodyPrefix {
+    /// Bodies for the loaded prefix, in identity order.
+    Loaded(Vec<Vec<u8>>),
+    /// The first identity whose body the store could not serve. The cause —
+    /// transient absence versus deletion below the prune line — is
+    /// classified by the caller against the retention registry (#1120).
+    Missing(BlockIdentity),
+}
+
 /// Loads bodies for a prefix of `identities` in order, stopping once
 /// `PREPARE_CHUNK_BLOCKS` bodies are held or the serialized total reaches
 /// `PREPARE_CHUNK_BYTES`. Every body the reader hands out is retained, so the
-/// returned prefix is exactly the set of prefetched positions the reader
+/// loaded prefix is exactly the set of prefetched positions the reader
 /// consumed; the body that reaches the byte cap may carry the total past it.
 /// Stops early, keeping what was loaded, when `should_stop` reports shutdown.
-/// `Ok(None)` when a body is unavailable.
+/// Reports the first unavailable body as [`BodyPrefix::Missing`].
 fn load_body_prefix(
     reader: &mut dyn BlockBodyReader,
     identities: &[BlockIdentity],
     should_stop: &dyn Fn() -> bool,
-) -> Result<Option<Vec<Vec<u8>>>, StorageError> {
+) -> Result<BodyPrefix, StorageError> {
     let mut bodies = Vec::new();
     let mut loaded_bytes = 0_usize;
     for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
@@ -330,7 +419,7 @@ fn load_body_prefix(
         }
         let hash = Hash256::from_le_bytes(&identity.hash);
         let Some(body) = reader.load_block_body(identity.height, hash)? else {
-            return Ok(None);
+            return Ok(BodyPrefix::Missing(*identity));
         };
         loaded_bytes = loaded_bytes.saturating_add(body.len());
         bodies.push(body);
@@ -338,7 +427,7 @@ fn load_body_prefix(
             break;
         }
     }
-    Ok(Some(bodies))
+    Ok(BodyPrefix::Loaded(bodies))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

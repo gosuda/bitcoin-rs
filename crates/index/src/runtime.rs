@@ -407,6 +407,11 @@ pub struct DerivedIndexOpenSpec {
     pub utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
     /// Serializes a live-view query or seed against a chain transition.
     pub chain_transition: Option<Arc<Mutex<()>>>,
+    /// Retention authority the backfill holds its bounded lease against:
+    /// the lease floor advances with durable progress, and the recorded
+    /// prune line classifies a missing body as transient or permanently
+    /// pruned (#1120).
+    pub retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
 }
 
 /// Handle used to spawn and join the supervised reconciliation worker.
@@ -564,6 +569,12 @@ struct Worker {
     utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
     /// Chain transition authority shared with apply and RPC reads.
     chain_transition: Option<Arc<Mutex<()>>>,
+    /// Retention authority the backfill pins its required history against.
+    retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    /// Live backfill lease, held from the first required height until the
+    /// leg completes; released exactly once by `Drop` on every other exit.
+    /// Worker methods take `&self`, so the lease sits behind a mutex.
+    retention_lease: parking_lot::Mutex<Option<bitcoin_rs_storage::RetentionLease>>,
 }
 
 /// Uncommitted contiguous rows based on one unchanged durable watermark.
@@ -653,13 +664,21 @@ pub enum DerivedIndexWorkerError {
     /// The index writer or reader reported a failure.
     #[error("txindex index error: {0}")]
     Index(#[from] IndexError),
-    /// A block body needed for indexing or rollback was absent.
-    #[error("txindex worker: missing body at height {height}, hash {hash}")]
+    /// A block body needed for indexing or rollback was absent, and the
+    /// recorded prune line proves the store can never serve it again: rows
+    /// below the line are deleted, so no retry can succeed.
+    #[error(
+        "txindex worker: required history permanently unavailable at height {height}, hash {hash} \
+         (pruned below line {pruned_below}) — derived capability cannot backfill over pruned \
+         blocks; it must be rebuilt against retained history or disabled"
+    )]
     MissingBody {
         /// Block height whose body is missing.
         height: u32,
         /// Active-chain hash of the missing body.
         hash: Hash256,
+        /// Highest prune line already executed; `height` is below it.
+        pruned_below: u32,
     },
     /// A capability requiring bodies was enabled without a body store.
     #[error("txindex worker: body store missing")]

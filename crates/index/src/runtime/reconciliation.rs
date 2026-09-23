@@ -143,9 +143,19 @@ impl Worker {
             return Ok(ReconcileAction::Progressed);
         }
         self.runtime.publish_phase(ReconcilePhase::FORWARD);
+        // Fully caught up: the backfill requires no more history, so its
+        // retention authority returns to pruning exactly once here (#1120).
+        self.release_retention();
         Ok(ReconcileAction::CaughtUp)
     }
 
+    /// One reconciliation pass over every stale capability selection.
+    ///
+    /// The hub routes rollback, rebuild, seed, and forward legs; each leg
+    /// lives in its own method. Allowed over the line limit rather than
+    /// split further: the arms share `fence`/`watermarks` rebindings across
+    /// `continue`, and a split would scatter the state machine.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn reconcile_pass(
         &self,
         pending: &mut Option<PendingForward>,
@@ -266,7 +276,45 @@ impl Worker {
         let Some((capabilities, watermark)) = self.forward_selection(watermarks, &target) else {
             return Ok(ReconcileAction::CaughtUp);
         };
-        self.catch_up_to(&target, fence, watermarks, watermark, capabilities, pending)
+        self.catch_up_forward(
+            &target,
+            fence,
+            watermarks,
+            watermark,
+            capabilities,
+            pending,
+        )
+    }
+
+    /// Runs the forward leg against `target`, classifying a terminal
+    /// missing-body outcome per capability (#1120).
+    fn catch_up_forward(
+        &self,
+        target: &TipSnapshot,
+        fence: IndexWriteFence,
+        watermarks: IndexWatermarks,
+        watermark: Option<IndexWatermark>,
+        capabilities: IndexCapabilities,
+        pending: &mut Option<PendingForward>,
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
+        match self.catch_up_to(target, fence, watermarks, watermark, capabilities, pending) {
+            Err(error @ DerivedIndexWorkerError::MissingBody { .. })
+                if capabilities == IndexCapabilities::SCRIPT_LIVE =>
+            {
+                // ScriptLive is a current-state capability: unlike the
+                // history-requiring families it can rebuild from the
+                // authoritative UTXO view instead of dying on pruned
+                // blocks (#1120). The reset routes the next pass through
+                // the UTXO seed.
+                tracing::warn!(
+                    error = %error,
+                    "rebuilding ScriptLive from the authoritative UTXO view after pruned history"
+                );
+                self.reset_for_rebuild(capabilities)?;
+                Ok(ReconcileAction::Progressed)
+            }
+            other => other,
+        }
     }
 
     pub(super) fn reconcile_pending(

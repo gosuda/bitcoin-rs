@@ -250,6 +250,8 @@ pub(super) fn open_and_run(
         batch_delay: FORWARD_BATCH_DELAY,
         utxo: spec.utxo.clone(),
         chain_transition: spec.chain_transition.clone(),
+        retention: Arc::clone(&spec.retention),
+        retention_lease: parking_lot::Mutex::new(None),
     };
 
     worker.run()
@@ -530,6 +532,9 @@ mod tests {
             open_store: std::sync::Arc::new(|_| Err(DerivedIndexWorkerError::Stopped)),
             utxo: None,
             chain_transition: None,
+            retention: std::sync::Arc::new(
+                bitcoin_rs_storage::RetentionRegistry::new(),
+            ),
         };
         let result =
             open_derived_index_with_timeout(&spec, &path, Duration::from_secs(30), || true);

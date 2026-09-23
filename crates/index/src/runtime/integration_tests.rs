@@ -22,6 +22,7 @@ fn test_open_spec(dir: &std::path::Path, epoch: u64) -> DerivedIndexOpenSpec {
         canonical_data_root: dir.to_path_buf(),
         utxo: None,
         chain_transition: None,
+        retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
         open_store: Arc::new(move |dir| {
             let store = Arc::new(
                 bitcoin_rs_storage::FjallStore::open_with_cache(dir, 8 * 1024 * 1024)
