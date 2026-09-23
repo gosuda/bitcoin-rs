@@ -45,4 +45,5 @@ pub use manifest::MANIFEST_TOML;
 
 pub use error::RpcError;
 pub use handlers::Handler;
+pub use manifest::MANIFEST_TOML;
 pub use server::RpcServer;
