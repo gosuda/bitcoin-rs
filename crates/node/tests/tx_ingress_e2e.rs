@@ -386,6 +386,9 @@ fn serve_connection(
                     &message,
                     None,
                     Some(gateway.as_ref()),
+                    // The harness has no chain; its tests cover post-IBD
+                    // relay behavior, so the gate defaults open.
+                    &|| true,
                     &|| true,
                     &mut send,
                 );

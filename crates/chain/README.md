@@ -17,6 +17,10 @@ naming the blocks to disconnect and connect. An internal `Bip9Cache` memoizes
 versionbits deployment states per node and is invalidated on reorg. `BlockTreeNode` carries
 parent, height, and header hash with a `NodeStatus` (header-valid, active, or
 off-best-chain), and every failure surfaces as a structured `ChainError` variant.
+`InitialBlockDownload` (in `ibd`) owns the process-wide initial-block-download
+latch over the published applied-tip and block-tree handles; the node builds
+one `Arc` shared by RPC and P2P, so both surfaces answer identically
+(Core `IsInitialBlockDownload` / `m_cached_is_ibd` semantics).
 
 ## Features
 - `rocksdb`: enables the `RocksDB` backend in `bitcoin-rs-storage`

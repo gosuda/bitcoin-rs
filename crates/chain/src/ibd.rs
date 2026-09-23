@@ -220,7 +220,7 @@ mod initial_block_download_tests {
     }
 
     #[test]
-    fn a_recent_tip_with_enough_work_has_left_initial_block_download() {
+    fn a_recent_tip_with_enough_work_exits_initial_block_download() {
         let now = 1_800_000_000_u64;
         let latch = latch_with_tip_at(
             Network::Regtest,

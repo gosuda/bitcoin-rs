@@ -45,6 +45,11 @@ pub struct ListenerExtras {
     pub compact_hints: CompactHintsHandle,
     /// Bounded ingress for decoded `tx` bodies from Ready peers.
     pub inbound_tx: Option<Sender<crate::InboundTx>>,
+    /// Chain-owned initial-block-download latch. `None` means transaction
+    /// relay is open (callers without a chain, and tests). While `Some` and
+    /// active, tx-typed `inv` vectors are not requested and `tx` bodies are
+    /// dropped before ingress (Core 31.1 `net_processing.cpp:4401`, `:4716`).
+    pub ibd: Option<Arc<bitcoin_rs_chain::InitialBlockDownload>>,
 }
 
 /// State shared by the listener and every connection thread it spawns.
@@ -64,6 +69,7 @@ struct ConnectionShared {
     compact_hints: CompactHintsHandle,
     session_cancel: Option<Arc<AtomicBool>>,
     peer_ready: PeerReadyHandle,
+    ibd: Option<Arc<bitcoin_rs_chain::InitialBlockDownload>>,
 }
 
 impl ConnectionShared {
@@ -82,6 +88,7 @@ impl ConnectionShared {
             compact_hints: None,
             session_cancel: None,
             peer_ready: None,
+            ibd: None,
         }
     }
 
@@ -99,6 +106,7 @@ impl ConnectionShared {
             compact_hints: None,
             session_cancel: None,
             peer_ready: None,
+            ibd: None,
         }
     }
 
@@ -119,6 +127,11 @@ impl ConnectionShared {
 
     fn with_peer_ready(mut self, peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>) -> Self {
         self.peer_ready = Some(peer_ready);
+        self
+    }
+
+    fn with_ibd(mut self, ibd: Option<Arc<bitcoin_rs_chain::InitialBlockDownload>>) -> Self {
+        self.ibd = ibd;
         self
     }
 
@@ -596,7 +609,8 @@ pub fn serve_bound_with_session_cancel(
         .with_session_cancel(session_cancel)
         .with_peer_ready(peer_ready)
         .with_tx_inventory(extras.tx_inventory)
-        .with_compact_hints(extras.compact_hints);
+        .with_compact_hints(extras.compact_hints)
+        .with_ibd(extras.ibd);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -634,7 +648,8 @@ pub fn spawn_outbound_connection_with_session_cancel(
         .with_session_cancel(session_cancel)
         .with_peer_ready(peer_ready)
         .with_tx_inventory(extras.tx_inventory)
-        .with_compact_hints(extras.compact_hints);
+        .with_compact_hints(extras.compact_hints)
+        .with_ibd(extras.ibd);
     shared.activity = Some(Arc::new(crate::NetworkActivity::from_shared(
         network_active,
     )));
@@ -1026,6 +1041,7 @@ fn run_connected_session(
         shared.chain_query.as_deref(),
         shared.tx_inventory.as_deref(),
         shared.compact_hints.as_deref(),
+        shared.ibd.as_ref(),
         shared.totals.as_ref(),
     );
 
@@ -1048,6 +1064,9 @@ fn run_connected_session(
 }
 
 #[allow(clippy::too_many_arguments)]
+// The transaction-relay gate adds one documented parameter and one lazy
+// closure to an already-large dispatch loop.
+#[allow(clippy::too_many_lines)]
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
@@ -1057,12 +1076,19 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     chain_query: Option<&dyn crate::dispatch::ChainQuery>,
     tx_inventory: Option<&dyn crate::dispatch::TxInventory>,
     compact_hints: Option<&dyn crate::compact_blocks::CompactBlockHints>,
+    ibd: Option<&Arc<bitcoin_rs_chain::InitialBlockDownload>>,
     totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
     use std::time::Instant;
 
     const IDLE_DISCONNECT: Duration = Duration::from_mins(1);
+
+    // PRE: the handle is the RPC-shared IBD Arc. POST: a closed gate requests
+    // no announced transaction and enqueues no tx body. INVARIANT: blocks and
+    // punishment are unchanged; read lazily per relevant message, never at
+    // connect, so opening the gate needs no reconnect.
+    let tx_relay_open = || ibd.is_none_or(|latch| !latch.is_active(unix_time_secs()));
 
     let mut last_inbound = Instant::now();
     let budget = lease.budget_handle();
@@ -1108,6 +1134,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     &message,
                     chain_query,
                     tx_inventory,
+                    &tx_relay_open,
                     &|| budget.has_block_production_headroom(),
                     &mut |response| {
                         lease.send(response).map_err(|_| {
@@ -1127,9 +1154,13 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     crate::Message::Block(block) => {
                         inbound_sync_sinks.send_block(lease.source(peer_addr), block, raw);
                     }
-                    crate::Message::Tx(tx) => {
-                        inbound_sync_sinks.send_tx(lease.source(peer_addr), tx);
-                    }
+                    crate::Message::Tx(tx) => forward_tx_if_relay_open(
+                        inbound_sync_sinks,
+                        lease.source(peer_addr),
+                        tx,
+                        peer_addr,
+                        tx_relay_open(),
+                    ),
                     crate::Message::Pong(nonce) => {
                         lease.stats().complete_ping(nonce, unix_micros());
                     }
@@ -1432,6 +1463,27 @@ fn unix_secs(now: SystemTime) -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
+/// Forwards a decoded transaction into ingress while the relay gate is open.
+///
+/// PRE: `relay_open` was read from the RPC-shared IBD handle for this
+/// message. POST: a closed gate enqueues no body and never punishes the peer.
+/// INVARIANT: the gate is read per message, so opening it needs no reconnect.
+fn forward_tx_if_relay_open(
+    inbound_sync_sinks: &InboundSyncSinks,
+    source: crate::PeerSource,
+    tx: bitcoin_rs_primitives::Tx,
+    peer_addr: SocketAddr,
+    relay_open: bool,
+) {
+    if relay_open {
+        inbound_sync_sinks.send_tx(source, tx);
+    } else {
+        // Unsolicited transactions are not a protocol violation; Core drops
+        // them unpunished while in initial block download (:4716).
+        tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
+    }
+}
+
 fn unix_secs_i64(now: SystemTime) -> i64 {
     now.duration_since(UNIX_EPOCH).map_or(0, |duration| {
         i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
@@ -1444,6 +1496,13 @@ fn unix_micros() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
         })
+}
+
+/// UNIX seconds for the chain-owned initial-block-download latch.
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn wake_sync(sync_wake_tx: Option<&Sender<()>>) {
@@ -1942,7 +2001,8 @@ mod writer_shutdown_tests {
                 None,
                 None,
                 None,
-                None
+                None,
+                None,
             )
             .is_ok()
         );
@@ -1978,7 +2038,7 @@ mod writer_shutdown_tests {
 
         assert!(
             run_message_loop(
-                &mut peer, addr, &old, &table, &sinks, None, None, None, None
+                &mut peer, addr, &old, &table, &sinks, None, None, None, None, None
             )
             .is_ok()
         );
@@ -2036,7 +2096,7 @@ mod writer_shutdown_tests {
         // Script end ends the connection; the arm already ran.
         assert!(
             run_message_loop(
-                &mut peer, addr, &lease, &table, &sinks, None, None, None, None
+                &mut peer, addr, &lease, &table, &sinks, None, None, None, None, None
             )
             .is_err()
         );
@@ -2124,7 +2184,8 @@ mod writer_shutdown_tests {
                 None,
                 None,
                 None,
-                None
+                None,
+                None,
             )
             .is_err()
         );
@@ -2550,6 +2611,7 @@ mod writer_shutdown_tests {
             &lease,
             &peer_table,
             &sinks,
+            None,
             None,
             None,
             None,
