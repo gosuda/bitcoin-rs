@@ -89,8 +89,8 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap()
     // `getheaders` on this connection (a `tick` tail could also queue one
     // via `request_headers_from_best_peer` and mask a regression).
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block3.clone()))?;
-    sync.drain_inbound_blocks();
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
+    sync.drain_inbound_blocks(Instant::now());
     next_getheaders(&rx)?;
 
     // The ancestry fill lands: the gap headers admit, both bodies stage,

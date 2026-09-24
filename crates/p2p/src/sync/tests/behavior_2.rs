@@ -168,7 +168,7 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
         .window
         .mark_received_from(hash, bytes, None, Instant::now());
 
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
     Ok(())

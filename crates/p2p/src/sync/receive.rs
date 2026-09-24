@@ -33,7 +33,18 @@ enum DeliveryCredit {
 }
 
 impl BlockSync {
-    pub(super) fn drain_inbound_blocks(&self) {
+    /// Drains delivered bodies, admits their carried headers, and prunes
+    /// staging timeouts.
+    ///
+    /// PRE: `now` is the tick's clock reading, or the reading of the caller
+    ///   that owns the pacing decision.
+    /// POST: every header blame, cooldown stamp, and follow-up header request
+    ///   the drain makes is evaluated at `now`. Expired staging bodies are
+    ///   pruned against a wall reading taken after this drain stages them, so
+    ///   a body delivered now is never judged expired by the caller's clock.
+    /// INVARIANT: no peer-facing timing decision in this path reads
+    ///   `Instant::now()` while its counterpart on the tick path reads `now`.
+    pub(super) fn drain_inbound_blocks(&self, now: Instant) {
         let mut apply_head_check = None;
         let mut next_expected_hash = None;
         let mut blocks = Vec::with_capacity(INBOUND_BLOCK_STAGE_CHUNK);
@@ -57,7 +68,7 @@ impl BlockSync {
             return;
         }
 
-        self.admit_staged_headers();
+        self.admit_staged_headers(now);
 
         let now = Instant::now();
         let dropped = self.scheduler.lock().stager.prune_expired(now);
@@ -157,7 +168,7 @@ impl BlockSync {
     /// means the body can never apply, so it is discarded instead of paying
     /// the same admission retry every drain — and its delivering peer
     /// carries the fault, exactly as a rejected `headers` batch would.
-    fn admit_staged_headers(&self) {
+    fn admit_staged_headers(&self, now: Instant) {
         let unadmitted: Vec<(Hash256, Header, Option<crate::PeerSource>)> = {
             let tree = self.chain.block_tree().read();
             let scheduler = self.scheduler.lock();
@@ -231,9 +242,7 @@ impl BlockSync {
                 scheduler.stager.discard(hash);
             }
             for peer_addr in &blamed {
-                scheduler
-                    .window
-                    .mark_peer_unresponsive(*peer_addr, Instant::now());
+                scheduler.window.mark_peer_unresponsive(*peer_addr, now);
             }
             tracing::debug!(
                 discarded = invalid.len(),
@@ -247,7 +256,7 @@ impl BlockSync {
         // a deferred owned fetch was waiting on — resolve it now.
         self.resolve_owned_body_fetches();
         if missing_parent {
-            self.request_headers_from_eligible(Instant::now());
+            self.request_headers_from_eligible(now);
         }
     }
 
