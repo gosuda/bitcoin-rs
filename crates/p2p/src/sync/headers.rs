@@ -159,8 +159,51 @@ impl BlockSync {
         // The drain may have attached the ancestry a deferred owned fetch
         // was waiting on — resolve it against the tree now.
         self.resolve_owned_body_fetches();
+        self.drain_block_announcements();
         if total_headers > 0 {
             tracing::debug!(total_headers, "block sync: drained inbound headers");
+        }
+    }
+
+    /// Applies every queued `MSG_BLOCK` announcement to the announcing
+    /// connection's header-sync state, as Core does in
+    /// `net_processing.cpp:4370-4410`.
+    ///
+    /// PRE: entries were queued by [`BlockSync::announce_block`].
+    /// POST: a hash already in the tree credits its connection with that tip
+    /// and refreshes active-peer credit; a hash the tree does not know asks
+    /// that connection for headers. No block body is requested here.
+    /// INVARIANT: block inventory never bypasses header admission and the
+    /// download-window budget.
+    fn drain_block_announcements(&self) {
+        let pending = std::mem::take(&mut *self.block_announcements.lock());
+        if pending.is_empty() {
+            return;
+        }
+        let mut credit_refresh_needed = false;
+        for (source, hash) in pending {
+            if !self.peer_table.is_current(source) {
+                continue;
+            }
+            // The tree read is scoped so no lock is held across the peer
+            // table or the outbound send the unknown case performs.
+            let (known, active_height) = {
+                let tree = self.chain.block_tree().read();
+                let height = tree
+                    .tip()
+                    .and_then(|tip| shared_active_height(&tree, tip.tip_id, hash))
+                    .and_then(|height| i32::try_from(height).ok());
+                (tree.lookup(hash).is_some(), height)
+            };
+            if !known {
+                self.request_headers_from(Some(source));
+                continue;
+            }
+            self.peer_table.note_announced_tip(source, hash, active_height);
+            credit_refresh_needed = true;
+        }
+        if credit_refresh_needed {
+            self.refresh_active_peer_credit();
         }
     }
 

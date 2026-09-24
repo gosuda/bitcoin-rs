@@ -107,6 +107,11 @@ pub struct BlockSync {
     /// paces retries to the request timeout so a paused admission cannot
     /// re-issue the same locator at round-trip pace.
     refused_rerequest_at: Mutex<Option<Instant>>,
+    /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained
+    /// by the next tick's header drain. One entry per connection keeps the
+    /// queue bounded by the live session set, as Core keeps one best block
+    /// per `inv` message.
+    block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
@@ -225,6 +230,7 @@ impl BlockSync {
                 owned_body_fetches: Vec::new(),
             }),
             refused_rerequest_at: Mutex::new(None),
+            block_announcements: Mutex::new(hashbrown::HashMap::new()),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
@@ -240,6 +246,20 @@ impl BlockSync {
             header_request: None,
             owned_body_fetches: Vec::new(),
         };
+    }
+
+    /// Records one block-typed inventory vector from `source` for the next
+    /// header drain.
+    ///
+    /// PRE: `source` identifies the current connection and `hash` is a
+    /// `MSG_BLOCK` or `MSG_WITNESS_BLOCK` inventory hash.
+    /// POST: the announcement is queued and the sync loop is woken; no block
+    /// body request is emitted here.
+    /// INVARIANT: one entry per connection — the latest announcement wins, as
+    /// Core keeps one best block per `inv` message — so a flooding peer
+    /// cannot grow the queue past the live session set.
+    pub fn announce_block(&self, source: PeerSource, hash: Hash256) {
+        self.block_announcements.lock().insert(source, hash);
     }
 
     /// Runs one orchestrator tick as a single canonical frontier
