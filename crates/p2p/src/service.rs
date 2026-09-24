@@ -335,7 +335,7 @@ impl P2pService {
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
-                let mut active = HashSet::new();
+                let mut active: HashMap<SocketAddr, crate::peer_info::PeerRole> = HashMap::new();
                 let mut handles = Vec::new();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 while !shutdown.load(Ordering::Acquire)
@@ -366,7 +366,7 @@ impl P2pService {
                         }
                         continue;
                     };
-                    if active.contains(&addr) || peer_table.is_connected(addr) {
+                    if active.contains_key(&addr) || peer_table.is_connected(addr) {
                         tracing::debug!(
                             addr = %addr,
                             "p2p outbound request skipped: already active"
@@ -379,13 +379,14 @@ impl P2pService {
                         .is_some_and(|sync| sync.allow_extra_full_relay_dial());
                     let role = next_outbound_role(
                         &peer_table,
+                        &active,
                         full_relay_slots,
                         block_relay_slots,
                         extra_dial,
                     );
                     let handle =
                         crate::listener::spawn_outbound_connection(addr, shared.clone(), role);
-                    active.insert(addr);
+                    active.insert(addr, role);
                     handles.push((addr, handle));
                 }
                 for (_, handle) in handles {
@@ -683,7 +684,7 @@ pub fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active:
 }
 
 fn reap_finished_outbound_connections(
-    active: &mut HashSet<SocketAddr>,
+    active: &mut HashMap<SocketAddr, crate::peer_info::PeerRole>,
     handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
 ) {
     let mut index = 0;
@@ -767,29 +768,47 @@ fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
 
 /// Chooses the relay role of the next outbound connection.
 ///
-/// PRE: `peer_table` holds the live connections of the current epoch, and
-///   `extra_full_relay` reports the scheduler's stale-tip allowance.
+/// PRE: `peer_table` holds the live connections of the current epoch,
+///   `pending` holds every dial the caller has started whose thread is still
+///   running — connected ones included — keyed by address with the role each
+///   was dialed as, and `extra_full_relay` reports the scheduler's allowance.
 /// POST: return `BlockRelayOnly` only while the block-relay population is
 ///   below its slots, which happens once the full-relay slots are filled.
-/// INVARIANT: full-relay slots fill first, then block-relay slots, as Core
-///   orders its dial priorities (`net.cpp:2780-2799`). A stale tip raises the
-///   full-relay target by one, which is Core's `GetTryNewOutboundPeer`
+/// INVARIANT: a connection counts once, in its own class: the table's
+///   registered leases plus the dials that have not registered yet. A dial
+///   therefore holds its class from the moment it starts, so a burst of queued
+///   addresses fills both classes rather than every slot of the first one.
+///   Full-relay slots fill first, then block-relay slots, as Core orders its
+///   dial priorities (`net.cpp:2780-2799`). A stale tip raises the full-relay
+///   target by one, which is Core's `GetTryNewOutboundPeer`
 ///   (`net.cpp:2471-2480`). When both classes are satisfied the request is
 ///   served as full relay, which is what an operator's explicit `addnode`
 ///   asks for.
 fn next_outbound_role(
     peer_table: &crate::PeerTable,
+    pending: &HashMap<SocketAddr, crate::peer_info::PeerRole>,
     full_relay_slots: usize,
     block_relay_slots: usize,
     extra_full_relay: bool,
 ) -> crate::peer_info::PeerRole {
-    let (full_relay, block_relay) = peer_table.outbound_role_counts();
-    if full_relay < full_relay_slots + usize::from(extra_full_relay) {
-        crate::peer_info::PeerRole::FullRelay
-    } else if block_relay < block_relay_slots {
-        crate::peer_info::PeerRole::BlockRelayOnly
+    use crate::peer_info::PeerRole;
+    let (connected_full, connected_block) = peer_table.outbound_role_counts();
+    // A live connection stays in `pending` until its thread exits, so only a
+    // dial the table has not taken yet adds to its class.
+    let in_flight = |want: PeerRole| {
+        pending
+            .iter()
+            .filter(|(addr, role)| **role == want && !peer_table.is_connected(**addr))
+            .count()
+    };
+    let dialed_full = connected_full + in_flight(PeerRole::FullRelay);
+    let dialed_block = connected_block + in_flight(PeerRole::BlockRelayOnly);
+    if dialed_full < full_relay_slots + usize::from(extra_full_relay) {
+        PeerRole::FullRelay
+    } else if dialed_block < block_relay_slots {
+        PeerRole::BlockRelayOnly
     } else {
-        crate::peer_info::PeerRole::FullRelay
+        PeerRole::FullRelay
     }
 }
 
@@ -1113,7 +1132,7 @@ mod tests {
         let table = crate::PeerTable::new();
         assert!(
             matches!(
-                next_outbound_role(&table, 1, 1, false),
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
                 crate::peer_info::PeerRole::FullRelay
             ),
             "an empty table takes the full-relay slot first"
@@ -1126,14 +1145,14 @@ mod tests {
         );
         assert!(
             matches!(
-                next_outbound_role(&table, 1, 1, false),
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
                 crate::peer_info::PeerRole::BlockRelayOnly
             ),
             "the full-relay slot is held, so the next dial is block-relay"
         );
         assert!(
             matches!(
-                next_outbound_role(&table, 1, 1, true),
+                next_outbound_role(&table, &HashMap::new(), 1, 1, true),
                 crate::peer_info::PeerRole::FullRelay
             ),
             "a stale tip raises the full-relay target by one"
@@ -1146,10 +1165,70 @@ mod tests {
         );
         assert!(
             matches!(
-                next_outbound_role(&table, 1, 1, false),
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
                 crate::peer_info::PeerRole::FullRelay
             ),
             "with both classes full, a requested dial stays full relay"
+        );
+    }
+
+    /// A dial that has not registered yet still counts against its class, so a
+    /// burst of queued addresses fills the block-relay slots instead of
+    /// stacking every connection in the first class.
+    #[test]
+    fn in_flight_dials_hold_their_class() {
+        use crate::peer_info::PeerRole;
+        let table = crate::PeerTable::new();
+        let mut pending: HashMap<SocketAddr, PeerRole> = HashMap::new();
+        for port in 1..=8_u16 {
+            pending.insert(
+                SocketAddr::from(([127, 0, 0, 1], port)),
+                PeerRole::FullRelay,
+            );
+        }
+        assert!(
+            matches!(
+                next_outbound_role(&table, &pending, 8, 2, false),
+                PeerRole::BlockRelayOnly
+            ),
+            "eight unregistered full-relay dials already fill the full-relay slots"
+        );
+        for port in 9..=10_u16 {
+            pending.insert(
+                SocketAddr::from(([127, 0, 0, 1], port)),
+                PeerRole::BlockRelayOnly,
+            );
+        }
+        assert!(
+            matches!(
+                next_outbound_role(&table, &pending, 8, 2, false),
+                PeerRole::FullRelay
+            ),
+            "with both classes dialled full, a requested dial stays full relay"
+        );
+    }
+
+    /// A live connection that is still on the caller's dial list counts once:
+    /// five connected full-relay peers hold five of eight slots, not ten, so
+    /// the next dial is still full relay rather than an early block-relay.
+    #[test]
+    fn a_registered_dial_counts_once() {
+        use crate::connection::PeerLease;
+        use crate::peer_info::PeerRole;
+        let table = crate::PeerTable::new();
+        let mut pending: HashMap<SocketAddr, PeerRole> = HashMap::new();
+        for port in 1..=5_u16 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            table.register(addr, PeerLease::new(tx));
+            pending.insert(addr, PeerRole::FullRelay);
+        }
+        assert!(
+            matches!(
+                next_outbound_role(&table, &pending, 8, 2, false),
+                PeerRole::FullRelay
+            ),
+            "five connected full-relay peers hold five of eight slots, not ten"
         );
     }
 
