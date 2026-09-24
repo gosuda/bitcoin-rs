@@ -332,6 +332,65 @@ impl SyncChain for TestChain {
     }
 }
 
+/// Chain stub whose header admission is always refused, mirroring the
+/// production executor's paused admission: the chain transition lock is
+/// unavailable, so the batch is dropped before validation. Every other
+/// operation delegates to [`TestChain`], whose admission always validates.
+struct RefusingChain(Arc<TestChain>);
+
+impl SyncChain for RefusingChain {
+    fn network(&self) -> Network {
+        self.0.network()
+    }
+
+    fn block_tree(&self) -> &RwLock<BlockTree> {
+        self.0.block_tree()
+    }
+
+    fn chain_tip(&self) -> &ArcSwapOption<TipSnapshot> {
+        self.0.chain_tip()
+    }
+
+    fn applied_tip(&self) -> &ArcSwapOption<TipSnapshot> {
+        self.0.applied_tip()
+    }
+
+    fn bootstrap_genesis(&self) {
+        self.0.bootstrap_genesis();
+    }
+
+    fn admit_headers(&self, _headers: &[Header]) -> HeaderAdmission {
+        HeaderAdmission::Refused(Box::new(std::io::Error::other(
+            "scripted admission refusal",
+        )))
+    }
+
+    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+        self.0.check_body_binding(block)
+    }
+
+    fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
+        self.0.window_len(serialized_sizes)
+    }
+
+    fn commit_window(
+        &self,
+        blocks: &[&Block],
+        bodies: &[bytes::Bytes],
+    ) -> Result<usize, WindowCommitError> {
+        self.0.commit_window(blocks, bodies)
+    }
+
+    fn switch_to_branch(
+        &self,
+        target: NodeId,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        connected_body: &mut dyn FnMut(Hash256),
+    ) -> Result<(), BranchSwitchError> {
+        self.0.switch_to_branch(target, staged_body, connected_body)
+    }
+}
+
 /// Script-int encoding used by the regtest fixture coinbases (duplicated
 /// rather than depending on `bitcoin-rs-script` from `p2p` tests).
 fn push_int(value: i64) -> Vec<u8> {
@@ -411,6 +470,174 @@ fn check_sync_frontier_pair(
     assert_eq!(requested, expected_hashes);
     assert!(!requested.is_empty());
     assert!(rx.try_recv().is_err());
+    Ok(())
+}
+
+/// A batch forwarded out of a delivered body (`wire_response = false`) is
+/// not an answer to the pending `getheaders`, whatever admission does with
+/// it: neither a rejected batch (`TimestampTooFarAhead`) nor a refused one
+/// (paused admission) may re-arm the gate. An unconditional re-arm would
+/// stamp the gate answered and move its deadline forward at every body
+/// delivery, so a connection that silently ignored its wire request would
+/// age out of expiry without blame forever.
+///
+/// PRE: `a` owns the header request registered at `t0` and `b` is a second
+///   usable peer, so expiry has a fallback; the batch from `a` is carried by
+///   a body delivery, not by the wire answer.
+/// POST: at `t0 + HEADER_REQUEST_TIMEOUT` the gate expires with blame: `a`
+///   is disconnected, penalised, and marked unresponsive, and `b` is asked
+///   in that same tick.
+/// INVARIANT: only a wire answer may move a header request's deadline or
+///   mark it answered.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn body_forwarded_batch_does_not_rearm_the_pending_header_gate()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Phase 1: admission rejects the body-forwarded header before it can
+    // attach (`TimestampTooFarAhead`, a non-fault, non-MissingParent
+    // rejection).
+    {
+        let HeaderSyncFixture {
+            genesis,
+            sync,
+            inbound_headers_tx,
+            peers,
+        } = header_sync_with_genesis()?;
+        let a = test_addr(9771, 0)?;
+        let b = test_addr(9771, 1)?;
+        let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
+        let b_rx = connect_peer(&peers, synthetic_peer(b, 8));
+        let a_source = current_source(&peers, a);
+        let t0 = Instant::now();
+
+        sync.tick_at(t0);
+        assert!(
+            a_rx.try_iter()
+                .any(|message| matches!(message, Message::GetHeaders(_))),
+            "the first tick must ask `a`",
+        );
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![far_future_header(genesis.compute_hash(), 1)?],
+            source: Some(a_source),
+            wire_response: false,
+            body_fetch_owned: false,
+        })?;
+        sync.tick_at(t0 + Duration::from_millis(1));
+
+        {
+            let scheduler = sync.scheduler.lock();
+            let request = scheduler
+                .header_request
+                .as_ref()
+                .ok_or("the gate must stay registered after the rejection")?;
+            assert!(!request.answered, "a body-forwarded batch is not an answer");
+            assert_eq!(
+                request.requested_at, t0,
+                "a body-forwarded batch must not move the deadline",
+            );
+        }
+
+        let expiry = t0 + super::HEADER_REQUEST_TIMEOUT;
+        sync.tick_at(expiry);
+
+        assert!(
+            !peers.is_connected(a),
+            "a connection that silently ignored its getheaders must be rotated away",
+        );
+        assert!(
+            sync.scheduler
+                .lock()
+                .header_penalties
+                .contains_key(&a_source),
+            "the silent connection must carry the timeout penalty",
+        );
+        assert!(
+            b_rx.try_iter()
+                .any(|message| matches!(message, Message::GetHeaders(_))),
+            "the fallback peer must be asked in the very tick that rotates",
+        );
+        assert!(
+            sync.scheduler
+                .lock()
+                .header_request
+                .is_some_and(|request| request.source == current_source(&peers, b)),
+            "the gate must move to the fallback connection",
+        );
+    }
+
+    // Phase 2: admission refuses the body-forwarded header before
+    // validation (paused admission), and the paced ancestry re-request it
+    // paces must not move the pending deadline either.
+    {
+        let HeaderSyncFixture {
+            genesis,
+            sync,
+            inbound_headers_tx,
+            peers,
+        } = header_sync_with_refusing_chain()?;
+        let a = test_addr(9773, 0)?;
+        let b = test_addr(9773, 1)?;
+        let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
+        let b_rx = connect_peer(&peers, synthetic_peer(b, 8));
+        let a_source = current_source(&peers, a);
+        let t0 = Instant::now();
+
+        sync.tick_at(t0);
+        assert!(
+            a_rx.try_iter()
+                .any(|message| matches!(message, Message::GetHeaders(_))),
+            "the first tick must ask `a`",
+        );
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![far_future_header(genesis.compute_hash(), 1)?],
+            source: Some(a_source),
+            wire_response: false,
+            body_fetch_owned: false,
+        })?;
+        sync.tick_at(t0 + Duration::from_millis(1));
+
+        {
+            let scheduler = sync.scheduler.lock();
+            let request = scheduler
+                .header_request
+                .as_ref()
+                .ok_or("the gate must stay registered after the refusal")?;
+            assert!(!request.answered, "a body-forwarded batch is not an answer");
+            assert_eq!(
+                request.requested_at, t0,
+                "a body-forwarded batch must not move the deadline",
+            );
+        }
+
+        let expiry = t0 + super::HEADER_REQUEST_TIMEOUT;
+        sync.tick_at(expiry);
+
+        assert!(
+            !peers.is_connected(a),
+            "a connection that silently ignored its getheaders must be rotated away",
+        );
+        assert!(
+            sync.scheduler
+                .lock()
+                .header_penalties
+                .contains_key(&a_source),
+            "the silent connection must carry the timeout penalty",
+        );
+        assert!(
+            b_rx.try_iter()
+                .any(|message| matches!(message, Message::GetHeaders(_))),
+            "the fallback peer must be asked in the very tick that rotates",
+        );
+        assert!(
+            sync.scheduler
+                .lock()
+                .header_request
+                .is_some_and(|request| request.source == current_source(&peers, b)),
+            "the gate must move to the fallback connection",
+        );
+    }
     Ok(())
 }
 
@@ -1935,6 +2162,48 @@ fn header_sync_with_genesis() -> Result<HeaderSyncFixture, Box<dyn std::error::E
 
 fn genesis_header() -> Header {
     Network::Regtest.genesis_block().header
+}
+
+/// [`header_sync_with_genesis`] over a chain whose header admission is
+/// always refused: the fixture for the paused-admission path that
+/// [`TestChain`], whose admission always validates, cannot produce.
+fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let genesis = genesis_header();
+    tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(PeerTable::new());
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
+    let sync = BlockSync::new(
+        Arc::new(RefusingChain(Arc::new(TestChain::new(
+            chain_tip,
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        )))),
+        Arc::clone(&peers),
+        Arc::new(Mutex::new(inbound_headers_rx)),
+        Arc::new(Mutex::new(inbound_blocks_rx)),
+        crate::sync::syncing_ibd_latch(),
+    );
+    // Dropping the sender mirrors the header-only fixture: an inbound-blocks
+    // channel that never yields a block.
+    drop(inbound_blocks_tx);
+    install_budget(
+        &sync,
+        super::SyncBudget {
+            max_pending_blocks: 0,
+            ..super::default_sync_budget(Network::Regtest)
+        },
+    );
+    Ok(HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    })
 }
 
 pub(crate) fn coinbase_transaction(height: u32) -> Tx {
