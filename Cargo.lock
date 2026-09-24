@@ -329,7 +329,6 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",
  "bitcoin-rs-utxo",
- "bitcoin_slices",
  "compact_str",
  "criterion",
  "crossbeam-channel",
@@ -589,17 +588,6 @@ dependencies = [
  "bitcoin-io",
  "hex-conservative 0.2.3",
  "serde",
-]
-
-[[package]]
-name = "bitcoin_slices"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf2e3495f805510fc6958e1c7a84c940b8501d0cb3ab372797c1e91275477691"
-dependencies = [
- "bitcoin",
- "bitcoin_hashes",
- "sha2",
 ]
 
 [[package]]
@@ -884,12 +872,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea0095f6103c2a8b44acd6fd15960c801dafebf02e21940360833e0673f48ba7"
 
 [[package]]
-name = "const-oid"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
 name = "corepc-types"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1046,7 +1028,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer",
- "const-oid",
  "crypto-common",
 ]
 

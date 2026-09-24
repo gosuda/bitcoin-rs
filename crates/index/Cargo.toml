@@ -41,7 +41,6 @@ compact_str.workspace = true
 crossbeam-channel.workspace = true
 rayon.workspace = true
 sha2.workspace = true
-bitcoin_slices.workspace = true
 hashbrown.workspace = true
 zerocopy.workspace = true
 serde.workspace = true
