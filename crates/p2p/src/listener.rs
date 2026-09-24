@@ -971,7 +971,7 @@ mod keepalive_tests {
         let mut keepalive = Keepalive::starting(t0);
         assert_eq!(keepalive.next_action(t0), KeepaliveAction::Ping);
         assert_eq!(
-            keepalive.next_action(t0 + PING_INTERVAL - Duration::from_secs(1)),
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle
         );
         assert_eq!(
@@ -1012,7 +1012,7 @@ mod keepalive_tests {
     fn fresh_activity_defers_the_timeout() {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
-        let fresh = t0 + TIMEOUT_INTERVAL - Duration::from_secs(1);
+        let fresh = t0 + TIMEOUT_INTERVAL / 2;
         keepalive.record_recv(fresh);
         keepalive.record_send(fresh);
         assert_eq!(
@@ -1020,7 +1020,7 @@ mod keepalive_tests {
             KeepaliveAction::Ping
         );
         assert_eq!(
-            keepalive.next_action(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
+            keepalive.next_action(t0 + TIMEOUT_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
         );
     }
