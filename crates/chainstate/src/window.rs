@@ -282,7 +282,15 @@ pub(super) fn apply_window_admitted(
                         invalidated: Box::default(),
                     });
                 }
-                let invalidated = invalidate_failed_subtree(handles, block, disposition);
+                // Only permanent failures invalidate: operational failures
+                // (storage, UTXO commit, shutdown) leave the block retryable,
+                // and a body-mutated failure poisons only the delivered body.
+                let (invalidated, disposition) = if disposition == WindowApplyDisposition::Permanent
+                {
+                    invalidate_permanent_failure(handles, block.block_hash().0)
+                } else {
+                    (Box::default(), disposition)
+                };
                 // The prefix that committed in memory stays committed: flush
                 // its durable group before reporting, so the durable head
                 // and the published tip keep moving together. A flush
@@ -334,31 +342,40 @@ pub(super) fn apply_window_admitted(
     Ok(committed)
 }
 
-/// Marks the failed block's header subtree invalid while the chain transition
-/// is still held, so the window caller can purge download state without the
-/// frontier ever re-offering a descendant of a permanently invalid block.
+/// Invalidates a permanently invalid block's subtree through the shared
+/// chainstate operation, so the window caller can purge download state
+/// without the frontier ever re-offering a descendant of that block.
 ///
-/// Only permanent failures invalidate. Operational failures (storage, UTXO
-/// commit, shutdown) are transient: the block stays retryable, so nothing may
-/// be marked `Invalid` here. A header missing from the tree (rejected before
-/// insertion, e.g. prev-hash mismatch or `PoW` failure) has no subtree to
-/// invalidate, which leaves the list empty and the classification untouched.
-pub(super) fn invalidate_failed_subtree(
+/// Returns the marked hashes and the disposition to report. A header missing
+/// from the tree (rejected before insertion, e.g. prev-hash mismatch or `PoW`
+/// failure) has no subtree to invalidate, which leaves the list empty and the
+/// classification untouched. A tree-plan failure can leave the tree partially
+/// marked, so the best remaining tip is republished, the assume-valid gate is
+/// re-evaluated, and the batch escalates to `Fatal`: a permanently invalid
+/// block whose subtree could not be marked must not be retried in-process.
+///
+/// PRE: the caller holds the chain transition and `disposition` is `Permanent`.
+fn invalidate_permanent_failure(
     handles: &Chainstate,
-    block: &Block,
-    disposition: WindowApplyDisposition,
-) -> Box<[Hash256]> {
-    if disposition != WindowApplyDisposition::Permanent {
-        return Box::default();
+    hash: Hash256,
+) -> (Box<[Hash256]>, WindowApplyDisposition) {
+    match crate::reorg::invalidate_and_republish(handles, hash) {
+        Ok(invalidated) => (invalidated, WindowApplyDisposition::Permanent),
+        Err(crate::reorg::InvalidationError::UnknownBlock(_)) => {
+            (Box::default(), WindowApplyDisposition::Permanent)
+        }
+        Err(invalidation) => {
+            tracing::error!(
+                %invalidation,
+                "window subtree invalidation failed; requiring recovery"
+            );
+            let tree = handles.block_tree.read();
+            handles.chain_tip().store(tree.tip());
+            handles.reevaluate_assume_valid_with(&tree);
+            drop(tree);
+            (Box::default(), WindowApplyDisposition::Fatal)
+        }
     }
-    let hash = block.block_hash().0;
-    let mut tree = handles.block_tree.write();
-    let Some(node_id) = tree.lookup(hash) else {
-        return Box::default();
-    };
-    tree.invalidate_subtree(node_id)
-        .unwrap_or_default()
-        .into_boxed_slice()
 }
 
 /// Classifies an apply failure by what it proves about the header branch.
