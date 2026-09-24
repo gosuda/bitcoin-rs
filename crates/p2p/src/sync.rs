@@ -284,6 +284,11 @@ pub(super) struct PendingHeaderRequest {
     locator_tip_hash: Hash256,
     target_height: u32,
     requested_at: Instant,
+    /// Whether this connection already answered the request with a batch
+    /// this node could not use. Such a request keeps its gate to pace the
+    /// retry, but its deadline is not silence: expiry retires it without
+    /// blame. A fresh send always starts unanswered.
+    answered: bool,
 }
 
 /// Whether `send_getheaders` reached the wire this tick.
