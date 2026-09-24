@@ -5,7 +5,7 @@
 use super::{chain_reject_reason, consensus_reject_reason, header_reject_reason};
 use crate::MiningControlError;
 use bitcoin_rs_chain::{ChainError, ChainWork, NodeId};
-use bitcoin_rs_consensus::ConsensusError;
+use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
 use bitcoin_rs_primitives::Hash256;
 
 #[test]
@@ -17,6 +17,7 @@ fn consensus_failures_use_core_bip22_reasons() {
     let script = |reason: &str| ConsensusError::Script {
         input_index: 0,
         reason: reason.to_owned(),
+        engine: ScriptEngine::Native,
     };
     for (error, want) in [
         (

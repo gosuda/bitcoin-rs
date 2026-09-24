@@ -376,17 +376,16 @@ pub(super) fn invalidate_failed_subtree(
 /// must be dropped, not finished, so the mempool generation stays odd until
 /// recovery.
 ///
-/// Kernel-backed script verification failures are classified Operational
-/// because `bitcoinkernel` can reject a valid block depending on process
-/// state (issue #618): the same block applies successfully after restart.
-/// Treating these as Permanent would freeze the node at the tip and
-/// invalidate a valid header subtree with no retry path. The native
-/// interpreter path does not produce this spurious failure, so its
-/// `ConsensusError::Script` remains Permanent.
-///
+/// A kernel-backed script failure is Operational because `bitcoinkernel` can
+/// reject a valid block depending on process state (issue #618): the same
+/// block applies successfully after restart. Treating it as Permanent would
+/// freeze the node at the tip and invalidate a valid header subtree with no
+/// retry path. The native interpreter does not produce that spurious failure,
+/// so its `ConsensusError::Script` stays Permanent. The engine field decides
+/// this; the reason text is never inspected.
 pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
     use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
-    use bitcoin_rs_consensus::ConsensusError;
+    use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
     match error {
         ApplyError::UtxoCommit(_)
         | ApplyError::DurableHeadCommit(_)
@@ -401,14 +400,11 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             | ConsensusError::WitnessNonceSize
             | ConsensusError::WitnessCommitment
             | ConsensusError::UnexpectedWitness => BodyMutated,
-            ConsensusError::PrevoutMatrixSize { .. }
-            | ConsensusError::Kernel(_)
-            | ConsensusError::Encoding(_) => Operational,
-            ConsensusError::Script { reason, .. }
-                if reason.starts_with("kernel script verification failed:") =>
-            {
-                Operational
-            }
+            ConsensusError::PrevoutMatrixSize { .. } | ConsensusError::Kernel(_) => Operational,
+            ConsensusError::Script {
+                engine: ScriptEngine::Kernel,
+                ..
+            } => Operational,
             _ => Permanent,
         },
         _ => Operational,
