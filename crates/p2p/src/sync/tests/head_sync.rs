@@ -295,6 +295,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
+        answered: false,
     });
 
     let body_tip = test_header(genesis.compute_hash(), 1);

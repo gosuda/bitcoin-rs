@@ -271,6 +271,7 @@ fn live_pending_header_request_awaits_its_connection() {
         locator_tip_hash: hash(0x01),
         target_height: 6,
         requested_at: Instant::now(),
+        answered: false,
     });
     frontier.header_request_live = true;
     assert_eq!(frontier.plan().header_action, HeaderAction::AwaitPending);
@@ -292,6 +293,7 @@ fn probe_rotates_past_the_dead_pending_owner() {
         locator_tip_hash: hash(0x01),
         target_height: 6,
         requested_at: Instant::now(),
+        answered: false,
     });
     frontier.header_request_live = super::super::frontier::header_request_live(
         frontier.header_request,
@@ -387,6 +389,7 @@ proptest::proptest! {
                 locator_tip_hash: hash(0x01),
                 target_height: 9,
                 requested_at: Instant::now(),
+                answered: false,
             })
         } else {
             None
