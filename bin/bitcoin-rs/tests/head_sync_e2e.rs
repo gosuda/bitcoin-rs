@@ -177,11 +177,14 @@ fn build_chain(parent: &Block, count: u32, tag: u8, start_height: u32) -> Vec<Bl
     chain
 }
 
-/// T1+T2: the inv-echo path must request announced blocks as
-/// `MSG_WITNESS_BLOCK`, and the headers->getdata->bodies->apply pipeline must
-/// actually apply segwit bodies served with witnesses.
+/// T1+T2: a block announced by `inv` is availability, not a body order: the
+/// node fetches headers first, and the admitted tip's body rides a window
+/// request as `MSG_WITNESS_BLOCK`. The
+/// headers->getdata->bodies->apply pipeline must still apply segwit bodies
+/// served with witnesses, and an `inv` for the already-known tip must never
+/// produce a plain `MSG_BLOCK` request.
 #[test]
-fn inv_echo_requests_witness_block_and_applies_segwit_chain() -> Result<(), Error> {
+fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = LivePeer::connect(&node, "t1")?;
 
@@ -199,14 +202,13 @@ fn inv_echo_requests_witness_block_and_applies_segwit_chain() -> Result<(), Erro
     let tip = chain.last().expect("chain tip");
     let tip_hash = tip.block_hash();
 
-    // Announce the chain via headers, then announce the tip via inv — the
-    // live-relay path this commit fixes.
+    // Send the chain's headers, then announce the tip by `inv` as well: the
+    // announcement route must keep the header-led fetch intact.
     let deadline = Instant::now() + Duration::from_secs(10);
     peer.send(
         NetworkMessage::Headers(chain.iter().map(|b| b.header).collect()),
         deadline,
     )?;
-    let inv_sent = Instant::now();
     peer.send(
         NetworkMessage::Inv(vec![Inventory::Block(tip_hash)]),
         deadline,
@@ -220,25 +222,23 @@ fn inv_echo_requests_witness_block_and_applies_segwit_chain() -> Result<(), Erro
         }
     });
 
-    // The echo response to the inv must contain exactly the announced item
-    // upgraded to WitnessBlock — never a plain MSG_BLOCK.
-    let echo = vec![Inventory::WitnessBlock(tip_hash)];
+    // The announced tip's body must be requested as MSG_WITNESS_BLOCK —
+    // possibly batched by the window with its other near-tip requests.
+    let tip_hex = tip_hash.to_string();
+    let tip_requested_witness = peer.getdata_seen.iter().any(|frame| {
+        frame
+            .items
+            .iter()
+            .any(|(inv_type, hex)| *inv_type == 0x4000_0002 && *hex == tip_hex)
+    });
     assert!(
-        peer.find_getdata(&echo).is_some(),
-        "no getdata echo containing [WitnessBlock({tip_hash})] was observed; \
+        tip_requested_witness,
+        "no MSG_WITNESS_BLOCK getdata for the announced tip was observed; \
          getdata frames: {:?}",
         peer.getdata_seen
             .iter()
             .map(|f| (f.at_ms, f.items.clone()))
             .collect::<Vec<_>>()
-    );
-    let echo_at = peer
-        .find_getdata(&echo)
-        .map(|f| f.at_ms)
-        .expect("echo frame checked above");
-    eprintln!(
-        "[E2E] inv-echo getdata observed {} ms after inv",
-        echo_at.saturating_sub(u64::try_from(inv_sent.elapsed().as_millis()).unwrap_or(0))
     );
 
     // A plain MSG_BLOCK request for ANY announced block is the bug signature.
