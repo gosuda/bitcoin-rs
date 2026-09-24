@@ -62,24 +62,24 @@ impl BlockSync {
         let dropped = self.scheduler.lock().stager.prune_expired(now);
         let pruned = !dropped.is_empty();
         if pruned {
-            let tree = self.chain.block_tree().read();
-            let height_updates: Vec<(Hash256, u32)> = dropped
+            // The tree owns heights: a pruned body requeues at its tree
+            // height, or without a cursor move when the tree cannot resolve
+            // it (the old 0-sentinel rewind to genesis is unrepresentable).
+            let requeues: Vec<(Hash256, Option<u32>)> = dropped
                 .iter()
-                .filter_map(|dropped| {
-                    let node_id = tree.lookup(dropped.hash)?;
-                    tree.node(node_id)
-                        .ok()
-                        .map(|node| (dropped.hash, node.height))
+                .map(|dropped| {
+                    let height = {
+                        let tree = self.chain.block_tree().read();
+                        tree.lookup(dropped.hash)
+                            .and_then(|node_id| tree.node(node_id).ok())
+                            .map(|node| node.height)
+                    };
+                    (dropped.hash, height)
                 })
                 .collect();
-            drop(tree);
             let mut scheduler = self.scheduler.lock();
-            let window = &mut scheduler.window;
-            for (hash, height) in height_updates {
-                window.update_received_height(&hash, height);
-            }
-            for dropped in dropped {
-                window.drop_received_for_retry(&dropped.hash);
+            for (hash, height) in requeues {
+                scheduler.window.requeue_for_retry(&hash, height);
             }
         }
 
@@ -167,9 +167,7 @@ impl BlockSync {
                 .collect()
         };
         // Every staged header reaches `admit_headers`, and a rejection can
-        // still commit a valid prefix — staged-body sentinels reconcile on
-        // the attempt, not only on a clean accept.
-        let admission_attempted = !unadmitted.is_empty();
+        // still commit a valid prefix.
         let mut missing_parent = false;
         let mut credit_refresh_needed = false;
         let mut invalid: Vec<(Hash256, Option<crate::PeerSource>)> = Vec::new();
@@ -230,7 +228,6 @@ impl BlockSync {
             let mut scheduler = self.scheduler.lock();
             for (hash, _) in &invalid {
                 scheduler.stager.discard(hash);
-                scheduler.window.discard_received(hash);
             }
             for peer_addr in &blamed {
                 scheduler
@@ -245,12 +242,6 @@ impl BlockSync {
         if credit_refresh_needed {
             self.refresh_active_peer_credit();
         }
-        if admission_attempted {
-            // A body staged before its header landed kept the 0-height
-            // sentinel; now that the tree resolves the hash, pin the real
-            // height rather than waiting for a `headers` batch to repair it.
-            self.reconcile_staged_received_heights();
-        }
         // A staged retry that just admitted may have attached the ancestry
         // a deferred owned fetch was waiting on — resolve it now.
         self.resolve_owned_body_fetches();
@@ -259,6 +250,17 @@ impl BlockSync {
         }
     }
 
+    /// Stages one chunk of delivered bodies.
+    ///
+    /// PRE: `blocks` is non-empty; `next_expected_hash` is the apply
+    ///   frontier's next hash when one is known.
+    /// POST: `blocks` is empty; returns how many bodies were staged, found
+    ///   already staged, or rejected for a failed body/header binding. A
+    ///   body that no connection has in flight stages only when
+    ///   `unrequested_body_admissible` holds; any other such body is
+    ///   discarded with no retry and is not counted.
+    /// INVARIANT: an unrequested body whose tree-resolved node fails an
+    ///   admission clause is never staged.
     #[allow(clippy::too_many_lines)]
     pub(super) fn buffer_received_block_chunk(
         &self,
@@ -387,15 +389,10 @@ impl BlockSync {
             })
             .collect();
 
-        // Resolve heights the window cannot see: an untracked delivery (inv
-        // announcement, cold-front hedge) enters `received` at height 0, and
-        // `mark_received_from` reports `needs_height_lookup` for exactly those
-        // entries so this pass can pin the tree height. The same lookup covers
-        // staged bodies this insert count-evicts: a body that arrived before
-        // its header stayed at height 0, and `drop_received_for_retry` must
-        // place the retry at the tree height, not rewind the request cursor.
-        // A hash not yet in the tree stays 0 until the prune path's own
-        // re-evaluation.
+        // The block tree owns heights: bodies this insert count-evicts are
+        // requeued at their tree-resolved heights, never at a stored sentinel
+        // (there is no stored height). A hash the tree cannot resolve
+        // requeues with no cursor move.
         let staged_blocks: Vec<_> = {
             let tree = self.chain.block_tree().read();
             staged_blocks
@@ -406,14 +403,13 @@ impl BlockSync {
                             .and_then(|node_id| tree.node(node_id).ok())
                             .map(|node| node.height)
                     };
-                    let known_height = resolve(hash);
                     let dropped_heights = match &staged {
                         StagedBlock::Memory { dropped, .. } => {
                             dropped.iter().map(|entry| resolve(entry.hash)).collect()
                         }
                         _ => Vec::new(),
                     };
-                    (hash, source_peer, staged, known_height, dropped_heights)
+                    (hash, source_peer, staged, dropped_heights)
                 })
                 .collect()
         };
@@ -424,7 +420,7 @@ impl BlockSync {
         {
             let mut scheduler = self.scheduler.lock();
             let window = &mut scheduler.window;
-            for (hash, source_peer, staged, known_height, dropped_heights) in staged_blocks {
+            for (hash, source_peer, staged, dropped_heights) in staged_blocks {
                 match staged {
                     StagedBlock::AlreadyStaged => {
                         metrics::counter!("node.sync.duplicate_deliveries").increment(1);
@@ -434,14 +430,6 @@ impl BlockSync {
                     }
                     StagedBlock::Memory { bytes, dropped } => {
                         let pending_height = window.mark_received_from(hash, bytes, None, now);
-                        // A body that arrived before its header entered the
-                        // tree has no pending height: adopt the tree-resolved
-                        // height so a later retry lands at the right cursor.
-                        if pending_height.is_none()
-                            && let Some(height) = known_height
-                        {
-                            window.update_received_height(&hash, height);
-                        }
                         if let Some(source_peer) = source_peer {
                             delivery_credits.push((
                                 hash,
@@ -450,15 +438,14 @@ impl BlockSync {
                             ));
                         }
                         for (entry, height) in dropped.into_iter().zip(dropped_heights) {
-                            if let Some(height) = height {
-                                window.update_received_height(&entry.hash, height);
-                            }
-                            window.drop_received_for_retry(&entry.hash);
+                            window.requeue_for_retry(&entry.hash, height);
                             retry_count = retry_count.saturating_add(1);
                         }
                     }
                     StagedBlock::DroppedForRetry { dropped } => {
-                        window.drop_for_retry(&dropped.hash);
+                        // Count-evicted before staging: release what the
+                        // window holds without a cursor rewind.
+                        window.requeue_for_retry(&dropped.hash, None);
                         retry_count = retry_count.saturating_add(1);
                         tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
                     }

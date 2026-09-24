@@ -304,7 +304,7 @@ fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
     while stalled_rx.try_recv().is_ok() {}
 
     // Let the staged successor outlive its received timeout, then tick:
-    // prune_expired drops it, drop_received_for_retry releases its bytes
+    // prune_expired drops it from the stager, which releases its bytes
     // (gate reopens), and expire_pending re-queues the stalled frontier
     // height-first toward the healthy peer.
     std::thread::sleep(Duration::from_millis(125));
@@ -313,10 +313,12 @@ fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
     {
         let scheduler = sync.scheduler.lock();
-        let window = &scheduler.window;
-        assert_eq!(window.received_len(), 0);
-        assert!(window.has_request_capacity());
-        assert!(window.contains_pending(&Hash256::from_le_bytes(block1_hash.as_bytes())));
+        assert!(scheduler.window.has_request_capacity(&scheduler.stager));
+        assert!(
+            scheduler
+                .window
+                .contains_pending(&Hash256::from_le_bytes(block1_hash.as_bytes()))
+        );
     }
     let Message::GetData(retry) = healthy_rx.try_recv()? else {
         return Err(std::io::Error::other("expected healthy peer retry getdata").into());

@@ -125,12 +125,6 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
         !sync.scheduler.lock().stager.contains(&block_hash),
         "malformed body must not be staged"
     );
-    // The window must not have the malformed body in its received state.
-    assert_eq!(
-        sync.scheduler.lock().window.received_len(),
-        0,
-        "malformed body must not be in window received state"
-    );
 
     // Now send the correct body.
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
@@ -203,7 +197,6 @@ fn altered_non_witness_body_dropped_then_correct_body_staged()
         1
     );
     assert!(!sync.scheduler.lock().stager.contains(&block_hash));
-    assert_eq!(sync.scheduler.lock().window.received_len(), 0);
 
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
     assert_eq!(
@@ -234,7 +227,6 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
         "correct body must be staged"
     );
     let staged_bytes = sync.scheduler.lock().stager.received_bytes();
-    let window_received = sync.scheduler.lock().window.received_len();
 
     // Send the stripped (malformed) duplicate.
     let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
@@ -255,13 +247,6 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
         sync.scheduler.lock().stager.received_len(),
         1,
         "only one body should be staged"
-    );
-    // The already-staged precheck skips witness hashing, so no
-    // reject_delivery touches the window — received state is unchanged.
-    assert_eq!(
-        sync.scheduler.lock().window.received_len(),
-        window_received,
-        "window received state must not change from an already-staged duplicate"
     );
 
     Ok(())

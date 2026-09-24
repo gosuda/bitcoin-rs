@@ -70,10 +70,17 @@ impl BlockSync {
             }) => {
                 if disposition == WindowCommitDisposition::BodyMutated {
                     // Only the delivered body is bad. Keep the header branch
-                    // and its descendants, but free this slot for a new body.
+                    // and its descendants, but free this slot for a new body;
+                    // the tree-owned height keeps the retry cursor exact.
+                    let height = {
+                        let tree = self.chain.block_tree().read();
+                        tree.lookup(hash)
+                            .and_then(|node_id| tree.node(node_id).ok())
+                            .map(|node| node.height)
+                    };
                     let mut scheduler = self.scheduler.lock();
                     scheduler.stager.retire_applied(&hash);
-                    scheduler.window.drop_for_retry(&hash);
+                    scheduler.window.requeue_for_retry(&hash, height);
                 }
                 // Invalid descendants cannot occupy bounded download state or
                 // they can prevent the newly selected valid branch from refilling.
@@ -115,7 +122,6 @@ impl BlockSync {
     #[doc(hidden)]
     pub fn retire_applied_reorg_body(&self, hash: Hash256) {
         let mut scheduler = self.scheduler.lock();
-        scheduler.window.mark_received_applied(&hash);
         scheduler.stager.retire_applied(&hash);
     }
 
@@ -129,7 +135,8 @@ impl BlockSync {
         let mut scheduler = self.scheduler.lock();
         for hash in hashes {
             scheduler.stager.retire_applied(hash);
-            scheduler.window.drop_for_retry(hash);
+            // Invalidated hashes are never re-requested: no cursor rewind.
+            scheduler.window.requeue_for_retry(hash, None);
         }
     }
 

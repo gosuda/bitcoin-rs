@@ -2,13 +2,13 @@
 //! against a spawned bitcoin-rs daemon (regtest, fjall). A loopback wire peer
 //! announces blocks by `inv` only — never sending a `headers` batch for them —
 //! so the delivered body is the node's only copy of the header and must admit
-//! through the staged-body path (P2P-06 + `reconcile_received_heights`).
+//! through the staged-body path (P2P-06). Heights come from the block tree.
 //!
 //!  * T1: headers bootstrap, then inv-only live-head blocks apply one after
 //!    another via their carried headers — no stall across the chain.
 //!  * T2: a delivered body whose carried header's parent is unknown triggers a
 //!    recovery `getheaders`; once the ancestors land the staged body applies in
-//!    place and is never re-requested (0-height sentinel repaired).
+//!    place and is never re-requested.
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
@@ -324,9 +324,9 @@ fn carried_header_live_head_applies_and_continues() -> Result<(), Error> {
 
 /// T2: a delivered body whose carried header's parent is unknown is not a
 /// peer fault — the node must issue a recovery `getheaders`, then apply the
-/// staged body in place once the ancestors land. The NEW
-/// `reconcile_received_heights` must repair the 0-height sentinel on h4's
-/// received entry: the node must never re-request h4 and must apply it.
+/// staged body in place once the ancestors land. The staged h4 body keeps
+/// no height of its own; the tree places it once its header lands, so the
+/// node must never re-request h4 and must apply it.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
@@ -442,8 +442,7 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
     assert_eq!(
         peer.requests_for(&h4),
         pre_headers_requests,
-        "h4 body re-requested after headers landed ({} -> {}) — 0-height sentinel \
-         not repaired",
+        "h4 body re-requested after headers landed ({} -> {}) — staged body lost",
         pre_headers_requests,
         peer.requests_for(&h4)
     );
@@ -452,7 +451,8 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
     );
 
     // The gap-fill getdata must cover each of h1..h3 exactly once (h4's body
-    // was already delivered — a second request would be the sentinel bug).
+    // was already delivered — a second request would mean the staged body
+    // was lost).
     for block in &chain[..3] {
         let hash = block.block_hash();
         assert_eq!(
@@ -488,8 +488,6 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
         "node requested MSG_BLOCK and got a stripped body"
     );
     assert_clean_stderr(&node, "missing-parent recovery + staged apply");
-    eprintln!(
-        "[E2E] T2 PASSED: recovery getheaders, sentinel repaired, staged body applied, tip continued"
-    );
+    eprintln!("[E2E] T2 PASSED: recovery getheaders, staged body applied in place, tip continued");
     Ok(())
 }

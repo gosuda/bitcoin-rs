@@ -47,7 +47,6 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn s
     let scheduler = sync.scheduler.lock();
     let window = &scheduler.window;
     assert_eq!(window.pending_len(), 0);
-    assert_eq!(window.received_len(), 0);
     assert!(!window.contains_pending(&stale_hash));
     Ok(())
 }
@@ -56,14 +55,10 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn s
 fn received_only_state_uses_scan_path_without_duplicate_request()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
-    let received_hash = Hash256::from_le_bytes(expected[1].as_bytes());
-    {
-        let mut scheduler = sync.scheduler.lock();
-        let window = &mut scheduler.window;
-        let needs_height = window.mark_received(received_hash, 80, Instant::now());
-        assert!(needs_height);
-        window.update_received_height(&received_hash, 2);
-    }
+    // The tree owns heights: received-only state is a stager insert; the
+    // window holds no staged-body copy to reconcile.
+    let (_, blocks) = mined_chain(3, 0)?;
+    stage_body(&sync, &blocks[1]);
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 3));
 

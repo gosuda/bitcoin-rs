@@ -417,9 +417,9 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
 
 /// T4: an unsolicited block body for a tree-known hash whose pending request
 /// was already released (peer disconnect) takes the untracked-delivery path:
-/// `mark_received_from` reports `needs_height_lookup` and the fix pins the
-/// tree height instead of recording 0 forever. The chain must still converge
-/// and the request cursor must never rewind to applied heights.
+/// the stager holds the body and the block tree supplies its height. The
+/// chain must still converge and the request cursor must never rewind to
+/// applied heights.
 #[test]
 fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -481,7 +481,7 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
 
     // Second peer connects; peer 1 disconnects — h5's pending request is
     // released. A block body arriving now for h5 has NO pending entry:
-    // the untracked-delivery (needs_height_lookup) path.
+    // the untracked-delivery path.
     let mut hedge = LivePeer::connect(&node, "t4-hedge")?;
     drop(peer);
     std::thread::sleep(Duration::from_millis(300));
@@ -503,9 +503,9 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
     );
     eprintln!("[E2E] untracked h5 body applied; tip={tip_hash}, count=5");
 
-    // Watch a few more ticks on the hedge connection: under the height-0
-    // bug, a later drop-for-retry of that entry rewinds the request cursor
-    // toward genesis and the node re-requests already-applied heights.
+    // Watch a few more ticks on the hedge connection: a retry of that entry
+    // must never rewind the request cursor toward genesis, so the node never
+    // re-requests already-applied heights.
     hedge.pump(Duration::from_secs(4), &mut |peer, items| {
         let deadline = Instant::now() + Duration::from_secs(5);
         for item in items {

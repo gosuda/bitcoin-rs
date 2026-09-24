@@ -14,6 +14,7 @@ use bitcoin_rs_primitives::Hash256;
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
+use crate::BlockStager;
 use crate::PeerInfo;
 use crate::connection::{ConnectionId, PeerSource};
 
@@ -502,16 +503,14 @@ fn count_stall_episode_cleared(reason: &'static str) {
     metrics::counter!("node.sync.stall_episodes_cleared", "reason" => reason).increment(1);
 }
 
-/// Block download window: tracks pending, received, and in-flight block
-/// requests with stall detection, cold-front hedging, and fan-out policy.
+/// Block download window: tracks pending and in-flight block requests with
+/// stall detection, cold-front hedging, and fan-out policy.
 #[derive(Debug)]
 pub struct DownloadWindow {
     budget: SyncBudget,
     pending: HashMap<Hash256, PendingBlock>,
-    received: HashMap<Hash256, ReceivedBlock>,
     peer_inflight: HashMap<SocketAddr, PeerInflight>,
     pending_bytes: usize,
-    received_bytes: usize,
     /// Highest `pending` population observed; feeds the high-water gauge.
     pending_blocks_high_water: usize,
     /// Highest `pending_bytes` observed; feeds the high-water gauge.
@@ -597,24 +596,16 @@ pub struct DownloadWindow {
     recent_stallers: HashMap<SocketAddr, Instant>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ReceivedBlock {
-    height: u32,
-    bytes: usize,
-}
-
 impl DownloadWindow {
     /// Creates a new download window with the given budget.
     pub fn new(budget: SyncBudget) -> Self {
         Self {
             budget,
             pending: HashMap::with_capacity(budget.max_pending_blocks),
-            received: HashMap::with_capacity(budget.max_received_blocks),
             peer_inflight: HashMap::with_capacity(
                 budget.max_pending_blocks.min(budget.max_peer_inflight),
             ),
             pending_bytes: 0,
-            received_bytes: 0,
             pending_blocks_high_water: 0,
             pending_bytes_high_water: 0,
             apply_idle_since: None,
@@ -730,12 +721,20 @@ impl DownloadWindow {
     }
 
     /// Returns `true` if the window can accept new block requests.
-    pub fn has_request_capacity(&self) -> bool {
+    ///
+    /// PRE: `stager` is the staging set coupled to this window (the same
+    ///      one the scheduler holds); expiry has run this tick.
+    /// POST: `true` only while pending counts, pending bytes, and the
+    ///      stager's staged byte and slot headroom can absorb one more
+    ///      estimated block.
+    /// INVARIANT: staged-body counts and bytes are read from `stager`,
+    ///      never from a window-local copy.
+    pub fn has_request_capacity(&self, stager: &BlockStager) -> bool {
         self.pending.len() < self.budget.max_pending_blocks
             && self.pending_bytes.saturating_add(self.ewma_block_bytes)
                 <= self.budget.max_pending_bytes
-            && self.staged_byte_headroom() >= self.ewma_block_bytes
-            && self.staged_count_headroom(0) > 0
+            && self.staged_byte_headroom(stager) >= self.ewma_block_bytes
+            && self.staged_count_headroom(stager, 0) > 0
     }
 
     /// Staged-byte backpressure: once the blocks already received and waiting
@@ -743,8 +742,13 @@ impl DownloadWindow {
     /// requests — arrivals would only be refused by the stager and
     /// re-requested, churning bandwidth. Capacity returns as staged blocks are
     /// applied (or expire) and their bytes are released.
-    const fn staged_bytes_exhausted(&self) -> bool {
-        self.received_bytes >= self.budget.max_received_bytes
+    ///
+    /// PRE: `stager` is the staging set coupled to this window.
+    /// POST: `true` while the stager's staged bytes have exhausted the
+    ///      staging byte budget.
+    /// INVARIANT: the byte total is read from `stager`.
+    fn staged_bytes_exhausted(&self, stager: &BlockStager) -> bool {
+        stager.received_bytes() >= self.budget.max_received_bytes
     }
 
     /// Staging bytes still free if every in-flight pending block arrives at
@@ -761,13 +765,19 @@ impl DownloadWindow {
     /// there), and the default budget pair (`max_pending_bytes ==
     /// max_received_bytes`) already bounds a from-empty burst to exactly the
     /// staging budget.
-    const fn staged_byte_headroom(&self) -> usize {
-        if self.received_bytes == 0 {
+    ///
+    /// PRE: `stager` is the staging set coupled to this window.
+    /// POST: the free staging bytes after subtracting in-flight pending
+    ///      bytes; `usize::MAX` while nothing is staged.
+    /// INVARIANT: the staged byte total is read from `stager`.
+    fn staged_byte_headroom(&self, stager: &BlockStager) -> usize {
+        let staged_bytes = stager.received_bytes();
+        if staged_bytes == 0 {
             return usize::MAX;
         }
         self.budget
             .max_received_bytes
-            .saturating_sub(self.received_bytes)
+            .saturating_sub(staged_bytes)
             .saturating_sub(self.pending_bytes)
     }
 
@@ -775,7 +785,7 @@ impl DownloadWindow {
     /// count-denominated twin of [`Self::staged_byte_headroom`]. The twin is
     /// load-bearing, not symmetry for its own sake: the stager enforces its
     /// byte budget as admission backpressure but its count budget by
-    /// **evicting the oldest staged blocks** (`stage.rs`,
+    /// **evicting the oldest staged blocks** (`block_stager.rs`,
     /// `evict_over_budget`) — the blocks nearest the apply frontier. A window
     /// clamped on bytes alone keeps requesting while a stalled front-stripe
     /// peer freezes the frontier, and the healthy peers' next wave pushes the
@@ -804,19 +814,31 @@ impl DownloadWindow {
     /// while the staged set survives intact. Late arrival of an expired
     /// original deduplicates against its re-request by hash, so the credit
     /// cannot double-fill staging.
-    fn staged_count_headroom(&self, expired_pending_blocks: usize) -> usize {
-        if self.received.is_empty() {
+    ///
+    /// PRE: `stager` is the staging set coupled to this window.
+    /// POST: the free staging slots after subtracting live pendings
+    ///      (crediting `expired_pending_blocks`); `usize::MAX` while nothing
+    ///      is staged.
+    /// INVARIANT: the staged count is read from `stager`.
+    fn staged_count_headroom(&self, stager: &BlockStager, expired_pending_blocks: usize) -> usize {
+        if stager.received_len() == 0 {
             return usize::MAX;
         }
         self.budget
             .max_received_blocks
-            .saturating_sub(self.received.len())
+            .saturating_sub(stager.received_len())
             .saturating_sub(self.pending.len().saturating_sub(expired_pending_blocks))
     }
 
     /// Maximum number of blocks to request from one peer this tick.
-    pub fn request_peer_scan_limit(&self, now: Instant) -> usize {
-        if self.staged_bytes_exhausted() {
+    ///
+    /// PRE: `stager` is the staging set coupled to this window; expiry has
+    ///      run this tick.
+    /// POST: the per-peer scan bound derived from the pending budgets and
+    ///      the stager's staged byte and slot headroom.
+    /// INVARIANT: staged totals are read from `stager`.
+    pub fn request_peer_scan_limit(&self, stager: &BlockStager, now: Instant) -> usize {
+        if self.staged_bytes_exhausted(stager) {
             return 0;
         }
         let per_peer = self
@@ -831,7 +853,7 @@ impl DownloadWindow {
             .budget
             .max_pending_blocks
             .saturating_sub(self.pending.len().saturating_sub(expired_blocks))
-            .min(self.staged_count_headroom(expired_blocks));
+            .min(self.staged_count_headroom(stager, expired_blocks));
         // Expired bytes are credited back to pending capacity (they will be
         // re-requested) but not to staging byte headroom: a late arrival of
         // the original request still stages. The count headroom does credit
@@ -840,7 +862,7 @@ impl DownloadWindow {
             .budget
             .max_pending_bytes
             .saturating_sub(self.pending_bytes.saturating_sub(expired_bytes))
-            .min(self.staged_byte_headroom())
+            .min(self.staged_byte_headroom(stager))
             / self.ewma_block_bytes;
         let request_blocks = block_capacity.min(byte_capacity);
         if request_blocks == 0 {
@@ -1034,6 +1056,8 @@ impl DownloadWindow {
         &mut self,
         next_apply_height: u32,
         apply_side_busy: bool,
+        stager: &BlockStager,
+        tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerSource> {
         // Measurement only (issue #51): interval bookkeeping ahead of the
@@ -1063,7 +1087,8 @@ impl DownloadWindow {
             }
             return None;
         }
-        let Some((owner, front_hash)) = self.window_blocked_on(next_apply_height) else {
+        let Some((owner, front_hash)) = self.window_blocked_on(stager, tree, next_apply_height)
+        else {
             if self.stall.take().is_some() {
                 count_stall_episode_cleared("predicate");
             }
@@ -1197,7 +1222,8 @@ impl DownloadWindow {
     }
 
     /// The stall predicate: the window cannot progress and exactly one peer's
-    /// in-flight front block is why. All terms derive from window state:
+    /// in-flight front block is why. The terms read the pending set, the
+    /// stager, and the block tree:
     ///
     /// 1. **Front in flight at the apply frontier**: the minimum-height
     ///    pending entry sits exactly at `next_apply_height`. This is also the
@@ -1227,7 +1253,21 @@ impl DownloadWindow {
     ///    term trivially, so wedge conviction is preserved. The chain tail
     ///    (nothing above the window left to request) is deliberately not an
     ///    arm of this term — see [`Self::observe_stall`].
-    fn window_blocked_on(&self, next_apply_height: u32) -> Option<(PeerSource, Hash256)> {
+    ///
+    /// PRE: `stager` is the coupled staging set and `tree` resolves staged
+    ///      hashes to heights.
+    /// POST: `Some((owner, front_hash))` exactly when every predicate term
+    ///      holds: the lowest pending sits at the frontier, at least one
+    ///      staged body resolves above it, and the staged count covers half
+    ///      the count window.
+    /// INVARIANT: staged identity, count, and heights come from `stager`
+    ///      and `tree`; the window holds no staged-body copy.
+    fn window_blocked_on(
+        &self,
+        stager: &BlockStager,
+        tree: &BlockTree,
+        next_apply_height: u32,
+    ) -> Option<(PeerSource, Hash256)> {
         let (front_hash, front) = self
             .pending
             .iter()
@@ -1235,14 +1275,14 @@ impl DownloadWindow {
         if front.height != next_apply_height {
             return None;
         }
-        if !self
-            .received
-            .values()
-            .any(|received| received.height > front.height)
-        {
+        if stager.received_len() < self.budget.max_received_blocks / 2 {
             return None;
         }
-        if self.received.len() < self.budget.max_received_blocks / 2 {
+        let has_staged_successor = stager.staged_hashes().any(|hash| {
+            tree.height_of_hash(hash)
+                .is_some_and(|height| height > front.height)
+        });
+        if !has_staged_successor {
             return None;
         }
         Some((front.owner, *front_hash))
@@ -1455,20 +1495,7 @@ impl DownloadWindow {
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
     }
 
-    /// Returns the number of received (staged) blocks. Test-only accessor.
-    pub fn received_len(&self) -> usize {
-        self.received.len()
-    }
-
-    /// Returns the recorded height of a received block: the tree height for
-    /// tracked deliveries, `0` when the tree could not resolve an untracked
-    /// one. Test-only accessor.
-    #[cfg(test)]
-    pub(crate) fn received_height(&self, hash: &Hash256) -> Option<u32> {
-        self.received.get(hash).map(|received| received.height)
-    }
-
-    /// Returns `true` if `hash` is currently pending. Test-only accessor.
+    /// Returns `true` if `hash` is currently pending.
     pub fn contains_pending(&self, hash: &Hash256) -> bool {
         self.pending.contains_key(hash)
     }
@@ -1619,8 +1646,16 @@ impl DownloadWindow {
 
     /// Builds the next batch of block requests for `peer_addr`, or `None` if
     /// no blocks are available to request.
+    ///
+    /// PRE: `stager` is the coupled staging set; expiry has run this tick.
+    /// POST: a request whose entries are unowned, on the request branch, and
+    ///      inside every pending/staging budget; `next_request_height` covers
+    ///      every height the scan offered.
+    /// INVARIANT: staged membership, count, and bytes are read from `stager`.
+    #[allow(clippy::too_many_arguments)]
     pub fn next_peer_request(
         &mut self,
+        stager: &mut BlockStager,
         peer_addr: SocketAddr,
         allow_expired_retry_from_peer: bool,
         chain_tip: &TipSnapshot,
@@ -1630,7 +1665,7 @@ impl DownloadWindow {
         now: Instant,
     ) -> Option<PeerRequest> {
         self.retarget_request_branch(chain_tip, request_start_height, tree);
-        if self.staged_bytes_exhausted() {
+        if self.staged_bytes_exhausted(stager) {
             return None;
         }
         if !allow_expired_retry_from_peer
@@ -1653,12 +1688,12 @@ impl DownloadWindow {
             .budget
             .max_pending_blocks
             .saturating_sub(self.pending.len())
-            .min(self.staged_count_headroom(0));
+            .min(self.staged_count_headroom(stager, 0));
         let mut byte_capacity = self
             .budget
             .max_pending_bytes
             .saturating_sub(self.pending_bytes)
-            .min(self.staged_byte_headroom());
+            .min(self.staged_byte_headroom(stager));
         let batch_limit = self
             .budget
             .getdata_batch_limit
@@ -1668,7 +1703,8 @@ impl DownloadWindow {
             return None;
         }
 
-        let mut entries = self.expired_request_entries(expired, batch_limit, &mut byte_capacity);
+        let mut entries =
+            self.expired_request_entries(stager, expired, batch_limit, &mut byte_capacity);
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
         // The current chain frontier outranks the forward-scan hint. A
@@ -1679,8 +1715,7 @@ impl DownloadWindow {
                 .node_at_height_from(chain_tip.tip_id, request_start_height)
                 .and_then(|id| tree.node(id).ok())
                 .is_some_and(|node| {
-                    !self.pending.contains_key(&node.hash)
-                        && !self.received.contains_key(&node.hash)
+                    !self.pending.contains_key(&node.hash) && !stager.contains(&node.hash)
                 })
         {
             self.next_request_height = request_start_height;
@@ -1693,29 +1728,24 @@ impl DownloadWindow {
             .saturating_sub(entries.len())
             .min(byte_capacity / self.ewma_block_bytes);
         if height <= request_tip_height && remaining_limit > 0 {
-            if entries.is_empty() {
-                if let Some(request) = self.clean_contiguous_peer_request(
-                    peer_addr,
-                    chain_tip,
-                    tree,
-                    height,
-                    request_tip_height,
-                    remaining_limit,
-                    next_request_height,
-                ) {
-                    return Some(request);
-                }
+            let scan = RequestScan {
+                height,
+                request_tip_height,
+                remaining_limit,
+                next_request_height,
+            };
+            if entries.is_empty()
+                && let Some(request) =
+                    self.clean_contiguous_peer_request(stager, peer_addr, chain_tip, tree, scan)
+            {
+                return Some(request);
             }
 
             next_request_height = self.extend_request_by_reverse_scan(
+                stager,
                 chain_tip,
                 tree,
-                RequestScan {
-                    height,
-                    request_tip_height,
-                    remaining_limit,
-                    next_request_height,
-                },
+                scan,
                 selected_hashes.as_ref(),
                 &mut entries,
             );
@@ -1755,16 +1785,6 @@ impl DownloadWindow {
         for hash in stale_pending {
             self.remove_pending(&hash);
         }
-        let stale_received: Vec<Hash256> = self
-            .received
-            .iter()
-            .filter_map(|(hash, received)| {
-                (!is_on_request_branch(*hash, received.height)).then_some(*hash)
-            })
-            .collect();
-        for hash in stale_received {
-            self.remove_received(&hash);
-        }
 
         self.next_request_height = request_start_height;
         self.stall = None;
@@ -1777,6 +1797,7 @@ impl DownloadWindow {
 
     fn extend_request_by_reverse_scan(
         &self,
+        stager: &BlockStager,
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
         scan: RequestScan,
@@ -1790,7 +1811,7 @@ impl DownloadWindow {
         let skipped_hashes = self
             .pending
             .len()
-            .saturating_add(self.received.len())
+            .saturating_add(stager.received_len())
             .saturating_add(selected_hashes.map_or(0, SelectedHashes::len));
         // Each skipped hash can displace at most one eligible height from the prefix.
         let scan_limit = scan.remaining_limit.saturating_add(skipped_hashes);
@@ -1809,7 +1830,7 @@ impl DownloadWindow {
                 break;
             }
             if !self.pending.contains_key(&node.hash)
-                && !self.received.contains_key(&node.hash)
+                && !stager.contains(&node.hash)
                 && selected_hashes.is_none_or(|hashes| !hashes.contains(&node.hash))
             {
                 candidates.push(PeerRequestEntry {
@@ -1837,6 +1858,7 @@ impl DownloadWindow {
 
     fn expired_request_entries(
         &self,
+        stager: &BlockStager,
         expired: Vec<PeerRequestEntry>,
         batch_limit: usize,
         byte_capacity: &mut usize,
@@ -1846,7 +1868,7 @@ impl DownloadWindow {
             if entries.len() >= batch_limit || *byte_capacity < self.ewma_block_bytes {
                 break;
             }
-            if self.received.contains_key(&entry.hash) || self.pending.contains_key(&entry.hash) {
+            if stager.contains(&entry.hash) || self.pending.contains_key(&entry.hash) {
                 continue;
             }
             *byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);
@@ -1857,23 +1879,25 @@ impl DownloadWindow {
 
     fn clean_contiguous_peer_request(
         &self,
+        stager: &BlockStager,
         peer_addr: SocketAddr,
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
-        height: u32,
-        request_tip_height: u32,
-        remaining_limit: usize,
-        next_request_height: u32,
+        scan: RequestScan,
     ) -> Option<PeerRequest> {
-        if !self.pending.is_empty() || !self.received.is_empty() {
+        if !self.pending.is_empty() || stager.received_len() > 0 {
             return None;
         }
-        let request_end_height = height
-            .saturating_add(u32::try_from(remaining_limit.saturating_sub(1)).unwrap_or(u32::MAX))
-            .min(request_tip_height);
+        let span = u32::try_from(scan.remaining_limit.saturating_sub(1)).unwrap_or(u32::MAX);
+        let request_end_height = scan
+            .height
+            .saturating_add(span)
+            .min(scan.request_tip_height);
         let entries =
-            contiguous_request_entries(tree, chain_tip.tip_id, height, request_end_height)?;
-        let next_request_height = next_request_height.max(request_end_height.saturating_add(1));
+            contiguous_request_entries(tree, chain_tip.tip_id, scan.height, request_end_height)?;
+        let next_request_height = scan
+            .next_request_height
+            .max(request_end_height.saturating_add(1));
         non_empty_request(peer_addr, entries, next_request_height)
     }
 
@@ -1964,10 +1988,16 @@ impl DownloadWindow {
     }
 
     /// Records that `request` has been sent to `owner`, moving entries to
-    /// pending under that exact connection's ownership. Returns `true` if
-    /// the window still has request capacity.
+    /// pending under that exact connection's ownership.
+    ///
+    /// PRE: `stager` is the coupled staging set; no entry of `request` is
+    ///      pending or staged.
+    /// POST: every entry is pending under `owner`; the return value states
+    ///      whether the window still has request capacity.
+    /// INVARIANT: staged membership is read from `stager`.
     pub fn mark_requested(
         &mut self,
+        stager: &BlockStager,
         request: &PeerRequest,
         owner: PeerSource,
         now: Instant,
@@ -1979,7 +2009,7 @@ impl DownloadWindow {
         let inflight = self.peer_inflight.entry(owner.addr).or_default();
         for entry in &request.entries {
             debug_assert!(!self.pending.contains_key(&entry.hash));
-            debug_assert!(!self.received.contains_key(&entry.hash));
+            debug_assert!(!stager.contains(&entry.hash));
             let previous = self.pending.insert(
                 entry.hash,
                 PendingBlock {
@@ -1999,12 +2029,16 @@ impl DownloadWindow {
             self.record_pending_deadline(now);
         }
         self.next_request_height = self.next_request_height.max(request.next_request_height);
-        self.has_request_capacity()
+        self.has_request_capacity(stager)
     }
 
-    /// Records that block `hash` was received from `source_peer`, moving it
-    /// from pending to received (staged). Returns the removed pending's
-    /// height, `None` when the hash was not pending.
+    /// Records a delivery: pending release, source credit, EWMA byte
+    /// estimate. Staging itself is the [`BlockStager`]'s job.
+    ///
+    /// PRE: `hash` was staged by the caller, or was never requested.
+    /// POST: returns the height the pending carried at removal; `None` means
+    ///   the delivery was not pending. No staged state is written.
+    /// INVARIANT: the window holds no staged-body bytes or counts.
     ///
     /// The source-attributed credit runs through [`Self::credit_delivery_from`];
     /// callers proving the source's connection is still current may also call
@@ -2021,14 +2055,6 @@ impl DownloadWindow {
         if let Some(source) = source_peer {
             self.credit_delivery_from(hash, source, pending_height, now);
         }
-        // Heights of unsolicited deliveries stay 0 until `update_received_height`
-        // fills them in from the tree.
-        let height = pending_height.unwrap_or(0);
-        let previous = self.received.insert(hash, ReceivedBlock { height, bytes });
-        if let Some(previous) = previous {
-            self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
-        }
-        self.received_bytes = self.received_bytes.saturating_add(bytes);
         self.ewma_block_bytes = self
             .ewma_block_bytes
             .saturating_mul(7)
@@ -2036,6 +2062,34 @@ impl DownloadWindow {
             / 8;
         self.ewma_block_bytes = self.ewma_block_bytes.max(80);
         pending_height
+    }
+
+    /// Releases whatever the window holds for `hash` and makes it
+    /// requestable again.
+    ///
+    /// PRE: `height`, when known, is the tree height of `hash`.
+    /// POST: a pending for `hash` is released; the request cursor is lowered
+    ///   to the lower of `height` and the released pending's height, when
+    ///   either is known.
+    /// INVARIANT: every rewind target is a tree height (the caller's, or the
+    ///   one the pending recorded at request time); a body of unknown height
+    ///   with no pending never moves the cursor, so the height-0 rewind to
+    ///   genesis is unrepresentable.
+    pub fn requeue_for_retry(&mut self, hash: &Hash256, height: Option<u32>) {
+        let pending_height = self.remove_pending(hash).map(|pending| pending.height);
+        let target = match (height, pending_height) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (known, None) | (None, known) => known,
+        };
+        if let Some(target) = target {
+            self.next_request_height = self.next_request_height.min(target);
+        }
+    }
+
+    /// The request cursor: the lowest height not yet scanned or offered.
+    #[cfg(test)]
+    pub(crate) fn request_cursor(&self) -> u32 {
+        self.next_request_height
     }
 
     /// The source-attributed share of a staged delivery: pending-timeout,
@@ -2061,14 +2115,6 @@ impl DownloadWindow {
         if let Some(height) = pending_height {
             self.record_delivery_progress(source, hash, height, now);
         }
-    }
-
-    /// Test-only shorthand for delivery by the pending owner. Returns whether
-    /// the hash was not pending, i.e. its height needs a tree lookup.
-    pub fn mark_received(&mut self, hash: Hash256, bytes: usize, now: Instant) -> bool {
-        let source_peer = self.pending.get(&hash).map(|pending| pending.owner);
-        self.mark_received_from(hash, bytes, source_peer, now)
-            .is_none()
     }
 
     /// Credits a duplicate after the first copy was already staged.
@@ -2171,60 +2217,6 @@ impl DownloadWindow {
         self.last_front_advance = Some(now);
     }
 
-    /// Updates the height of a received block after a tree re-evaluation.
-    pub fn update_received_height(&mut self, hash: &Hash256, height: u32) {
-        if let Some(received) = self.received.get_mut(hash) {
-            received.height = height;
-        }
-    }
-
-    /// Fills the 0-height sentinel on received entries whose headers have
-    /// since landed in `tree` — e.g. admitted through a `headers` batch
-    /// rather than a body admission — so successor visibility and retry
-    /// rewinds see real heights instead of staying invisible.
-    pub fn reconcile_received_heights(&mut self, tree: &BlockTree) {
-        let unresolved: Vec<Hash256> = self
-            .received
-            .iter()
-            .filter_map(|(hash, received)| (received.height == 0).then_some(*hash))
-            .collect();
-        for hash in unresolved {
-            if let Some(node) = tree
-                .lookup(hash)
-                .and_then(|node_id| tree.node(node_id).ok())
-            {
-                self.update_received_height(&hash, node.height);
-            }
-        }
-    }
-
-    /// Marks a block as applied and removes it from pending. Test-only.
-    #[cfg(test)]
-    fn mark_applied(&mut self, hash: &Hash256) {
-        self.mark_received_applied(hash);
-        self.remove_pending(hash);
-    }
-
-    /// Marks a received block as applied, removing it from the staging set.
-    pub fn mark_received_applied(&mut self, hash: &Hash256) {
-        self.remove_received(hash);
-    }
-
-    /// Drops a received (staged) block, re-queuing it for re-download.
-    pub fn drop_received_for_retry(&mut self, hash: &Hash256) {
-        if let Some(received) = self.remove_received(hash) {
-            self.next_request_height = self.next_request_height.min(received.height);
-        }
-    }
-
-    /// Drops a block from both received and pending, re-queuing it for retry.
-    pub fn drop_for_retry(&mut self, hash: &Hash256) {
-        self.drop_received_for_retry(hash);
-        if let Some(pending) = self.remove_pending(hash) {
-            self.next_request_height = self.next_request_height.min(pending.height);
-        }
-    }
-
     /// Rejects a malformed block delivery, source-aware (issue #1070).
     ///
     /// When the delivering peer owns the pending request for `hash`, the
@@ -2233,7 +2225,7 @@ impl DownloadWindow {
     /// unsolicited, the body is discarded and any existing pending request is
     /// preserved — the original owner may still supply the correct body.
     ///
-    /// The malformed body was never staged, so no received state is touched.
+    /// The malformed body was never staged, so the stager is not touched.
     pub fn reject_delivery(
         &mut self,
         hash: Hash256,
@@ -2311,17 +2303,6 @@ impl DownloadWindow {
         entries
     }
 
-    /// Discards a received-or-pending record outright — no re-queue. Used
-    /// when the stager drops a body whose header admission permanently
-    /// failed (peer-fault rejection, or [`DrainedBlock`] for a replaced
-    /// entry): the window must not keep a delivery that can never apply.
-    /// Re-requested bodies return to `pending` via `drop_for_retry`
-    /// instead.
-    pub fn discard_received(&mut self, hash: &Hash256) {
-        self.remove_received(hash);
-        self.remove_pending(hash);
-    }
-
     /// Records a body fetch the window does not own — a compact
     /// `getblocktxn` or fallback `getdata` already issued on `owner` —
     /// as pending so `next_peer_request` does not schedule a duplicate
@@ -2340,16 +2321,17 @@ impl DownloadWindow {
     /// into a re-request sweep of heights already applied.
     pub fn mark_owned_fetch(
         &mut self,
+        stager: &BlockStager,
         owner: PeerSource,
         hash: Hash256,
         height: u32,
         now: Instant,
     ) {
-        if self.pending.contains_key(&hash) || self.received.contains_key(&hash) {
+        if self.pending.contains_key(&hash) || stager.contains(&hash) {
             return;
         }
         if height < self.next_request_height
-            || !self.has_request_capacity()
+            || !self.has_request_capacity(stager)
             || self
                 .peer_inflight
                 .get(&owner.addr)
@@ -2367,14 +2349,8 @@ impl DownloadWindow {
         // An externally owned fetch is not one: keep the marker so a
         // proven-stall owner stays ineligible for the next prefix probe.
         let attempted_owner = self.prefix_probe_attempted_owner;
-        self.mark_requested(&request, owner, now);
+        self.mark_requested(stager, &request, owner, now);
         self.prefix_probe_attempted_owner = attempted_owner;
-    }
-
-    fn remove_received(&mut self, hash: &Hash256) -> Option<ReceivedBlock> {
-        let received = self.received.remove(hash)?;
-        self.received_bytes = self.received_bytes.saturating_sub(received.bytes);
-        Some(received)
     }
 
     fn remove_pending(&mut self, hash: &Hash256) -> Option<PendingBlock> {
@@ -2469,11 +2445,136 @@ mod tests {
 
     use bitcoin_rs_primitives::Hash256;
 
+    use bitcoin_rs_chain::Network;
+    use bitcoin_rs_primitives::{
+        Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+        consensus_bytes,
+    };
+
     use super::{
-        DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
+        BlockStager, DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
         FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, fast_sync_budget,
     };
     use crate::connection::{ConnectionId, PeerSource};
+
+    /// A stager whose budget mirrors `window`'s, so window-side backpressure
+    /// reads see the same bytes/counts a real sync pair would.
+    fn test_stager(window: &DownloadWindow) -> BlockStager {
+        BlockStager::new(window.budget)
+    }
+
+    /// A 256-header regtest chain: the height-`n` header hashes to `hash(n)`.
+    static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_primitives::Header>> =
+        std::sync::LazyLock::new(|| {
+            let genesis = Network::Regtest.genesis_block().header;
+            std::iter::successors(Some(genesis), |prev| {
+                let height = prev.time.saturating_sub(genesis.time).saturating_add(1);
+                let mut merkle = [0_u8; 32];
+                merkle[..4].copy_from_slice(&height.to_le_bytes());
+                Some(bitcoin_rs_primitives::Header {
+                    prev_blockhash: prev.compute_hash(),
+                    merkle_root: Hash256::from_le_bytes(&merkle),
+                    time: prev.time.saturating_add(1),
+                    ..*prev
+                })
+            })
+            .take(256)
+            .collect()
+        });
+
+    /// The [`TEST_CHAIN`] tree: every test hash resolves to the height its
+    /// byte names.
+    fn test_tree() -> bitcoin_rs_chain::BlockTree {
+        let mut tree = bitcoin_rs_chain::BlockTree::new();
+        let mut parent = None;
+        for header in TEST_CHAIN.iter() {
+            let inserted =
+                tree.insert_node(parent, *header, bitcoin_rs_chain::NodeStatus::HeaderValid);
+            parent = Some(inserted.unwrap_or_else(|error| panic!("test chain header: {error}")));
+        }
+        tree
+    }
+
+    /// The serialized size of the smallest padded test block: an empty
+    /// coinbase script.
+    const SMALL_BODY: usize = 141;
+
+    /// A one-coinbase block whose serialized size is exactly `total_bytes`.
+    /// The script-length prefix grows by 2 bytes at 253 and again at 65536,
+    /// so sizes 253, 254, 65538, and 65539 above the empty-script size do
+    /// not exist.
+    fn padded_regtest_block(total_bytes: usize) -> Block {
+        let wanted = total_bytes.saturating_sub(padded_regtest_block_with_script(0).total_size());
+        let script_len = match wanted {
+            0..=252 => wanted,
+            255..=65_537 => wanted - 2,
+            _ => wanted.saturating_sub(4),
+        };
+        let block = padded_regtest_block_with_script(script_len);
+        assert_eq!(block.total_size(), total_bytes);
+        block
+    }
+
+    fn padded_regtest_block_with_script(script_len: usize) -> Block {
+        Block {
+            header: Network::Regtest.genesis_block().header,
+            txs: vec![Tx {
+                version: 2,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::default(),
+                    script_sig: vec![0_u8; script_len].into(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                outputs: vec![TxOut {
+                    value: Amount::from_sat(0),
+                    script_pubkey: Script::new(),
+                }],
+                lock_time: LockTime::ZERO,
+            }],
+        }
+    }
+
+    /// Stages one `total_bytes`-long body into `stager`.
+    fn stage_body(
+        stager: &mut BlockStager,
+        hash: Hash256,
+        total_bytes: usize,
+        source: Option<PeerSource>,
+        now: Instant,
+    ) {
+        let block = padded_regtest_block(total_bytes);
+        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+        match stager.insert(hash, None, block, serialized, source, now) {
+            crate::StagedBlock::Memory { .. } => {}
+            other => panic!("stage_body refused: {other:?}"),
+        }
+    }
+
+    /// Test replacement for the deleted `mark_received` shorthand: stages the
+    /// body (the wire path's only staged store) and records the delivery,
+    /// attributed to the pending owner when one exists. Returns whether the
+    /// hash was not pending, as the deleted shorthand did.
+    fn receive_staged(
+        window: &mut DownloadWindow,
+        stager: &mut BlockStager,
+        hash: Hash256,
+        total_bytes: usize,
+        now: Instant,
+    ) -> bool {
+        let source = window.pending_owner(&hash);
+        stage_body(stager, hash, total_bytes, source, now);
+        window
+            .mark_received_from(hash, total_bytes, source, now)
+            .is_none()
+    }
+
+    /// Retires one staged body the way an applied commit does. The window
+    /// holds nothing for an applied body: its pending was released at
+    /// delivery, so only the stager entry is removed.
+    fn apply_staged(stager: &mut BlockStager, hash: &Hash256) {
+        stager.retire_applied(hash);
+    }
 
     fn test_source(addr: std::net::SocketAddr) -> PeerSource {
         PeerSource::for_test(addr)
@@ -2496,12 +2597,14 @@ mod tests {
 
     fn stall_owner(
         window: &mut DownloadWindow,
+        stager: &BlockStager,
+        tree: &bitcoin_rs_chain::BlockTree,
         next_apply_height: u32,
         apply_side_busy: bool,
         now: Instant,
     ) -> Option<std::net::SocketAddr> {
         window
-            .observe_stall(next_apply_height, apply_side_busy, now)
+            .observe_stall(next_apply_height, apply_side_busy, stager, tree, now)
             .map(|owner| owner.addr)
     }
 
@@ -2535,13 +2638,14 @@ mod tests {
             getdata_batch_limit: 4,
             ..test_budget()
         });
+        let stager = test_stager(&window);
         window.pending_bytes = 256 * 1024;
         window.peer_inflight.insert(
             std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
             super::PeerInflight { blocks: 2 },
         );
 
-        assert_eq!(window.request_peer_scan_limit(Instant::now()), 3);
+        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 3);
     }
 
     #[test]
@@ -2554,6 +2658,7 @@ mod tests {
             pending_timeout: Duration::ZERO,
             ..test_budget()
         });
+        let stager = test_stager(&window);
         let now = Instant::now();
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         for (byte, height) in [(1, 1_u32), (2, 2)] {
@@ -2573,7 +2678,7 @@ mod tests {
             .peer_inflight
             .insert(peer_addr, super::PeerInflight { blocks: 2 });
 
-        assert_eq!(window.request_peer_scan_limit(now), 2);
+        assert_eq!(window.request_peer_scan_limit(&stager, now), 2);
     }
 
     #[test]
@@ -2582,6 +2687,7 @@ mod tests {
             pending_timeout: Duration::from_secs(10),
             ..test_budget()
         });
+        let mut stager = test_stager(&window);
         let requested_at = Instant::now();
         let observed_at = requested_at + Duration::from_secs(10);
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
@@ -2597,7 +2703,13 @@ mod tests {
         );
         window.next_pending_deadline = Some(observed_at);
         assert_eq!(timeout_owner(&mut window, false, observed_at), None);
-        window.mark_received(block_hash, 80, observed_at);
+        receive_staged(
+            &mut window,
+            &mut stager,
+            block_hash,
+            SMALL_BODY,
+            observed_at,
+        );
         assert_eq!(timeout_owner(&mut window, false, observed_at), None);
         assert!(!window.peer_in_staller_cooldown(peer_addr, observed_at));
     }
@@ -2661,6 +2773,7 @@ mod tests {
     #[test]
     fn default_budget_keeps_full_request_window_for_large_blocks() {
         let mut window = DownloadWindow::new(super::default_sync_budget());
+        let stager = test_stager(&window);
         window.ewma_block_bytes = 2 * 1024 * 1024;
         window.pending_bytes = window
             .budget
@@ -2668,7 +2781,7 @@ mod tests {
             .saturating_sub(1)
             .saturating_mul(window.ewma_block_bytes);
 
-        assert!(window.has_request_capacity());
+        assert!(window.has_request_capacity(&stager));
     }
 
     #[test]
@@ -2718,6 +2831,7 @@ mod tests {
             pending_timeout: Duration::from_secs(10),
             ..test_budget()
         });
+        let mut stager = test_stager(&window);
         let now = Instant::now();
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let earliest = hash(0x91);
@@ -2746,9 +2860,9 @@ mod tests {
             .peer_inflight
             .insert(peer_addr, super::PeerInflight { blocks: 2 });
 
-        let needs_height_lookup = window.mark_received(earliest, 80, now);
+        let unsolicited = receive_staged(&mut window, &mut stager, earliest, SMALL_BODY, now);
 
-        assert!(!needs_height_lookup);
+        assert!(!unsolicited);
         assert_eq!(window.pending_len(), 1);
         assert!(window.contains_pending(&later));
         assert_eq!(
@@ -2758,14 +2872,15 @@ mod tests {
     }
 
     #[test]
-    fn mark_received_applied_removes_only_received_accounting() {
+    fn retire_applied_leaves_pending_accounting_untouched() {
         let mut window = DownloadWindow::new(test_budget());
+        let mut stager = test_stager(&window);
         let now = Instant::now();
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let applied = hash(0xa1);
         let pending = hash(0xa2);
         let pending_bytes = 256 * 1024;
-        let received_bytes = 80;
+        let received_bytes = SMALL_BODY;
         window.pending.insert(
             pending,
             super::PendingBlock {
@@ -2776,46 +2891,41 @@ mod tests {
             },
         );
         window.pending_bytes = pending_bytes;
-        window.received.insert(
-            applied,
-            super::ReceivedBlock {
-                height: 1,
-                bytes: received_bytes,
-            },
-        );
-        window.received_bytes = received_bytes;
+        // The staged body lives only in the stager now: seed it there.
+        stage_body(&mut stager, applied, received_bytes, None, now);
 
-        window.mark_received_applied(&applied);
+        apply_staged(&mut stager, &applied);
 
-        assert_eq!(window.received_len(), 0);
-        assert_eq!(window.received_bytes, 0);
+        assert_eq!(stager.received_len(), 0);
+        assert_eq!(stager.received_bytes(), 0);
         assert_eq!(window.pending_len(), 1);
         assert!(window.contains_pending(&pending));
-        assert_eq!(window.pending_bytes(), pending_bytes);
+        assert_eq!(window.pending_bytes, pending_bytes);
     }
 
     #[test]
     fn staged_byte_exhaustion_stops_new_requests_until_applied() {
         let mut window = DownloadWindow::new(SyncBudget {
-            max_received_bytes: 100,
+            max_received_bytes: SMALL_BODY,
             ..test_budget()
         });
+        let mut stager = test_stager(&window);
         let staged = hash(0xb1);
-        assert!(window.has_request_capacity());
-        assert_ne!(window.request_peer_scan_limit(Instant::now()), 0);
+        assert!(window.has_request_capacity(&stager));
+        assert_ne!(window.request_peer_scan_limit(&stager, Instant::now()), 0);
 
-        window.mark_received(staged, 100, Instant::now());
+        receive_staged(&mut window, &mut stager, staged, SMALL_BODY, Instant::now());
 
         // Staged bytes at the budget: stop issuing new block requests instead
         // of letting arrivals bounce off the exhausted stager.
-        assert!(!window.has_request_capacity());
-        assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
+        assert!(!window.has_request_capacity(&stager));
+        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 0);
 
-        window.mark_received_applied(&staged);
+        apply_staged(&mut stager, &staged);
 
         // Applying the staged block releases its bytes and reopens the window.
-        assert!(window.has_request_capacity());
-        assert_ne!(window.request_peer_scan_limit(Instant::now()), 0);
+        assert!(window.has_request_capacity(&stager));
+        assert_ne!(window.request_peer_scan_limit(&stager, Instant::now()), 0);
     }
 
     #[test]
@@ -2828,30 +2938,32 @@ mod tests {
             getdata_batch_limit: 128,
             ..test_budget()
         });
+        let stager = test_stager(&window);
         let now = Instant::now();
 
         // Below the threshold: single-peer deep window — one peer can take
         // the full 128, so only one peer needs scanning.
         window.set_fanout_eligible_peers(7, now);
         assert!(!window.fanout_active());
-        assert_eq!(window.request_peer_scan_limit(now), 1);
+        assert_eq!(window.request_peer_scan_limit(&stager, now), 1);
 
         // At the threshold: shallow per-peer cap engages and the scan fans
         // out to enough peers to fill the window (128 / 16 = 8).
         window.set_fanout_eligible_peers(8, now);
         assert!(window.fanout_active());
-        assert_eq!(window.request_peer_scan_limit(now), 8);
+        assert_eq!(window.request_peer_scan_limit(&stager, now), 8);
     }
 
     #[test]
     fn fast_sync_budget_stripes_window_across_fast_outbound_target() {
         let mut window = DownloadWindow::new(fast_sync_budget());
+        let stager = test_stager(&window);
         let now = Instant::now();
 
         // One peer keeps the deep fallback.
         window.set_fanout_eligible_peers(1, now);
         assert!(!window.fanout_active());
-        assert_eq!(window.request_peer_scan_limit(now), 1);
+        assert_eq!(window.request_peer_scan_limit(&stager, now), 1);
 
         // A second eligible peer engages fan-out immediately.
         window.set_fanout_eligible_peers(FAST_MIN_PEERS_FOR_FANOUT, now);
@@ -2866,7 +2978,7 @@ mod tests {
             FAST_BLOCKS_IN_TRANSIT_PER_PEER
         );
         assert_eq!(
-            window.request_peer_scan_limit(now),
+            window.request_peer_scan_limit(&stager, now),
             FAST_OUTBOUND_PEER_TARGET
         );
     }
@@ -2881,18 +2993,19 @@ mod tests {
             max_received_bytes: 4 * slot,
             ..test_budget()
         });
+        let mut stager = test_stager(&window);
         for byte in [0xc1, 0xc2, 0xc3] {
-            window.mark_received(hash(byte), slot, Instant::now());
+            receive_staged(&mut window, &mut stager, hash(byte), slot, Instant::now());
         }
 
-        assert!(window.has_request_capacity());
-        assert_eq!(window.request_peer_scan_limit(Instant::now()), 1);
+        assert!(window.has_request_capacity(&stager));
+        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 1);
 
         // The fourth staged block consumes the last slot: headroom hits zero
         // and request capacity closes before any eviction can happen.
-        window.mark_received(hash(0xc4), slot, Instant::now());
-        assert!(!window.has_request_capacity());
-        assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
+        receive_staged(&mut window, &mut stager, hash(0xc4), slot, Instant::now());
+        assert!(!window.has_request_capacity(&stager));
+        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 0);
     }
 
     #[test]
@@ -2904,19 +3017,32 @@ mod tests {
             max_received_blocks: 4,
             ..test_budget()
         });
+        let mut stager = test_stager(&window);
         for byte in [0xd1, 0xd2, 0xd3] {
-            window.mark_received(hash(byte), 80, Instant::now());
+            receive_staged(
+                &mut window,
+                &mut stager,
+                hash(byte),
+                SMALL_BODY,
+                Instant::now(),
+            );
         }
 
-        assert!(window.has_request_capacity());
-        assert_eq!(window.request_peer_scan_limit(Instant::now()), 1);
+        assert!(window.has_request_capacity(&stager));
+        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 1);
 
         // The fourth staged block consumes the last slot: count headroom hits
         // zero and requests stop — overflow becomes request backpressure
         // before the stager's count budget could ever evict.
-        window.mark_received(hash(0xd4), 80, Instant::now());
-        assert!(!window.has_request_capacity());
-        assert_eq!(window.request_peer_scan_limit(Instant::now()), 0);
+        receive_staged(
+            &mut window,
+            &mut stager,
+            hash(0xd4),
+            SMALL_BODY,
+            Instant::now(),
+        );
+        assert!(!window.has_request_capacity(&stager));
+        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 0);
     }
 
     #[test]
@@ -2935,6 +3061,7 @@ mod tests {
             pending_timeout: Duration::from_secs(10),
             ..test_budget()
         });
+        let mut stager = test_stager(&window);
         let now = Instant::now();
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         for (byte, height) in [(0xe1, 1_u32), (0xe2, 2)] {
@@ -2954,13 +3081,13 @@ mod tests {
             .peer_inflight
             .insert(peer_addr, super::PeerInflight { blocks: 2 });
         for byte in [0xe3, 0xe4] {
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
 
-        assert_eq!(window.request_peer_scan_limit(now), 0);
+        assert_eq!(window.request_peer_scan_limit(&stager, now), 0);
 
         let after_timeout = now + Duration::from_secs(10);
-        assert_ne!(window.request_peer_scan_limit(after_timeout), 0);
+        assert_ne!(window.request_peer_scan_limit(&stager, after_timeout), 0);
     }
 
     #[test]
@@ -3045,13 +3172,14 @@ mod tests {
         t0: Instant,
         gap: Duration,
     ) -> Instant {
+        let mut stager = test_stager(window);
         insert_pending(window, test_source(peer), hash(0x01), 1, t0);
-        window.mark_received(hash(0x01), 80, t0);
-        window.mark_applied(&hash(0x01));
+        receive_staged(window, &mut stager, hash(0x01), SMALL_BODY, t0);
+        apply_staged(&mut stager, &hash(0x01));
         let t1 = t0 + gap;
         insert_pending(window, test_source(peer), hash(0x02), 2, t1);
-        window.mark_received(hash(0x02), 80, t1);
-        window.mark_applied(&hash(0x02));
+        receive_staged(window, &mut stager, hash(0x02), SMALL_BODY, t1);
+        apply_staged(&mut stager, &hash(0x02));
         t1
     }
 
@@ -3061,23 +3189,24 @@ mod tests {
     /// arithmetic matches a fast network while the cold-start suppression is
     /// disarmed), then the front (height 3) is in flight to `staller` while
     /// `healthy` delivered heights 4..=6, leaving zero staged-count headroom
-    /// — every stall-predicate term holds. Returns the window and the
-    /// construction instant (100ms after `t0`); observe with
+    /// — every stall-predicate term holds. Returns the window, the
+    /// coupled stager, and the construction instant (100ms after `t0`); observe with
     /// `next_apply_height` 3.
     fn window_blocked_on_staller(
         staller: std::net::SocketAddr,
         healthy: std::net::SocketAddr,
         t0: Instant,
-    ) -> (DownloadWindow, Instant) {
+    ) -> (DownloadWindow, BlockStager, Instant) {
         let mut window = DownloadWindow::new(stall_budget());
         let t1 = seed_front_cadence(&mut window, healthy, t0, Duration::from_millis(100));
         assert_eq!(window.front_interval_ewma_ms(), Some(100));
+        let mut stager = test_stager(&window);
         insert_pending(&mut window, test_source(staller), hash(0x03), 3, t1);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
             insert_pending(&mut window, test_source(healthy), hash(byte), height, t1);
-            window.mark_received(hash(byte), 80, t1);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, t1);
         }
-        (window, t1)
+        (window, stager, t1)
     }
 
     fn staller_addr() -> std::net::SocketAddr {
@@ -3095,11 +3224,23 @@ mod tests {
         // how much time passes.
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
+        let stager = test_stager(&window);
+        let tree = test_tree();
         insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, now);
 
-        assert_eq!(stall_owner(&mut window, 1, false, now), None);
         assert_eq!(
-            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, &stager, &tree, 1, false, now),
+            None
+        );
+        assert_eq!(
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                1,
+                false,
+                now + Duration::from_mins(1)
+            ),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -3112,6 +3253,8 @@ mod tests {
         // attaches even with delivered successors and zero headroom.
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         insert_pending(&mut window, test_source(staller_addr()), hash(0x02), 2, now);
         for (byte, height) in [(0x03_u8, 3_u32), (0x04, 4), (0x05, 5)] {
             insert_pending(
@@ -3121,12 +3264,22 @@ mod tests {
                 height,
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
 
-        assert_eq!(stall_owner(&mut window, 1, false, now), None);
         assert_eq!(
-            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
+            stall_owner(&mut window, &stager, &tree, 1, false, now),
+            None
+        );
+        assert_eq!(
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                1,
+                false,
+                now + Duration::from_mins(1)
+            ),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -3144,12 +3297,17 @@ mod tests {
         // capacity_closed`.)
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, now);
         insert_pending(&mut window, test_source(healthy_addr()), hash(0x02), 2, now);
-        window.mark_received(hash(0x02), 80, now);
-        assert!(window.has_request_capacity());
+        receive_staged(&mut window, &mut stager, hash(0x02), SMALL_BODY, now);
+        assert!(window.has_request_capacity(&stager));
 
-        assert_eq!(stall_owner(&mut window, 1, false, now), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 1, false, now),
+            None
+        );
         assert!(window.stalling_peer().is_none());
 
         // Chain-tail decision (ADV-2): this same state at the header tip
@@ -3159,7 +3317,14 @@ mod tests {
         // Below the staged fraction the predicate stays false no matter how
         // much time passes.
         assert_eq!(
-            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                1,
+                false,
+                now + Duration::from_mins(1)
+            ),
             None
         );
         assert!(window.stalling_peer().is_none());
@@ -3175,6 +3340,8 @@ mod tests {
         // semantics are unchanged: the episode still runs the same clock to
         // the same threshold.
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         let now = seed_front_cadence(
             &mut window,
             healthy_addr(),
@@ -3191,25 +3358,35 @@ mod tests {
                 height,
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
         assert!(
-            window.has_request_capacity(),
+            window.has_request_capacity(&stager),
             "the construction must keep request capacity open: arming no longer reads it"
         );
 
         // U7 no-blame guard, under the new arming term: while the apply
         // side is busy the armed-shaped window must not start an episode.
-        assert_eq!(stall_owner(&mut window, 3, true, now), None);
+        assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
         assert!(window.stalling_peer().is_none());
 
         // Apply idle: the staged fraction arms, and the unchanged
         // conviction clock fires at the unchanged threshold.
-        assert_eq!(stall_owner(&mut window, 3, false, now), None);
-        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
-        assert!(window.has_request_capacity());
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
+            stall_owner(&mut window, &stager, &tree, 3, false, now),
+            None
+        );
+        assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
+        assert!(window.has_request_capacity(&stager));
+        assert_eq!(
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(2)
+            ),
             Some(staller_addr())
         );
     }
@@ -3229,6 +3406,8 @@ mod tests {
                 getdata_batch_limit: depth,
                 ..stall_budget()
             });
+            let mut stager = test_stager(&window);
+            let tree = test_tree();
             let now = seed_front_cadence(
                 &mut window,
                 healthy_addr(),
@@ -3247,10 +3426,13 @@ mod tests {
                     u32::from(byte),
                     now,
                 );
-                window.mark_received(hash(byte), 80, now);
+                receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
             }
-            assert!(window.has_request_capacity());
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            assert!(window.has_request_capacity(&stager));
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert!(
                 window.stalling_peer().is_none(),
                 "one below half the window must not arm (depth {depth})"
@@ -3265,9 +3447,12 @@ mod tests {
                 u32::from(byte),
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
-            assert!(window.has_request_capacity());
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
+            assert!(window.has_request_capacity(&stager));
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert_eq!(
                 window.stalling_peer(),
                 Some((staller_addr(), now)),
@@ -3289,9 +3474,11 @@ mod tests {
             max_received_blocks: 10,
             max_peer_inflight: 10,
             getdata_batch_limit: 10,
-            max_received_bytes: 4 * 80,
+            max_received_bytes: 4 * SMALL_BODY,
             ..stall_budget()
         });
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         let now = seed_front_cadence(
             &mut window,
             healthy_addr(),
@@ -3307,17 +3494,27 @@ mod tests {
                 height,
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
         assert!(
-            !window.has_request_capacity(),
+            !window.has_request_capacity(&stager),
             "the staged-byte clamp must close request capacity (the old arming trigger)"
         );
 
-        assert_eq!(stall_owner(&mut window, 3, false, now), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, now),
+            None
+        );
         assert!(window.stalling_peer().is_none());
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_mins(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_mins(1)
+            ),
             None,
             "capacity-closed below the staged fraction must never arm"
         );
@@ -3326,18 +3523,36 @@ mod tests {
 
     #[test]
     fn stall_fires_after_threshold_and_starts_cooldown() {
-        let (mut window, now) =
+        let (mut window, stager, now) =
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+        let tree = test_tree();
 
         // Episode starts on first observation; no fire before the threshold.
-        assert_eq!(stall_owner(&mut window, 3, false, now), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, now),
+            None
+        );
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(1)
+            ),
             None
         );
 
-        let fired = stall_owner(&mut window, 3, false, now + Duration::from_secs(2));
+        let fired = stall_owner(
+            &mut window,
+            &stager,
+            &tree,
+            3,
+            false,
+            now + Duration::from_secs(2),
+        );
 
         assert_eq!(fired, Some(staller_addr()));
         assert!(window.stalling_peer().is_none());
@@ -3349,27 +3564,37 @@ mod tests {
 
     #[test]
     fn stall_timeout_doubles_per_fire_caps_and_decays_on_front_arrival() {
-        let (mut window, now) =
+        let (mut window, mut stager, now) =
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+        let tree = test_tree();
         assert_eq!(window.stall_timeout(), Duration::from_secs(2));
 
         // Fire 1 at +2s: threshold doubles to 4s.
-        stall_owner(&mut window, 3, false, now);
+        stall_owner(&mut window, &stager, &tree, 3, false, now);
         let mut at = now + Duration::from_secs(2);
-        assert_eq!(stall_owner(&mut window, 3, false, at), Some(staller_addr()));
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, at),
+            Some(staller_addr())
+        );
         assert_eq!(window.stall_timeout(), Duration::from_secs(4));
 
         // The window state still satisfies the predicate (the disconnect and
         // re-queue are the sync layer's job), so a fresh episode starts and
         // must now survive the doubled threshold: fire 2 doubles to the 8s
         // cap, fire 3 stays capped.
-        stall_owner(&mut window, 3, false, at);
+        stall_owner(&mut window, &stager, &tree, 3, false, at);
         at += Duration::from_secs(4);
-        assert_eq!(stall_owner(&mut window, 3, false, at), Some(staller_addr()));
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, at),
+            Some(staller_addr())
+        );
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
-        stall_owner(&mut window, 3, false, at);
+        stall_owner(&mut window, &stager, &tree, 3, false, at);
         at += Duration::from_secs(8);
-        assert_eq!(stall_owner(&mut window, 3, false, at), Some(staller_addr()));
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, at),
+            Some(staller_addr())
+        );
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
 
         // Progress: the front block arrives — any running episode ends, and
@@ -3381,8 +3606,8 @@ mod tests {
         // above the bare x0.85 decay (8s x0.85 = 6.8s), so the floor binds.
         // (The bare decay arithmetic in isolation is pinned by
         // `stall_timeout_decays_across_rotation_and_shields_slow_honest_peer`.)
-        stall_owner(&mut window, 3, false, at);
-        window.mark_received(hash(0x03), 80, at);
+        stall_owner(&mut window, &stager, &tree, 3, false, at);
+        receive_staged(&mut window, &mut stager, hash(0x03), SMALL_BODY, at);
         assert_eq!(window.front_interval_ewma_ms(), Some(3575));
         assert_eq!(window.stall_timeout(), Duration::from_millis(7150));
         assert!(window.stalling_peer().is_none());
@@ -3396,6 +3621,8 @@ mod tests {
         // the pending-timeout fallback); the 100ms cadence keeps the decay
         // floor at the static 2s.
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         let now = seed_front_cadence(
             &mut window,
             healthy_addr(),
@@ -3411,45 +3638,79 @@ mod tests {
                 height,
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
         insert_pending(&mut window, test_source(healthy_addr()), hash(0x06), 6, now);
 
-        stall_owner(&mut window, 3, false, now);
+        stall_owner(&mut window, &stager, &tree, 3, false, now);
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
 
-        window.mark_received(hash(0x06), 80, now + Duration::from_secs(1));
+        receive_staged(
+            &mut window,
+            &mut stager,
+            hash(0x06),
+            SMALL_BODY,
+            now + Duration::from_secs(1),
+        );
 
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(2)
+            ),
             Some(staller_addr())
         );
     }
 
     #[test]
     fn no_blame_guard_keeps_stall_clock_idle_while_apply_side_is_busy() {
-        let (mut window, now) =
+        let (mut window, stager, now) =
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+        let tree = test_tree();
 
         // With the apply side busy the clock never runs, no matter how long
         // the state persists.
-        assert_eq!(stall_owner(&mut window, 3, true, now), None);
+        assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
         assert!(window.stalling_peer().is_none());
         let later = now + Duration::from_mins(1);
-        assert_eq!(stall_owner(&mut window, 3, true, later), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, true, later),
+            None
+        );
         assert!(window.stalling_peer().is_none());
 
         // Once the apply side drains, blame starts from scratch — the busy
         // interval is never retroactively charged to the peer.
-        assert_eq!(stall_owner(&mut window, 3, false, later), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, later),
+            None
+        );
         assert_eq!(window.stalling_peer(), Some((staller_addr(), later)));
         assert_eq!(
-            stall_owner(&mut window, 3, false, later + Duration::from_secs(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                later + Duration::from_secs(1)
+            ),
             None
         );
         assert_eq!(
-            stall_owner(&mut window, 3, false, later + Duration::from_secs(2)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                later + Duration::from_secs(2)
+            ),
             Some(staller_addr())
         );
     }
@@ -3566,52 +3827,87 @@ mod tests {
     fn stall_episode_counters_cover_every_clear_path() {
         let recorder = CounterRecorder::default();
         metrics::with_local_recorder(&recorder, || {
-            let (mut window, now) =
+            let (mut window, mut stager, now) =
                 window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+            let tree = test_tree();
 
             // No running episode: the guard paths must not count a clear.
-            assert_eq!(stall_owner(&mut window, 3, true, now), None);
-            assert_eq!(stall_owner(&mut window, 4, false, now), None);
+            assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 4, false, now),
+                None
+            );
             assert_eq!(recorder.cleared("apply_busy"), 0);
             assert_eq!(recorder.cleared("predicate"), 0);
             assert_eq!(recorder.started(), 0);
 
             // apply_busy: a running episode cleared by the no-blame guard.
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert_eq!(recorder.started(), 1);
-            assert_eq!(stall_owner(&mut window, 3, true, now), None);
+            assert_eq!(stall_owner(&mut window, &stager, &tree, 3, true, now), None);
             assert_eq!(recorder.cleared("apply_busy"), 1);
 
             // predicate: re-arm, then a predicate term goes false (the
             // frontier moves past the pending front, so term 1 fails).
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert_eq!(recorder.started(), 2);
-            assert_eq!(stall_owner(&mut window, 4, false, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 4, false, now),
+                None
+            );
             assert_eq!(recorder.cleared("predicate"), 1);
 
             // front_moved: re-arm, then re-key the front to another peer at
             // the same frontier while every predicate term still holds — the
             // old episode clears as front_moved and a new one starts.
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert_eq!(recorder.started(), 3);
             window.remove_pending(&hash(0x03));
             insert_pending(&mut window, test_source(healthy_addr()), hash(0x07), 3, now);
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert_eq!(recorder.cleared("front_moved"), 1);
             assert_eq!(recorder.started(), 4);
 
             // peer_delivery: the blamed peer (now `healthy`, owning the
             // re-keyed front) delivers a requested block.
-            window.mark_received(hash(0x07), 80, now + Duration::from_millis(100));
+            receive_staged(
+                &mut window,
+                &mut stager,
+                hash(0x07),
+                SMALL_BODY,
+                now + Duration::from_millis(100),
+            );
             assert_eq!(recorder.cleared("peer_delivery"), 1);
 
             // fired: a fresh construction runs an episode to conviction.
-            let (mut window, now) =
+            let (mut window, stager, now) =
                 window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
-            assert_eq!(stall_owner(&mut window, 3, false, now), None);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, 3, false, now),
+                None
+            );
             assert_eq!(recorder.started(), 5);
             assert_eq!(
-                stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
+                stall_owner(
+                    &mut window,
+                    &stager,
+                    &tree,
+                    3,
+                    false,
+                    now + Duration::from_secs(2)
+                ),
                 Some(staller_addr())
             );
             assert_eq!(recorder.cleared("fired"), 1);
@@ -3647,14 +3943,25 @@ mod tests {
     /// [`info_logged`] for why not via log capture).
     #[test]
     fn stall_episode_logs_info_once_per_episode_after_one_second() {
-        let (mut window, now) =
+        let (mut window, stager, now) =
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
+        let tree = test_tree();
 
         // Below the 1s log age: episode running, nothing emitted.
-        assert_eq!(stall_owner(&mut window, 3, false, now), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, now),
+            None
+        );
         assert_eq!(info_logged(&window), Some(false));
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_millis(500)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_millis(500)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(false));
@@ -3662,16 +3969,37 @@ mod tests {
         // Past 1s: the latch flips on the emitting tick and stays latched —
         // one line, no matter how many further ticks the episode survives.
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(1)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_millis(1500)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_millis(1500)
+            ),
             None
         );
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_millis(1900)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_millis(1900)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
@@ -3679,17 +4007,38 @@ mod tests {
         // Fire ends the episode; the replacement episode (judged against the
         // doubled threshold) carries a fresh latch and re-emits once at 1s.
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(2)
+            ),
             Some(staller_addr())
         );
         assert_eq!(info_logged(&window), None);
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(2)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(2)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(false));
         assert_eq!(
-            stall_owner(&mut window, 3, false, now + Duration::from_secs(4)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                now + Duration::from_secs(4)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
@@ -3703,6 +4052,8 @@ mod tests {
     fn stall_episode_logs_info_during_ewma_cold_start_without_firing() {
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, now);
         for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
             insert_pending(
@@ -3712,20 +4063,37 @@ mod tests {
                 height,
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
         assert_eq!(window.front_interval_ewma_ms(), None);
 
-        assert_eq!(stall_owner(&mut window, 1, false, now), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 1, false, now),
+            None
+        );
         assert_eq!(info_logged(&window), Some(false));
         // The INFO latch flips at 1s, but an unseeded window never convicts.
         assert_eq!(
-            stall_owner(&mut window, 1, false, now + Duration::from_secs(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                1,
+                false,
+                now + Duration::from_secs(1)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
         assert_eq!(
-            stall_owner(&mut window, 1, false, now + Duration::from_mins(1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                1,
+                false,
+                now + Duration::from_mins(1)
+            ),
             None
         );
         assert_eq!(info_logged(&window), Some(true));
@@ -3758,6 +4126,8 @@ mod tests {
             ..stall_budget()
         };
         let mut window = DownloadWindow::new(budget);
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
 
         // Pre-seed: the network has already demonstrated its 3s front
         // cadence — two front advances 3s apart seed the interval EWMA at
@@ -3769,12 +4139,12 @@ mod tests {
         // the first two blocks of the session anyway, long before blocks
         // grow past one threshold of transfer time.
         insert_pending(&mut window, test_source(peer_addr(0)), hash(0x01), 1, t0);
-        window.mark_received(hash(0x01), 80, t0);
-        window.mark_applied(&hash(0x01));
+        receive_staged(&mut window, &mut stager, hash(0x01), SMALL_BODY, t0);
+        apply_staged(&mut stager, &hash(0x01));
         let t1 = t0 + Duration::from_secs(3);
         insert_pending(&mut window, test_source(peer_addr(0)), hash(0x02), 2, t1);
-        window.mark_received(hash(0x02), 80, t1);
-        window.mark_applied(&hash(0x02));
+        receive_staged(&mut window, &mut stager, hash(0x02), SMALL_BODY, t1);
+        apply_staged(&mut stager, &hash(0x02));
         assert_eq!(window.front_interval_ewma_ms(), Some(3000));
         assert_eq!(
             window.stall_timeout(),
@@ -3796,7 +4166,7 @@ mod tests {
             }
         }
         // Nothing staged yet: download-bound, no episode regardless of time.
-        assert_eq!(stall_owner(&mut window, 3, false, t1), None);
+        assert_eq!(stall_owner(&mut window, &stager, &tree, 3, false, t1), None);
 
         for round in 0..3u8 {
             let at = t1 + Duration::from_secs(3) * (u32::from(round) + 1);
@@ -3804,10 +4174,10 @@ mod tests {
                 // Highest remaining block of the stripe first: the front
                 // (height 3, peer 0) arrives only in the last round.
                 let height = peer * 3 + 5 - round;
-                window.mark_received(hash(height), 80, at);
+                receive_staged(&mut window, &mut stager, hash(height), SMALL_BODY, at);
             }
             assert_eq!(
-                stall_owner(&mut window, 3, false, at),
+                stall_owner(&mut window, &stager, &tree, 3, false, at),
                 None,
                 "a streaming peer must never fire (round {round})"
             );
@@ -3817,7 +4187,14 @@ mod tests {
             // pre-fix drip fired exactly here) but under the 6s adaptive
             // floor.
             assert_eq!(
-                stall_owner(&mut window, 3, false, at + Duration::from_secs(2)),
+                stall_owner(
+                    &mut window,
+                    &stager,
+                    &tree,
+                    3,
+                    false,
+                    at + Duration::from_secs(2)
+                ),
                 None,
                 "a mid-gap observation must never fire on a streaming peer (round {round})"
             );
@@ -3852,14 +4229,24 @@ mod tests {
         // pending and a staged successor exist.
         insert_pending(&mut window, test_source(peer_addr(0)), hash(27), 27, end);
         insert_pending(&mut window, test_source(peer_addr(1)), hash(28), 28, end);
-        window.mark_received(hash(28), 80, end);
-        assert_eq!(stall_owner(&mut window, 27, false, end), None);
+        receive_staged(&mut window, &mut stager, hash(28), SMALL_BODY, end);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 27, false, end),
+            None
+        );
         assert_eq!(
             window.stalling_peer().map(|(addr, _)| addr),
             Some(peer_addr(0))
         );
         assert_eq!(
-            stall_owner(&mut window, 27, false, end + Duration::from_secs(7)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                27,
+                false,
+                end + Duration::from_secs(7)
+            ),
             None,
             "a slow honest front owner must stay under the preserved adaptive floor"
         );
@@ -3877,6 +4264,8 @@ mod tests {
         // to the pending-timeout fallback); the 100ms cadence keeps the
         // decay floor at the static 2s.
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         let now = seed_front_cadence(
             &mut window,
             healthy_addr(),
@@ -3896,28 +4285,47 @@ mod tests {
                 height,
                 now,
             );
-            window.mark_received(hash(byte), 80, now);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
 
-        assert_eq!(stall_owner(&mut window, 3, false, now), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, now),
+            None
+        );
         assert_eq!(window.stalling_peer(), Some((staller_addr(), now)));
 
         // The episode peer delivers its mid-window block at +1.5s: progress,
         // episode cleared (and no threshold decay — not the front).
-        window.mark_received(hash(0x06), 80, now + Duration::from_millis(1500));
+        receive_staged(
+            &mut window,
+            &mut stager,
+            hash(0x06),
+            SMALL_BODY,
+            now + Duration::from_millis(1500),
+        );
         assert!(window.stalling_peer().is_none());
         assert_eq!(window.stall_timeout(), Duration::from_secs(2));
 
         // +2.5s (past the original episode's threshold): blame restarts from
         // the delivery, no fire.
         let restarted = now + Duration::from_millis(2500);
-        assert_eq!(stall_owner(&mut window, 3, false, restarted), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, restarted),
+            None
+        );
         assert_eq!(window.stalling_peer(), Some((staller_addr(), restarted)));
 
         // No deliveries for a full threshold after that: a true staller now,
         // and it fires.
         assert_eq!(
-            stall_owner(&mut window, 3, false, restarted + Duration::from_secs(2)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                restarted + Duration::from_secs(2)
+            ),
             Some(staller_addr())
         );
     }
@@ -3938,12 +4346,16 @@ mod tests {
         // static 2s — this test pins the bare x0.85 decay arithmetic. The
         // adaptive-floor interaction is pinned separately in
         // `stall_decay_limit_cycle_stops_at_adaptive_floor`.
-        let (mut window, now) =
+        let (mut window, mut stager, now) =
             window_blocked_on_staller(staller_addr(), healthy_addr(), Instant::now());
-        assert_eq!(stall_owner(&mut window, 3, false, now), None);
+        let tree = test_tree();
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, 3, false, now),
+            None
+        );
         let fired_at = now + Duration::from_secs(2);
         assert_eq!(
-            stall_owner(&mut window, 3, false, fired_at),
+            stall_owner(&mut window, &stager, &tree, 3, false, fired_at),
             Some(staller_addr())
         );
         assert_eq!(window.stall_timeout(), Duration::from_secs(4));
@@ -3959,7 +4371,7 @@ mod tests {
             3,
             fired_at,
         );
-        window.mark_received(hash(0x03), 80, fired_at);
+        receive_staged(&mut window, &mut stager, hash(0x03), SMALL_BODY, fired_at);
         assert_eq!(window.front_interval_ewma_ms(), Some(575));
         assert_eq!(
             window.stall_timeout(),
@@ -3980,15 +4392,25 @@ mod tests {
                 height,
                 fired_at,
             );
-            window.mark_received(hash(byte), 80, fired_at);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, fired_at);
         }
-        assert_eq!(stall_owner(&mut window, 7, false, fired_at), None);
         assert_eq!(
-            stall_owner(&mut window, 7, false, fired_at + Duration::from_secs(3)),
+            stall_owner(&mut window, &stager, &tree, 7, false, fired_at),
+            None
+        );
+        assert_eq!(
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                7,
+                false,
+                fired_at + Duration::from_secs(3)
+            ),
             None,
             "a ~3s honest front owner must not fire while the threshold is elevated"
         );
-        window.mark_received(hash(0x07), 80, fired_at);
+        receive_staged(&mut window, &mut stager, hash(0x07), SMALL_BODY, fired_at);
 
         // Gradual 0.85 steps down to the floor, never below it. All these
         // same-instant front advances are skipped batch samples: the EWMA
@@ -4007,7 +4429,7 @@ mod tests {
                 u32::from(byte),
                 fired_at,
             );
-            window.mark_received(hash(byte), 80, fired_at);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, fired_at);
             assert_eq!(window.stall_timeout(), expected);
         }
         assert_eq!(window.front_interval_ewma_ms(), Some(575));
@@ -4028,13 +4450,19 @@ mod tests {
         // defers an unseeded window to the pending-timeout fallback, pinned
         // by `cold_start_unseeded_ewma_never_fires_and_defers_to_fallback`),
         // so even the FIRST conviction is judged at the 6s adaptive floor.
-        let (mut window, front, at, _silent) = limit_cycle_window_state();
+        let (mut window, stager, front, at, _silent) = limit_cycle_window_state();
+        let tree = test_tree();
         assert_eq!(window.front_interval_ewma_ms(), Some(3239));
         // No re-fire: the honest 3s owner must never cross the adaptive floor.
-        assert_eq!(stall_owner(&mut window, u32::from(front), false, at), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, u32::from(front), false, at),
+            None
+        );
         assert_eq!(
             stall_owner(
                 &mut window,
+                &stager,
+                &tree,
                 u32::from(front),
                 false,
                 at + Duration::from_secs(3)
@@ -4049,14 +4477,18 @@ mod tests {
         // Companion to `stall_decay_limit_cycle_stops_at_adaptive_floor`:
         // once the decay floor stabilises at 2g, a genuinely silent peer that
         // holds the front must still convict at the elevated threshold.
-        let (mut window, front, at, silent) = limit_cycle_window_state();
+        let (mut window, mut stager, front, at, silent) = limit_cycle_window_state();
+        let tree = test_tree();
 
         // A true staller now owns the front: zero deliveries while the
         // healthy peer keeps streaming successors. The episode survives the
         // successor arrival (different peer, not the front hash) and convicts
         // at the adaptive ~2g threshold — 6.478s, far inside the 60s
         // pending-timeout fallback.
-        assert_eq!(stall_owner(&mut window, u32::from(front), false, at), None);
+        assert_eq!(
+            stall_owner(&mut window, &stager, &tree, u32::from(front), false, at),
+            None
+        );
         insert_pending(
             &mut window,
             test_source(healthy_addr()),
@@ -4064,10 +4496,18 @@ mod tests {
             u32::from(front) + 4,
             at,
         );
-        window.mark_received(hash(front + 4), 80, at + Duration::from_secs(2));
+        receive_staged(
+            &mut window,
+            &mut stager,
+            hash(front + 4),
+            SMALL_BODY,
+            at + Duration::from_secs(2),
+        );
         assert_eq!(
             stall_owner(
                 &mut window,
+                &stager,
+                &tree,
                 u32::from(front),
                 false,
                 at + Duration::from_secs(3)
@@ -4078,6 +4518,8 @@ mod tests {
         assert_eq!(
             stall_owner(
                 &mut window,
+                &stager,
+                &tree,
                 u32::from(front),
                 false,
                 at + Duration::from_millis(6478)
@@ -4096,11 +4538,20 @@ mod tests {
     /// Builds the window state reached after the first stall conviction in the
     /// ADV-DRIP-1 limit-cycle scenario: EWMA seeded at 3s cadence, one fire
     /// and release, four more 3s front advances with the decay clamped at the
-    /// adaptive floor. Returns `(window, front_height, now, silent_peer)`.
-    fn limit_cycle_window_state() -> (DownloadWindow, u8, Instant, std::net::SocketAddr) {
+    /// adaptive floor. Returns `(window, stager, front_height, now, silent_peer)`.
+    #[allow(clippy::too_many_lines)]
+    fn limit_cycle_window_state() -> (
+        DownloadWindow,
+        BlockStager,
+        u8,
+        Instant,
+        std::net::SocketAddr,
+    ) {
         let mut window = DownloadWindow::new(stall_budget());
         let healthy = test_source(healthy_addr());
         let staller = test_source(staller_addr());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         let t1 = seed_front_cadence(
             &mut window,
             healthy_addr(),
@@ -4112,17 +4563,24 @@ mod tests {
         insert_pending(&mut window, staller, hash(0x03), 3, t1);
         for (byte, height) in [(0x04_u8, 4_u32), (0x05, 5), (0x06, 6)] {
             insert_pending(&mut window, healthy, hash(byte), height, t1);
-            window.mark_received(hash(byte), 80, t1);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, t1);
         }
-        assert_eq!(stall_owner(&mut window, 3, false, t1), None);
+        assert_eq!(stall_owner(&mut window, &stager, &tree, 3, false, t1), None);
         assert_eq!(
-            stall_owner(&mut window, 3, false, t1 + Duration::from_secs(3)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                3,
+                false,
+                t1 + Duration::from_secs(3)
+            ),
             None,
             "one honest-cadence gap of blame must stay under the adaptive floor"
         );
         let fired_at = t1 + Duration::from_secs(6);
         assert_eq!(
-            stall_owner(&mut window, 3, false, fired_at),
+            stall_owner(&mut window, &stager, &tree, 3, false, fired_at),
             Some(staller_addr())
         );
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
@@ -4131,9 +4589,9 @@ mod tests {
         // Healthy peer resumes; four 3s cycles walk the EWMA back with the
         // decay clamped at the adaptive floor — the limit cycle never re-fires.
         insert_pending(&mut window, healthy, hash(0x03), 3, fired_at);
-        window.mark_received(hash(0x03), 80, fired_at);
+        receive_staged(&mut window, &mut stager, hash(0x03), SMALL_BODY, fired_at);
         for offset in 0..4u8 {
-            window.mark_received_applied(&hash(3 + offset));
+            apply_staged(&mut stager, &hash(3 + offset));
         }
         let silent = peer_addr(9);
         insert_pending(&mut window, healthy, hash(0x07), 7, fired_at);
@@ -4145,7 +4603,13 @@ mod tests {
                 u32::from(7 + offset),
                 fired_at,
             );
-            window.mark_received(hash(7 + offset), 80, fired_at);
+            receive_staged(
+                &mut window,
+                &mut stager,
+                hash(7 + offset),
+                SMALL_BODY,
+                fired_at,
+            );
         }
         let mut front: u8 = 7;
         let mut at = fired_at;
@@ -4158,19 +4622,22 @@ mod tests {
         for expected_timeout in expected {
             let arrive = at + Duration::from_secs(3);
             // No fire at wake or at honest-cadence arrival.
-            assert_eq!(stall_owner(&mut window, u32::from(front), false, at), None);
             assert_eq!(
-                stall_owner(&mut window, u32::from(front), false, arrive),
+                stall_owner(&mut window, &stager, &tree, u32::from(front), false, at),
                 None
             );
-            window.mark_received(hash(front), 80, arrive);
+            assert_eq!(
+                stall_owner(&mut window, &stager, &tree, u32::from(front), false, arrive),
+                None
+            );
+            receive_staged(&mut window, &mut stager, hash(front), SMALL_BODY, arrive);
             assert_eq!(
                 window.stall_timeout(),
                 expected_timeout,
                 "the decay must stop at the adaptive floor, never re-crossing the 3s cadence"
             );
             for offset in 0..4u8 {
-                window.mark_received_applied(&hash(front + offset));
+                apply_staged(&mut stager, &hash(front + offset));
             }
             let next_front = front + 4;
             let owner = if next_front == 23 {
@@ -4194,13 +4661,13 @@ mod tests {
                     u32::from(height),
                     arrive,
                 );
-                window.mark_received(hash(height), 80, arrive);
+                receive_staged(&mut window, &mut stager, hash(height), SMALL_BODY, arrive);
             }
             front = next_front;
             at = arrive;
         }
         assert_eq!(window.front_interval_ewma_ms(), Some(3239));
-        (window, front, at, silent)
+        (window, stager, front, at, silent)
     }
 
     #[test]
@@ -4209,6 +4676,8 @@ mod tests {
         // predicate. It races only the unchanged apply-front hash.
         let t0 = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
         insert_pending(&mut window, test_source(staller_addr()), hash(0x01), 1, t0);
         for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
             insert_pending(
@@ -4218,7 +4687,7 @@ mod tests {
                 height,
                 t0,
             );
-            window.mark_received(hash(byte), 80, t0);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, t0);
         }
         assert_eq!(window.front_interval_ewma_ms(), None);
 
@@ -4252,12 +4721,12 @@ mod tests {
         assert!(window.pending_timeout_observation.is_none());
         assert_eq!(window.front_interval_ewma_ms(), None);
         for byte in [0x01_u8, 0x02, 0x03, 0x04] {
-            window.mark_received_applied(&hash(byte));
+            apply_staged(&mut stager, &hash(byte));
         }
         let t2 = t1 + Duration::from_secs(3);
         insert_pending(&mut window, test_source(healthy_addr()), hash(0x05), 5, t1);
-        window.mark_received(hash(0x05), 80, t2);
-        window.mark_received_applied(&hash(0x05));
+        receive_staged(&mut window, &mut stager, hash(0x05), SMALL_BODY, t2);
+        apply_staged(&mut stager, &hash(0x05));
         assert_eq!(window.front_interval_ewma_ms(), Some(3000));
 
         // A true staller (silent on the front while the healthy peer's
@@ -4273,15 +4742,29 @@ mod tests {
                 height,
                 t2,
             );
-            window.mark_received(hash(byte), 80, t2);
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, t2);
         }
-        assert_eq!(stall_owner(&mut window, 6, false, t2), None);
+        assert_eq!(stall_owner(&mut window, &stager, &tree, 6, false, t2), None);
         assert_eq!(
-            stall_owner(&mut window, 6, false, t2 + Duration::from_secs(3)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                6,
+                false,
+                t2 + Duration::from_secs(3)
+            ),
             None
         );
         assert_eq!(
-            stall_owner(&mut window, 6, false, t2 + Duration::from_secs(6)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                6,
+                false,
+                t2 + Duration::from_secs(6)
+            ),
             Some(silent),
             "a seeded window must convict a true staller at the effective threshold"
         );
@@ -4910,6 +5393,8 @@ mod tests {
     #[test]
     fn apply_side_bound_holds_below_two_received_timeouts() {
         let mut window = DownloadWindow::new(test_budget());
+        let stager = test_stager(&window);
+        let tree = test_tree();
         let start = Instant::now();
         // test_budget received_timeout is 30s, so the bound is 60s.
         let bound = test_budget().received_timeout.saturating_mul(2);
@@ -4927,7 +5412,14 @@ mod tests {
         );
         // The no-blame suppression itself is unchanged below the bound.
         assert_eq!(
-            stall_owner(&mut window, 7, true, just_below(start, bound, 1)),
+            stall_owner(
+                &mut window,
+                &stager,
+                &tree,
+                7,
+                true,
+                just_below(start, bound, 1)
+            ),
             None
         );
     }
@@ -5129,8 +5621,9 @@ mod tests {
         }
     }
 
+    /// The hash of the height-`byte` header of [`TEST_CHAIN`].
     fn hash(byte: u8) -> Hash256 {
-        Hash256::from_le_bytes(&[byte; 32])
+        Hash256::from(TEST_CHAIN[usize::from(byte)].compute_hash())
     }
 
     #[test]
@@ -5144,7 +5637,7 @@ mod tests {
         // An externally owned fetch on an empty window is not a post-drain
         // request: the marker must survive so the proven-stall owner stays
         // ineligible for the next prefix probe.
-        window.mark_owned_fetch(compact_peer, hash(0xf1), 7, now);
+        window.mark_owned_fetch(&test_stager(&window), compact_peer, hash(0xf1), 7, now);
         assert_eq!(window.prefix_probe_attempted_owner, Some(stall_owner));
         assert!(window.contains_pending(&hash(0xf1)));
 
@@ -5159,7 +5652,7 @@ mod tests {
             9,
         )
         .unwrap_or_else(|| panic!("non-empty request"));
-        window.mark_requested(&request, compact_peer, now);
+        window.mark_requested(&test_stager(&window), &request, compact_peer, now);
         assert!(window.prefix_probe_attempted_owner.is_none());
     }
 
@@ -5175,9 +5668,9 @@ mod tests {
         // The first mark lands; the second exceeds the pending budget a
         // real request would face, so it is not recorded — the compact
         // fetch still resolves delivery by hash either way.
-        window.mark_owned_fetch(owner, hash(0xa1), 9, now);
+        window.mark_owned_fetch(&test_stager(&window), owner, hash(0xa1), 9, now);
         assert!(window.contains_pending(&hash(0xa1)));
-        window.mark_owned_fetch(owner, hash(0xa2), 10, now);
+        window.mark_owned_fetch(&test_stager(&window), owner, hash(0xa2), 10, now);
         assert!(!window.contains_pending(&hash(0xa2)));
 
         // Below the request frontier a mark could never be scheduled
@@ -5193,8 +5686,8 @@ mod tests {
             11,
         )
         .unwrap_or_else(|| panic!("non-empty request"));
-        window.mark_requested(&request, owner, now);
-        window.mark_owned_fetch(owner, hash(0xb1), 3, now);
+        window.mark_requested(&test_stager(&window), &request, owner, now);
+        window.mark_owned_fetch(&test_stager(&window), owner, hash(0xb1), 3, now);
         assert!(!window.contains_pending(&hash(0xb1)));
         assert_eq!(window.next_request_height, 11);
     }

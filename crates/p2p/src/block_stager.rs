@@ -145,6 +145,15 @@ impl BlockStager {
         Some(received_len)
     }
 
+    /// PRE: none.
+    /// POST: yields the identity of every currently staged body, in map
+    ///       order.
+    /// INVARIANT: yields no heights; the block tree is the only height
+    ///       source.
+    pub fn staged_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
+        self.received.keys().copied()
+    }
+
     /// Stages `block` or refuses it for retry under the byte budget.
     pub fn insert(
         &mut self,

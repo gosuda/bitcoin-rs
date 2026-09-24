@@ -293,7 +293,7 @@ fn tick_preserves_partial_window_order_across_pending_gap() -> Result<(), Box<dy
     {
         let mut scheduler = sync.scheduler.lock();
         let window = &mut scheduler.window;
-        window.drop_for_retry(&Hash256::from_le_bytes(expected[1].as_bytes()));
+        window.requeue_for_retry(&Hash256::from_le_bytes(expected[1].as_bytes()), Some(2));
     }
 
     sync.tick();

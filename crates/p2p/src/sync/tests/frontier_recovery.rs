@@ -484,23 +484,56 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     Ok(())
 }
 
-// P2P-05: an out-of-band delivery (no pending request) must still record
-// the canonical tree height. A height-0 entry would rewind the request
-// cursor to genesis on retry and misorder stale-receive eviction.
+/// An unsolicited body the tree cannot place stages on the missing-header
+/// path. When expiry prunes it, its retry must not move the request cursor:
+/// a body of unknown height has no height to rewind to. Before the stager
+/// became the single staged-body store, the window mirrored such a body at
+/// height 0 and the prune rewound the cursor to genesis.
 #[test]
-fn untracked_delivery_records_tree_height() -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, _peers, _applied, blocks, _incoming) = sync_with_mined_chain(2)?;
-    let block = &blocks[1];
-    let hash = Hash256::from(block.block_hash());
-    let mut inbound = vec![crate::InboundBlock::from_decoded(block.clone())];
-    assert_eq!(
-        sync.buffer_received_block_chunk(&mut inbound, Some(hash)),
-        1
+fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(4)?;
+    let peer = test_addr(9766, 0)?;
+    let outbound = connect_peer(&peers, eligible_peer(peer, 4));
+    sync.tick();
+    let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
+    assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
+    for block in blocks.into_iter().take(3) {
+        incoming.send(crate::InboundBlock::from_decoded(block))?;
+    }
+    sync.tick();
+    assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
+    let cursor = sync.scheduler.lock().window.request_cursor();
+    assert!(cursor > 3, "the cursor advanced past the requested heights");
+
+    // Expire every staged body on the next drain, without a timing race.
+    sync.scheduler.lock().stager = crate::BlockStager::new(super::super::SyncBudget {
+        received_timeout: Duration::ZERO,
+        ..super::super::default_sync_budget()
+    });
+    let orphan = mined_block_with_prev_hash(
+        BlockHash::from(Hash256::from_le_bytes(&[0x5a; 32])),
+        9,
+        vec![coinbase_transaction(9)],
+    );
+    let orphan_hash = Hash256::from(orphan.block_hash());
+    let mut inbound = vec![crate::InboundBlock::from_decoded(orphan)];
+    assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);
+    assert!(sync.scheduler.lock().stager.contains(&orphan_hash));
+
+    sync.tick();
+
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        !scheduler.stager.contains(&orphan_hash),
+        "expiry pruned the body"
     );
     assert_eq!(
-        sync.scheduler.lock().window.received_height(&hash),
-        Some(2),
-        "an untracked tree-known body must carry its canonical height"
+        scheduler.window.request_cursor(),
+        cursor,
+        "a pruned body of unknown height must not move the request cursor"
     );
+    drop(scheduler);
+    assert_no_getdata(&outbound)?;
     Ok(())
 }

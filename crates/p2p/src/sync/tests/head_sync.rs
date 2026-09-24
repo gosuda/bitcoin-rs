@@ -266,11 +266,6 @@ fn staged_body_with_permanently_inadmissible_header_is_discarded()
         0,
         "the inadmissible body must be discarded, not retried"
     );
-    assert_eq!(
-        sync.scheduler.lock().window.received_len(),
-        0,
-        "the discarded body's window record must not linger and re-queue"
-    );
     Ok(())
 }
 

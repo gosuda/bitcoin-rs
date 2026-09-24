@@ -563,16 +563,24 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
     );
     let _headers = rx.try_recv()?;
     apply_fixture_block(&sync, block1)?;
-    sync.scheduler
-        .lock()
-        .window
-        .drop_for_retry(&Hash256::from(expected_hash));
+    {
+        let hash = Hash256::from(expected_hash);
+        let height = {
+            let tree = sync.chain.block_tree().read();
+            tree.lookup(hash)
+                .and_then(|id| tree.node(id).ok())
+                .map(|node| node.height)
+        };
+        sync.scheduler
+            .lock()
+            .window
+            .requeue_for_retry(&hash, height);
+    }
 
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
     sync.drain_inbound_blocks();
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
-    assert_eq!(sync.scheduler.lock().window.received_len(), 0);
 
     sync.tick();
 
@@ -757,10 +765,13 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
         std::vec![block1.block_hash()]
     );
     assert_eq!(
-        sync.scheduler
-            .lock()
-            .window
-            .received_height(&Hash256::from(block2.block_hash())),
+        {
+            let hash = Hash256::from(block2.block_hash());
+            let tree = sync.chain.block_tree().read();
+            tree.lookup(hash)
+                .and_then(|id| tree.node(id).ok())
+                .map(|node| node.height)
+        },
         Some(2),
         "header admission must reconcile the staged child's height"
     );
@@ -952,11 +963,10 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     sync.tick();
     {
         let scheduler = sync.scheduler.lock();
-        let window = &scheduler.window;
-        assert_eq!(window.received_len(), 14);
-        assert_eq!(window.pending_len(), 2);
+        assert_eq!(scheduler.stager.received_len(), 14);
+        assert_eq!(scheduler.window.pending_len(), 2);
         assert_eq!(
-            window.stalling_peer().map(|(addr, _)| addr),
+            scheduler.window.stalling_peer().map(|(addr, _)| addr),
             Some(staller),
             "the front-stripe owner must be the observed staller"
         );
@@ -1100,7 +1110,10 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     // budget, closing the request gate.
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
     sync.drain_inbound_blocks();
-    assert!(!sync.scheduler.lock().window.has_request_capacity());
+    assert!(!{
+        let scheduler = sync.scheduler.lock();
+        scheduler.window.has_request_capacity(&scheduler.stager)
+    });
 
     let healthy_rx = connect_peer(&peers, synthetic_peer(healthy_addr, 100));
 

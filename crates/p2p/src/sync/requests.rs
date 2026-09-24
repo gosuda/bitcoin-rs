@@ -4,6 +4,7 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
+use super::SchedulerState;
 use super::frontier::SyncFrontier;
 use super::peers::active_demonstrated_height;
 use super::telemetry::metric_count;
@@ -150,15 +151,20 @@ impl BlockSync {
         };
 
         let tree = self.chain.block_tree().read();
-        let request = self.scheduler.lock().window.next_peer_request(
-            source.addr,
-            allow_expired_retry_from_peer,
-            chain_tip,
-            required.height,
-            peer_best_height,
-            &tree,
-            now,
-        );
+        let request = {
+            let mut scheduler = self.scheduler.lock();
+            let SchedulerState { window, stager, .. } = &mut *scheduler;
+            window.next_peer_request(
+                stager,
+                source.addr,
+                allow_expired_retry_from_peer,
+                chain_tip,
+                required.height,
+                peer_best_height,
+                &tree,
+                now,
+            )
+        };
         drop(tree);
         let Some(request) = request else {
             return GetdataRequestOutcome::default();
@@ -177,11 +183,9 @@ impl BlockSync {
         if self
             .peer_table
             .send_then(source, msg, || {
-                has_request_capacity = self
-                    .scheduler
-                    .lock()
-                    .window
-                    .mark_requested(&request, source, now);
+                let mut scheduler = self.scheduler.lock();
+                let SchedulerState { window, stager, .. } = &mut *scheduler;
+                has_request_capacity = window.mark_requested(stager, &request, source, now);
             })
             .is_err()
         {
