@@ -16,6 +16,7 @@
 pub mod differential;
 pub mod error;
 pub mod helpers;
+pub mod live_peer;
 pub mod node;
 pub mod process_peer;
 pub mod rpc;
