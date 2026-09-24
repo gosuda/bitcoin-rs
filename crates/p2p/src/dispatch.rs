@@ -73,6 +73,19 @@ pub trait ChainQuery: Send + Sync {
         &self,
         request: &BlockTransactionsRequest,
     ) -> Result<Option<Message>, PeerError>;
+
+    /// Header time of the active tip, `None` when no active tip is known.
+    ///
+    /// PRE: none.
+    /// POST: returns UNIX seconds of the tip header Core would read as
+    ///   `m_best_block_time` (`net_processing.cpp:1445-1448`); `None` means
+    ///   nothing is applied, which the outbound service policy reads as the
+    ///   deepest possible local chain.
+    /// INVARIANT: the only local tip-age source for peer admission; no
+    ///   caller walks the block tree per handshake for it.
+    fn best_block_time(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the
