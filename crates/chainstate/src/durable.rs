@@ -211,14 +211,6 @@ pub(super) fn commit_disconnect_head(
     Ok(DurableReceipt::from_head(&next))
 }
 
-/// Bound on how many blocks one crash can leave committed-but-unpublished
-/// above a restored chainstate.
-///
-/// The apply path publishes every durable batch before the next begins
-/// (`RCV-02`), so a crash can strand at most one group: the crash-redo
-/// bound the contract states, not an emergent number.
-const REPLAY_GAP_BLOCK_LIMIT: usize = super::window::DURABLE_HEAD_GROUP_BLOCKS;
-
 /// Resolves one replayed block's spends from its own durable undo row.
 ///
 /// The stored head certifies the undo record in the same batch as the body,
@@ -255,8 +247,12 @@ impl OutputSource for UndoRowSpends<'_> {
 /// restored chainstate — a crash before the first clean checkpoint, or a
 /// forced full revalidation — is the same gap measured from the empty chain:
 /// the head certifies the bodies, and replaying them from genesis rebuilds
-/// exactly the state it names. That rebuild is not a publication lag, so the
-/// one-group bound does not apply to it.
+/// exactly the state it names.
+///
+/// Recoverability is defined by the identity and ancestry checks the replay
+/// performs, never by gap width. Any authenticated ancestor chain above the
+/// restored tip replays, however wide; a gap that is not an ancestor prefix
+/// of stored bodies fails closed.
 pub fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
     let stored = handles
         .durable_head
@@ -274,7 +270,30 @@ pub fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
 
 /// Replays the committed-but-unpublished gap onto the restored chainstate.
 ///
-/// The walk is bounded and durable-resolved: the stored head names the tip,
+/// Replays every authenticated durable-head body above `restored`, or the
+/// complete certified head chain when `restored` is `None`.
+///
+/// # Errors
+///
+/// The first body that is missing from storage, does not hash to the stored
+/// head identity, or does not descend from the stored tip fails startup
+/// closed: no partial success publishes.
+///
+/// # PRE
+///
+/// The stored head is loaded successfully and every body it names exists,
+/// and every body equals the committed hash.
+///
+/// # POST
+///
+/// Success publishes exactly `head.tip`, `head.height`, and
+/// `head.commit_id`; failure leaves admission closed and publishes no
+/// guess.
+///
+/// # INVARIANT
+///
+/// Body identity, ancestry, durable receipt, and publication order are
+/// checked. The walk is durable-resolved: the stored head names the tip,
 /// every step loads `(height, hash)` by the parent chain the previous body
 /// names, and peak retained state is one block plus the hash descriptors.
 /// Each block re-enters through [`PublishMode::Replay`], which redoes the
@@ -306,11 +325,13 @@ fn replay_committed_gap(
         }
         None => 0,
     };
+    // Width bounds the descriptor allocation only. Recoverability is decided
+    // by the body-identity and ancestry checks below, never by how wide the
+    // gap is: any authenticated ancestor chain above the restored tip
+    // replays, however many commit groups it spans.
     let gap_width = usize::try_from(head.height - base_height + 1)
         .map_err(|_| unrecoverable("gap width exceeds the address space"))?;
-    if restored.is_some() && gap_width > REPLAY_GAP_BLOCK_LIMIT {
-        return Err(unrecoverable("the gap is wider than one commit group"));
-    }
+
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
     };
