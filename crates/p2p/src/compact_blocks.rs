@@ -91,6 +91,9 @@ struct Pending {
     filled: Vec<Option<Tx>>,
     /// Absolute slot indexes still missing, ascending.
     missing: Vec<u64>,
+    /// Number of short IDs the message declared for the non-prefilled slots;
+    /// the accounting [`complete_block`] re-checks before delivery.
+    short_id_count: usize,
     /// Approximate retained bytes (prefill bodies + short IDs + filled bodies).
     retained_bytes: usize,
     deadline: Instant,
@@ -170,10 +173,10 @@ impl Reconstruction {
             .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX))
             .collect();
         if missing.is_empty() {
-            return Outcome::Complete(Block {
-                header,
-                txs: filled.into_iter().flatten().collect(),
-            });
+            return match complete_block(header, filled, compact.short_ids.len()) {
+                Ok(block) => Outcome::Complete(block),
+                Err(()) => Outcome::Fallback(hash),
+            };
         }
         if missing.len() > MAX_REQUESTED_MISSING {
             return Outcome::Fallback(hash);
@@ -184,6 +187,7 @@ impl Reconstruction {
                 header,
                 filled,
                 missing: missing.clone(),
+                short_id_count: compact.short_ids.len(),
                 retained_bytes,
                 deadline: now + PENDING_DEADLINE,
                 fallback: false,
@@ -201,47 +205,43 @@ impl Reconstruction {
     ///
     /// Places the announced transactions at the pending entry's missing
     /// indexes and completes the block, or falls back when the response does
-    /// not match the outstanding request.
+    /// not match the outstanding request. A completion that fails
+    /// verification flags the entry first: a late `blocktxn` for the same
+    /// block is then ignored, not re-guessed.
     pub fn receive_blocktxn(&mut self, txn: &BlockTxn, now: Instant) -> Outcome {
         self.prune(now);
         let hash = native_block_hash(txn.transactions.block_hash);
-        {
-            let Some(entry) = self.pending.get_mut(&hash) else {
-                return Outcome::Idle;
-            };
-            if entry.fallback {
-                return Outcome::Idle;
-            }
-            if txn.transactions.transactions.len() != entry.missing.len() {
-                entry.fallback = true;
-                return Outcome::Fallback(hash);
-            }
-            for (slot, tx) in entry.missing.iter().zip(&txn.transactions.transactions) {
-                let Some(body) = native_tx(tx) else {
-                    entry.fallback = true;
-                    return Outcome::Fallback(hash);
-                };
-                let Some(slot) = usize::try_from(*slot)
-                    .ok()
-                    .filter(|slot| *slot < entry.filled.len())
-                else {
-                    entry.fallback = true;
-                    return Outcome::Fallback(hash);
-                };
-                entry.filled[slot] = Some(body);
-            }
-            if entry.filled.iter().any(Option::is_none) {
-                entry.fallback = true;
-                return Outcome::Fallback(hash);
-            }
-        }
-        let Some(entry) = self.pending.remove(&hash) else {
+        let Some(entry) = self.pending.get_mut(&hash) else {
             return Outcome::Idle;
         };
-        Outcome::Complete(Block {
-            header: entry.header,
-            txs: entry.filled.into_iter().flatten().collect(),
-        })
+        if entry.fallback {
+            return Outcome::Idle;
+        }
+        if txn.transactions.transactions.len() != entry.missing.len() {
+            entry.fallback = true;
+            return Outcome::Fallback(hash);
+        }
+        for (slot, tx) in entry.missing.iter().zip(&txn.transactions.transactions) {
+            let Some(body) = native_tx(tx) else {
+                entry.fallback = true;
+                return Outcome::Fallback(hash);
+            };
+            let Some(slot) = usize::try_from(*slot)
+                .ok()
+                .filter(|slot| *slot < entry.filled.len())
+            else {
+                entry.fallback = true;
+                return Outcome::Fallback(hash);
+            };
+            entry.filled[slot] = Some(body);
+        }
+        let filled = std::mem::take(&mut entry.filled);
+        let Ok(block) = complete_block(entry.header, filled, entry.short_id_count) else {
+            entry.fallback = true;
+            return Outcome::Fallback(hash);
+        };
+        self.pending.remove(&hash);
+        Outcome::Complete(block)
     }
 
     /// Drops pending entries whose deadline passed.
@@ -255,6 +255,36 @@ impl Reconstruction {
             .map(|entry| entry.retained_bytes)
             .sum()
     }
+}
+
+/// PRE: `filled` holds the declared prefill plus one slot per declared short
+/// ID for one reconstruction whose transaction request, if any, has been
+/// answered.
+/// POST: return a block only when every slot exists, no more slots than
+/// `short_id_count` plus the prefills were declared, and the transaction-ID
+/// merkle root of the assembled body equals `header.merkle_root`; otherwise
+/// return `Err`.
+/// INVARIANT: no unverified compact reconstruction reaches
+/// [`Outcome::Complete`] (Core 31.1 rejects a seemingly complete mutated
+/// block before delivery, `blockencodings.cpp:207-219`).
+fn complete_block(
+    header: Header,
+    filled: Vec<Option<Tx>>,
+    short_id_count: usize,
+) -> Result<Block, ()> {
+    if filled.iter().any(Option::is_none) || filled.len() < short_id_count {
+        return Err(());
+    }
+    let txs: Vec<Tx> = filled.into_iter().flatten().collect();
+    let root = bitcoin::merkle_tree::calculate_root(
+        txs.iter()
+            .map(|tx| bitcoin::Txid::from_byte_array(*tx.txid().as_bytes())),
+    )
+    .ok_or(())?;
+    if root.as_byte_array() != header.merkle_root.as_byte_array() {
+        return Err(());
+    }
+    Ok(Block { header, txs })
 }
 
 /// Matches the message's short IDs against the hint identities and fills
@@ -902,6 +932,88 @@ mod tests {
             0,
             "a body lookup inside the identity walk re-enters the pool read lock"
         );
+    }
+
+    /// A fully hinted reconstruction whose transaction set does not hash to
+    /// the header's merkle root is never delivered as complete — the cheap
+    /// reconstruction verdict runs before the block enters the sink.
+    #[test]
+    fn compact_completion_merkle_mismatch_falls_back() {
+        let txs = vec![test_tx(1), test_tx(2)];
+        let header = Header {
+            version: 1,
+            prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
+            merkle_root: Hash256::from_le_bytes(&[0; 32]),
+            time: 7,
+            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 9,
+        };
+        let bridged =
+            bitcoin::consensus::encode::deserialize::<RegistryBlock>(&consensus_bytes(&Block {
+                header,
+                txs: txs.clone(),
+            }))
+            .unwrap_or_else(|error| panic!("sample block must decode: {error}"));
+        let compact = HeaderAndShortIds::from_block(&bridged, 0x77, 2, &[])
+            .unwrap_or_else(|error| panic!("sample compact block must build: {error}"));
+        let hints = SetHints { txs };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome = reconstruction.receive_cmpctblock(
+            &CmpctBlock {
+                compact_block: compact,
+            },
+            COMPACT_BLOCK_VERSION,
+            &hints,
+            now(),
+        );
+
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "a merkle mismatch must never complete, got {outcome:?}"
+        );
+    }
+
+    /// A `blocktxn` response that fills the pending slots with the wrong
+    /// bodies produces a transaction set that does not hash to the header's
+    /// merkle root; the reconstruction falls back, the pending entry stays
+    /// closed for late responses, and no wrong block is delivered.
+    #[test]
+    fn blocktxn_merkle_mismatch_falls_back() {
+        let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x78);
+        let hints = SetHints {
+            txs: vec![native.txs[0].clone()],
+        };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("expected a getblocktxn request, got {outcome:?}");
+        };
+
+        let wrong_body = BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: request.txs_request.block_hash,
+                transactions: vec![registry_tx(&test_tx(9))],
+            },
+        };
+        let outcome = reconstruction.receive_blocktxn(&wrong_body, now());
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "a wrong-body completion must fall back, got {outcome:?}"
+        );
+
+        let late = BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: request.txs_request.block_hash,
+                transactions: vec![registry_tx(&test_tx(2))],
+            },
+        };
+        assert!(matches!(
+            reconstruction.receive_blocktxn(&late, now()),
+            Outcome::Idle
+        ));
     }
 
     /// Serializes the precomputed colliding fixture transaction; only the
