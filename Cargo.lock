@@ -312,6 +312,7 @@ name = "bitcoin-rs-e2e"
 version = "0.9.0"
 dependencies = [
  "bitcoin",
+ "bitcoin-rs-rpc",
  "serde_json",
  "tempfile",
  "toml 1.1.6+spec-1.1.0",
