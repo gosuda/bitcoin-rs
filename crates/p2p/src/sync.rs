@@ -458,25 +458,6 @@ impl BlockSync {
                 .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
-    /// Whether `source` already owns the download of `hash`.
-    ///
-    /// PRE: `source` identifies a live connection and `hash` is a block hash.
-    /// POST: `true` when the download window holds a pending request for
-    ///   `hash` owned by this exact connection, or the compact path marked
-    ///   the body as fetched by it.
-    /// INVARIANT: ownership is compared by connection identity, never by
-    ///   address alone, so a same-address replacement cannot claim its
-    ///   predecessor's request.
-    #[must_use]
-    pub fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
-        let scheduler = self.scheduler.lock();
-        scheduler.window.pending_owner(&hash) == Some(source)
-            || scheduler
-                .owned_body_fetches
-                .iter()
-                .any(|(owner, owned)| *owner == source && *owned == hash)
-    }
-
     /// Runs one orchestrator tick against the host clock.
     pub fn tick(&self) {
         self.tick_at(Instant::now());
@@ -489,8 +470,9 @@ impl BlockSync {
     /// PRE: `now` is the instant this tick judges every timeout against.
     /// POST: inbound headers and blocks are drained, dead connections are
     ///   released, the frontier is observed once, an unanswered header request
-    ///   is rotated away, and the work that frontier names is scheduled — all
-    ///   timed against `now`.
+    ///   is rotated away, connections the rotation or the sweep retired are
+    ///   dropped from the observed snapshot before it is read, and the work
+    ///   that frontier names is scheduled — all timed against `now`.
     /// INVARIANT: no expiry, blame, or selection path inside the tick reads the
     ///   wall clock; `now` is the tick's only time source.
     pub fn tick_at(&self, now: Instant) {
@@ -508,7 +490,7 @@ impl BlockSync {
         // Convicted connections must release their work before selection so
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
-        let frontier = self.observe_frontier(chain, now);
+        let mut frontier = self.observe_frontier(chain, now);
         // A `getheaders` that outlived its deadline is retired before any
         // selection this tick, so the scheduler cannot re-ask the connection
         // that ignored it.
@@ -517,6 +499,15 @@ impl BlockSync {
         // two more to answer a probe is retired before this tick plans any
         // further work with it.
         self.sweep_chain_sync(&frontier, now);
+        // Both maintenance steps above can retire a connection after the
+        // observation. Drop the retired connections from the snapshot before
+        // planning or selection reads it, so the same tick's header fallback
+        // asks a live peer instead of replaying into the socket that just
+        // closed — the same conviction-before-selection rule
+        // `reconcile_peer_sessions` enforces above.
+        frontier
+            .usable_peers
+            .retain(|peer| self.peer_table.is_current(peer.source));
         self.follow_tip_progress(&frontier, now);
         let plan = frontier.plan();
 
@@ -790,8 +781,9 @@ pub(crate) mod tests;
 #[must_use]
 pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
     Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-        Arc::new(arc_swap::ArcSwapOption::empty()),
-        Arc::new(parking_lot::RwLock::new(BlockTree::new())),
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(
+            parking_lot::RwLock::new(BlockTree::new()),
+        )),
     ))
 }
