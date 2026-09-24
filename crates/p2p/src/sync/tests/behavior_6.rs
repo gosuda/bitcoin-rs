@@ -7,9 +7,9 @@ fn tick_retries_when_all_selected_peers_have_expired_pending()
     install_budget(
         &sync,
         super::super::SyncBudget {
-            pending_timeout: Duration::ZERO,
+            pending_timeout_override: Some(Duration::ZERO),
             getdata_batch_limit: 1,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let rx = connect_peer(&peers, synthetic_peer(test_addr(9504, 0)?, 100));

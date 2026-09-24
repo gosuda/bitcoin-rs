@@ -69,7 +69,7 @@ fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block 
 fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn std::error::Error>> {
     let (sync, _peers, _applied_tip, _main, _blocks_tx) = sync_with_mined_chain(0)?;
     sync.chain.bootstrap_genesis();
-    install_budget(&sync, super::super::default_sync_budget());
+    install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
 
     let genesis = Network::Regtest.genesis_block();
     let prev_hash = genesis.block_hash();

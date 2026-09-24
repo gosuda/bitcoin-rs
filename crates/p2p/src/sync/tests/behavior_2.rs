@@ -35,7 +35,7 @@ fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
         &sync,
         super::super::SyncBudget {
             getdata_batch_limit: usize::try_from(batch_size)?,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -181,7 +181,7 @@ fn tick_respects_pending_byte_budget() -> Result<(), Box<dyn std::error::Error>>
         &sync,
         super::super::SyncBudget {
             max_pending_bytes: 256 * 1024,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -205,7 +205,7 @@ fn tick_limits_inflight_per_peer() -> Result<(), Box<dyn std::error::Error>> {
         &sync,
         super::super::SyncBudget {
             max_peer_inflight: 2,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -285,8 +285,8 @@ fn demoted_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std:
     install_budget(
         &sync,
         super::super::SyncBudget {
-            pending_timeout: Duration::ZERO,
-            ..super::super::default_sync_budget()
+            pending_timeout_override: Some(Duration::ZERO),
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     // Phase 1: the lone peer takes the deep window; the zero timeout
@@ -343,8 +343,8 @@ fn ineligible_peers_receive_no_block_requests_during_fanout()
     install_budget(
         &sync,
         super::super::SyncBudget {
-            pending_timeout: Duration::from_millis(250),
-            ..super::super::default_sync_budget()
+            pending_timeout_override: Some(Duration::from_millis(250)),
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     // Soft-demote one otherwise-eligible peer: it takes the deep window

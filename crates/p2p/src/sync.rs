@@ -54,8 +54,6 @@ use crate::download_window::MAX_BLOCKS_IN_TRANSIT_PER_PEER;
 use crate::download_window::PEER_INFLIGHT_BUDGET;
 #[cfg(test)]
 use crate::download_window::PENDING_BUDGET;
-#[cfg(test)]
-use crate::download_window::PENDING_TIMEOUT;
 use crate::download_window::RECEIVED_BLOCK_BUDGET;
 #[cfg(test)]
 use crate::download_window::RECEIVED_BLOCK_TIMEOUT;
@@ -214,14 +212,15 @@ impl BlockSync {
         inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
         inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
     ) -> Self {
+        let budget = default_sync_budget(chain.network());
         Self {
             chain,
             peer_table,
             inbound_headers_rx,
             inbound_blocks_rx,
             scheduler: Mutex::new(SchedulerState {
-                window: DownloadWindow::new(default_sync_budget()),
-                stager: BlockStager::new(default_sync_budget()),
+                window: DownloadWindow::new(budget),
+                stager: BlockStager::new(budget),
                 header_request: None,
                 owned_body_fetches: Vec::new(),
             }),

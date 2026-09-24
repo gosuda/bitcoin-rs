@@ -28,6 +28,7 @@ fn stall_blame(
             next_apply_height: Some(next_apply),
             frontier_hash: None,
             apply_side_busy: false,
+            active_downloading_peers: window.active_downloading_peers(),
         },
         stager,
         tree,
@@ -470,7 +471,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
         &sync,
         super::super::SyncBudget {
             max_received_blocks: 2,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let staller = test_addr(9810, 0)?;

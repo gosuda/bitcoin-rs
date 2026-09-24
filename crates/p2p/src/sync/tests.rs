@@ -381,7 +381,7 @@ fn check_sync_frontier_pair(
             .map(|_| target.tip_id),
         "branch gate differs: {applied:?} -> {target:?}; indexed or parent-walk fixture"
     );
-    sync.install_budget(super::default_sync_budget());
+    sync.install_budget(super::default_sync_budget(Network::Regtest));
     let outcome = sync.send_getdata_for_pending_blocks(
         current_source(&sync.peer_table, addr),
         true,
@@ -424,8 +424,8 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
             max_pending_blocks: 2,
             max_peer_inflight: 2,
             getdata_batch_limit: 2,
-            pending_timeout: Duration::ZERO,
-            ..super::default_sync_budget()
+            pending_timeout_override: Some(Duration::ZERO),
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -484,7 +484,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
     // Relaying peer, whole four-block chain within the near-tip window:
     // every entry asks for the compact flavor.
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
-    install_budget(&sync, super::default_sync_budget());
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_101);
     let mut relaying = synthetic_peer(addr, 100);
     relaying.compact_block_relay = true;
@@ -494,7 +494,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
 
     // Same proximity without the published relay preference: witness flavor.
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
-    install_budget(&sync, super::default_sync_budget());
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_102);
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
     sync.tick();
@@ -508,7 +508,7 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
             max_pending_blocks: 9,
             max_peer_inflight: 9,
             getdata_batch_limit: 9,
-            ..super::default_sync_budget()
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_103);
@@ -545,7 +545,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
         super::SyncBudget {
             getdata_batch_limit: 2,
             received_timeout: Duration::ZERO,
-            ..super::default_sync_budget()
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -574,7 +574,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
         sync.scheduler
             .lock()
             .window
-            .requeue_for_retry(&hash, height);
+            .requeue_for_retry(&hash, height, Instant::now());
     }
 
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
@@ -612,7 +612,7 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> Result<(), Box<dyn
         inbound_blocks_tx,
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
-    install_budget(&sync, super::default_sync_budget());
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, synthetic_peer(addr, 0));
 
@@ -669,7 +669,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::er
         inbound_blocks_tx,
         inbound_headers_tx: _inbound_headers_tx,
     } = SyncHarness::new(tree);
-    install_budget(&sync, super::default_sync_budget());
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, eligible_peer(addr, 0));
     let source = current_source(&peers, addr);
@@ -723,7 +723,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
         inbound_blocks_tx,
         inbound_headers_tx,
     } = SyncHarness::new(tree);
-    install_budget(&sync, super::default_sync_budget());
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let rx = connect_peer(&peers, eligible_peer(addr, 0));
     let source = current_source(&peers, addr);
@@ -814,7 +814,7 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     // the one-shot probe sends the first 8 (PREFIX_PROBE_BLOCK_LIMIT), so
     // the probe getdata is distinguishable from the deep getdata.
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(16)?;
-    install_budget(&sync, super::default_sync_budget());
+    install_budget(&sync, super::default_sync_budget(Network::Regtest));
 
     // Two eligible peers: below the 8-peer fanout threshold. The owner
     // (highest) takes the deep window; the alternate is the probe racer.
@@ -866,7 +866,7 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     let started_at = window
         .active_prefix_probe_started_at()
         .ok_or_else(|| std::io::Error::other("probe must remain active after deferral"))?;
-    let budget = super::default_sync_budget();
+    let budget = super::default_sync_budget(Network::Regtest);
     let planned_duration = budget.stall_timeout_initial;
     let deadline = started_at + planned_duration;
     assert_eq!(
@@ -942,7 +942,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     // this test, so the staller disconnect is the ONLY recovery path.
     let budget = super::SyncBudget {
         stall_timeout_initial: Duration::from_millis(100),
-        ..wedge_budget(super::PENDING_TIMEOUT)
+        ..wedge_budget(Duration::from_mins(1))
     };
     let (sync, peers, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
     let staller = test_addr(9320, 0)?;
@@ -1028,7 +1028,7 @@ fn clean_fast_path_caps_request_at_peer_height() -> Result<(), Box<dyn std::erro
             max_pending_blocks: 4,
             max_peer_inflight: 4,
             getdata_batch_limit: 4,
-            ..super::default_sync_budget()
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -1084,9 +1084,9 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
         super::SyncBudget {
             max_received_bytes: consensus_bytes(&block2).len(),
             getdata_batch_limit: 2,
-            pending_timeout: Duration::ZERO,
+            pending_timeout_override: Some(Duration::ZERO),
             received_timeout: Duration::from_millis(100),
-            ..super::default_sync_budget()
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
     let stalled_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -1161,7 +1161,7 @@ fn deterministic_proxy_fixture() -> Result<DeterministicProxyFixture, Box<dyn st
             max_received_bytes: usize::MAX,
             max_peer_inflight: DETERMINISTIC_PROXY_BLOCKS,
             getdata_batch_limit: DETERMINISTIC_PROXY_BLOCKS,
-            ..super::default_sync_budget()
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
 
@@ -1470,8 +1470,8 @@ fn wedge_budget(pending_timeout: Duration) -> super::SyncBudget {
         fanout_peer_inflight: 2,
         min_peers_for_fanout: 8,
         getdata_batch_limit: 16,
-        pending_timeout,
-        ..super::default_sync_budget()
+        pending_timeout_override: Some(pending_timeout),
+        ..super::default_sync_budget(Network::Regtest)
     }
 }
 
@@ -1838,7 +1838,7 @@ fn header_sync_with_genesis() -> Result<HeaderSyncFixture, Box<dyn std::error::E
         &sync,
         super::SyncBudget {
             max_pending_blocks: 0,
-            ..super::default_sync_budget()
+            ..super::default_sync_budget(Network::Regtest)
         },
     );
     Ok(HeaderSyncFixture {
