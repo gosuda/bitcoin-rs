@@ -501,6 +501,10 @@ impl BlockSync {
             {
                 let hash = Hash256::from(inbound.block.block_hash());
                 let source = inbound.source;
+                // The body has left the ingress channel: release the
+                // delivering connection's unsolicited forwarding slot. What
+                // follows - staging, discarding, or rejecting - is sync's.
+                drop(inbound.forward_credit);
                 if matches!(admission, BodyAdmission::Staged) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
                     continue;
