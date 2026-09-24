@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
@@ -74,6 +75,10 @@ pub struct P2pServiceConfig {
     ///
     /// Core: `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
     pub outbound_full_relay_slots: usize,
+    /// The services this node advertises in every `version`. A pruned node
+    /// supplies `WITNESS | NETWORK_LIMITED`; the default is the full-history
+    /// advertisement (Core `init.cpp:2022-2026`).
+    pub local_services: ServiceFlags,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
     ///
@@ -99,6 +104,7 @@ impl Default for P2pServiceConfig {
             outbound_block_relay_slots: DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
+            local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
         }
     }
 }
@@ -325,6 +331,7 @@ impl P2pService {
         shared.ibd = extras.ibd;
         shared.block_sync = extras.block_sync;
         shared.max_inbound = self.config.max_inbound();
+        shared.local_services = self.config.local_services;
 
         let mut listeners = Vec::with_capacity(bound_listeners.len());
         for (listener_addr, listener) in bound_listeners {

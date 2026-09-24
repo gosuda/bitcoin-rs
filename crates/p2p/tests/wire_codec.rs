@@ -31,7 +31,12 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
     let messages = vec![
         Message::Ping(42),
         Message::Pong(42),
-        Message::Version(version_message(99, 123, PeerRole::FullRelay)),
+        Message::Version(version_message(
+            99,
+            123,
+            PeerRole::FullRelay,
+            bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        )),
         Message::Verack,
         Message::Inv(vec![Inventory::Transaction(Txid::from_byte_array(
             [7u8; 32],

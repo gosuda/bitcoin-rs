@@ -388,7 +388,12 @@ mod tests {
         let mut info = crate::PeerInfo::inbound_from_version(
             addr,
             addr,
-            &crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay),
+            &crate::handshake::version_message(
+                1,
+                0,
+                crate::peer_info::PeerRole::FullRelay,
+                bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+            ),
             0,
             0,
             Arc::new(crate::PeerCounters::default()),

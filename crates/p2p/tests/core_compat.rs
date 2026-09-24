@@ -308,7 +308,12 @@ fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
 }
 
 fn version_for_handshake() -> Message {
-    Message::Version(version_message(1, 0, PeerRole::FullRelay))
+    Message::Version(version_message(
+        1,
+        0,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    ))
 }
 
 fn get_headers(locator: Vec<NativeBlockHash>, stop: NativeBlockHash) -> Message {
@@ -515,7 +520,12 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
 #[test]
 fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), Box<dyn Error>>
 {
-    let version = version_message(0xdead_beef, 777, PeerRole::FullRelay);
+    let version = version_message(
+        0xdead_beef,
+        777,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
     let inv = vec![Inventory::Transaction(Txid::from_byte_array([9u8; 32]))];
     let cases = [
         (Message::Ping(42), NetworkMessage::Ping(42)),
@@ -551,7 +561,12 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
 
 #[test]
 fn version_message_pins_core_31_handshake_fields() {
-    let version = version_message(0xdead_beef, 777, PeerRole::FullRelay);
+    let version = version_message(
+        0xdead_beef,
+        777,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
 
     assert_eq!(version.version, PROTOCOL_VERSION);
     assert_eq!(
@@ -580,7 +595,13 @@ fn version_message_pins_core_31_handshake_fields() {
 #[test]
 fn outbound_handshake_sends_version_then_core_feature_set() {
     let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
-    let messages = start(&mut peer, 1, 0, PeerRole::FullRelay);
+    let messages = start(
+        &mut peer,
+        1,
+        0,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
 
     assert_eq!(peer.state, PeerState::VersionExchange);
     assert_eq!(messages.len(), 4);
@@ -1373,7 +1394,13 @@ fn drive_handshake_as_core(
                 assert_eq!(version.version, PROTOCOL_VERSION);
                 assert_eq!(
                     version.services,
-                    version_message(0, 0, PeerRole::FullRelay).services
+                    version_message(
+                        0,
+                        0,
+                        PeerRole::FullRelay,
+                        ServiceFlags::NETWORK | ServiceFlags::WITNESS
+                    )
+                    .services
                 );
             }
             Message::WtxidRelay => saw_features[0] = true,
@@ -1437,7 +1464,12 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
 
 /// One remote `version` advertising exactly `services`.
 fn remote_version(services: ServiceFlags) -> Message {
-    let mut version = version_message(1, 0, PeerRole::FullRelay);
+    let mut version = version_message(
+        1,
+        0,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
     version.services = services;
     Message::Version(version)
 }
@@ -1612,4 +1644,29 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     drop(server);
     drop(dial);
     Ok(())
+}
+
+/// A pruned node advertises `WITNESS | NODE_NETWORK_LIMITED` and never the
+/// full-history bit, because the advertisement would be false after bodies
+/// are pruned (Core `init.cpp:2022-2026`).
+#[test]
+fn pruned_version_message_advertises_network_limited_only() {
+    let pruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK_LIMITED;
+    let version = version_message(1, 0, PeerRole::FullRelay, pruned);
+    assert!(version.services.has(ServiceFlags::NETWORK_LIMITED));
+    assert!(!version.services.has(ServiceFlags::NETWORK));
+    assert!(version.services.has(ServiceFlags::WITNESS));
+    assert_eq!(version.sender.services, pruned);
+    assert_eq!(version.receiver.services, pruned);
+}
+
+/// The unpruned advertisement is the inverse: NETWORK set, LIMITED clear,
+/// WITNESS kept.
+#[test]
+fn unpruned_version_message_advertises_network() {
+    let unpruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK;
+    let version = version_message(1, 0, PeerRole::FullRelay, unpruned);
+    assert!(version.services.has(ServiceFlags::NETWORK));
+    assert!(!version.services.has(ServiceFlags::NETWORK_LIMITED));
+    assert!(version.services.has(ServiceFlags::WITNESS));
 }

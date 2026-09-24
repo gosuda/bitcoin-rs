@@ -16,19 +16,27 @@ use bitcoin::p2p::message_compact_blocks::SendCmpct;
 
 /// Build a local version message for handshake initiation.
 ///
-/// PRE: `role` is the role of the connection that will send the message.
+/// PRE: `role` is the role of the connection that will send the message,
+///   and `local_services` contains the services this node can provide.
 /// POST: the message advertises transaction relay only for a full-relay
 ///   connection; a block-relay-only connection advertises `relay = false`,
 ///   as Core's `PushNodeVersion` does (`net_processing.cpp:1651-1689`).
-/// INVARIANT: services, height, and nonce do not vary with the role.
-pub fn version_message(nonce: u64, start_height: i32, role: PeerRole) -> VersionMessage {
+///   Prune mode never advertises NODE_NETWORK; non-prune mode advertises
+///   NODE_NETWORK; WITNESS remains advertised in both modes (Core
+///   `init.cpp:2022-2026`).
+/// INVARIANT: services, height, and nonce do not vary with the role; both
+///   inbound and outbound handshakes use the same service set.
+pub fn version_message(
+    nonce: u64,
+    start_height: i32,
+    role: PeerRole,
+    local_services: ServiceFlags,
+) -> VersionMessage {
     let socket = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
-    let mut services = ServiceFlags::NETWORK;
-    services.add(ServiceFlags::WITNESS);
-    let address = Address::new(&socket, services);
+    let address = Address::new(&socket, local_services);
     VersionMessage {
         version: PROTOCOL_VERSION,
-        services,
+        services: local_services,
         timestamp: 0,
         receiver: address.clone(),
         sender: address,
@@ -81,25 +89,44 @@ pub(crate) fn send_post_verack_messages<S: Read + Write>(
 
 /// Start an outbound handshake and return messages to send to the remote peer.
 ///
-/// PRE: `role` is the dialing connection's role.
-/// POST: the first message advertises relay per `role`.
+/// PRE: `role` is the dialing connection's role and `local_services` are
+///   the services this node provides.
+/// POST: the first message advertises relay per `role` and the supplied
+///   service set.
 /// INVARIANT: feature negotiation is identical for both roles.
-pub fn start<S>(peer: &mut Peer<S>, nonce: u64, start_height: i32, role: PeerRole) -> Vec<Message> {
+pub fn start<S>(
+    peer: &mut Peer<S>,
+    nonce: u64,
+    start_height: i32,
+    role: PeerRole,
+    local_services: ServiceFlags,
+) -> Vec<Message> {
     peer.state = PeerState::VersionExchange;
     let mut messages = Vec::with_capacity(4);
-    messages.push(Message::Version(version_message(nonce, start_height, role)));
+    messages.push(Message::Version(version_message(
+        nonce,
+        start_height,
+        role,
+        local_services,
+    )));
     messages.extend(feature_messages());
     messages
 }
 
 /// Exercise a complete version/verack handshake between two cursor-backed peers.
+///
+/// PRE: both peers wrap independent buffers.
+/// POST: both peers are ready, advertising the explicit unpruned service
+///   set (full history plus witness).
+/// INVARIANT: this helper never varies the advertisement by role.
 pub fn handshake_cursors(
     left: &mut Peer<Cursor<Vec<u8>>>,
     right: &mut Peer<Cursor<Vec<u8>>>,
 ) -> Result<(), PeerError> {
-    let left_messages = start(left, 1, 0, PeerRole::FullRelay);
+    let unpruned = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+    let left_messages = start(left, 1, 0, PeerRole::FullRelay, unpruned);
     exchange(left, right, left_messages)?;
-    let right_messages = start(right, 2, 0, PeerRole::FullRelay);
+    let right_messages = start(right, 2, 0, PeerRole::FullRelay, unpruned);
     exchange(right, left, right_messages)?;
     exchange(left, right, vec![Message::Verack])?;
     exchange(right, left, vec![Message::Verack])?;
@@ -131,14 +158,17 @@ pub fn handshake_cursors(
 /// before the peer reaches the ready state, or if the connection's lease is
 /// revoked mid-handshake.
 ///
-/// PRE: `peer` wraps an accepted connection, and `lease` belongs to it.
-/// POST: `peer` is `Ready`, and the post-verack messages are sent.
+/// PRE: `peer` wraps an accepted connection, `lease` belongs to it, and
+///   `local_services` are the services this node provides.
+/// POST: `peer` is `Ready`, the post-verack messages are sent, and our
+///   `Version` advertised `local_services`.
 /// INVARIANT: This function counts no bytes; the stream that `peer` wraps
 /// owns byte accounting.
 pub fn run_inbound_handshake<S: Read + Write>(
     peer: &mut Peer<S>,
     our_nonce: u64,
     our_start_height: i32,
+    local_services: ServiceFlags,
     lease: &PeerLease,
     deadline: Instant,
 ) -> Result<(), PeerError> {
@@ -150,6 +180,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
         our_nonce,
         our_start_height,
         PeerRole::FullRelay,
+        local_services,
     )))?;
     for response in responses {
         peer.send(&response)?;
@@ -234,7 +265,7 @@ where
 mod tests {
     use std::io::{self, Cursor};
 
-    use bitcoin::p2p::Magic;
+    use bitcoin::p2p::{Magic, ServiceFlags};
 
     use super::{
         COMPACT_BLOCK_VERSION, Message, Peer, PeerError, PeerRole, PeerState, feature_messages,
@@ -281,7 +312,12 @@ mod tests {
         write_message(
             &mut remote_outbound,
             magic,
-            &Message::Version(version_message(99, 0, PeerRole::FullRelay)),
+            &Message::Version(version_message(
+                99,
+                0,
+                PeerRole::FullRelay,
+                ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+            )),
         )?;
         write_message(&mut remote_outbound, magic, &Message::Verack)?;
 
@@ -295,6 +331,7 @@ mod tests {
             &mut peer,
             1,
             0,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
             &lease,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
         )?;
@@ -346,11 +383,11 @@ mod tests {
     #[test]
     fn version_message_advertises_relay_only_for_full_relay() {
         assert!(
-            version_message(1, 0, PeerRole::FullRelay).relay,
+            version_message(1, 0, PeerRole::FullRelay, ServiceFlags::NETWORK).relay,
             "a full-relay handshake asks for transaction relay"
         );
         assert!(
-            !version_message(1, 0, PeerRole::BlockRelayOnly).relay,
+            !version_message(1, 0, PeerRole::BlockRelayOnly, ServiceFlags::NETWORK).relay,
             "a block-relay-only handshake asks for none"
         );
     }
@@ -361,7 +398,13 @@ mod tests {
     fn outbound_handshake_start_carries_the_connection_role() {
         let stream: std::io::Cursor<Vec<u8>> = Cursor::new(Vec::new());
         let mut peer = Peer::new(stream, Magic::BITCOIN);
-        let messages = start(&mut peer, 7, 42, PeerRole::BlockRelayOnly);
+        let messages = start(
+            &mut peer,
+            7,
+            42,
+            PeerRole::BlockRelayOnly,
+            ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+        );
         assert_eq!(
             messages.len(),
             4,
