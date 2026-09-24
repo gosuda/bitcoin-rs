@@ -159,6 +159,33 @@ mod tests {
     }
 
     #[test]
+    fn earlier_toml_connect_survives_later_cli_network() {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, "connect = [\"10.0.0.5:8333\"]\n")
+            .unwrap_or_else(|error| panic!("write toml: {error}"));
+
+        let config = super::load(
+            [
+                "bitcoin-rs",
+                "--config",
+                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
+                "--network",
+                "regtest",
+            ],
+            std::iter::empty(),
+        )
+        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+
+        assert_eq!(config.network, Network::Regtest);
+        assert_eq!(
+            config.p2p.connect,
+            vec!["10.0.0.5:8333"],
+            "a later bare CLI network selection fills profile fields, it does not reset them"
+        );
+    }
+
+    #[test]
     fn environment_is_overridden_by_cli() {
         let config = super::load(
             [

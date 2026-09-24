@@ -232,44 +232,73 @@ impl NodeConfig {
     /// Returns resolved defaults for a network.
     #[must_use]
     pub fn default_for_network(network: Network) -> Self {
-        let mut config = Self {
-            network: Network::Mainnet,
-            data_dir: PathBuf::from(".bitcoin-rs"),
+        Self::materialize(&UserConfig::default(), NetworkSelection::from(network))
+    }
+
+    /// Materializes the resolved settings from one folded layer.
+    ///
+    /// PRE: `settings` is the overlay of every source layer and `selection`
+    /// is the network named by the highest-precedence layer that named one.
+    /// POST: every field holds the operator's value, or the winning
+    /// profile's value for a field no layer set.
+    /// INVARIANT: a network selection never overwrites a field an operator
+    /// set on any layer; it only fills the gaps (`ARCH-05`).
+    fn materialize(settings: &UserConfig, selection: NetworkSelection) -> Self {
+        let profile = NetworkProfile::for_selection(selection);
+        let mut chainstate_journal = ChainstateJournalConfig::default();
+        apply_journal_overrides(&settings.chainstate_journal, &mut chainstate_journal);
+        Self {
+            network: selection.consensus_network(),
+            data_dir: settings
+                .data_dir
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".bitcoin-rs")),
             storage: StorageConfig {
-                backend: DEFAULT_STORAGE_BACKEND,
-                dbcache_mb: DEFAULT_DBCACHE_MB,
-                prune_target_mb: 0,
+                backend: settings.storage.backend.unwrap_or(DEFAULT_STORAGE_BACKEND),
+                dbcache_mb: settings.storage.dbcache_mb.unwrap_or(DEFAULT_DBCACHE_MB),
+                prune_target_mb: settings.storage.prune_target_mb.unwrap_or(0),
             },
             p2p: P2pConfig {
-                magic: Network::Mainnet.magic(),
-                listen: Vec::new(),
-                dns_seeds_enabled: true,
-                connect: Vec::new(),
-                fast_sync: false,
+                magic: settings.p2p.magic.unwrap_or(profile.magic),
+                listen: settings.p2p.listen.clone().unwrap_or(profile.listen),
+                dns_seeds_enabled: settings.p2p.dns_seeds.unwrap_or(profile.dns_seeds),
+                connect: settings.p2p.connect.clone().unwrap_or(profile.connect),
+                fast_sync: settings.p2p.fast_sync.unwrap_or(false),
             },
             rpc: RpcConfig {
-                bind: SocketAddr::from(([127, 0, 0, 1], Network::Mainnet.default_rpc_port())),
-                rest: false,
-                auth: Auth::default(),
+                bind: settings.rpc.bind.unwrap_or(profile.rpc_bind),
+                rest: settings.rpc.rest.unwrap_or(false),
+                auth: rpc_auth(settings),
             },
             indexes: IndexConfig {
-                txindex: false,
-                script_index: ScriptIndexMode::Disabled,
+                txindex: settings.indexes.txindex.unwrap_or(false),
+                script_index: settings
+                    .indexes
+                    .script_index
+                    .unwrap_or(ScriptIndexMode::Disabled),
             },
             observability: ObservabilityConfig {
-                log_level: DEFAULT_LOG_LEVEL.to_owned(),
-                metrics_bind: None,
+                log_level: settings
+                    .observability
+                    .log_level
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_LOG_LEVEL.to_owned()),
+                metrics_bind: settings.observability.metrics_bind,
             },
-            notifications: NotificationConfig::default(),
-            chainstate_journal: ChainstateJournalConfig::default(),
+            notifications: settings.notifications.clone().unwrap_or_default(),
+            chainstate_journal,
             validation: ValidationConfig {
-                assume_valid_height: 0,
-                mode: ValidationMode::AssumeValid,
+                assume_valid_height: settings
+                    .validation
+                    .assume_valid_height
+                    .unwrap_or(profile.assume_valid_height),
+                mode: settings
+                    .validation
+                    .mode
+                    .unwrap_or(ValidationMode::AssumeValid),
             },
             mining: MiningConfig::default(),
-        };
-        config.apply_network_selection(NetworkSelection::from(network));
-        config
+        }
     }
 
     /// Returns configured ZMQ endpoint groups.
@@ -327,111 +356,82 @@ impl NodeConfig {
         );
         Ok(())
     }
-
-    pub(super) fn apply_layer(&mut self, layer: &UserConfig) {
-        if let Some(network) = layer.network {
-            self.apply_network_selection(network);
-        }
-        if let Some(magic) = layer.p2p.magic {
-            self.p2p.magic = magic;
-        }
-        if let Some(data_dir) = &layer.data_dir {
-            self.data_dir.clone_from(data_dir);
-        }
-        if let Some(backend) = layer.storage.backend {
-            self.storage.backend = backend;
-        }
-        if let Some(value) = layer.storage.dbcache_mb {
-            self.storage.dbcache_mb = value;
-        }
-        if let Some(value) = layer.storage.prune_target_mb {
-            self.storage.prune_target_mb = value;
-        }
-        if let Some(bind) = layer.rpc.bind {
-            self.rpc.bind = bind;
-        }
-        if let Some(rest) = layer.rpc.rest {
-            self.rpc.rest = rest;
-        }
-        if let Some(path) = &layer.rpc.cookie {
-            self.rpc.auth = Auth::Cookie { path: path.clone() };
-        } else if layer.rpc.user.is_some() || layer.rpc.password.is_some() {
-            let (old_user, old_password) = self.rpc.auth.basic_parts();
-            self.rpc.auth = Auth::basic(
-                layer.rpc.user.clone().unwrap_or(old_user),
-                layer.rpc.password.clone().unwrap_or(old_password),
-            );
-        }
-        if let Some(value) = layer.indexes.txindex {
-            self.indexes.txindex = value;
-        }
-        if let Some(value) = layer.indexes.script_index {
-            self.indexes.script_index = value;
-        }
-        if let Some(value) = &layer.observability.log_level {
-            self.observability.log_level.clone_from(value);
-        }
-        if let Some(value) = layer.observability.metrics_bind {
-            self.observability.metrics_bind = Some(value);
-        }
-        if let Some(value) = &layer.p2p.listen {
-            self.p2p.listen.clone_from(value);
-        }
-        if let Some(value) = layer.p2p.dns_seeds {
-            self.p2p.dns_seeds_enabled = value;
-        }
-        if let Some(value) = &layer.p2p.connect {
-            self.p2p.connect.clone_from(value);
-        }
-        if let Some(value) = layer.p2p.fast_sync {
-            self.p2p.fast_sync = value;
-        }
-        if let Some(notifications) = &layer.notifications {
-            self.notifications.clone_from(notifications);
-        }
-        apply_journal_overrides(&layer.chainstate_journal, &mut self.chainstate_journal);
-        if let Some(value) = layer.validation.assume_valid_height {
-            self.validation.assume_valid_height = value;
-        }
-        if let Some(value) = layer.validation.mode {
-            self.validation.mode = value;
-        }
-    }
-
-    fn apply_network_selection(&mut self, selection: NetworkSelection) {
-        let network = selection.consensus_network();
-        self.network = network;
-        self.p2p.magic = network.magic();
-        self.rpc.bind = SocketAddr::from(([127, 0, 0, 1], network.default_rpc_port()));
-        self.p2p.listen = vec![SocketAddr::from(([0, 0, 0, 0], network.default_p2p_port()))];
-        self.p2p.dns_seeds_enabled = true;
-        self.p2p.connect.clear();
-        self.validation.assume_valid_height = network
-            .assume_valid_anchor()
-            .map_or(0, |(height, _)| height);
-        if selection == NetworkSelection::Drynet4 {
-            self.p2p.magic = DRYNET4_P2P_MAGIC;
-            self.p2p.dns_seeds_enabled = false;
-            self.p2p.connect = vec![DRYNET4_CONNECT.to_owned()];
-        }
-    }
 }
 
 /// Resolves layers from lowest to highest precedence.
+///
+/// The layers fold field-wise into one set of settings, the winning network
+/// selection fills the profile-owned fields no layer set, and the mining
+/// payout decodes once against that resolved network.
 pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
-    let mut config = NodeConfig::default_for_network(Network::Mainnet);
+    let mut settings = UserConfig::default();
     for layer in layers {
-        config.apply_layer(layer);
+        settings.overlay(layer);
     }
-    if let Some(address) = layers
-        .iter()
-        .rev()
-        .find_map(|layer| layer.mining.payout_address.as_deref())
-    {
-        config.mining.payout_script = decode_payout_script(config.network, address)?;
+    let selection = settings.network.unwrap_or(NetworkSelection::Mainnet);
+    let mut config = NodeConfig::materialize(&settings, selection);
+    if let Some(address) = settings.mining.payout_address {
+        config.mining.payout_script = decode_payout_script(config.network, &address)?;
     }
     config.validate()?;
     Ok(config)
+}
+
+/// Resolves the RPC authentication mode from the folded auth group.
+///
+/// PRE: `UserConfig::overlay` kept the group coherent: a cookie path and
+/// basic credentials are never both set.
+/// POST: a cookie path selects cookie auth; otherwise the two basic halves
+/// fall back to the built-in credentials.
+fn rpc_auth(settings: &UserConfig) -> Auth {
+    if let Some(path) = &settings.rpc.cookie {
+        return Auth::Cookie { path: path.clone() };
+    }
+    Auth::basic(
+        settings.rpc.user.as_deref().unwrap_or(DEFAULT_RPC_USER),
+        settings
+            .rpc
+            .password
+            .as_deref()
+            .unwrap_or(DEFAULT_RPC_PASSWORD),
+    )
+}
+
+/// The P2P bootstrap, RPC bind, and assume-valid values one network
+/// selection owns. A selection supplies these only for fields no operator
+/// layer set.
+struct NetworkProfile {
+    magic: [u8; 4],
+    listen: Vec<SocketAddr>,
+    dns_seeds: bool,
+    connect: Vec<String>,
+    rpc_bind: SocketAddr,
+    assume_valid_height: u32,
+}
+
+impl NetworkProfile {
+    fn for_selection(selection: NetworkSelection) -> Self {
+        let network = selection.consensus_network();
+        let drynet4 = selection == NetworkSelection::Drynet4;
+        Self {
+            magic: if drynet4 {
+                DRYNET4_P2P_MAGIC
+            } else {
+                network.magic()
+            },
+            listen: vec![SocketAddr::from(([0, 0, 0, 0], network.default_p2p_port()))],
+            dns_seeds: !drynet4,
+            connect: if drynet4 {
+                vec![DRYNET4_CONNECT.to_owned()]
+            } else {
+                Vec::new()
+            },
+            rpc_bind: SocketAddr::from(([127, 0, 0, 1], network.default_rpc_port())),
+            assume_valid_height: network
+                .assume_valid_anchor()
+                .map_or(0, |(height, _)| height),
+        }
+    }
 }
 
 fn bitcoin_network(network: Network) -> bitcoin::Network {
@@ -497,13 +497,6 @@ impl Auth {
                 Ok(bitcoin_rs_rpc::Auth::basic(user.clone(), password))
             }
             Self::Cookie { path } => Ok(bitcoin_rs_rpc::Auth::cookie(path)?),
-        }
-    }
-
-    pub(super) fn basic_parts(&self) -> (String, String) {
-        match self {
-            Self::Basic { user, password } => (user.clone(), password.clone()),
-            Self::Cookie { .. } => (DEFAULT_RPC_USER.to_owned(), DEFAULT_RPC_PASSWORD.to_owned()),
         }
     }
 }
