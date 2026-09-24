@@ -278,6 +278,7 @@ impl P2pService {
             listeners.push(handle);
         }
 
+        let dial_allowance = shared.block_sync.clone();
         let outbound = match self.spawn_outbound_worker(shared) {
             Ok(handle) => handle,
             Err(error) => {
@@ -285,7 +286,7 @@ impl P2pService {
                 return Err(error.into());
             }
         };
-        let bootstrap = match self.spawn_bootstrap_worker() {
+        let bootstrap = match self.spawn_bootstrap_worker(dial_allowance) {
             Ok(handle) => handle,
             Err(error) => {
                 self.rollback_startup(listeners, Some(outbound));
@@ -348,7 +349,19 @@ impl P2pService {
                             now,
                         );
                     }
-                    if !shared.activity.is_active() || active.len() >= active_limit {
+                    if !shared.activity.is_active() {
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    let extra_dial = shared
+                        .block_sync
+                        .as_ref()
+                        .is_some_and(|sync| sync.allow_extra_full_relay_dial());
+                    // A stale tip raises the total cap by one, so the extra
+                    // full-relay peer can form beside a full slot set: Core
+                    // opens it on top of both populations
+                    // (`net.cpp:2786-2806`).
+                    if active.len() >= active_limit + usize::from(extra_dial) {
                         thread::sleep(Duration::from_millis(100));
                         continue;
                     }
@@ -369,10 +382,6 @@ impl P2pService {
                         );
                         continue;
                     }
-                    let extra_dial = shared
-                        .block_sync
-                        .as_ref()
-                        .is_some_and(|sync| sync.allow_extra_full_relay_dial());
                     let role = next_outbound_role(
                         &peer_table,
                         &active,
@@ -391,7 +400,10 @@ impl P2pService {
             })
     }
 
-    fn spawn_bootstrap_worker(&self) -> Result<Option<JoinHandle<()>>, io::Error> {
+    fn spawn_bootstrap_worker(
+        &self,
+        block_sync: Option<Arc<crate::sync::BlockSync>>,
+    ) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
             let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
@@ -433,6 +445,7 @@ impl P2pService {
                     port,
                     seeds,
                     target,
+                    block_sync,
                 );
             })
             .map(Some)
@@ -895,6 +908,7 @@ fn run_dns_peer_maintenance(
     port: u16,
     seeds: Vec<String>,
     target: usize,
+    block_sync: Option<Arc<crate::sync::BlockSync>>,
 ) {
     let resolver = crate::SystemDnsResolver::new(port);
     let seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
@@ -938,11 +952,19 @@ fn run_dns_peer_maintenance(
         if wait_for_shutdown(&shutdown, delay) {
             break;
         }
+        // A stale tip raises the target by one so the refill feeds the
+        // extra dial too, as Core opens it from its own address book
+        // (`net.cpp:2786-2806`).
+        let extra = usize::from(
+            block_sync
+                .as_ref()
+                .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
+        );
         let live = live_outbound_count(&peer_table);
-        if live >= target {
+        if live >= target + extra {
             continue;
         }
-        let needed = target - live;
+        let needed = target + extra - live;
         queued = drain_dns_peer_deficit(
             &resolver,
             &seeds,
