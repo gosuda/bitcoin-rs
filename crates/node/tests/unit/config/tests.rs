@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use super::{
-    Auth, ChainstateJournalOverrides, NetworkSelection, NodeConfig, P2pOverrides, RpcOverrides,
-    ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
+use super::{Auth, NetworkSelection, NodeConfig, ScriptIndexMode};
+use crate::options::{
+    ChainstateJournalOverrides, P2pOverrides, RpcOverrides, StorageOverrides, UserConfig,
+    ValidationOverrides,
 };
 
 #[test]
@@ -93,17 +94,17 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
 #[test]
 fn journal_nested_overrides_apply_field_by_field_across_layers() {
     let base = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             blocks: Some(200),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let higher = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             seconds: Some(45),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let config = resolved(&[&base, &higher]);
@@ -216,11 +217,11 @@ fn p2p_magic_override_is_cross_field_validated() {
 #[test]
 fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     let inverted_retention = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             rotate_mib: Some(4096),
             max_journal_mib: Some(2048),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let Err(error) = super::resolve(&[&inverted_retention]) else {
@@ -234,11 +235,11 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     );
 
     let inverted_lag = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             blocks: Some(500),
             max_lag_blocks: Some(100),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let Err(error) = super::resolve(&[&inverted_lag]) else {
@@ -252,10 +253,10 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     );
 
     let zero_period = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             seconds: Some(0),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let Err(error) = super::resolve(&[&zero_period]) else {

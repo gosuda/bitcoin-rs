@@ -1,5 +1,6 @@
 //! Node configuration DTOs, resolution, and validation.
 
+use crate::options::{ChainstateJournalOverrides, UserConfig};
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_index::IndexCapabilities;
@@ -96,107 +97,32 @@ impl ScriptIndexMode {
     }
 }
 
-/// User-supplied storage overrides.
-#[derive(Clone, Debug, Default)]
-pub struct StorageOverrides {
-    /// Selected storage backend.
-    pub backend: Option<StorageBackend>,
-    /// Database cache budget in MiB.
-    pub dbcache_mb: Option<u64>,
-    /// Pruning target in MiB.
-    pub prune_target_mb: Option<u64>,
-}
-
-/// User-supplied P2P overrides.
-#[derive(Clone, Debug, Default)]
-pub struct P2pOverrides {
-    /// P2P message-start bytes.
-    pub magic: Option<[u8; 4]>,
-    /// P2P listener bind addresses.
-    pub listen: Option<Vec<SocketAddr>>,
-    /// Whether DNS seeds are enabled.
-    pub dns_seeds: Option<bool>,
-    /// Fixed outbound peer endpoints.
-    pub connect: Option<Vec<String>>,
-    /// Whether fast sync (shallow, early fan-out over a larger outbound set) is enabled.
-    pub fast_sync: Option<bool>,
-}
-
-/// User-supplied RPC overrides.
-#[derive(Clone, Debug, Default)]
-pub struct RpcOverrides {
-    /// JSON-RPC bind address.
-    pub bind: Option<SocketAddr>,
-    /// Whether the REST gateway is enabled.
-    pub rest: Option<bool>,
-    /// Basic-auth username.
-    pub user: Option<String>,
-    /// Basic-auth password.
-    pub password: Option<String>,
-    /// Cookie-auth path.
-    pub cookie: Option<PathBuf>,
-}
-
-/// User-supplied index overrides.
-#[derive(Clone, Debug, Default)]
-pub struct IndexOverrides {
-    /// Whether the transaction index is enabled.
-    pub txindex: Option<bool>,
-    /// Script index mode.
-    pub script_index: Option<ScriptIndexMode>,
-}
-
-/// User-supplied observability overrides.
-#[derive(Clone, Debug, Default)]
-pub struct ObservabilityOverrides {
-    /// Tracing filter level.
-    pub log_level: Option<String>,
-    /// Optional Prometheus metrics bind address.
-    pub metrics_bind: Option<SocketAddr>,
-}
-
-/// User-supplied validation overrides.
-#[derive(Clone, Debug, Default)]
-pub struct ValidationOverrides {
-    /// Height through which script verification may be skipped.
-    pub assume_valid_height: Option<u32>,
-    /// Which script verification the apply path may skip.
-    pub mode: Option<ValidationMode>,
-}
-
-/// User-supplied mining overrides.
-#[derive(Clone, Debug, Default)]
-pub struct MiningOverrides {
-    /// Watch-only coinbase payout address. Decoded after every config layer
-    /// has been applied, against the resolved consensus network.
-    pub payout_address: Option<String>,
-}
-
-/// A parser-independent source layer.
-#[derive(Clone, Debug, Default)]
-pub struct UserConfig {
-    /// Network profile.
-    pub network: Option<NetworkSelection>,
-    /// Node data directory.
-    pub data_dir: Option<PathBuf>,
-    /// Storage settings.
-    pub storage: StorageOverrides,
-    /// P2P settings.
-    pub p2p: P2pOverrides,
-    /// RPC settings.
-    pub rpc: RpcOverrides,
-    /// Index settings.
-    pub indexes: IndexOverrides,
-    /// Logging and metrics settings.
-    pub observability: ObservabilityOverrides,
-    /// Notification adapters. `None` means this layer does not speak to them.
-    pub notifications: Option<NotificationConfig>,
-    /// Chainstate journal settings. `None` means this layer does not speak to them.
-    pub chainstate_journal: Option<ChainstateJournalOverrides>,
-    /// Validation settings.
-    pub validation: ValidationOverrides,
-    /// Mining settings.
-    pub mining: MiningOverrides,
+/// Applies one journal layer field by field onto the resolved settings.
+fn apply_journal_overrides(
+    layer: &ChainstateJournalOverrides,
+    config: &mut ChainstateJournalConfig,
+) {
+    if let Some(enabled) = layer.enabled {
+        config.enabled = enabled;
+    }
+    if let Some(blocks) = layer.blocks {
+        config.blocks = blocks;
+    }
+    if let Some(seconds) = layer.seconds {
+        config.seconds = seconds;
+    }
+    if let Some(rotate_mib) = layer.rotate_mib {
+        config.rotate_mib = rotate_mib;
+    }
+    if let Some(max_journal_mib) = layer.max_journal_mib {
+        config.max_journal_mib = max_journal_mib;
+    }
+    if let Some(max_lag_blocks) = layer.max_lag_blocks {
+        config.max_lag_blocks = max_lag_blocks;
+    }
+    if let Some(max_lag_seconds) = layer.max_lag_seconds {
+        config.max_lag_seconds = max_lag_seconds;
+    }
 }
 
 const DEFAULT_STORAGE_BACKEND: StorageBackend = StorageBackend::Fjall;
@@ -463,9 +389,7 @@ impl NodeConfig {
         if let Some(notifications) = &layer.notifications {
             self.notifications.clone_from(notifications);
         }
-        if let Some(journal) = layer.chainstate_journal {
-            journal.apply_to(&mut self.chainstate_journal);
-        }
+        apply_journal_overrides(&layer.chainstate_journal, &mut self.chainstate_journal);
         if let Some(value) = layer.validation.assume_valid_height {
             self.validation.assume_valid_height = value;
         }
@@ -603,52 +527,6 @@ impl fmt::Debug for Auth {
 impl Default for Auth {
     fn default() -> Self {
         Self::basic(DEFAULT_RPC_USER, DEFAULT_RPC_PASSWORD)
-    }
-}
-
-/// User-supplied chainstate journal overrides.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ChainstateJournalOverrides {
-    /// Whether the journal is active.
-    pub enabled: Option<bool>,
-    /// Durability batch size, in blocks.
-    pub blocks: Option<u32>,
-    /// Durability batch period, in seconds.
-    pub seconds: Option<u64>,
-    /// Active-segment rotation threshold, in MiB.
-    pub rotate_mib: Option<u64>,
-    /// Total-journal retention bound, in MiB.
-    pub max_journal_mib: Option<u64>,
-    /// Backpressure threshold, in blocks.
-    pub max_lag_blocks: Option<u32>,
-    /// Backpressure threshold, in seconds.
-    pub max_lag_seconds: Option<u64>,
-}
-
-impl ChainstateJournalOverrides {
-    pub(super) fn apply_to(self, config: &mut ChainstateJournalConfig) {
-        if let Some(enabled) = self.enabled {
-            config.enabled = enabled;
-        }
-        if let Some(blocks) = self.blocks {
-            config.blocks = blocks;
-        }
-        if let Some(seconds) = self.seconds {
-            config.seconds = seconds;
-        }
-        if let Some(rotate_mib) = self.rotate_mib {
-            config.rotate_mib = rotate_mib;
-        }
-        if let Some(max_journal_mib) = self.max_journal_mib {
-            config.max_journal_mib = max_journal_mib;
-        }
-        if let Some(max_lag_blocks) = self.max_lag_blocks {
-            config.max_lag_blocks = max_lag_blocks;
-        }
-        if let Some(max_lag_seconds) = self.max_lag_seconds {
-            config.max_lag_seconds = max_lag_seconds;
-        }
     }
 }
 
