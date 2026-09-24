@@ -162,16 +162,20 @@ impl ChainSyncState {
 /// Whether the chain-sync rule applies to `peer`.
 ///
 /// PRE: `now` is this tick's monotonic stamp.
-/// POST: return true exactly for an outbound full-relay connection older than
-///   `MINIMUM_CONNECT_TIME`.
+/// POST: return true exactly for an outbound, not operator-pinned,
+///   full-relay connection older than `MINIMUM_CONNECT_TIME`.
 /// INVARIANT: an inbound connection is never timed out, because we did not
-///   choose it, and neither is a block-relay-only one, which is never asked to
-///   bring us a chain. Core times out both outbound classes
+///   choose it; neither is a manual one, because the operator did — Core
+///   gates the rule on `IsOutboundOrBlockRelayConn()`, which excludes
+///   `ConnectionType::MANUAL` (`net_processing.cpp:5502`). Neither is a
+///   block-relay-only one, which is never asked to bring us a chain: Core
+///   times out both outbound classes
 ///   (`ConsiderEviction`, `net_processing.cpp:5498-5550`); keeping the
 ///   block-relay population out of the rule is a documented divergence, so a
 ///   connection we dialed for blocks alone is never replaced by this timer.
 pub(super) fn chain_sync_subject(peer: &UsablePeer, now: Instant) -> bool {
     !peer.info.inbound
+        && !peer.manual
         && peer.role == PeerRole::FullRelay
         && now.saturating_duration_since(peer.connected_at) >= MINIMUM_CONNECT_TIME
 }
