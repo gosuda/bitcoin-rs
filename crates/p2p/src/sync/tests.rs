@@ -2166,8 +2166,8 @@ fn current_source(peer_table: &Arc<PeerTable>, addr: SocketAddr) -> PeerSource {
 }
 
 /// The canonical frontier `tick()` would observe right now.
-fn test_frontier(sync: &BlockSync) -> super::SyncFrontier {
-    sync.observe_frontier(sync.observe_chain_frontier(), Instant::now())
+fn test_frontier(sync: &BlockSync) -> super::ChainFrontier {
+    sync.observe_chain_frontier()
 }
 
 fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
