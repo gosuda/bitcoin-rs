@@ -297,6 +297,75 @@ fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+/// RC2: a same-address reconnect neither inherits its dead predecessor's
+/// deep-window election nor loses its own in-flight work when its
+/// readiness is reported.
+#[test]
+fn same_address_reconnect_does_not_inherit_stalled_inflight()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (sync, peers, _applied_tip, blocks, blocks_tx) = sync_with_mined_chain(16)?;
+    let owner = test_addr(9322, 0)?;
+    let winner = test_addr(9322, 1)?;
+    let owner_rx = connect_peer(&peers, eligible_peer(owner, 200));
+    let winner_rx = connect_peer(&peers, eligible_peer(winner, 100));
+    sync.tick();
+    let _ = next_getdata(&owner_rx)?;
+    let _ = next_getdata(&winner_rx)?;
+    let predecessor = current_source(&peers, winner);
+    for block in &blocks[..4] {
+        let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+        inbound.source = Some(predecessor);
+        blocks_tx.send(inbound)?;
+    }
+    sync.tick();
+    let _ = next_getdata(&winner_rx)?;
+    let pending_owner = |hash: &BlockHash| {
+        sync.scheduler
+            .lock()
+            .window
+            .pending_owner(&Hash256::from_le_bytes(hash.as_bytes()))
+    };
+    assert!(sync.scheduler.lock().window.preferred_peer().is_some());
+    assert!(
+        blocks[4..]
+            .iter()
+            .any(|block| pending_owner(&block.block_hash()) == Some(predecessor)),
+        "the elected winner must hold the deep window in flight"
+    );
+
+    let (replacement_tx, replacement_rx) = unbounded::<Message>();
+    let lease = PeerLease::new(replacement_tx);
+    peers.register(winner, lease.clone());
+    peers.publish_info(winner, &lease, eligible_peer(winner, 100));
+    let replacement = lease.source(winner);
+    sync.on_peer_ready(replacement);
+    assert!(
+        sync.scheduler.lock().window.preferred_peer().is_none(),
+        "the dead connection's election must not pass to its replacement"
+    );
+    sync.tick();
+
+    let rerequested = witness_block_inventory(next_getdata(&replacement_rx)?)?;
+    assert!(!rerequested.is_empty());
+    for hash in &rerequested {
+        assert_eq!(pending_owner(hash), Some(replacement));
+    }
+
+    sync.on_peer_ready(replacement);
+    for hash in &rerequested {
+        assert_eq!(
+            pending_owner(hash),
+            Some(replacement),
+            "readiness must not release the replacement's own in-flight work"
+        );
+    }
+    sync.tick();
+    for hash in &rerequested {
+        assert_eq!(pending_owner(hash), Some(replacement));
+    }
+    Ok(())
+}
+
 #[test]
 fn stall_eviction_does_not_disconnect_replacement_connection()
 -> Result<(), Box<dyn std::error::Error>> {
