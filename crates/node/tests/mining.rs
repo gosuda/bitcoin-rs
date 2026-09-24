@@ -1520,7 +1520,8 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Resu
             .chain_tx_count
     };
     assert_ne!(
-        chain_tx_count, 0,
+        chain_tx_count,
+        bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         "disconnect must keep the scripts-valid chain_tx_count"
     );
     let tip = state
@@ -1581,7 +1582,7 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> anyhow::Result<(
         let genesis_id = tree
             .lookup(genesis_hash)
             .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
-        tree.restore_chain_tx_count(genesis_id, 0)?;
+        tree.restore_chain_tx_count(genesis_id, bitcoin_rs_chain::ChainTxCount::UNKNOWN)?;
     }
     assert_eq!(
         propose_block(&mining, genesis.clone())?,

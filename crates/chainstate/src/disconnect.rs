@@ -5,9 +5,8 @@ use super::Chainstate;
 use super::DisconnectOutcome;
 use super::DisconnectPlan;
 use super::durable::commit_disconnect_head;
-use super::publication::begin_applied_publication;
-use super::publication::rewind_chain_tx_count;
-use super::publication::rewound_chain_tx_count;
+use super::publication::certified_rewind;
+use super::publication::publish_disconnect;
 use super::publication::tx_count_delta_for;
 use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -16,8 +15,6 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_utxo::{BlockRollback, RollbackError, load_block_undo, rollback_block};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 pub(super) fn plan_disconnect(
     handles: &Chainstate,
@@ -157,44 +154,41 @@ pub(super) fn disconnect_block_admitted(
     })?;
     // Journal rewinds before the head advances so a kill between the two
     // leaves the head as high-water mark.
-    let journal_rewound = rewind_journal_to_parent(
-        handles,
-        &parent_tip,
-        parent_prev_hash,
-        parent_chain_tx_count,
-    );
-    commit_disconnect_head(
-        handles,
-        &parent_tip,
-        block_hash,
-        rewound_chain_tx_count(handles, tx_count_delta),
-    )
-    .map_err(fatal)?;
-
-    {
-        let _publication = begin_applied_publication(handles);
-        handles
-            .applied_tip
-            .store(Some(Arc::new(parent_tip.clone())));
-        handles.chain_events.record(
-            crate::events::HintKind::Disconnected,
+    let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
+        let rewound = journal.lock().rewind_to(
             parent_tip.height,
-            parent_tip.hash,
+            parent_tip.hash.to_le_bytes(),
+            parent_prev_hash.to_le_bytes(),
+            parent_chain_tx_count.to_wire(),
         );
-        rewind_chain_tx_count(handles, tx_count_delta);
-        // A checkpoint-restored parent node still carries an unknown count
-        // even though the rewind just re-derived it; store the value on the
-        // node too so a later reorg reconnect derives the child's cumulative
-        // count from it instead of propagating unknown.
-        handles
-            .block_tree
-            .write()
-            .restore_chain_tx_count(
-                parent_tip.tip_id,
-                handles.chain_tx_count.load(Ordering::Relaxed),
-            )
-            .map_err(|error| fatal(ApplyError::Chain(error)))?;
-    }
+        rewound
+            .map_err(|error| {
+                metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
+                tracing::warn!(
+                    height = parent_tip.height,
+                    hash = %parent_tip.hash,
+                    %error,
+                    "chainstate journal fork-head rewrite failed; retaining disconnect marker"
+                );
+            })
+            .is_ok()
+    });
+    // Durable before published: the head batch names the rewound count one
+    // step ahead of the tip that carries it, and both stores land the value
+    // the commit certified.
+    let rewound = certified_rewind(handles.applied_chain_tx_count(), tx_count_delta);
+    commit_disconnect_head(handles, &parent_tip, block_hash, rewound.to_wire())
+        .map_err(fatal)?;
+    publish_disconnect(handles, &parent_tip, rewound);
+    // A checkpoint-restored parent node still carries an unknown count even
+    // though the rewind just re-derived it; store the value on the node too
+    // so a later reorg reconnect derives the child's cumulative count from it
+    // instead of propagating unknown.
+    handles
+        .block_tree
+        .write()
+        .restore_chain_tx_count(parent_tip.tip_id, rewound)
+        .map_err(|error| fatal(ApplyError::Chain(error)))?;
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {

@@ -1,6 +1,7 @@
 //! Checkpoint formats, loading, and publication.
 
 use bitcoin_rs_chain::BlockTree;
+use bitcoin_rs_chain::ChainTxCount;
 use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
@@ -310,9 +311,9 @@ fn load_payloads(
         headers.tree.restore_chain_tx_count(
             node_id,
             if node_id == headers.applied_tip_id {
-                chain_tx_count
+                ChainTxCount::from_wire(chain_tx_count)
             } else {
-                0
+                ChainTxCount::UNKNOWN
             },
         )?;
         cursor = parent;
