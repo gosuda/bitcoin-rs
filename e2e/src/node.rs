@@ -25,6 +25,8 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Bound on retained child output.
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
+/// Bound on the journaled RPC and HTTP transcript.
+const MAX_TRANSCRIPT: u64 = 64 * 1024 * 1024;
 /// Fixed test credentials; both node kinds share them.
 const AUTH_USER: &str = "parity";
 const AUTH_PASSWORD: &str = "parity";
@@ -126,6 +128,7 @@ pub struct ProcessNode {
     /// Directory that receives launch.json, stdout.log, stderr.log, transcript.
     pub evidence: PathBuf,
     journal: File,
+    journal_bytes: u64,
     started: Instant,
     output: Vec<JoinHandle<()>>,
     conn: Connection,
@@ -389,17 +392,36 @@ impl ProcessNode {
         let (rpc_addr, p2p_addr, rpc_listener, p2p_listener) = loopback_addresses()?;
         let rpc_addr = options.rpc_bind.unwrap_or(rpc_addr);
         let journal = File::create(evidence.join("transcript.jsonl"))?;
-        let (mut command, clock) = launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
+        let (mut command, clock) =
+            launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
         command.args(options.extra_args);
+        let executable = Path::new(command.get_program());
+        let mut engine = sha256::Hash::engine();
+        std::io::copy(&mut File::open(executable)?, &mut engine)?;
+        let digest = sha256::Hash::from_engine(engine);
+        let config = match kind {
+            Kind::BitcoinRs => Some(fs::read_to_string(datadir.path().join("node.toml"))?),
+            Kind::Core => None,
+        };
         fs::write(
             evidence.join("launch.json"),
             serde_json::to_vec_pretty(&json!({
-                "kind": format!("{kind:?}"),
-                "program": command.get_program(),
+                "binary": format!("{kind:?}"),
+                "executable": executable,
+                "executable_sha256": digest.to_string(),
                 "argv": command.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
+                "config": config,
                 "datadir": datadir.path(),
                 "rpc_address": rpc_addr.to_string(),
                 "p2p_address": p2p_addr.to_string(),
+                "clock": format!("{clock:?}"),
+                "startup_timeout_ms": options.timeout.unwrap_or(START_TIMEOUT).as_millis(),
+                "request_timeout_ms": REQUEST_TIMEOUT.as_millis(),
+                "output_limit_bytes": MAX_OUTPUT,
+                "transcript_limit_bytes": MAX_TRANSCRIPT,
+                "ci_commit": std::env::var("GITHUB_SHA").ok(),
+                "ci_run_id": std::env::var("GITHUB_RUN_ID").ok(),
+                "ci_run_attempt": std::env::var("GITHUB_RUN_ATTEMPT").ok(),
             }))?,
         )?;
         drop((rpc_listener, p2p_listener));
@@ -413,6 +435,7 @@ impl ProcessNode {
             clock,
             evidence,
             journal,
+            journal_bytes: 0,
             started: Instant::now(),
             output: Vec::new(),
             conn: Connection::new(rpc_addr),
@@ -464,7 +487,11 @@ impl ProcessNode {
                     evidence: self.evidence.clone(),
                 });
             }
-            match self.rpc_until("getblockchaininfo", &json!([]), deadline) {
+            match self.rpc_until(
+                "getblockchaininfo",
+                &json!([]),
+                deadline.min(Instant::now() + REQUEST_TIMEOUT),
+            ) {
                 Ok(_) => return Ok(()),
                 Err(error) if Instant::now() >= deadline => {
                     return Err(Error::Timeout {
@@ -488,26 +515,26 @@ impl ProcessNode {
     /// JSON-RPC call bounded by `deadline`: the transport obeys the same
     /// deadline as the polling loop, so a startup wait cannot be renewed
     /// by a per-request budget.
-    pub fn rpc_until(
-        &mut self,
-        method: &str,
-        params: &Value,
-        deadline: Instant,
-    ) -> Result<Value> {
+    pub fn rpc_until(&mut self, method: &str, params: &Value, deadline: Instant) -> Result<Value> {
         let request = json!({"jsonrpc": "1.0", "id": "e2e", "method": method, "params": params});
-        self.record(&request)?;
-        let response = self.conn.rpc(&request, (AUTH_USER, AUTH_PASSWORD), deadline);
-        self.record(&match &response {
-            Ok(value) => value.clone(),
-            Err(error) => json!({"transport_error": error.to_string()}),
-        })?;
+        let response = self
+            .conn
+            .rpc(&request, (AUTH_USER, AUTH_PASSWORD), deadline);
+        self.record(
+            &request,
+            &match &response {
+                Ok(value) => value.clone(),
+                Err(error) => json!({"transport_error": error.to_string()}),
+            },
+        )?;
         let reply = response?;
         if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
             return Err(Error::Rpc {
                 method: method.to_owned(),
-                code: error.get("code").and_then(Value::as_i64).ok_or_else(|| {
-                    Error::Protocol("RPC error lacks a numeric code".into())
-                })?,
+                code: error
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| Error::Protocol("RPC error lacks a numeric code".into()))?,
                 message: error
                     .get("message")
                     .and_then(Value::as_str)
@@ -560,27 +587,34 @@ impl ProcessNode {
         body: &[u8],
         auth: Option<(&str, &str)>,
     ) -> Result<HttpResponse> {
-        self.record(&json!({
+        let request = json!({
             "http_request": {
                 "method": method,
                 "path": path,
                 "body_bytes": body.len(),
                 "auth_user": auth.map(|(user, _)| user),
             }
-        }))?;
-        let response =
-            self.conn.http(method, path, body, auth, Instant::now() + REQUEST_TIMEOUT)?;
-        self.record(&json!({
-            "http_response": {
-                "status": response.status,
-                "body_bytes": response.body.len(),
-                "body_head": String::from_utf8_lossy(
-                    &response.body[..response.body.len().min(512)]
-                )
-                .into_owned(),
-            }
-        }))?;
-        Ok(response)
+        });
+        let response = self
+            .conn
+            .http(method, path, body, auth, Instant::now() + REQUEST_TIMEOUT);
+        self.record(
+            &request,
+            &match &response {
+                Ok(response) => json!({
+                    "http_response": {
+                        "status": response.status,
+                        "body_bytes": response.body.len(),
+                        "body_head": String::from_utf8_lossy(
+                            &response.body[..response.body.len().min(512)]
+                        )
+                        .into_owned(),
+                    }
+                }),
+                Err(error) => json!({"transport_error": error.to_string()}),
+            },
+        )?;
+        Ok(response?)
     }
 
     /// GET helper for REST/Esplora surfaces.
@@ -598,9 +632,7 @@ impl ProcessNode {
         }
         let response = self.http_get(path)?;
         if response.status != 200 {
-            return Err(Error::Protocol(
-                "explorer HTTP response was not 200".into(),
-            ));
+            return Err(Error::Protocol("explorer HTTP response was not 200".into()));
         }
         response.json()
     }
@@ -611,14 +643,26 @@ impl ProcessNode {
         self.started
     }
 
-    fn record(&mut self, entry: &Value) -> Result<()> {
-        let line = serde_json::to_vec(&json!({
+    /// Journal one request/reply pair against the shared monotonic clock.
+    fn record(&mut self, request: &Value, reply: &Value) -> Result<()> {
+        let encoded = serde_json::to_vec(&json!({
+            "request": request,
+            "reply": reply,
             "at_micros": self.started.elapsed().as_micros(),
-            "entry": entry,
         }))?;
-        self.journal.write_all(&line)?;
+        let next_size = self
+            .journal_bytes
+            .saturating_add(
+                u64::try_from(encoded.len()).map_err(|error| Error::Protocol(error.to_string()))?,
+            )
+            .saturating_add(1);
+        if next_size > MAX_TRANSCRIPT {
+            return Err(Error::Protocol("transcript capacity exceeded".into()));
+        }
+        self.journal.write_all(&encoded)?;
         self.journal.write_all(b"\n")?;
         self.journal.flush()?;
+        self.journal_bytes = next_size;
         Ok(())
     }
 
