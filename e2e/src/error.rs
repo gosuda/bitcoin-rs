@@ -50,6 +50,15 @@ pub enum Error {
         /// Why the binary failed the check.
         detail: String,
     },
+    /// A behavior difference between the reference and candidate replies.
+    Difference {
+        /// The observation that diverged.
+        observation: String,
+        /// The reply from the pinned reference process.
+        reference: serde_json::Value,
+        /// The reply from the candidate process.
+        candidate: serde_json::Value,
+    },
     /// A test-level assertion or protocol assumption failed.
     Assertion(String),
 }
@@ -89,6 +98,14 @@ impl fmt::Display for Error {
                 f,
                 "reference binary {} must have SHA256 {expected}: {detail}",
                 path.display()
+            ),
+            Self::Difference {
+                observation,
+                reference,
+                candidate,
+            } => write!(
+                f,
+                "behavior difference for {observation}: reference={reference}; candidate={candidate}"
             ),
             Self::Assertion(detail) => write!(f, "assertion: {detail}"),
         }

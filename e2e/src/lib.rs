@@ -13,6 +13,7 @@
 //! transcript) lands in `target/process-harness/e2e/run-*`, under the
 //! artifact root CI uploads.
 
+pub mod differential;
 pub mod error;
 pub mod helpers;
 pub mod node;
