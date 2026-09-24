@@ -614,7 +614,7 @@ impl ProcessNode {
                 Err(error) => json!({"transport_error": error.to_string()}),
             },
         )?;
-        Ok(response?)
+        response
     }
 
     /// GET helper for REST/Esplora surfaces.
@@ -827,8 +827,8 @@ mod tests {
     /// child that died for any other reason must surface after exactly one
     /// attempt, not after the whole bounded budget.
     #[test]
-    fn spawn_retry_does_not_fire_on_a_non_port_bind_startup_failure() {
-        let datadir = tempfile::tempdir().expect("isolated datadir");
+    fn spawn_retry_does_not_fire_on_a_non_port_bind_startup_failure() -> Result<()> {
+        let datadir = tempfile::tempdir()?;
         let before = invalid_flag_runs();
         let error = ProcessNode::spawn_in_datadir(
             Kind::BitcoinRs,
@@ -838,7 +838,10 @@ mod tests {
             },
             datadir,
         )
-        .expect_err("an unknown startup flag must not produce a ready node");
+        .err()
+        .ok_or_else(|| {
+            Error::Assertion("an unknown startup flag must not produce a ready node".into())
+        })?;
         assert!(
             matches!(error, Error::ChildExit { .. }),
             "startup must report child exit: {error}"
@@ -848,5 +851,6 @@ mod tests {
             1,
             "a non-bind startup failure must consume exactly one spawn attempt"
         );
+        Ok(())
     }
 }
