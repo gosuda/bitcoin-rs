@@ -37,12 +37,14 @@ pub fn block_sync(
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
 ) -> BlockSync {
     BlockSync::new(
         Arc::new(NodeSyncChain { handles, followers }),
         peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
+        ibd,
     )
 }
 

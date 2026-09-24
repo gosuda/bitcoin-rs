@@ -8,7 +8,7 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
 use bitcoin::hashes::Hash;
-use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -734,7 +734,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::er
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    let rx = connect_peer(&peers, eligible_peer(addr, 0));
+    let rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
     sync.tick();
@@ -789,7 +789,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
     } = SyncHarness::new(tree);
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
-    let rx = connect_peer(&peers, eligible_peer(addr, 0));
+    let rx = connect_peer(&peers, synthetic_peer(addr, 0));
     let source = current_source(&peers, addr);
 
     sync.tick();
@@ -886,8 +886,8 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     // (highest) takes the deep window; the alternate is the probe racer.
     let owner_addr = test_addr(9401, 0)?;
     let alternate_addr = test_addr(9401, 1)?;
-    let owner_rx = connect_peer(&peers, eligible_peer(owner_addr, 201));
-    let alternate_rx = connect_peer(&peers, eligible_peer(alternate_addr, 200));
+    let owner_rx = connect_peer(&peers, synthetic_peer(owner_addr, 201));
+    let alternate_rx = connect_peer(&peers, synthetic_peer(alternate_addr, 200));
 
     // Tick 1: below the threshold, a prefix probe is created. The owner
     // receives the deep getdata (all 16) and the alternate receives the
@@ -914,7 +914,7 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     // fresh (age well under stall_timeout_initial = 2s), so the bounded
     // deferral holds fanout off and the probe survives the transition.
     for idx in 2..super::MIN_PEERS_FOR_FANOUT {
-        connect_peer(&peers, eligible_peer(test_addr(9401, idx)?, 200));
+        connect_peer(&peers, synthetic_peer(test_addr(9401, idx)?, 200));
     }
     sync.tick();
     assert!(
@@ -952,15 +952,13 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     Ok(())
 }
 
-/// Seven eligible peers plus one ineligible candidate: were the
-/// ineligible peer counted, fan-out (many shallow getdatas) would engage;
-/// instead the window collapses to one deep single-peer batch. When the
-/// ineligible peer is the highest candidate (`serves_fallback`), it also
-/// pins that the fallback still uses it — the pre-fan-out shipped
-/// behavior (an inbound-only node must still sync).
-fn assert_fallback_with_ineligible_candidate(
+/// Seven eligible peers plus one candidate that may not serve block bodies:
+/// the ineligible candidate never counts toward the fan-out threshold, and it
+/// never receives a body request either — the highest eligible peer takes the
+/// deep batch. Header requests stay open to it: fetching headers is not
+/// gated by block-service eligibility.
+fn assert_no_bodies_for_ineligible_candidate(
     ineligible: PeerInfo,
-    serves_fallback: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
@@ -970,29 +968,17 @@ fn assert_fallback_with_ineligible_candidate(
         let addr = test_addr(9230, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 300 - i32::try_from(idx)?),
+            synthetic_peer(addr, 300 - i32::try_from(idx)?),
         ));
     }
 
     sync.tick();
 
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    let deep_rx = if serves_fallback {
-        &ineligible_rx
-    } else {
-        &rxs[0]
-    };
-    let Message::GetData(inventory) = deep_rx.try_recv()? else {
-        return Err(std::io::Error::other("expected one deep fallback getdata").into());
-    };
+    assert_no_getdata(&ineligible_rx)?;
+    let inventory = next_getdata(&rxs[0])?;
     assert_eq!(witness_block_inventory(inventory)?, expected);
-    if !serves_fallback {
-        assert!(
-            ineligible_rx.try_recv().is_err(),
-            "ineligible peer must receive nothing"
-        );
-    }
-    for rx in &rxs[usize::from(!serves_fallback)..] {
+    for rx in &rxs[1..] {
         assert_eq!(witness_block_inventory(next_getdata(rx)?)?, expected[..8]);
     }
     Ok(())
@@ -1530,7 +1516,12 @@ struct SyncHarness {
 }
 
 impl SyncHarness {
-    fn new(mut tree: BlockTree) -> Self {
+    fn new(tree: BlockTree) -> Self {
+        Self::with_ibd(tree, crate::sync::syncing_ibd_latch())
+    }
+
+    /// The same executor over a caller-chosen initial-block-download latch.
+    fn with_ibd(mut tree: BlockTree, ibd: Arc<InitialBlockDownload>) -> Self {
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
@@ -1547,6 +1538,7 @@ impl SyncHarness {
             Arc::clone(&peers),
             Arc::new(Mutex::new(inbound_headers_rx)),
             Arc::new(Mutex::new(inbound_blocks_rx)),
+            ibd,
         );
         Self {
             sync,
@@ -1557,6 +1549,60 @@ impl SyncHarness {
             inbound_blocks_tx,
         }
     }
+}
+
+/// [`sync_with_header_chain`] over a caller-chosen latch.
+pub(crate) fn sync_with_header_chain_and_ibd(
+    height: u32,
+    ibd: Arc<InitialBlockDownload>,
+) -> Result<SyncFixture, Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(height, 0)?;
+    let expected = blocks.iter().map(Block::block_hash).collect();
+    let harness = SyncHarness::with_ibd(tree, ibd);
+    Ok((
+        harness.sync,
+        harness.peers,
+        harness.block_tree,
+        harness.applied_tip,
+        expected,
+    ))
+}
+
+/// A latch that has left initial block download: a two-block regtest chain
+/// whose tip header is stamped with the current wall-clock second, so the
+/// work floor (zero on regtest) and the tip-age rule both pass on the first
+/// read and the answer latches off for good.
+pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let block_tree = Arc::new(RwLock::new(BlockTree::new()));
+    let genesis = Network::Regtest.genesis_block();
+    let recent = Header {
+        prev_blockhash: genesis.block_hash(),
+        time: u32::try_from(crate::counters::now_seconds()).unwrap_or(u32::MAX),
+        ..genesis.header
+    };
+    {
+        let mut tree = block_tree.write();
+        let Ok(genesis_id) = tree.insert_node(None, genesis.header, NodeStatus::Active) else {
+            unreachable!("regtest genesis is always insertable");
+        };
+        if tree
+            .insert_node(Some(genesis_id), recent, NodeStatus::Active)
+            .is_err()
+        {
+            unreachable!("a valid regtest child is always insertable");
+        }
+    }
+    let tip = block_tree
+        .read()
+        .tip()
+        .unwrap_or_else(|| unreachable!("the chain has a tip"));
+    applied_tip.store(Some(Arc::clone(&tip)));
+    Arc::new(InitialBlockDownload::new(
+        applied_tip,
+        block_tree,
+        Network::Regtest,
+    ))
 }
 
 /// Mine real bodies, then extend their header chain without applying anything.
@@ -1689,7 +1735,7 @@ fn staged_count_wedge(
         let addr = test_addr(9320, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 200 - i32::try_from(idx)?),
+            synthetic_peer(addr, 200 - i32::try_from(idx)?),
         ));
     }
 
@@ -2184,33 +2230,34 @@ fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
     peer_table.register(info.addr, lease.clone());
     peer_table.publish_info(info.addr, &lease, info);
 }
-
-fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
+/// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK`
+/// plus `NODE_WITNESS`, so it may serve block bodies at any height. A peer
+/// that must not be chosen for bodies comes from [`ineligible_peer`].
+pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     PeerInfo {
         addr,
         version: 70_016,
         wtxid_relay: false,
         compact_block_relay: false,
-        services: 0,
+        services: bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
+            | bitcoin::p2p::ServiceFlags::WITNESS.to_u64(),
         user_agent: String::from("/test/"),
         start_height,
         best_known_height: start_height,
         conn_time: 0,
-        inbound: true,
+        inbound: false,
         addr_bind: addr,
         time_offset: 0,
         counters: std::sync::Arc::new(crate::PeerCounters::default()),
     }
 }
 
-pub(crate) fn eligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
+/// A peer that may not serve block bodies at all: inbound (attacker-chosen)
+/// and advertising no services.
+pub(crate) fn ineligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     PeerInfo {
-        // SERVICE_WITNESS (1 << 3) | NODE_NETWORK (1): native peer flags.
-        services: 0b1001,
-        inbound: false,
-        addr_bind: addr,
-        time_offset: 0,
-        counters: std::sync::Arc::new(crate::PeerCounters::default()),
+        services: 0,
+        inbound: true,
         ..synthetic_peer(addr, start_height)
     }
 }
@@ -2284,6 +2331,7 @@ mod chain_sync;
 #[cfg(test)]
 mod frontier_model;
 mod head_sync;
+mod limited_peers;
 mod stale_tip;
 
 /// A sync loop over an applied chain whose commit fails on command for one
@@ -2323,13 +2371,14 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         Arc::clone(&peers),
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),
+        crate::sync::syncing_ibd_latch(),
     ));
     // Apply block 1 so the apply frontier needs block 2's body.
     blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
     sync.tick();
 
     let addr = test_addr(9770, 0)?;
-    let peer_rx = connect_peer(&peers, eligible_peer(addr, 2));
+    let peer_rx = connect_peer(&peers, synthetic_peer(addr, 2));
     let source = current_source(&peers, addr);
     let block2 =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);

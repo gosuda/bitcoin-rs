@@ -39,12 +39,14 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    let ibd = handles.ibd_latch();
     let sync = bitcoin_rs_node::sync::block_sync(
         Arc::new(handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
         inbound_blocks_rx,
+        Arc::clone(&ibd),
     );
 
     inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
@@ -95,12 +97,14 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         Arc::clone(&applied_tip),
         Arc::clone(&block_tree),
     );
+    let ibd = handles.ibd_latch();
     let sync = bitcoin_rs_node::sync::block_sync(
         Arc::new(handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         Arc::clone(&peer_table),
         inbound_headers_rx,
         inbound_blocks_rx,
+        Arc::clone(&ibd),
     );
 
     inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {

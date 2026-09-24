@@ -427,12 +427,19 @@ impl NodeState {
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
         let chainstate = Arc::new(chainstate);
+        // One chain-owned latch for the whole process: the chainstate builds
+        // it once, and the block-download executor, the RPC context, and the
+        // P2P listener all hold this same `Arc`, so `initialblockdownload`,
+        // the transaction-relay gate, and block-peer eligibility can never
+        // disagree.
+        let ibd = chainstate.ibd_latch();
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
             followers.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
+            Arc::clone(&ibd),
         ));
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
@@ -488,6 +495,7 @@ impl NodeState {
             chainstate,
             followers,
             sync,
+            ibd,
             recovery_reporter,
         })
     }

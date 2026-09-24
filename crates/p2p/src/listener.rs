@@ -318,19 +318,6 @@ impl ConnectionShared {
         // same tick would schedule a duplicate fetch for it. Queueing the
         // body first means the tick that admits the header always marks the
         // body received first.
-        let hash = bitcoin_rs_primitives::Hash256::from(block.header.compute_hash());
-        let requested = self
-            .block_sync
-            .as_ref()
-            .is_some_and(|sync| sync.owns_body_fetch(source, hash));
-        let forward_credit = match lease.admit_block_forward(source, hash, requested) {
-            Some(credit) => Some(credit),
-            None => {
-                metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
-                self.send_headers(source, vec![block.header], false, false);
-                return;
-            }
-        };
         let header = block.header;
         let hash = bitcoin_rs_primitives::Hash256::from(header.compute_hash());
         let requested = self
@@ -755,7 +742,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
         let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, deadline)?;
         let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
         // Core disconnects an outbound peer whose `version` does not offer
-        // the expected services (`net_processing.cpp:1904-1912`); an
+        // the expected services (`net_processing.cpp:3864-3871`); an
         // ineligible peer would otherwise hold an outbound slot that
         // maintenance cannot replace.
         if peer.remote_version.as_ref().is_some_and(|version| {
@@ -784,7 +771,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
 /// INVARIANT: this is the only outbound desirable-service predicate
 ///   (Core `HasAllDesirableServiceFlags` / `GetDesirableServiceFlags`,
 ///   `net_processing.cpp:1857-1872`, applied to outbound connections at
-///   `net_processing.cpp:1904-1912`); inbound peers are exempt.
+///   `net_processing.cpp:3864-3871`); inbound peers are exempt.
 #[must_use]
 pub fn has_all_desirable_service_flags(
     remote_services: ServiceFlags,
@@ -1972,8 +1959,7 @@ mod inbound_admission_tests {
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let serve_shutdown = Arc::clone(&shutdown);
-        let serve_shared = shared.clone();
-        let handle = std::thread::spawn(move || serve(listener, serve_shutdown, serve_shared));
+        let handle = std::thread::spawn(move || serve(listener, serve_shutdown, shared));
 
         let _first = TcpStream::connect(addr)?;
         let mut second = TcpStream::connect(addr)?;
@@ -3002,8 +2988,8 @@ mod block_forward_tests {
     use crate::sync::BlockSync;
     use crate::sync::chain::SyncChain;
     use crate::sync::tests::{
-        TestChain, coinbase_transaction, connect_peer, current_source, eligible_peer,
-        mined_block_with_prev_hash, mined_chain, test_addr,
+        TestChain, coinbase_transaction, connect_peer, current_source, mined_block_with_prev_hash,
+        mined_chain, synthetic_peer, test_addr,
     };
 
     fn genesis_body() -> bitcoin_rs_primitives::Block {
@@ -3037,6 +3023,7 @@ mod block_forward_tests {
             Arc::clone(&peers),
             Arc::new(Mutex::new(sync_headers_rx)),
             Arc::new(Mutex::new(sync_blocks_rx)),
+            crate::sync::syncing_ibd_latch(),
         ));
         sync_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
         sync.tick();
@@ -3045,7 +3032,7 @@ mod block_forward_tests {
         // The outbound queue stays alive: a closed queue would cancel the
         // lease and masquerade as a disconnect.
         let _rx: crossbeam_channel::Receiver<crate::Message> =
-            connect_peer(&peers, eligible_peer(flooded, 3));
+            connect_peer(&peers, synthetic_peer(flooded, 3));
         let source = current_source(&peers, flooded);
         let block2 =
             mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
@@ -3095,7 +3082,7 @@ mod block_forward_tests {
 
         let other: SocketAddr = test_addr(9781, 0)?;
         let _other_rx: crossbeam_channel::Receiver<crate::Message> =
-            connect_peer(&peers, eligible_peer(other, 3));
+            connect_peer(&peers, synthetic_peer(other, 3));
         let other_lease = peers
             .lease(other)
             .ok_or("second connection must be registered")?;

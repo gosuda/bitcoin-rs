@@ -27,7 +27,7 @@ const SPACING: Duration = Duration::from_secs(600);
 fn the_stale_tip_allowance_dials_past_the_slot_cap() {
     // A scheduler whose tip has stood still for three target spacings.
     let t0 = Instant::now();
-    let tree = BlockTree::new();
+    let mut tree = BlockTree::new();
     let chain_tip = tree.tip_handle();
     let (_headers_tx, headers_rx) = unbounded();
     let (_blocks_tx, blocks_rx) = unbounded();
@@ -41,6 +41,7 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         Arc::new(PeerTable::new()),
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),
+        crate::sync::syncing_ibd_latch(),
     ));
     {
         let mut scheduler = sync.scheduler.lock();

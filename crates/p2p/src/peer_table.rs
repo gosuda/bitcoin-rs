@@ -806,12 +806,11 @@ mod tests {
     }
 
     #[test]
-    fn removal_releases_inbound_capacity() {
+    fn removal_releases_inbound_capacity() -> Result<(), Box<dyn std::error::Error>> {
         let table = PeerTable::new();
-        let first = inbound_lease();
         let registered = table
-            .try_register_inbound(addr(1), first.clone(), 1)
-            .expect("capacity available");
+            .try_register_inbound(addr(1), inbound_lease(), 1)
+            .ok_or("capacity must admit the first inbound lease")?;
         assert!(table.remove_current(addr(1), &registered));
         assert_eq!(table.live_inbound_count(), 0);
         assert!(
@@ -819,19 +818,22 @@ mod tests {
                 .try_register_inbound(addr(2), inbound_lease(), 1)
                 .is_some()
         );
+        Ok(())
     }
 
     #[test]
     fn inbound_replacement_at_capacity_keeps_the_count_and_cancels_the_predecessor() {
         let table = PeerTable::new();
         let first = inbound_lease();
-        table
-            .try_register_inbound(addr(1), first.clone(), 1)
-            .expect("capacity available");
-        let second = inbound_lease();
         assert!(
             table
-                .try_register_inbound(addr(1), second.clone(), 1)
+                .try_register_inbound(addr(1), first.clone(), 1)
+                .is_some(),
+            "capacity must admit the first inbound lease"
+        );
+        assert!(
+            table
+                .try_register_inbound(addr(1), inbound_lease(), 1)
                 .is_some(),
             "a same-address replacement never grows the count and is admitted at capacity"
         );

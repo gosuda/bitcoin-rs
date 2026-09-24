@@ -938,6 +938,9 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         magic,
         headers_tx,
         blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
     );
     let dial = spawn_outbound_connection(addr, shared, PeerRole::BlockRelayOnly);
 
@@ -1463,6 +1466,9 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
         magic,
         headers_tx,
         blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
     )
 }
 
@@ -1524,7 +1530,7 @@ fn desirable_service_policy_matches_core() {
 /// A dialed peer that does not offer the desirable services is disconnected
 /// right after its `version` and never published: it would otherwise hold an
 /// outbound slot that maintenance cannot replace
-/// (`net_processing.cpp:1904-1912`).
+/// (`net_processing.cpp:3864-3871`).
 #[test]
 fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;

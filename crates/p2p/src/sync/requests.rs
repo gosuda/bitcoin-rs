@@ -10,12 +10,14 @@ use super::peers::active_demonstrated_height;
 use super::telemetry::metric_count;
 use crate::Message;
 use crate::connection::PeerSource;
+use crate::download_window::BlockDownloadPolicy;
 use crate::download_window::SyncPeer;
 use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
+use std::sync::Arc;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -243,6 +245,11 @@ impl BlockSync {
         let tree = self.chain.block_tree();
         let active_tip = self.chain.chain_tip()?.tip_id;
         let active_front_height = tree.active_height_of(active_tip, front_hash)?;
+        let policy = BlockDownloadPolicy {
+            ibd: Arc::clone(&self.ibd),
+            requested_height: active_front_height,
+            network: self.chain.network(),
+        };
         let mut eligible = SmallVec::<[PeerSource; 8]>::new();
         for session in sessions {
             let Some(peer) = session.info else {
@@ -257,10 +264,10 @@ impl BlockSync {
             } else {
                 active_demonstrated_height(&tree, active_tip, &session.demonstrated_tips)
             };
-            if source != owner
-                && statically_fanout_eligible(&peer)
-                && capability.is_some_and(|height| height >= active_front_height)
-            {
+            if source == owner || !statically_fanout_eligible(&peer, &policy) {
+                continue;
+            }
+            if capability.is_some_and(|height| height >= active_front_height) {
                 eligible.push(source);
             }
         }

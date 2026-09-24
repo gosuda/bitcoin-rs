@@ -81,7 +81,7 @@ impl PartialEq for PeerCounters {
 
 impl Eq for PeerCounters {}
 
-fn now_seconds() -> u64 {
+pub(crate) fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
