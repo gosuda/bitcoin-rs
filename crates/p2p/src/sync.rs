@@ -295,7 +295,7 @@ impl BlockSync {
                         peer.source,
                         peer_idx + 1 == request_peer_count,
                         peer_best_height,
-                        &frontier,
+                        &frontier.chain,
                     );
                     sent_getdata |= request_outcome.sent;
                     if request_outcome.sent && !request_outcome.has_request_capacity {
