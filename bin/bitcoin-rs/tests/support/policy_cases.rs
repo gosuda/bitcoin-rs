@@ -6,9 +6,10 @@ use bitcoin::{
 };
 use serde_json::{Value, json};
 
-use super::support::process_node::{
-    HarnessError, NodeBinary, ProcessNode, START_TIMEOUT, mine_common_chain, sign_funding_inputs,
-};
+use bitcoin_rs_e2e::differential::mine_common_chain;
+use bitcoin_rs_e2e::helpers::sign_p2pkh_inputs;
+use bitcoin_rs_e2e::node::START_TIMEOUT;
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode, SpawnOptions};
 
 type Coin = (OutPoint, TxOut);
 
@@ -25,19 +26,22 @@ impl Pair {
         // The two process launches are independent; start them concurrently.
         let (core, node) = std::thread::scope(|scope| {
             let core = scope.spawn(|| {
-                ProcessNode::start_with_options(
-                    NodeBinary::ReferenceCore,
-                    &[
-                        "-acceptnonstdtxn=0",
-                        "-minrelaytxfee=0.00001000",
-                        "-incrementalrelayfee=0.00001000",
-                        "-dustrelayfee=0.00003000",
-                        "-datacarriersize=83",
-                    ],
-                    START_TIMEOUT,
+                ProcessNode::spawn_with(
+                    Kind::Core,
+                    &SpawnOptions {
+                        extra_args: &[
+                            "-acceptnonstdtxn=0",
+                            "-minrelaytxfee=0.00001000",
+                            "-incrementalrelayfee=0.00001000",
+                            "-dustrelayfee=0.00003000",
+                            "-datacarriersize=83",
+                        ],
+                        timeout: Some(START_TIMEOUT),
+                        ..Default::default()
+                    },
                 )
             });
-            let node = scope.spawn(|| ProcessNode::start(NodeBinary::BitcoinRs));
+            let node = scope.spawn(|| ProcessNode::spawn(Kind::BitcoinRs));
             (
                 core.join().expect("reference launch panicked"),
                 node.join().expect("candidate launch panicked"),
@@ -112,7 +116,7 @@ impl Pair {
                 assert_eq!(preview[0]["reject-reason"], json!(reason), "{preview}");
                 let submitted = process.rpc("sendrawtransaction", &json!([raw]));
                 assert!(
-                    matches!(submitted, Err(HarnessError::Rpc { code: -26, ref message, .. }) if message.contains(reason)),
+                    matches!(submitted, Err(Error::Rpc { code: -26, ref message, .. }) if message.contains(reason)),
                     "{submitted:?}"
                 );
                 assert_eq!(
@@ -230,7 +234,7 @@ fn signed(inputs: &[Coin], outputs: Vec<TxOut>, version: i32) -> Transaction {
             .collect(),
         output: outputs,
     };
-    sign_funding_inputs(
+    sign_p2pkh_inputs(
         &mut tx,
         &inputs
             .iter()
