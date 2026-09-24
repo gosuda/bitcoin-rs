@@ -11,6 +11,8 @@ use bitcoin_rs_script::Interpreter;
 use bitcoin_rs_script::VerifyFlags;
 use rayon::prelude::*;
 
+#[cfg(not(feature = "kernel"))]
+use crate::ScriptEngine;
 use crate::rust_path::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST};
 
@@ -372,6 +374,7 @@ fn verify_input_script_portable(
         .map_err(|error| ConsensusError::Script {
             input_index,
             reason: error.to_string(),
+            engine: ScriptEngine::Native,
         })?;
     Ok(())
 }
@@ -859,7 +862,7 @@ mod tests {
         view.set_resolved(resolved);
         view
     }
-    use crate::{ConsensusError, rust_path::UtxoView};
+    use crate::{ConsensusError, ScriptEngine, rust_path::UtxoView};
 
     impl UtxoView for hashbrown::HashMap<OutPoint, TxOut> {
         fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
@@ -1105,6 +1108,7 @@ mod tests {
             Err(ConsensusError::Script {
                 input_index: 0,
                 reason: "script failed: WITNESS_PROGRAM_WITNESS_EMPTY".to_owned(),
+                engine: ScriptEngine::Native,
             })
         );
     }
@@ -1269,13 +1273,24 @@ mod tests {
 
         let result = verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY);
 
-        assert!(matches!(
-            result,
-            Err(ConsensusError::Script {
-                input_index: 0,
-                reason
-            }) if reason.starts_with("kernel script verification failed:")
-        ));
+        // Pins the client-facing bytes: the kernel verdict still arrives
+        // behind the unchanged prefix. Classification uses the engine field.
+        let Err(ConsensusError::Script {
+            input_index,
+            reason,
+            engine,
+        }) = result
+        else {
+            panic!("a kernel script rejection is expected");
+        };
+        assert_eq!(input_index, 0);
+        assert_eq!(engine, ScriptEngine::Kernel);
+        assert!(
+            reason
+                .strip_prefix(crate::kernel::KERNEL_SCRIPT_REJECT_PREFIX)
+                .is_some_and(|verdict| !verdict.is_empty()),
+            "the reject reason lost its kernel prefix: {reason}"
+        );
     }
 
     /// Assume-valid semantics: the non-script entry must accept a transaction

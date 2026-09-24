@@ -422,12 +422,7 @@ fn replay_gap_chain(
                 tip.height,
                 tip.chain_tx_count.to_wire(),
                 commit_id,
-            ) == (
-                head.tip,
-                head.height,
-                head.chain_tx_count,
-                head.commit_id,
-            )
+            ) == (head.tip, head.height, head.chain_tx_count, head.commit_id)
         });
         if !landed {
             return Err(unrecoverable("replay finished short of the stored head"));
