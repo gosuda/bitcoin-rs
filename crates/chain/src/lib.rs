@@ -34,8 +34,8 @@ pub use deployment::{
     softfork_state,
 };
 pub use header_sync::{
-    accept_headers, compact_is_met_by, current_unix_seconds, validate_header_timestamp,
-    validate_pow,
+    accept_headers, compact_is_met_by, current_unix_seconds, validate_contextual_header,
+    validate_header_timestamp, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
@@ -84,6 +84,35 @@ pub enum ChainError {
         /// Previous-block hash referenced by the child header.
         prev_hash: Hash256,
     },
+    /// The header version is below the floor a buried deployment requires.
+    ///
+    /// Core rejects with `bad-version(0x%08x)` once BIP34 (version 2),
+    /// BIP66 (version 3), or BIP65 (version 4) is active after the
+    /// previous block (`src/validation.cpp:4112-4126`).
+    #[error("header version {version:#010x} is below required {required} at height {height}")]
+    BadVersion {
+        /// The header's signed 32-bit version.
+        version: i32,
+        /// Minimum version the active deployment requires (2, 3, or 4).
+        required: i32,
+        /// Candidate header height.
+        height: u32,
+    },
+    /// A BIP94 retarget-boundary timestamp lies more than `MAX_TIMEWARP`
+    /// seconds below its parent's timestamp.
+    ///
+    /// Core rejects with `time-timewarp-attack`
+    /// (`src/validation.cpp:4100-4110`).
+    #[error("header timestamp {timestamp} at height {height} is below the timewarp floor {minimum}")]
+    TimewarpAttack {
+        /// Candidate header height (a difficulty-adjustment boundary).
+        height: u32,
+        /// The header's timestamp.
+        timestamp: u32,
+        /// Lowest legal timestamp: parent time minus `MAX_TIMEWARP`.
+        minimum: u32,
+    },
+
     /// A supplied parent does not match the header's previous-block hash.
     #[error("header prev hash {actual_prev} does not match expected parent {expected_prev}")]
     NonContinuousHeader {

@@ -15,6 +15,10 @@
 
 /// Maximum consensus script size in bytes.
 pub const MAX_SCRIPT_SIZE: usize = 10_000;
+/// Maximum distance a BIP94 candidate timestamp may fall below its parent
+/// block's timestamp at a difficulty-adjustment boundary
+/// (`MAX_TIMEWARP`, Core `src/consensus/consensus.h:30-37`).
+pub const MAX_TIMEWARP: u32 = 600;
 
 /// BIP113 median-time-past checks.
 mod bip113;
