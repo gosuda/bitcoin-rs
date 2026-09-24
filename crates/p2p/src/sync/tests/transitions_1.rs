@@ -81,6 +81,7 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::e
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         }
     };
     let announced_header = test_header(BlockHash::from(tree.node(tip_id)?.hash), 3);
@@ -157,6 +158,7 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std:
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         }
     };
 
@@ -239,6 +241,7 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
         height: genesis_node.height,
         chainwork: genesis_node.chainwork,
         hash: genesis_node.hash,
+        chain_tx_count: genesis_node.chain_tx_count,
     };
 
     let fork1 = test_header(genesis.compute_hash(), 101);

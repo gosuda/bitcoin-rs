@@ -18,9 +18,8 @@ use super::durable::{
 use super::prepare::parse_block_for_apply;
 use super::prepare::plan_block_transactions;
 use super::prepare::resolve_block_prevouts;
-use super::publication::publish_connect;
+use super::publication::publish_applied;
 use crate::error::ApplyError;
-use bitcoin_rs_chain::ChainTxCount;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
@@ -64,14 +63,15 @@ pub(super) enum PublishMode<'a> {
 }
 
 /// One staged block awaiting its group's durable commit.
+///
+/// The staged outcome's tip carries this block's own cumulative chain tx
+/// count, which its publication uses; the group's receipt certifies the last
+/// staged tip.
 pub(super) struct PendingBlockCommit {
     /// Commit id 0 until the group's batch assigns the prefix id.
     pub outcome: ConnectOutcome,
     /// The block's encoded undo record, landed in the group's receipt.
     pub undo_record: Vec<u8>,
-    /// This block's own cumulative chain tx count, which its published tip
-    /// carries; the group's receipt certifies the last one.
-    pub chain_tx_count_after: ChainTxCount,
     /// This block's parent; the group's first entry anchors the lineage
     /// fence.
     pub prev_hash: Hash256,
@@ -123,12 +123,6 @@ impl WindowGroup {
         Ok(Some((Arc::new(last.outcome.tip.clone()), height)))
     }
 
-    /// The cumulative chain tx count the next staged block advances, when a
-    /// prefix is staged: publication has not stored the staged deltas yet.
-    pub(super) fn chain_tx_count_base(&self) -> Option<ChainTxCount> {
-        self.pending.last().map(|last| last.chain_tx_count_after)
-    }
-
     pub(super) fn stage(&mut self, pending: PendingBlockCommit) {
         self.staged_bytes += pending.outcome.block_bytes.len();
         if self.pending.is_empty() {
@@ -176,7 +170,7 @@ impl WindowGroup {
             prev_hash: first_prev,
             tip: last.outcome.hash,
             height: last.outcome.height,
-            chain_tx_count_after: last.chain_tx_count_after.to_wire(),
+            chain_tx_count_after: last.outcome.tip.chain_tx_count.to_wire(),
             undo_extent: Some((last.outcome.height, last.outcome.hash)),
         };
         let started = quanta::Instant::now();
@@ -211,7 +205,11 @@ impl WindowGroup {
             .pending
             .drain(..)
             .map(|pending| {
-                publish_connect(handles, &pending.outcome.tip, pending.chain_tx_count_after);
+                publish_applied(
+                    handles,
+                    &pending.outcome.tip,
+                    crate::events::HintKind::Connected,
+                );
                 pending.outcome
             })
             .collect::<Vec<_>>();

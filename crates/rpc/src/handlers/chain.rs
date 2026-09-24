@@ -1624,6 +1624,7 @@ mod tests {
             height: u32::try_from(times.len().saturating_sub(1)).unwrap_or(u32::MAX),
             chainwork: ChainWork::ZERO,
             hash: tip_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
         ctx.set_chain_tip(tip.clone());
         ctx.set_applied_tip(tip);
@@ -2352,12 +2353,14 @@ mod tests {
             height: 100,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         ctx.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 50,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         let result = getblockchaininfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
@@ -2532,12 +2535,14 @@ mod tests {
             height: 50,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         ctx.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 100,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
 
         let result = getblockchaininfo(&ctx, &json!([]))
@@ -2634,6 +2639,7 @@ mod tests {
             height: 99,
             chainwork: ChainWork::from_be_bytes([2; 32]),
             hash: Hash256::from_le_bytes(&[9; 32]),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
 
         let result = getblockchaininfo(&ctx, &json!([]))
@@ -2751,6 +2757,7 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
+                chain_tx_count: node.chain_tx_count,
             }
         };
         ctx.set_applied_tip(tip);
@@ -2784,6 +2791,7 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
+                chain_tx_count: node.chain_tx_count,
             }
         };
         ctx.set_applied_tip(tip);
@@ -2813,6 +2821,7 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
+                chain_tx_count: node.chain_tx_count,
             }
         };
         ctx.set_applied_tip(tip);
@@ -2955,7 +2964,10 @@ mod tests {
                 prev = header.compute_hash();
                 let id = tree.insert_node(parent, header, NodeStatus::Active)?;
                 cumulative = cumulative.saturating_add(u64::from(height.saturating_add(1)));
-                tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(cumulative))?;
+                tree.restore_chain_tx_count(
+                    id,
+                    bitcoin_rs_chain::ChainTxCount::established(cumulative),
+                )?;
                 parent = Some(id);
                 let node = tree.node(id)?;
                 tip = Some(TipSnapshot {
@@ -2963,6 +2975,7 @@ mod tests {
                     height: node.height,
                     chainwork: node.chainwork,
                     hash: node.hash,
+                    chain_tx_count: node.chain_tx_count,
                 });
             }
             tip.ok_or("missing tip")?
@@ -3028,6 +3041,7 @@ mod tests {
                     height: node.height,
                     chainwork: node.chainwork,
                     hash: node.hash,
+                    chain_tx_count: node.chain_tx_count,
                 });
             }
             tip.ok_or("missing tip")?
@@ -3069,8 +3083,11 @@ mod tests {
                 let id = tree
                     .insert_node(parent, header, NodeStatus::Active)
                     .unwrap_or_else(|err| panic!("insert {height}: {err}"));
-                tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(u64::from(height) + 1))
-                    .unwrap_or_else(|err| panic!("count {height}: {err}"));
+                tree.restore_chain_tx_count(
+                    id,
+                    bitcoin_rs_chain::ChainTxCount::established(u64::from(height) + 1),
+                )
+                .unwrap_or_else(|err| panic!("count {height}: {err}"));
                 parent = Some(id);
                 let node = tree
                     .node(id)
@@ -3080,6 +3097,7 @@ mod tests {
                     height: node.height,
                     chainwork: node.chainwork,
                     hash: node.hash,
+                    chain_tx_count: node.chain_tx_count,
                 });
             }
             tip.unwrap_or_else(|| panic!("missing tip"))
@@ -3124,12 +3142,14 @@ mod tests {
             height: 0,
             chainwork: ChainWork::ZERO,
             hash: applied_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         ctx.set_chain_tip(TipSnapshot {
             tip_id: header_id,
             height: 1,
             chainwork: ChainWork::ZERO,
             hash: header_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         let tips = getchaintips(&ctx, &json!([])).unwrap();
         let tips = tips.as_array().expect("array");
@@ -3199,6 +3219,7 @@ mod pruneblockchain_tests {
             height,
             chainwork: ChainWork::ZERO,
             hash: Hash256::default(),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
     }
 
@@ -3429,6 +3450,7 @@ mod getchaintips_tests {
             height: 0,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
         ctx.set_chain_tip(tip.clone());
         ctx.set_applied_tip(tip);
@@ -3461,6 +3483,7 @@ mod getchaintips_tests {
             height: 42,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         let tips = getchaintips(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
@@ -3511,6 +3534,7 @@ mod getchaintips_tests {
             height: 1,
             chainwork: active_chainwork,
             hash: active_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
         ctx.set_chain_tip(tip.clone());
         ctx.set_applied_tip(tip);
@@ -3558,6 +3582,7 @@ mod getchaintips_tests {
                 height: 0,
                 chainwork: ChainWork::ZERO,
                 hash: genesis_hash,
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
             });
             tree.node(sibling_id)?.height
         };
@@ -3637,6 +3662,7 @@ mod getchaintips_tests {
             height: applied_height,
             chainwork: applied_work,
             hash: applied_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         Ok((ctx, applied_id, header_id))
     }
@@ -3782,6 +3808,7 @@ mod getchaintips_tests {
             height,
             chainwork,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
 
         let tips = tips_of(&ctx);
@@ -3841,6 +3868,7 @@ mod getchaintips_tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
+                chain_tx_count: node.chain_tx_count,
             }
         };
         ctx.set_applied_tip(tip.clone());
@@ -3931,6 +3959,7 @@ mod getchaintips_tests {
             height: 0,
             chainwork: genesis_chainwork,
             hash: genesis_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
 
         let result = getchaintips(&ctx, &json!([]))
@@ -4069,6 +4098,7 @@ mod chaintxstats_durability_tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
+                chain_tx_count: node.chain_tx_count,
             });
         }
         tip.unwrap_or_else(|| panic!("missing tip"))
@@ -4303,6 +4333,7 @@ mod chaintxstats_durability_tests {
                 height: child_node.height,
                 chainwork: child_node.chainwork,
                 hash: child_node.hash,
+                chain_tx_count: child_node.chain_tx_count,
             },
         )
     }
@@ -4439,6 +4470,7 @@ mod chaintxstats_window_tests {
             height,
             chainwork: bitcoin_rs_chain::ChainWork::ZERO,
             hash: hash.into(),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         ctx
     }
@@ -4920,12 +4952,14 @@ mod verification_progress_wiring_tests {
             height: 100,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         ctx.set_applied_tip(TipSnapshot {
             tip_id: id,
             height: 50,
             chainwork: ChainWork::ZERO,
             hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
         Arc::new(ctx)
     }
@@ -5107,6 +5141,7 @@ mod scantxoutset_tests {
             height: 0,
             chainwork: ChainWork::ZERO,
             hash: test_txid(100),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
         context.set_applied_tip(old_tip);
         let ctx = Arc::new(context);
@@ -5151,6 +5186,7 @@ mod scantxoutset_tests {
             height: 1,
             chainwork: ChainWork::from(1_u64),
             hash: test_txid(103),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
         ctx.set_applied_tip(new_tip.clone());
         drop(transition_guard);

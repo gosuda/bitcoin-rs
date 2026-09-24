@@ -20,6 +20,7 @@ fn tick_skips_getheaders_when_header_tip_matches_peer_height()
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         }
     };
     applied_tip.store(Some(Arc::new(applied_snapshot)));

@@ -419,21 +419,22 @@ enum ApplyFinish {
     Proposed,
 }
 
-/// Coherent read of header tip, applied tip, and chain-tx count.
+/// Coherent read of the header tip and the applied tip.
 ///
-/// Produced by [`Chainstate::snapshot`]. Applied tip and `chain_tx_count` are
-/// one publication. Header tip is a separate cell and may legitimately be
-/// ahead of the applied chain. The snapshot cannot mutate chainstate.
+/// Produced by [`Chainstate::snapshot`]. Each tip is one cell, and an applied
+/// tip carries its own certified cumulative transaction count, so one load
+/// supplies both. Header tip is a separate cell and may legitimately be ahead
+/// of the applied chain. The snapshot cannot mutate chainstate.
 #[derive(Clone, Debug)]
 pub struct ChainstateSnapshot {
     /// Best-work header tip, if the tree has one.
     pub header: Option<TipSnapshot>,
     /// Authoritative applied tip, if any block has committed.
     pub applied: Option<TipSnapshot>,
-    /// Cumulative transaction count of the applied chain, or `0` when unknown.
+    /// Cumulative transaction count of the applied chain.
     ///
-    /// Published with `applied`, never independently of it.
-    pub chain_tx_count: u64,
+    /// Derived from `applied`, never stored beside it independently.
+    pub chain_tx_count: ChainTxCount,
 }
 
 /// In-process facade for authoritative applied-chain mutation.
@@ -445,7 +446,7 @@ pub struct Chainstate {
     pub(crate) network: Network,
     pub(crate) chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count of the applied chain, or `0` when unknown.
+    /// Cumulative transaction count of the applied chain, `0` when unknown.
     ///
     /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
     /// that zero means *unset* rather than *empty* (`HaveNumChainTxs()`). Only a
@@ -453,14 +454,9 @@ pub struct Chainstate {
     /// it; a cold start before genesis or an arithmetic inconsistency leaves it
     /// unknown until the chain is applied again.
     ///
-    /// Kept beside `applied_tip`. Connect and disconnect publish the pair
-    /// under `applied_seq` so [`Chainstate::snapshot`] copies one view.
+    /// A projection of the published applied tip, stored for the readers that
+    /// have not yet loaded the tip itself.
     pub(crate) chain_tx_count: Arc<AtomicU64>,
-    /// Seqlock for the applied-tip / chain-tx-count pair.
-    ///
-    /// Odd means a writer is between the two stores; even is a stable pair.
-    /// Snapshot readers retry instead of taking the transition lock.
-    pub(crate) applied_seq: Arc<AtomicU64>,
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
@@ -707,7 +703,6 @@ impl Chainstate {
             chain_tip: parts.chain_tip,
             applied_tip: parts.applied_tip,
             chain_tx_count: parts.chain_tx_count,
-            applied_seq: Arc::new(AtomicU64::new(0)),
             block_tree: parts.block_tree,
             utxo: parts.utxo,
             coin_stats: parts.coin_stats,
@@ -815,12 +810,6 @@ impl Chainstate {
     #[must_use]
     pub fn chain_tx_count_handle(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.chain_tx_count)
-    }
-
-    /// The cumulative count of the published applied chain.
-    #[must_use]
-    pub(crate) fn applied_chain_tx_count(&self) -> ChainTxCount {
-        ChainTxCount::from_wire(self.chain_tx_count.load(Ordering::Relaxed))
     }
 
     /// Clones the authoritative chain-event publisher.
@@ -976,7 +965,6 @@ impl Chainstate {
             chain_tip,
             applied_tip,
             chain_tx_count: Arc::new(AtomicU64::new(0)),
-            applied_seq: Arc::new(AtomicU64::new(0)),
             block_tree,
             utxo,
             coin_stats,
@@ -1007,33 +995,22 @@ impl Chainstate {
         self
     }
 
-    /// Copies the published header tip and a coherent applied-tip / chain-tx
-    /// count pair.
+    /// Copies the published header tip and the published applied tip.
     ///
-    /// Does not take the transition lock. Header tip is a separate cell and
-    /// may be ahead of the applied chain. Applied tip and `chain_tx_count`
-    /// are published together under `applied_seq`; this method retries until
-    /// it observes a stable pair.
+    /// Does not take the transition lock. Each tip is one cell, and an applied
+    /// tip carries its own certified count, so one load per cell cannot
+    /// observe a tip and a count from different publications. Header tip is a
+    /// separate cell and may be ahead of the applied chain.
     #[must_use]
     pub fn snapshot(&self) -> ChainstateSnapshot {
-        loop {
-            let seq1 = self.applied_seq.load(Ordering::Acquire);
-            if seq1 & 1 != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-            let header = self.chain_tip.load_full().as_deref().cloned();
-            let applied = self.applied_tip.load_full().as_deref().cloned();
-            let chain_tx_count = self.chain_tx_count.load(Ordering::Acquire);
-            let seq2 = self.applied_seq.load(Ordering::Acquire);
-            if seq1 == seq2 {
-                return ChainstateSnapshot {
-                    header,
-                    applied,
-                    chain_tx_count,
-                };
-            }
-            std::hint::spin_loop();
+        let applied = self.applied_tip.load_full().as_deref().cloned();
+        let chain_tx_count = applied
+            .as_ref()
+            .map_or(ChainTxCount::UNKNOWN, |tip| tip.chain_tx_count);
+        ChainstateSnapshot {
+            header: self.chain_tip.load_full().as_deref().cloned(),
+            applied,
+            chain_tx_count,
         }
     }
 
@@ -1229,28 +1206,13 @@ impl Chainstate {
 /// added to `disconnect_block` that can fail belongs here unless it physically
 /// cannot run this early.
 struct DisconnectPlan {
+    /// Parent tip with the cumulative count its tree node carries, which the
+    /// disconnect commits and publishes unchanged.
     parent_tip: TipSnapshot,
     parent_prev_hash: Hash256,
-    parent_chain_tx_count: ChainTxCount,
     undo: bitcoin_rs_utxo::UndoBatch,
     height: u32,
     tx_count_delta: u64,
-}
-
-/// Seqlock guard for the applied-tip / chain-tx-count pair.
-///
-/// [`Chainstate::snapshot`] retries while the sequence is odd. Dropping the
-/// guard stores the matching even value, including on panic, so readers do
-/// not spin forever. A panic between the two stores can still expose a mixed
-/// pair; the transition lock already treats that as fatal process state.
-struct AppliedPublication<'a> {
-    seq: &'a AtomicU64,
-}
-
-impl Drop for AppliedPublication<'_> {
-    fn drop(&mut self) {
-        self.seq.fetch_add(1, Ordering::Release);
-    }
 }
 
 /// How many consecutive blocks share one script-verification dispatch.

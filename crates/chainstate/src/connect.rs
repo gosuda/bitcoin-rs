@@ -17,8 +17,7 @@ use super::durable::{
 };
 use super::prepare::prepare_apply;
 use super::prepare::verify_block_transactions;
-use super::publication::certified_advance;
-use super::publication::publish_connect;
+use super::publication::publish_applied;
 use super::publication::tx_count_delta_for;
 use super::scratch::ApplyScratch;
 use super::window::{PendingBlockCommit, PublishMode};
@@ -475,7 +474,7 @@ pub(super) fn apply_block_admitted<'b>(
     );
     let (txids, raw_txs) = scratch.into_payloads();
     let mut outcome = ConnectOutcome {
-        tip: tip.clone(),
+        tip,
         commit_id: 0,
         height,
         hash: block_hash,
@@ -483,7 +482,7 @@ pub(super) fn apply_block_admitted<'b>(
         block_bytes,
         raw_txs,
     };
-    let (commit_id, chain_tx_count) = match publication {
+    let commit_id = match publication {
         PublishMode::Now => {
             // RCV-02 steps 3–4: certify, then commit. `sync` makes the
             // appended body bytes, the blocks directory, and every deferred
@@ -503,15 +502,15 @@ pub(super) fn apply_block_admitted<'b>(
                 .into_iter()
                 .collect();
             let durable_commit_started = quanta::Instant::now();
-            let chain_tx_count =
-                certified_advance(handles.applied_chain_tx_count(), height, tx_count_delta);
             let commit_id = commit_connect_head(
                 handles,
                 &ConnectCommitFacts {
                     prev_hash,
                     tip: block_hash,
                     height,
-                    chain_tx_count_after: chain_tx_count.to_wire(),
+                    // The applied tip publishes with this count, so the
+                    // durable head names the node's own cumulative total.
+                    chain_tx_count_after: outcome.tip.chain_tx_count.to_wire(),
                     undo_extent: Some((height, block_hash)),
                 },
                 &CommitRecords {
@@ -521,23 +520,17 @@ pub(super) fn apply_block_admitted<'b>(
             )?;
             metrics::histogram!("node.apply_block.durable_commit_seconds")
                 .record(durable_commit_started.elapsed().as_secs_f64());
-            (commit_id, chain_tx_count)
+            commit_id
         }
         // The gap block's durable batch committed before the crash: the
         // stored head receipt covers its body, undo, and locator rows.
         // Replay redoes only what publication owed — the journal tail
         // and the coherent tip — and carries the receipt's commit id.
-        PublishMode::Replay { commit_id } => (
-            commit_id,
-            certified_advance(handles.applied_chain_tx_count(), height, tx_count_delta),
-        ),
+        PublishMode::Replay { commit_id } => commit_id,
         PublishMode::Grouped(group) => {
             // The window buffers the durable work: facts ride in the group
             // until its boundary, where one sync and one head batch commit
             // the whole verified prefix and the prefix publishes in order.
-            let base = group
-                .chain_tx_count_base()
-                .unwrap_or_else(|| handles.applied_chain_tx_count());
             let journal_record = build_journal_record(
                 block,
                 height,
@@ -550,7 +543,6 @@ pub(super) fn apply_block_admitted<'b>(
             group.stage(PendingBlockCommit {
                 outcome: outcome.clone(),
                 undo_record,
-                chain_tx_count_after: certified_advance(base, height, tx_count_delta),
                 prev_hash,
                 journal_record,
             });
@@ -572,7 +564,7 @@ pub(super) fn apply_block_admitted<'b>(
         ),
         height,
     );
-    publish_connect(handles, &tip, chain_tx_count);
+    publish_applied(handles, &outcome.tip, crate::events::HintKind::Connected);
     outcome.commit_id = commit_id;
     Ok(ApplyFinish::Committed(outcome))
 }
@@ -863,6 +855,7 @@ pub(super) fn applied_header_tip(
         height: node.height,
         chainwork: node.chainwork,
         hash: node.hash,
+        chain_tx_count: node.chain_tx_count,
     })
 }
 
