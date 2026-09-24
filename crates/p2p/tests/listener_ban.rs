@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::p2p::Magic;
-use bitcoin_rs_p2p::listener::{serve_with_shutdown, spawn_outbound_connection};
-use bitcoin_rs_p2p::{BannedSubnet, IpSubnet, PeerError, PeerTable};
+use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
+use bitcoin_rs_p2p::{BannedSubnet, IpSubnet, NetworkActivity, PeerError, PeerTable};
 use parking_lot::RwLock;
 
 #[test]
@@ -23,21 +23,14 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
     let accept_handle =
         thread::spawn(move || accept_one_connection(&accept_helper, &accept_shutdown));
 
-    let peer_table = Arc::new(PeerTable::new());
-    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
-    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
-    let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::from_ip(addr.ip()))]));
-    let network_active = Arc::new(AtomicBool::new(true));
-
-    let handle = spawn_outbound_connection(
-        addr,
-        network_active,
-        Magic::BITCOIN,
-        peer_table,
-        headers_tx,
-        blocks_tx,
-        banned,
+    let shared = wiring(
+        Arc::new(PeerTable::new()),
+        Arc::new(RwLock::new(vec![ban(IpSubnet::from_ip(addr.ip()))])),
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(false)),
     );
+
+    let handle = spawn_outbound_connection(addr, shared);
     let result = match handle.join() {
         Ok(result) => result,
         Err(error) => std::panic::resume_unwind(error),
@@ -64,37 +57,24 @@ fn outbound_ban_short_circuits_before_connect_with_typed_error() -> Result<(), B
 
 #[test]
 fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
-    let bind_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-    let helper = TcpListener::bind(bind_addr)?;
-    let addr = helper.local_addr()?;
-    drop(helper);
+    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let network_active = Arc::new(AtomicBool::new(true));
-    let listener_shutdown = Arc::clone(&shutdown);
-    let listener_network_active = Arc::clone(&network_active);
     let peer_table = Arc::new(PeerTable::new());
-    let listener_peer_table = Arc::clone(&peer_table);
-    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
-    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
     let banned = Arc::new(RwLock::new(vec![ban(IpSubnet::new(
         IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)),
         8,
     )?)]));
-    let listener_banned = Arc::clone(&banned);
+    let shared = wiring(
+        Arc::clone(&peer_table),
+        banned,
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(false)),
+    );
 
-    let handle = thread::spawn(move || {
-        serve_with_shutdown(
-            addr,
-            listener_shutdown,
-            listener_network_active,
-            Magic::BITCOIN,
-            listener_peer_table,
-            headers_tx,
-            blocks_tx,
-            listener_banned,
-        )
-    });
+    let listener_shutdown = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || serve(listener, listener_shutdown, shared));
 
     let mut client = match connect_with_retry(addr, Duration::from_secs(1)) {
         Ok(client) => client,
@@ -116,32 +96,20 @@ fn inbound_ban_drops_connection_pre_handshake() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn network_inactive_drops_inbound_pre_handshake() -> Result<(), Box<dyn Error>> {
-    let helper = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
-    let addr = helper.local_addr()?;
-    drop(helper);
+    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let network_active = Arc::new(AtomicBool::new(false));
     let peer_table = Arc::new(PeerTable::new());
-    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
-    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
-    let banned = Arc::new(RwLock::new(Vec::new()));
+    let shared = wiring(
+        Arc::clone(&peer_table),
+        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
 
     let listener_shutdown = Arc::clone(&shutdown);
-    let listener_network_active = Arc::clone(&network_active);
-    let listener_peer_table = Arc::clone(&peer_table);
-    let handle = thread::spawn(move || {
-        serve_with_shutdown(
-            addr,
-            listener_shutdown,
-            listener_network_active,
-            Magic::BITCOIN,
-            listener_peer_table,
-            headers_tx,
-            blocks_tx,
-            banned,
-        )
-    });
+    let handle = thread::spawn(move || serve(listener, listener_shutdown, shared));
 
     let mut client = connect_with_retry(addr, Duration::from_secs(1))?;
     wait_for_disconnect(&mut client, Duration::from_secs(1))?;
@@ -165,20 +133,14 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     });
 
     let network_active = Arc::new(AtomicBool::new(false));
-    let peer_table = Arc::new(PeerTable::new());
-    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
-    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
-    let banned = Arc::new(RwLock::new(Vec::new()));
-
-    let inactive = spawn_outbound_connection(
-        addr,
+    let shared = wiring(
+        Arc::new(PeerTable::new()),
+        Arc::new(RwLock::new(Vec::new())),
         Arc::clone(&network_active),
-        Magic::BITCOIN,
-        Arc::clone(&peer_table),
-        headers_tx.clone(),
-        blocks_tx.clone(),
-        Arc::clone(&banned),
+        Arc::new(AtomicBool::new(false)),
     );
+
+    let inactive = spawn_outbound_connection(addr, shared.clone());
     let inactive = inactive
         .join()
         .map_err(|_| io::Error::other("inactive outbound thread panicked"))?;
@@ -193,21 +155,71 @@ fn network_active_blocks_outbound_until_reenabled() -> Result<(), Box<dyn Error>
     );
 
     network_active.store(true, Ordering::Release);
-    let active = spawn_outbound_connection(
-        addr,
-        network_active,
-        Magic::BITCOIN,
-        peer_table,
-        headers_tx,
-        blocks_tx,
-        banned,
-    );
+    let active = spawn_outbound_connection(addr, shared);
     assert!(join_accept(accept_handle)?);
     let _ = active
         .join()
         .map_err(|_| io::Error::other("active outbound thread panicked"))?;
     accept_shutdown.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+#[test]
+fn cancelled_start_refuses_outbound_before_connect() -> Result<(), Box<dyn Error>> {
+    let helper = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    helper.set_nonblocking(true)?;
+    let addr = helper.local_addr()?;
+    let accept_helper = helper.try_clone()?;
+    let accept_shutdown = Arc::new(AtomicBool::new(false));
+    let accept_handle = thread::spawn({
+        let accept_shutdown = Arc::clone(&accept_shutdown);
+        move || accept_one_connection(&accept_helper, &accept_shutdown)
+    });
+
+    let peer_table = Arc::new(PeerTable::new());
+    let shared = wiring(
+        Arc::clone(&peer_table),
+        Arc::new(RwLock::new(Vec::new())),
+        Arc::new(AtomicBool::new(true)),
+        Arc::new(AtomicBool::new(true)),
+    );
+
+    let refused = spawn_outbound_connection(addr, shared)
+        .join()
+        .map_err(|_| io::Error::other("cancelled outbound thread panicked"))?;
+    assert!(
+        matches!(refused, Err(PeerError::Protocol("p2p startup cancelled"))),
+        "a cancelled start must refuse the dial, got {refused:?}"
+    );
+    thread::sleep(Duration::from_millis(100));
+    accept_shutdown.store(true, Ordering::Relaxed);
+    assert!(
+        !join_accept(accept_handle)?,
+        "a cancelled start must not open a TCP connection"
+    );
+    assert!(peer_table.is_empty());
+    Ok(())
+}
+
+/// Wiring for one test start epoch with no ready callback.
+fn wiring(
+    peer_table: Arc<PeerTable>,
+    banned: Arc<RwLock<Vec<BannedSubnet>>>,
+    network_active: Arc<AtomicBool>,
+    session_cancel: Arc<AtomicBool>,
+) -> ConnectionShared {
+    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+    ConnectionShared::new(
+        peer_table,
+        banned,
+        Arc::new(NetworkActivity::from_shared(network_active)),
+        session_cancel,
+        None,
+        Magic::BITCOIN,
+        headers_tx,
+        blocks_tx,
+    )
 }
 
 fn ban(subnet: IpSubnet) -> BannedSubnet {

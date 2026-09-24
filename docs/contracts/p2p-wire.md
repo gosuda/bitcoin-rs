@@ -173,7 +173,7 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
 
 ### `P2P-06`: Body-carried announcements reach header admission
 
-- **Owner**: `InboundSyncSinks::send_block` (`crates/p2p/src/listener.rs`)
+- **Owner**: `ConnectionShared::send_block` (`crates/p2p/src/listener.rs`)
   forwards every inbound body's embedded header through the headers sink;
   `BlockSync::admit_staged_headers` (`crates/p2p/src/sync/receive.rs`) retries
   admission for staged bodies still lacking a tree node.

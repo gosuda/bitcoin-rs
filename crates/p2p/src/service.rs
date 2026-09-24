@@ -200,9 +200,6 @@ impl P2pService {
         peer_ready: &Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
         extras: crate::listener::ListenerExtras,
     ) -> Result<(), P2pServiceError> {
-        let chain_query = chain_query.cloned();
-        let sync_wake_tx = sync_wake_tx.cloned();
-        let peer_ready = peer_ready.clone();
         let mut slot = self.workers.lock();
         if slot.is_some() {
             return Err(P2pServiceError::AlreadyStarted);
@@ -219,40 +216,33 @@ impl P2pService {
             bound_listeners.push((*addr, listener));
         }
 
+        let mut shared = crate::listener::ConnectionShared::new(
+            self.lifecycle.table(),
+            Arc::clone(&self.banned),
+            Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
+                &self.network_active,
+            ))),
+            session_cancel,
+            Some(Arc::clone(peer_ready)),
+            self.config.magic,
+            self.inbound_headers_tx.clone(),
+            self.inbound_blocks_tx.clone(),
+        );
+        shared.chain_query = chain_query.cloned();
+        shared.wake_tx = sync_wake_tx.cloned();
+        shared.tx_inventory = extras.tx_inventory;
+        shared.compact_hints = extras.compact_hints;
+        shared.inbound_tx = extras.inbound_tx;
+        shared.ibd = extras.ibd;
+
         let mut listeners = Vec::with_capacity(bound_listeners.len());
         for (listener_addr, listener) in bound_listeners {
             let shutdown = Arc::clone(&self.worker_shutdown);
-            let network_active = Arc::clone(&self.network_active);
-            let peer_table = self.lifecycle.table();
-            let banned = Arc::clone(&self.banned);
-            let headers_tx = self.inbound_headers_tx.clone();
-            let blocks_tx = self.inbound_blocks_tx.clone();
-            let chain_query = chain_query.clone();
-            let sync_wake_tx = sync_wake_tx.clone();
-            let session_cancel = Arc::clone(&session_cancel);
-            let peer_ready = Arc::clone(&peer_ready);
-            let extras = extras.clone();
-            let magic = self.config.magic;
+            let shared = shared.clone();
             let handle = match thread::Builder::new()
                 .name(format!("bitcoin-rs-p2p-{listener_addr}"))
-                .spawn(move || {
-                    crate::listener::serve_bound_with_session_cancel(
-                        listener_addr,
-                        listener,
-                        shutdown,
-                        network_active,
-                        magic,
-                        peer_table,
-                        headers_tx,
-                        blocks_tx,
-                        banned,
-                        chain_query,
-                        sync_wake_tx,
-                        session_cancel,
-                        peer_ready,
-                        extras,
-                    )
-                }) {
+                .spawn(move || crate::listener::serve(listener, shutdown, shared))
+            {
                 Ok(handle) => handle,
                 Err(error) => {
                     self.rollback_startup(listeners, None);
@@ -262,13 +252,7 @@ impl P2pService {
             listeners.push(handle);
         }
 
-        let outbound = match self.spawn_outbound_worker(
-            chain_query,
-            sync_wake_tx,
-            Arc::clone(&session_cancel),
-            Arc::clone(&peer_ready),
-            extras,
-        ) {
+        let outbound = match self.spawn_outbound_worker(shared) {
             Ok(handle) => handle,
             Err(error) => {
                 self.rollback_startup(listeners, None);
@@ -310,29 +294,22 @@ impl P2pService {
 
     fn spawn_outbound_worker(
         &self,
-        chain_query: Option<Arc<dyn crate::ChainQuery + 'static>>,
-        sync_wake_tx: Option<Sender<()>>,
-        session_cancel: Arc<AtomicBool>,
-        peer_ready: Arc<dyn Fn(crate::PeerSource) + Send + Sync>,
-        extras: crate::listener::ListenerExtras,
+        shared: crate::listener::ConnectionShared,
     ) -> Result<JoinHandle<()>, io::Error> {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let lifecycle = Arc::clone(&self.lifecycle);
-        let banned = Arc::clone(&self.banned);
-        let headers_tx = self.inbound_headers_tx.clone();
-        let blocks_tx = self.inbound_blocks_tx.clone();
-        let network_active = Arc::clone(&self.network_active);
         let shutdown = Arc::clone(&self.worker_shutdown);
-        let magic = self.config.magic;
         let active_limit = self.config.outbound_active_limit;
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
                 let mut active = HashSet::new();
                 let mut handles = Vec::new();
-                while !shutdown.load(Ordering::Acquire) && !session_cancel.load(Ordering::Acquire) {
+                while !shutdown.load(Ordering::Acquire)
+                    && !shared.session_cancel.load(Ordering::Acquire)
+                {
                     reap_finished_outbound_connections(&mut active, &mut handles);
-                    if !network_active.load(Ordering::Acquire) || active.len() >= active_limit {
+                    if !shared.activity.is_active() || active.len() >= active_limit {
                         thread::sleep(Duration::from_millis(100));
                         continue;
                     }
@@ -353,20 +330,7 @@ impl P2pService {
                         );
                         continue;
                     }
-                    let handle = crate::listener::spawn_outbound_connection_with_session_cancel(
-                        addr,
-                        magic,
-                        lifecycle.table(),
-                        headers_tx.clone(),
-                        blocks_tx.clone(),
-                        Arc::clone(&banned),
-                        Arc::clone(&network_active),
-                        chain_query.clone(),
-                        sync_wake_tx.clone(),
-                        Arc::clone(&session_cancel),
-                        Arc::clone(&peer_ready),
-                        extras.clone(),
-                    );
+                    let handle = crate::listener::spawn_outbound_connection(addr, shared.clone());
                     active.insert(addr);
                     handles.push((addr, handle));
                 }
