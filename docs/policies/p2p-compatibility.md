@@ -100,7 +100,11 @@ receive `MSG_WITNESS_TX` requests so the returned parent includes its witness;
 other sources receive `MSG_TX`, following
 [BIP144](https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay). Relay queue
 saturation drops the newest announcement without blocking admission;
-per-peer outbound saturation cancels that connection's lease.
+per-peer outbound saturation cancels that connection's lease. Each queued
+announcement is checked against the shared mempool at send time: a
+transaction that left the pool before the relay worker sent it (block
+connection, replacement, eviction, or reorg) is consumed with no `inv`, so a
+peer never receives an announcement whose body `getdata` cannot retrieve.
 
 The inventory view respects the reject cache's identity scope: witness-only
 refusals suppress the exact wtxid, not legacy txid inventory or another
@@ -140,7 +144,9 @@ Known deltas from Core 31.1:
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: absent. We do not broadcast `inv`/`headers`/`cmpctblock` for new blocks. Accepted transactions are announced with the negotiated inventory type (§5). Live relay of Core-originated blocks into bitcoin-rs is exercised by the interop lane (§8).
-4. **Address management**: no `getaddr` answers, no addr gossip, no DNS-seed-free peer discovery beyond configured `--connect`/`--addnode` surfaces.
+4. **Address management**: absent. There is no address store, no feeler
+   connection policy, no `getaddr` response, and no addr/addrv2 gossip; peer
+   discovery is limited to the configured `--connect`/`--addnode` surfaces.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic misbehavior bans** (§6) absent; manual bans only.
@@ -152,6 +158,19 @@ Known deltas from Core 31.1:
 12. **Inbound admission**: bitcoin-rs refuses an inbound socket once the live inbound count reaches `max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots` (default `200 - 8 - 2 = 190`, `net.h:1124-1127`), closing the stream before a handshake lease exists (`crates/p2p/src/listener.rs`, `PeerTable::try_register_inbound`). Core derives the same remainder and then scores an eviction (`AttemptToEvictConnection`, `net.cpp:1695-1735`) to make room. The eviction scoring is deliberately not implemented: no bitcoin-rs sync path depends on being able to displace an inbound peer, the resource-exhaustion defect closes at the admission boundary, and adding a second peer-selection policy would need an acceptance requirement it does not have. The operator-visible consequence is that the 191st inbound connection is refused rather than replacing a chosen peer.
 13. **Outbound service gate**: an outbound peer that does not advertise the desirable set is disconnected right after its `version`, before it is published as usable, exactly as Core's `HasAllDesirableServiceFlags` check does (`net_processing.cpp:1857-1872`, applied to an outbound connection at `:3864-3871`). The desirable set is `NETWORK | WITNESS`, or `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks (`NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`). Inbound peers are not service-checked, as in Core.
 14. **Limited peers and block download**: a connection without `NODE_NETWORK` is never asked for block bodies while the node is in initial block download, and after it only for the last 288 blocks of that peer's own chain (`net_processing.cpp:6521`, `NODE_NETWORK_LIMITED_MIN_BLOCKS` at `:159`, window applied at `:1637`). The rule reads the node's single `InitialBlockDownload` latch and applies to request, fan-out, probe, and hedge selection alike; header requests stay open to such a peer.
+15. **Transaction request tracker** (TXR-01–05, TXR-07): absent. On an
+   announced transaction, bitcoin-rs immediately requests it from every
+   announcing peer that supplies the announcement; it has no Core-style
+   per-peer in-flight request tracker or cap and does not retry a transaction
+   after `notfound`.
+16. **Poisson trickle** (TXR-09): absent. bitcoin-rs sends each accepted
+   queued transaction as an immediate single-item `inv`; Core batches and
+   delays relay through its trickle scheduling.
+17. **Proactive `feefilter` emission**: absent. Core sends
+   `feefilter=MAX_MONEY` while initial block download is active; bitcoin-rs
+   does not construct or send `feefilter`. This is distinct from the §5
+   receive row, which states that bitcoin-rs neither emits nor enforces peer
+   feefilters.
 
 ## 8. Verification
 
