@@ -62,6 +62,12 @@ pub fn chain_reject_reason(error: &ChainError) -> CompactString {
         ChainError::TimestampTooFarAhead { .. } => "time-too-new",
         ChainError::MissingParent { .. } => "prev-blk-not-found",
         ChainError::DuplicateHeader { .. } => "duplicate",
+        // Core formats the rejected version as its unsigned bit pattern
+        // (`src/validation.cpp:4112-4126`).
+        ChainError::BadVersion { version, .. } => {
+            return CompactString::from(format!("bad-version({version:08x})"));
+        }
+        ChainError::TimewarpAttack { .. } => return CompactString::from("time-timewarp-attack"),
         _ => return CompactString::from(error.to_string()),
     })
 }

@@ -998,6 +998,51 @@ fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
 }
 
 #[test]
+fn submit_header_rejects_bad_version_after_bip34_activation() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    let mining = coordinator(&state);
+    let genesis = Network::Regtest.genesis_block();
+    let base_time = genesis.header.time;
+    let mut prev = genesis.block_hash();
+    // Regtest enforces the BIP34 version floor from candidate height 500
+    // (Core `DeploymentActiveAfter`), so heights 1..=499 still carry version 1.
+    for height in 1..=499_u32 {
+        let header = mined_regtest_header(prev, base_time + height * 600, 1);
+        mining.submit_header(header)?;
+        prev = header.compute_hash();
+    }
+    let rejected = mined_regtest_header(prev, base_time + 500 * 600, 1);
+    match mining.submit_header(rejected) {
+        Err(MiningControlError::Rejected(reason)) => {
+            assert_eq!(reason.as_str(), "bad-version(0x00000001)");
+        }
+        other => panic!("expected bad-version rejection, got {other:?}"),
+    }
+    let accepted = mined_regtest_header(prev, base_time + 500 * 600, 2);
+    mining.submit_header(accepted)?;
+    Ok(())
+}
+
+fn mined_regtest_header(prev: BlockHash, time: u32, version: i32) -> Header {
+    let mut header = Header {
+        version,
+        prev_blockhash: prev,
+        merkle_root: Hash256::default(),
+        time,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        nonce: 0,
+    };
+    while !pow_met(header.bits.to_consensus(), &header.compute_hash()) {
+        header.nonce = header
+            .nonce
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("nonce exhausted mining a regtest header"));
+    }
+    header
+}
+
+#[test]
 fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
