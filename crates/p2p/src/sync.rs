@@ -288,6 +288,27 @@ impl SchedulerState {
     }
 }
 
+impl SchedulerState {
+    /// Releases every scheduling fact owned by a connection not in `live`.
+    ///
+    /// PRE: `live` is the peer table's live-session snapshot.
+    /// POST: the window, the header request, and the deferred body fetches
+    ///   hold only facts owned by a connection in `live`.
+    /// INVARIANT: ownership is compared by connection identity, never by
+    ///   address alone.
+    fn release_unowned(&mut self, live: &[PeerSource]) {
+        let owns = |source: &PeerSource| live.contains(source);
+        self.window.retain_owned_by(owns);
+        if self
+            .header_request
+            .is_some_and(|request| !owns(&request.source))
+        {
+            self.header_request = None;
+        }
+        self.owned_body_fetches.retain(|(source, _)| owns(source));
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PendingHeaderRequest {
     /// The exact connection the request was sent to.
