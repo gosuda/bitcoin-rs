@@ -1,413 +1,30 @@
-//! E2E: live-head announcement and body-carried header admission over the
-//! real P2P wire against a spawned bitcoin-rs daemon (regtest, fjall). A
-//! loopback wire peer announces blocks by `inv`; the node probes headers
-//! first (the announcement route), and where the peer withholds the ancestry
-//! a delivered body's carried header must still admit through the staged-body
-//! path (P2P-06). Heights come from the block tree.
+//! E2E: live-head body-carried header admission over the real P2P wire
+//! against a spawned bitcoin-rs daemon (regtest, fjall). A loopback wire peer
+//! announces blocks by `inv` only — never sending a `headers` batch for them —
+//! so the delivered body is the node's only copy of the header and must admit
+//! through the staged-body path (P2P-06 + `reconcile_received_heights`).
 //!
-//!  * T1: headers bootstrap, then inv-announced live-head blocks apply one
-//!    after another through the announcement route — no stall across the chain.
+//!  * T1: headers bootstrap, then inv-only live-head blocks apply one after
+//!    another via their carried headers — no stall across the chain.
 //!  * T2: a delivered body whose carried header's parent is unknown triggers a
 //!    recovery `getheaders`; once the ancestors land the staged body applies in
-//!    place and is never re-requested.
+//!    place and is never re-requested (0-height sentinel repaired).
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
-mod support;
-
-use std::collections::{BTreeMap, HashSet};
-use std::fs::File;
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::block::Header as BlockHeader;
-use bitcoin::consensus::serialize;
 use bitcoin::hashes::{Hash as _, sha256d};
-use bitcoin::p2p::address::Address;
-use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin::p2p::message_network::VersionMessage;
-use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::live_peer::LivePeer;
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use serde_json::{Value, json};
-use support::process_node::{HarnessError, NodeBinary, ProcessNode, workspace};
-use support::process_peer::connect_loopback;
-
-/// One decoded getdata frame: every item flattened to `(inv_type, hash)`.
-#[derive(Clone, Debug)]
-struct GetdataSeen {
-    items: Vec<(u32, String)>,
-}
-
-/// Minimal Bitcoin wire peer: `NODE_NETWORK|WITNESS` service (both required for
-/// `request_headers_from_eligible`), no compact relay, speaks regtest v70016.
-/// Serves full bodies for `MSG_WITNESS_BLOCK` and witness-stripped bodies for
-/// plain `MSG_BLOCK`. `getheaders` is answered from `headers_reply` — the test
-/// controls exactly which header ancestry is revealed and when.
-struct LivePeer {
-    stream: TcpStream,
-    journal: File,
-    t0: Instant,
-    /// Full blocks servable by hash.
-    blocks: BTreeMap<bitcoin::BlockHash, Block>,
-    /// The exact reply to every inbound `getheaders` — set per test phase so
-    /// early discovery probes cannot leak headers the test wants withheld.
-    headers_reply: Vec<BlockHeader>,
-    /// Every decoded getdata frame in arrival order.
-    getdata_seen: Vec<GetdataSeen>,
-    /// Block hashes whose body has been served at least once.
-    served: HashSet<bitcoin::BlockHash>,
-    /// Hashes named by a getdata arriving after their body was served — the
-    /// re-request signature of a lost staged body or a retry rewind. A duplicate getdata emitted before delivery is tolerated
-    /// (a preexisting burst quirk, not this path's invariant).
-    post_serve_requests: Vec<bitcoin::BlockHash>,
-    /// `at_ms` of every getheaders frame, in arrival order.
-    getheaders_at: Vec<u64>,
-    /// Bodies served stripped because the node asked `MSG_BLOCK`.
-    stripped_served: usize,
-    /// Peer socket died (node disconnected or transport error).
-    dropped: bool,
-}
-
-impl LivePeer {
-    fn connect(node: &ProcessNode, name: &str) -> Result<Self, HarnessError> {
-        Self::connect_with_height(node, name, 10_000)
-    }
-
-    /// `start_height` sets the peer's advertised best-known height: `10_000`
-    /// claims a deep chain (discovery probes fire and self-recover a
-    /// pre-bootstrap-rejected batch); 0 keeps the wire quiet so a lone
-    /// `getheaders` can only be the staged-header recovery send.
-    fn connect_with_height(
-        node: &ProcessNode,
-        name: &str,
-        start_height: i32,
-    ) -> Result<Self, HarnessError> {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let stream = connect_loopback(node.p2p_addr, deadline)?;
-        stream.set_nodelay(true)?;
-        let dir = evidence_dir();
-        let journal = File::create(dir.join(format!("{name}-peer.jsonl")))?;
-        let mut peer = Self {
-            stream,
-            journal,
-            t0: Instant::now(),
-            blocks: BTreeMap::new(),
-            headers_reply: Vec::new(),
-            getdata_seen: Vec::new(),
-            served: HashSet::new(),
-            post_serve_requests: Vec::new(),
-            getheaders_at: Vec::new(),
-            stripped_served: 0,
-            dropped: false,
-        };
-        // NODE_NETWORK|WITNESS: the recovery getheaders path only considers
-        // fully-serving peers eligible.
-        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-        let mut version = VersionMessage::new(
-            services,
-            i64::try_from(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|error| HarnessError::Protocol(error.to_string()))?
-                    .as_secs(),
-            )
-            .map_err(|error| HarnessError::Protocol(error.to_string()))?,
-            Address::new(&node.p2p_addr, ServiceFlags::NONE),
-            Address::new(
-                &peer
-                    .stream
-                    .local_addr()
-                    .map_err(|error| HarnessError::Protocol(error.to_string()))?,
-                services,
-            ),
-            0,
-            "/live-head-e2e:0.1/".to_owned(),
-            start_height,
-        );
-        version.version = 70016;
-        peer.send(NetworkMessage::Version(version), deadline)?;
-        let mut received_version = false;
-        for _ in 0..64 {
-            match peer.recv(deadline)? {
-                NetworkMessage::Version(_) if !received_version => {
-                    received_version = true;
-                    peer.send(NetworkMessage::WtxidRelay, deadline)?;
-                    peer.send(NetworkMessage::Verack, deadline)?;
-                }
-                NetworkMessage::Verack if received_version => return Ok(peer),
-                NetworkMessage::Verack | NetworkMessage::Version(_) => {
-                    return Err(HarnessError::Protocol(
-                        "out-of-order P2P handshake".to_owned(),
-                    ));
-                }
-                NetworkMessage::Ping(nonce) => {
-                    peer.send(NetworkMessage::Pong(nonce), deadline)?;
-                }
-                _ => {}
-            }
-        }
-        Err(HarnessError::Protocol(
-            "P2P handshake message limit".to_owned(),
-        ))
-    }
-
-    fn at_ms(&self) -> u64 {
-        u64::try_from(self.t0.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-
-    fn log(&mut self, direction: &str, detail: &str) {
-        let line = json!({"at_ms": self.at_ms(), "dir": direction, "detail": detail});
-        let _ = writeln!(self.journal, "{line}");
-        let _ = self.journal.flush();
-        eprintln!("[E2E {:>5}ms {direction}] {detail}", self.at_ms());
-    }
-
-    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), HarnessError> {
-        let cmd = message.cmd().to_owned();
-        let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
-        self.stream
-            .set_write_timeout(Some(
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::from_secs(1)),
-            ))
-            .map_err(HarnessError::Io)?;
-        self.stream.write_all(&frame).map_err(HarnessError::Io)?;
-        self.log("send", &cmd);
-        Ok(())
-    }
-
-    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, HarnessError> {
-        match read_frame_local(&mut self.stream, deadline) {
-            Ok(frame) => {
-                let message = decode_frame_local(&frame)?;
-                self.log("recv", message.cmd());
-                Ok(message)
-            }
-            Err(error) => {
-                if !is_soft_recv_error(&error) {
-                    self.log("recv_error", &error.to_string());
-                    self.dropped = true;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// Registers servable bodies only — headers are revealed solely through
-    /// `headers_reply` / explicit `headers` sends.
-    fn offer_bodies(&mut self, chain: &[Block]) {
-        for block in chain {
-            self.blocks.insert(block.block_hash(), block.clone());
-        }
-    }
-
-    /// Serves one getdata item type-faithfully: witness inventory gets the
-    /// full body; a plain `MSG_BLOCK` gets a witness-stripped body.
-    fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<(), HarnessError> {
-        let (hash, stripped) = match item {
-            Inventory::WitnessBlock(hash) | Inventory::CompactBlock(hash) => (*hash, false),
-            Inventory::Block(hash) => (*hash, true),
-            _ => return Ok(()),
-        };
-        let Some(block) = self.blocks.get(&hash) else {
-            return Ok(());
-        };
-        self.served.insert(hash);
-        let body = if stripped {
-            self.stripped_served += 1;
-            strip_witnesses(block)
-        } else {
-            block.clone()
-        };
-        self.log(
-            "serve",
-            &format!(
-                "block {} ({})",
-                hash,
-                if stripped { "STRIPPED" } else { "full" }
-            ),
-        );
-        self.send(NetworkMessage::Block(body), deadline)
-    }
-
-    /// Pump the connection for `dur`: decode inbound frames, answer Ping and
-    /// record getdata; answer every `getheaders` with `headers_reply` exactly
-    /// (a real peer behavior — repeated probes repeat the reply).
-    fn pump(&mut self, dur: Duration, serve: &mut dyn FnMut(&mut Self, &[Inventory])) {
-        let end = Instant::now() + dur;
-        while Instant::now() < end && !self.dropped {
-            match self.recv(end) {
-                Ok(NetworkMessage::GetData(items)) => {
-                    let seen = GetdataSeen {
-                        items: items.iter().map(inv_item_desc).collect(),
-                    };
-                    self.log("getdata", &format!("{:?}", seen.items));
-                    self.getdata_seen.push(seen);
-                    for item in &items {
-                        if let Inventory::WitnessBlock(hash)
-                        | Inventory::CompactBlock(hash)
-                        | Inventory::Block(hash) = item
-                        {
-                            if self.served.contains(hash) {
-                                self.post_serve_requests.push(*hash);
-                            }
-                        }
-                    }
-                    let items = items.clone();
-                    serve(self, &items);
-                }
-                Ok(NetworkMessage::GetHeaders(_)) => {
-                    let at = self.at_ms();
-                    self.getheaders_at.push(at);
-                    let reply = self.headers_reply.clone();
-                    self.log(
-                        "getheaders",
-                        &format!("replying with {} header(s)", reply.len()),
-                    );
-                    let _ = self.send(NetworkMessage::Headers(reply), end);
-                }
-                Ok(NetworkMessage::Ping(nonce)) => {
-                    let _ = self.send(NetworkMessage::Pong(nonce), end);
-                }
-                Ok(_) => {}
-                // Soft read timeouts inside a pump slice are not a
-                // disconnect — keep observing; hard failures end the pump.
-                Err(error) if is_soft_recv_error(&error) => {}
-                Err(_) => break,
-            }
-        }
-    }
-
-    /// Count of getdata items naming `hash` with plain `MSG_BLOCK` type.
-    fn plain_block_requests(&self, hash: &bitcoin::BlockHash) -> usize {
-        self.getdata_seen
-            .iter()
-            .flat_map(|frame| frame.items.iter())
-            .filter(|(inv_type, hex)| *inv_type == 0x0000_0002 && hex == &hash.to_string())
-            .count()
-    }
-
-    /// Count of getdata items naming `hash` regardless of request type.
-    fn requests_for(&self, hash: &bitcoin::BlockHash) -> usize {
-        self.getdata_seen
-            .iter()
-            .flat_map(|frame| frame.items.iter())
-            .filter(|(_, hex)| hex == &hash.to_string())
-            .count()
-    }
-
-    /// Every hash requested at least once, deduplicated, in first-seen order.
-    fn requested_hashes(&self) -> Vec<String> {
-        let mut seen = Vec::new();
-        for frame in &self.getdata_seen {
-            for (_, hex) in &frame.items {
-                if !seen.contains(hex) {
-                    seen.push(hex.clone());
-                }
-            }
-        }
-        seen
-    }
-}
-
-/// Local frame reader with a 32 MiB payload cap (wire `MAX_MESSAGE_PAYLOAD` —
-/// the harness's 4 MiB cap is below what a `block` frame legitimately holds).
-const HEADER_BYTES: usize = 24;
-const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
-
-fn read_frame_local(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, HarnessError> {
-    fn read_exact(
-        stream: &mut TcpStream,
-        mut bytes: &mut [u8],
-        deadline: Instant,
-    ) -> Result<(), HarnessError> {
-        while !bytes.is_empty() {
-            stream.set_read_timeout(Some(
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::from_millis(1)),
-            ))?;
-            let count = stream.read(bytes)?;
-            if count == 0 {
-                return Err(HarnessError::Protocol("truncated P2P frame".to_owned()));
-            }
-            bytes = &mut bytes[count..];
-        }
-        Ok(())
-    }
-    let mut header = [0; HEADER_BYTES];
-    read_exact(stream, &mut header, deadline)?;
-    let length =
-        usize::try_from(u32::from_le_bytes(header[16..20].try_into().map_err(
-            |_| HarnessError::Protocol("truncated P2P header".to_owned()),
-        )?))
-        .map_err(|error| HarnessError::Protocol(error.to_string()))?;
-    if length > MAX_PAYLOAD_BYTES {
-        return Err(HarnessError::Protocol("P2P payload byte limit".to_owned()));
-    }
-    let mut frame = header.to_vec();
-    frame.resize(HEADER_BYTES + length, 0);
-    read_exact(stream, &mut frame[HEADER_BYTES..], deadline)?;
-    Ok(frame)
-}
-
-/// Decode without the harness's 4 MiB payload cap.
-fn decode_frame_local(frame: &[u8]) -> Result<NetworkMessage, HarnessError> {
-    let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| HarnessError::Protocol(format!("invalid P2P envelope: {error}")))?;
-    if *envelope.magic() != Magic::REGTEST {
-        return Err(HarnessError::Protocol("P2P network mismatch".to_owned()));
-    }
-    Ok(envelope.into_payload())
-}
-
-/// True when a frame-read failure is just "no data yet" (read timeout or
-/// deadline bookkeeping) rather than a dropped connection.
-fn is_soft_recv_error(error: &HarnessError) -> bool {
-    match error {
-        HarnessError::Io(io) => matches!(
-            io.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        HarnessError::Protocol(detail) => detail.contains("deadline"),
-        _ => false,
-    }
-}
-
-/// `(inv_type, hash-display)` for an inventory item. Type codes follow the
-/// wire encoding: `MSG_BLOCK`=2, `MSG_WITNESS_BLOCK`=0x40000002.
-fn inv_item_desc(item: &Inventory) -> (u32, String) {
-    match item {
-        Inventory::Transaction(txid) => (0x0000_0001, txid.to_string()),
-        Inventory::Block(hash) => (0x0000_0002, hash.to_string()),
-        Inventory::CompactBlock(hash) => (0x0000_0004, hash.to_string()),
-        Inventory::WTx(wtxid) => (0x4000_0005, wtxid.to_string()),
-        Inventory::WitnessTransaction(txid) => (0x4000_0001, txid.to_string()),
-        Inventory::WitnessBlock(hash) => (0x4000_0002, hash.to_string()),
-        Inventory::Unknown { inv_type, hash } => (
-            *inv_type,
-            bitcoin::hashes::sha256d::Hash::from_byte_array(*hash).to_string(),
-        ),
-        Inventory::Error => (0, "error".to_owned()),
-    }
-}
-
-/// Returns a copy of `block` with every input witness removed.
-fn strip_witnesses(block: &Block) -> Block {
-    let mut stripped = block.clone();
-    for tx in &mut stripped.txdata {
-        for input in &mut tx.input {
-            input.witness = Witness::new();
-        }
-    }
-    stripped
-}
 
 /// Builds a BIP141 segwit coinbase-only block on `parent`: the coinbase
 /// carries the 32-byte reserved nonce in its input witness and an `OP_RETURN`
@@ -474,22 +91,22 @@ fn pow_met(bits: CompactTarget, hash: bitcoin::BlockHash) -> bool {
 }
 
 /// RPC helpers.
-fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, HarnessError> {
+fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, Error> {
     node.rpc(method, &json!([]))
 }
 
-fn block_count(node: &mut ProcessNode) -> Result<u64, HarnessError> {
+fn block_count(node: &mut ProcessNode) -> Result<u64, Error> {
     Ok(rpc(node, "getblockcount")?.as_u64().unwrap_or(u64::MAX))
 }
 
-fn best_hash(node: &mut ProcessNode) -> Result<String, HarnessError> {
+fn best_hash(node: &mut ProcessNode) -> Result<String, Error> {
     Ok(rpc(node, "getbestblockhash")?
         .as_str()
         .unwrap_or("")
         .to_owned())
 }
 
-fn connection_count(node: &mut ProcessNode) -> Result<u64, HarnessError> {
+fn connection_count(node: &mut ProcessNode) -> Result<u64, Error> {
     Ok(rpc(node, "getconnectioncount")?
         .as_u64()
         .unwrap_or(u64::MAX))
@@ -515,7 +132,7 @@ fn pump_until_tip(
     height: u64,
     hash: &str,
     dur: Duration,
-) -> Result<bool, HarnessError> {
+) -> Result<bool, Error> {
     let deadline = Instant::now() + dur;
     while Instant::now() < deadline && !peer.dropped {
         if block_count(node)? == height && best_hash(node)? == hash {
@@ -547,12 +164,6 @@ fn pump_until_request(peer: &mut LivePeer, want: bitcoin::BlockHash, dur: Durati
         });
     }
     peer.requests_for(&want) > 0
-}
-
-fn evidence_dir() -> std::path::PathBuf {
-    let dir = workspace().join("target/live-head-e2e");
-    std::fs::create_dir_all(&dir).expect("evidence dir");
-    dir
 }
 
 /// Reads the node's stderr evidence so far.
@@ -596,13 +207,13 @@ fn assert_clean_stderr(node: &ProcessNode, context: &str) {
     );
 }
 
-/// T1: headers bootstrap proves the baseline pipeline, then each block
-/// announced by `inv` reaches the node through the announcement route: the
-/// node probes `getheaders`, the revealed header admits near the tip, and
-/// the fetched body applies. Several in a row must keep advancing: no stall.
+/// T1: headers bootstrap proves the baseline pipeline, then blocks announced
+/// ONLY by `inv` (no `headers` batch ever carries them) must still apply —
+/// each delivered body is the node's only copy of its header and admits
+/// through the staged path. Several in a row must keep advancing: no stall.
 #[test]
-fn announced_live_head_applies_and_continues() -> Result<(), HarnessError> {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
+fn carried_header_live_head_applies_and_continues() -> Result<(), Error> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = LivePeer::connect(&node, "t1")?;
 
     assert!(
@@ -616,9 +227,9 @@ fn announced_live_head_applies_and_continues() -> Result<(), HarnessError> {
     let genesis = regtest_genesis();
     let chain = build_chain(&genesis, 6, 0xD1, 1);
     peer.offer_bodies(&chain);
-    // `getheaders` answers start at h1..h3: h4..h6 are revealed one at a
-    // time, each only when its block is announced.
-    peer.headers_reply = chain[..3].iter().map(|b| b.header).collect();
+    // `getheaders` answers may only ever reveal h1..h3: h4..h6 must reach the
+    // node exclusively inside delivered bodies (carried headers).
+    peer.headers = chain[..3].iter().map(|b| b.header).collect();
     let h3 = chain[2].block_hash();
     let h6 = chain[5].block_hash();
 
@@ -646,14 +257,12 @@ fn announced_live_head_applies_and_continues() -> Result<(), HarnessError> {
     );
     eprintln!("[E2E] bootstrap applied: tip=h3 ({h3}), count=3");
 
-    // Live-head blocks h4,h5,h6 arrive via inv announcements: the
-    // announcement route probes for headers, the revealed header admits near
-    // the tip, and the window asks this peer for the body.
+    // Live-head blocks h4,h5,h6 arrive ONLY via inv announcements — the
+    // delivered body is the node's only copy of each header.
     for (height, block) in chain.iter().enumerate().skip(3) {
         let hash = block.block_hash();
-        peer.headers_reply = chain[..=height].iter().map(|b| b.header).collect();
         peer.send(NetworkMessage::Inv(vec![Inventory::Block(hash)]), deadline)?;
-        eprintln!("[E2E] announced h{} via inv ({hash})", height + 1);
+        eprintln!("[E2E] announced h{} via inv only ({hash})", height + 1);
         assert!(
             pump_until_request(&mut peer, hash, Duration::from_secs(15)),
             "node never requested announced body {hash}"
@@ -672,16 +281,13 @@ fn announced_live_head_applies_and_continues() -> Result<(), HarnessError> {
                 &hash.to_string(),
                 Duration::from_secs(20)
             )?,
-            "announced block h{}={} never applied (count={:?}, best={:?})",
+            "carried-header block h{}={} never applied (count={:?}, best={:?})",
             height + 1,
             hash,
             block_count(&mut node),
             best_hash(&mut node)
         );
-        eprintln!(
-            "[E2E] h{} applied via the announcement route ({hash})",
-            height + 1
-        );
+        eprintln!("[E2E] h{} applied via carried header ({hash})", height + 1);
     }
 
     // Every block requested at least once; none re-requested after its
@@ -711,24 +317,23 @@ fn announced_live_head_applies_and_continues() -> Result<(), HarnessError> {
     assert_eq!(block_count(&mut node)?, 6, "tip must be h6");
     assert_eq!(best_hash(&mut node)?, h6.to_string());
 
-    assert_clean_stderr(&node, "live-head announcement chain");
-    eprintln!("[E2E] T1 PASSED: announced headers admitted, tip advanced h3→h6 without stall");
+    assert_clean_stderr(&node, "live-head carried-header chain");
+    eprintln!("[E2E] T1 PASSED: carried headers admitted, tip advanced h3→h6 without stall");
     Ok(())
 }
 
-/// T2: an announced block is probed with `getheaders` first; when the body
-/// then arrives with its carried header's parent still unknown that is not a
+/// T2: a delivered body whose carried header's parent is unknown is not a
 /// peer fault — the node must issue a recovery `getheaders`, then apply the
-/// staged body in place once the ancestors land. The staged h4 body keeps no
-/// height of its own; the tree places it once its header lands, so the node
-/// must never re-request h4 and must apply it.
+/// staged body in place once the ancestors land. The NEW
+/// `reconcile_received_heights` must repair the 0-height sentinel on h4's
+/// received entry: the node must never re-request h4 and must apply it.
 #[allow(clippy::too_many_lines)]
 #[test]
-fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError> {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
-    // start_height=0: the peer advertises no better tip, so no discovery
-    // getheaders fires before the announcement; later probes are
-    // attributable by their position in `getheaders_at`.
+fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    // start_height=0: the peer advertises no better tip, so the node has no
+    // reason to send discovery getheaders — any getheaders that arrives can
+    // only be the staged-header recovery send.
     let mut peer = LivePeer::connect_with_height(&node, "t2", 0)?;
 
     assert!(
@@ -743,7 +348,7 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
     peer.offer_bodies(&chain);
     // Nothing is revealed until the ancestry step: any probe that does show
     // up gets an empty reply and the wire stays clean.
-    peer.headers_reply = Vec::new();
+    peer.headers = Vec::new();
 
     // Quiet-wire precondition: with start_height=0 the peer demonstrates no
     // better tip, so no discovery getheaders should ever fire — making any
@@ -763,32 +368,30 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
     peer.send(NetworkMessage::Inv(vec![Inventory::Block(h4)]), deadline)?;
     eprintln!("[E2E] announced h4 alone ({h4}); h1..h3 unknown to node");
 
-    // New semantics: the announcement route probes for headers at once, and
-    // no body request may be emitted for a hash the tree has never admitted.
-    peer.pump(Duration::from_secs(2), &mut |_, _| {});
-    assert!(
-        !peer.getheaders_at.is_empty(),
-        "the inv announcement never led to a getheaders probe (announcement route broken)"
-    );
-    assert_eq!(
-        peer.requests_for(&h4),
-        0,
-        "inv alone requested the announced h4 body"
-    );
+    // Wait for the inv-echo getdata WITHOUT serving the body yet.
+    let requested = wait_for(Duration::from_secs(15), &mut || {
+        peer.pump(Duration::from_millis(150), &mut |_, _| {});
+        peer.requests_for(&h4) > 0
+    });
+    assert!(requested, "node never requested announced h4 body");
     assert_eq!(
         peer.plain_block_requests(&h4),
         0,
         "h4 requested as plain MSG_BLOCK"
     );
-    eprintln!("[E2E] announcement probed for headers; h4 body not requested");
+    eprintln!("[E2E] node requested h4 as WitnessBlock; withholding body");
 
-    // Settle ~1.2s with the body withheld; the probe count after that is the
-    // announcement baseline, so anything new once the body lands is the
-    // staged-header recovery send.
+    // Hold ~1.2s with the body withheld: an inv announcement alone must not
+    // produce a getheaders. Anything that fires after the BODY lands is then
+    // unambiguously the staged-header recovery send.
     peer.pump(Duration::from_millis(1200), &mut |_, _| {});
-    let announcement_probes = peer.getheaders_at.len();
+    assert!(
+        peer.getheaders_at.is_empty(),
+        "getheaders fired with the body still withheld: {:?} — inv alone probed?",
+        peer.getheaders_at
+    );
 
-    // Deliver the body unsolicited; its carried header fails admission
+    // Deliver the requested h4 body; its carried header fails admission
     // (parent h3 unknown) and the staged retry must ask us for the gap.
     let body = peer.blocks.get(&h4).cloned().expect("offered block");
     peer.send(NetworkMessage::Block(body), deadline)?;
@@ -797,14 +400,14 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
 
     let recovery_ok = wait_for(Duration::from_secs(6), &mut || {
         peer.pump(Duration::from_millis(100), &mut |_, _| {});
-        peer.getheaders_at.len() > announcement_probes
+        !peer.getheaders_at.is_empty()
     });
     assert!(
         recovery_ok,
         "no getheaders arrived after h4 body delivery (recovery path never fired); \
          body sent at {served_ms}ms",
     );
-    let recovery_at = peer.getheaders_at[announcement_probes];
+    let recovery_at = peer.getheaders_at[0];
     eprintln!(
         "[E2E] recovery getheaders observed at {recovery_at}ms ({}ms after body)",
         recovery_at.saturating_sub(served_ms)
@@ -814,7 +417,7 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
     // reply converge). Also switch future getheaders replies to the real
     // ancestry minus h5 — h5 must stay body-carried only.
     let pre_headers_requests = peer.requests_for(&h4);
-    peer.headers_reply = chain[..4].iter().map(|b| b.header).collect();
+    peer.headers = chain[..4].iter().map(|b| b.header).collect();
     peer.send(
         NetworkMessage::Headers(chain[..4].iter().map(|b| b.header).collect()),
         deadline,
@@ -839,7 +442,8 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
     assert_eq!(
         peer.requests_for(&h4),
         pre_headers_requests,
-        "h4 body re-requested after headers landed ({} -> {}) — staged body lost",
+        "h4 body re-requested after headers landed ({} -> {}) — 0-height sentinel \
+         not repaired",
         pre_headers_requests,
         peer.requests_for(&h4)
     );
@@ -848,8 +452,7 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
     );
 
     // The gap-fill getdata must cover each of h1..h3 exactly once (h4's body
-    // was already delivered — a second request would mean the staged body
-    // was lost).
+    // was already delivered — a second request would be the sentinel bug).
     for block in &chain[..3] {
         let hash = block.block_hash();
         assert_eq!(
@@ -861,9 +464,8 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
         );
     }
 
-    // Post-recovery liveness: announce h5 by inv — the announcement route
-    // probes, the reply reveals h5's header, and the tip keeps advancing.
-    peer.headers_reply = chain[..5].iter().map(|b| b.header).collect();
+    // Post-recovery liveness: announce h5 by inv only — its carried header
+    // admits (h4 now in tree) and the tip keeps advancing.
     peer.send(NetworkMessage::Inv(vec![Inventory::Block(h5)]), deadline)?;
     assert!(
         pump_until_request(&mut peer, h5, Duration::from_secs(15)),
@@ -886,6 +488,8 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
         "node requested MSG_BLOCK and got a stripped body"
     );
     assert_clean_stderr(&node, "missing-parent recovery + staged apply");
-    eprintln!("[E2E] T2 PASSED: recovery getheaders, staged body applied in place, tip continued");
+    eprintln!(
+        "[E2E] T2 PASSED: recovery getheaders, sentinel repaired, staged body applied, tip continued"
+    );
     Ok(())
 }
