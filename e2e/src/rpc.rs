@@ -63,7 +63,7 @@ impl Connection {
     pub fn rpc(&mut self, request: &Value, auth: (&str, &str), deadline: Instant) -> Result<Value> {
         let wire = request_wire(self.addr, request, Some(auth))?;
         let response = self.round_trip(&wire, deadline)?;
-        Ok(response.json()?)
+        response.json()
     }
 
     /// Send one HTTP request and return the parsed reply.
@@ -267,7 +267,7 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
     }
     let response = parse_reply(&bytes)?;
     remaining()?;
-    Ok(response.json()?)
+    response.json()
 }
 
 /// Time left before `deadline`, or a protocol failure naming `message`.
@@ -324,7 +324,11 @@ fn http_wire(
 /// INVARIANT: duplicate `Content-Length`, any `Transfer-Encoding`, a
 /// non-HTTP/1.x version, and a status code outside 100..=599 are protocol
 /// failures; header names come back lower-cased.
-fn parse_reply_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>, Option<usize>, bool)> {
+/// The parts of a reply head: status code, lower-cased headers, declared
+/// body length, and whether the peer announced a close.
+type ReplyHeadParts = (u16, Vec<(String, String)>, Option<usize>, bool);
+
+fn parse_reply_head(head: &[u8]) -> Result<ReplyHeadParts> {
     let text = std::str::from_utf8(head)
         .map_err(|error| Error::Protocol(format!("invalid HTTP headers: {error}")))?;
     let mut lines = text.split("\r\n");
@@ -376,8 +380,10 @@ fn parse_reply(bytes: &[u8]) -> Result<HttpResponse> {
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| Error::Protocol("missing HTTP header terminator".into()))?;
-    let (status, headers, content_length, _) =
-        parse_reply_head(bytes.get(..split).expect("position"))?;
+    let head = bytes
+        .get(..split)
+        .ok_or_else(|| Error::Protocol("invalid header split".into()))?;
+    let (status, headers, content_length, _) = parse_reply_head(head)?;
     let payload = bytes
         .get(split.saturating_add(4)..)
         .ok_or_else(|| Error::Protocol("missing HTTP body".into()))?;
