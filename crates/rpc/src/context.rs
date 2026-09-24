@@ -372,8 +372,9 @@ pub struct NetworkHandles {
     pub network_active: Arc<core::sync::atomic::AtomicBool>,
     /// Authoritative live peer sessions.
     pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    /// Channel that requests outbound P2P connections.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
+    /// Channel that requests outbound P2P connections, tagged with the
+    /// origin that asked for each one.
+    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
     /// Manual IP/CIDR bans.
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
@@ -449,7 +450,7 @@ pub struct Context {
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
     /// Optional outbound channel for `addnode` to request new P2P connections.
     /// `None` for embedded/test callers without a live P2P listener.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
+    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
     /// Manual IP/CIDR bans shared with P2P enforcement.
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
