@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -239,6 +240,8 @@ pub struct PeerLease {
     unsolicited_forwards: Arc<AtomicUsize>,
     inbound: bool,
     role: crate::peer_info::PeerRole,
+    /// Monotonic instant the connection was created.
+    connected: Instant,
 }
 
 impl PeerLease {
@@ -299,6 +302,7 @@ impl PeerLease {
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
             inbound,
             role,
+            connected: Instant::now(),
         }
     }
 
@@ -343,6 +347,25 @@ impl PeerLease {
     #[must_use]
     pub const fn role(&self) -> crate::peer_info::PeerRole {
         self.role
+    }
+
+    /// When this connection was created, on the monotonic clock.
+    ///
+    /// PRE: none.
+    /// POST: the instant never moves, and it is never in the future
+    ///   relative to a later read.
+    /// INVARIANT: this holds the role Core's `nTimeConnected` holds
+    ///   (`net.h`): the age a connection must reach before policy may
+    ///   hold its silence against it.
+    #[must_use]
+    pub const fn connected_at(&self) -> Instant {
+        self.connected
+    }
+
+    /// Moves this lease's connection instant into the past.
+    #[cfg(test)]
+    pub(crate) fn backdate_for_test(&mut self, at: Instant) {
+        self.connected = at;
     }
 
     /// Receiver half of the close signal raised by [`PeerLease::cancel`].

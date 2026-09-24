@@ -2082,9 +2082,11 @@ mod witness_staging_gate;
 
 mod frontier_recovery;
 
+mod chain_sync;
 #[cfg(test)]
 mod frontier_model;
 mod head_sync;
+mod stale_tip;
 
 /// A sync loop over an applied chain whose commit fails on command for one
 /// hash, with block 2 announced and its body owed to one live connection.
