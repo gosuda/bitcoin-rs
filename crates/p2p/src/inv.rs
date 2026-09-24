@@ -170,8 +170,12 @@ mod tests {
                 let lease = PeerLease::new(sender);
                 let source = source(&lease);
                 table.register(source.addr, lease.clone());
-                let mut version =
-                    crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay);
+                let mut version = crate::handshake::version_message(
+                    1,
+                    0,
+                    crate::peer_info::PeerRole::FullRelay,
+                    bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+                );
                 version.services = if witness {
                     ServiceFlags::NETWORK | ServiceFlags::WITNESS
                 } else {
