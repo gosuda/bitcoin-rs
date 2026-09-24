@@ -259,9 +259,22 @@ impl Reconstruction {
 
 /// Matches the message's short IDs against the hint identities and fills
 /// their slots. `short_ids` covers exactly the unfilled slots, in slot
-/// order; a count mismatch means the message is malformed, and two distinct
-/// hint identities claiming one short ID is an ambiguity — both fall back
-/// rather than guess.
+/// order. Two structural faults mean the message cannot be trusted and the
+/// reconstruction falls back rather than guess: fewer or more short IDs
+/// than unfilled slots, and one short ID declared twice — a collapsed slot
+/// map would silently misplace bodies. Two distinct hint identities that
+/// collide on one short ID retire only that slot, which the `getblocktxn`
+/// request then carries; a later candidate never refills it (Core 31.1
+/// clears only the colliding slot, `blockencodings.cpp:116-166`).
+///
+/// PRE: `filled` holds one body per prefill and `None` per short-ID slot;
+/// `retained_bytes` counts the short IDs and the prefilled bodies.
+/// POST: every unambiguous slot holds its body and is counted once; a
+/// retired slot, and one whose body the hints no longer offer, stay `None`
+/// and uncounted.
+/// INVARIANT: no body is looked up while the identity walk runs. The
+/// mempool walk holds its pool read lock across the callback and a body
+/// lookup takes that lock again, which deadlocks once a writer queues.
 fn fill_from_hints(
     filled: &mut [Option<Tx>],
     compact: &HeaderAndShortIds,
@@ -284,39 +297,51 @@ fn fill_from_hints(
             None => return Err(()),
         }
     }
-    if short_id_cursor != compact.short_ids.len() {
+    if short_id_cursor != compact.short_ids.len() || wanted.len() != compact.short_ids.len() {
         return Err(());
     }
-    let mut ambiguous = false;
+    // Identity scan: record one claim per slot, retire a slot the first time
+    // a second identity claims it.
+    let mut claims: Vec<Option<(Txid, Wtxid)>> = vec![None; filled.len()];
+    let mut retired = vec![false; filled.len()];
     hints.for_each_identity(&mut |txid, wtxid| {
-        if ambiguous {
-            return;
-        }
-        let identity_bytes = if identity_is_wtxid {
+        let identity = if identity_is_wtxid {
             wtxid.as_bytes()
         } else {
             txid.as_bytes()
         };
-        let short_id = ShortId::with_siphash_keys(identity_bytes, keys);
-        let Some(&slot) = wanted.get(&short_id) else {
+        let Some(&slot) = wanted.get(&ShortId::with_siphash_keys(identity, keys)) else {
             return;
         };
-        if filled[slot].is_some() {
-            ambiguous = true;
+        if retired[slot] {
             return;
         }
+        let Some((claimed_txid, claimed_wtxid)) = claims[slot] else {
+            claims[slot] = Some((txid, wtxid));
+            return;
+        };
+        if claimed_txid != txid || claimed_wtxid != wtxid {
+            claims[slot] = None;
+            retired[slot] = true;
+        }
+    });
+    // Body pass: outside the walk, fetch each surviving claim once.
+    for (slot, claim) in claims.into_iter().enumerate() {
+        let Some((txid, wtxid)) = claim else {
+            continue;
+        };
         let body = if identity_is_wtxid {
             hints.get_tx_by_wtxid(wtxid)
         } else {
             hints.get_tx_by_txid(txid)
         };
         let Some(body) = body else {
-            return;
+            continue;
         };
         *retained_bytes += body.total_size();
         filled[slot] = Some(body);
-    });
-    if ambiguous { Err(()) } else { Ok(()) }
+    }
+    Ok(())
 }
 
 /// Places the differentially encoded prefills into the transaction slots,
@@ -356,13 +381,21 @@ fn wire_block_hash(hash: BlockHash) -> bitcoin::BlockHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::bip152::BlockTransactions;
+
+    use bitcoin::bip152::{BlockTransactions, PrefilledTransaction};
     use bitcoin::blockdata::block::Block as RegistryBlock;
     use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
     use bitcoin_rs_primitives::{
         Amount, LockTime, OutPoint, Sequence, TxIn, TxOut, Witness, consensus_bytes,
     };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Instant;
+
+    /// Payload values ground offline for the fixed test header/nonce
+    /// `(conforming_block([test_tx(1), test_tx(2), test_tx(3)]), 0x515)`:
+    /// `colliding_tx_bytes(0x11, .0)` and `colliding_tx_bytes(0x22, .1)`
+    /// produce distinct wtxids that hash to one short ID.
+    const COLLIDING_PAYLOADS: (u32, u32) = (0x0055_7269, 0x0093_c777);
 
     /// Hints backed by a fixed transaction set, as the mempool would offer.
     struct SetHints {
@@ -411,31 +444,81 @@ mod tests {
             .unwrap_or_else(|error| panic!("test tx must bridge: {error}"))
     }
 
-    /// Builds a native block and the registry `cmpctblock` for it at
-    /// `version`, proving the registry-encode / native-decode round trip.
-    fn sample_cmpct(txs: Vec<Tx>, version: u64, nonce: u64) -> (Block, CmpctBlock) {
-        let header = Header {
-            version: 1,
-            prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
-            merkle_root: Hash256::default(),
-            time: 7,
-            bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 9,
+    /// Native → registry block bridge for wire-level test fixtures.
+    fn registry_block(native: &Block) -> RegistryBlock {
+        bitcoin::consensus::encode::deserialize(&consensus_bytes(native))
+            .unwrap_or_else(|error| panic!("test block must bridge: {error}"))
+    }
+
+    /// Builds a native block over `txs` whose header commits to their
+    /// transaction-ID merkle root, the property the reconstruction
+    /// verifier enforces. The registry round trip pins the merkle byte
+    /// order at the fixture level.
+    fn conforming_block(txs: Vec<Tx>) -> Block {
+        let mut native = Block {
+            header: Header {
+                version: 1,
+                prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
+                merkle_root: Hash256::default(),
+                time: 7,
+                bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 9,
+            },
+            txs,
         };
-        let native = Block { header, txs };
-        let registry =
-            bitcoin::consensus::encode::deserialize::<RegistryBlock>(&consensus_bytes(&native))
-                .unwrap_or_else(|error| panic!("sample block must decode: {error}"));
+        let root = registry_block(&native)
+            .compute_merkle_root()
+            .unwrap_or_else(|| panic!("a non-empty block has a merkle root"));
+        native.header.merkle_root = Hash256::from_le_bytes(&root.to_byte_array());
+        assert_eq!(
+            registry_block(&native).header.merkle_root,
+            root,
+            "merkle bytes must bridge losslessly"
+        );
+        native
+    }
+
+    /// Builds the registry `cmpctblock` for `native` at `version`, as the
+    /// encoder produces it: the coinbase prefilled, every other slot a
+    /// short ID.
+    fn compact_of(native: &Block, version: u64, nonce: u64) -> CmpctBlock {
         let version =
             u32::try_from(version).unwrap_or_else(|error| panic!("version fits u32: {error}"));
-        let compact = HeaderAndShortIds::from_block(&registry, nonce, version, &[])
+        let compact = HeaderAndShortIds::from_block(&registry_block(native), nonce, version, &[])
             .unwrap_or_else(|error| panic!("sample compact block must build: {error}"));
-        (
-            native,
-            CmpctBlock {
-                compact_block: compact,
+        CmpctBlock {
+            compact_block: compact,
+        }
+    }
+
+    /// Builds a conforming native block and its registry `cmpctblock` at
+    /// `version`, proving the registry-encode / native-decode round trip.
+    fn sample_cmpct(txs: Vec<Tx>, version: u64, nonce: u64) -> (Block, CmpctBlock) {
+        let native = conforming_block(txs);
+        let cmpct = compact_of(&native, version, nonce);
+        (native, cmpct)
+    }
+
+    /// Builds a `cmpctblock` over `native` with the coinbase prefilled at
+    /// index zero and caller-supplied short IDs for the remaining slots.
+    fn cmpct_with_slots(native: &Block, nonce: u64, short_ids: Vec<ShortId>) -> CmpctBlock {
+        CmpctBlock {
+            compact_block: HeaderAndShortIds {
+                header: registry_block(native).header,
+                nonce,
+                short_ids,
+                prefilled_txs: vec![PrefilledTransaction {
+                    idx: 0,
+                    tx: registry_tx(&native.txs[0]),
+                }],
             },
-        )
+        }
+    }
+
+    /// The wtxid short ID of `tx` under `native`'s header and `nonce`.
+    fn wtxid_short_id(native: &Block, nonce: u64, tx: &Tx) -> ShortId {
+        let keys = ShortId::calculate_siphash_keys(&registry_block(native).header, nonce);
+        ShortId::with_siphash_keys(tx.wtxid().as_bytes(), keys)
     }
 
     fn now() -> Instant {
@@ -650,5 +733,195 @@ mod tests {
             panic!("expected a missing-list request at the bound, got {outcome:?}");
         };
         assert_eq!(request.txs_request.indexes.len(), MAX_REQUESTED_MISSING);
+    }
+
+    // ---- Compact conformance fixtures and tests ----
+
+    /// Rebuilds the precomputed colliding pair: two transactions whose
+    /// distinct wtxids collide on one BIP152 short ID under `native`'s
+    /// header and `nonce` — the fixture behind the per-slot collision path,
+    /// which a hash collision makes unreachable by construction. The varying
+    /// bytes sit in a trailing `OP_RETURN` payload; distinct outpoints separate
+    /// the two inputs so the pair can coexist in one mempool. Setup asserts
+    /// both hashes really do produce the same short ID: a fixture that
+    /// silently stopped colliding would make the collision path unreachable
+    /// and the test vacuous.
+    fn colliding_hint_pair(native: &Block, nonce: u64) -> (Tx, Tx, ShortId) {
+        let keys = ShortId::calculate_siphash_keys(&registry_block(native).header, nonce);
+        let (first_payload, second_payload) = COLLIDING_PAYLOADS;
+        let first_bytes = colliding_tx_bytes(0x11, first_payload);
+        let second_bytes = colliding_tx_bytes(0x22, second_payload);
+        let short_id = |bytes: &[u8]| {
+            ShortId::with_siphash_keys(
+                &bitcoin::hashes::sha256d::Hash::hash(bytes).to_byte_array(),
+                keys,
+            )
+        };
+        let sid = short_id(&first_bytes);
+        assert_eq!(
+            sid,
+            short_id(&second_bytes),
+            "precomputed fixture must actually collide"
+        );
+        let first = Tx::consensus_decode(&first_bytes)
+            .unwrap_or_else(|error| panic!("fixture decodes: {error}"));
+        let second = Tx::consensus_decode(&second_bytes)
+            .unwrap_or_else(|error| panic!("fixture decodes: {error}"));
+        (first, second, sid)
+    }
+
+    /// Two mempool identities colliding on one short ID retire only their
+    /// own slot and request exactly that slot: the unrelated hinted slot
+    /// stays filled, a later candidate for the collided slot does not refill
+    /// it, and the correct `blocktxn` completes the block without a
+    /// full-block fallback (Core 31.1 `blockencodings.cpp:116-166`).
+    #[test]
+    fn colliding_hint_requests_only_its_slot() {
+        let native = conforming_block(vec![test_tx(1), test_tx(2), test_tx(3)]);
+        let (first, second, collided) = colliding_hint_pair(&native, 0x515);
+        let unrelated = wtxid_short_id(&native, 0x515, &native.txs[2]);
+        // The last entry repeats `first`: after the collision retires the
+        // slot, a later candidate for it must not refill it.
+        let hints = SetHints {
+            txs: vec![first.clone(), second, native.txs[2].clone(), first],
+        };
+        let mut reconstruction = Reconstruction::new();
+        let cmpct = cmpct_with_slots(&native, 0x515, vec![collided, unrelated]);
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+
+        let Outcome::RequestMissing(request) = outcome else {
+            panic!("expected a getblocktxn request for the collided slot, got {outcome:?}");
+        };
+        assert_eq!(request.txs_request.indexes, vec![1]);
+        // Retained bytes: two short IDs, the prefilled coinbase, and the
+        // unrelated hinted body; the collided candidate's body was returned
+        // exactly once.
+        assert_eq!(
+            reconstruction.retained_bytes(),
+            2 * 6 + native.txs[0].total_size() + native.txs[2].total_size()
+        );
+
+        let txn = BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: request.txs_request.block_hash,
+                transactions: vec![registry_tx(&native.txs[1])],
+            },
+        };
+        let outcome = reconstruction.receive_blocktxn(&txn, now());
+        let Outcome::Complete(block) = outcome else {
+            panic!("expected the collided slot's blocktxn to complete, got {outcome:?}");
+        };
+        assert_eq!(block.txs, native.txs);
+    }
+
+    /// A `cmpctblock` declaring the same short ID twice is structurally
+    /// malformed: the slot accounting cannot be trusted, so the message
+    /// falls back immediately instead of reconstructing from a collapsed
+    /// wanted map.
+    #[test]
+    fn duplicate_declared_short_ids_fall_back() {
+        let native = conforming_block(vec![test_tx(1), test_tx(2), test_tx(3)]);
+        let duplicated = wtxid_short_id(&native, 0x71, &native.txs[1]);
+        let hints = SetHints {
+            txs: native.txs.clone(),
+        };
+        let mut reconstruction = Reconstruction::new();
+        let cmpct = cmpct_with_slots(&native, 0x71, vec![duplicated, duplicated]);
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "duplicate declared short IDs must fall back, got {outcome:?}"
+        );
+    }
+
+    /// Hints that notice a body lookup made while the identity walk is still
+    /// running: [`SetHints`] behind a walk flag. The mempool holds its pool
+    /// read lock across the walk callback and a body lookup takes that lock
+    /// again, so a nested lookup deadlocks the moment a writer queues behind
+    /// the reader.
+    struct WalkGuardedHints {
+        inner: SetHints,
+        walking: AtomicBool,
+        nested: AtomicUsize,
+    }
+
+    impl WalkGuardedHints {
+        /// Counts one body lookup made during the walk.
+        fn note_lookup(&self) {
+            if !self.walking.load(Ordering::SeqCst) {
+                return;
+            }
+            self.nested.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl CompactBlockHints for WalkGuardedHints {
+        fn for_each_identity(&self, f: &mut dyn FnMut(Txid, Wtxid)) {
+            self.walking.store(true, Ordering::SeqCst);
+            self.inner.for_each_identity(f);
+            self.walking.store(false, Ordering::SeqCst);
+        }
+
+        fn get_tx_by_txid(&self, txid: Txid) -> Option<Tx> {
+            self.note_lookup();
+            self.inner.get_tx_by_txid(txid)
+        }
+
+        fn get_tx_by_wtxid(&self, wtxid: Wtxid) -> Option<Tx> {
+            self.note_lookup();
+            self.inner.get_tx_by_wtxid(wtxid)
+        }
+    }
+
+    /// A fully hinted reconstruction fetches every body after the identity
+    /// walk returns, never during it.
+    #[test]
+    fn hint_bodies_are_fetched_outside_the_identity_walk() {
+        let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2), test_tx(3)], 2, 0x77);
+        let hints = WalkGuardedHints {
+            inner: SetHints { txs: native.txs },
+            walking: AtomicBool::new(false),
+            nested: AtomicUsize::new(0),
+        };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome =
+            reconstruction.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, now());
+
+        assert!(
+            matches!(outcome, Outcome::Complete(_)),
+            "the reconstruction must still complete, got {outcome:?}"
+        );
+        assert_eq!(
+            hints.nested.load(Ordering::SeqCst),
+            0,
+            "a body lookup inside the identity walk re-enters the pool read lock"
+        );
+    }
+
+    /// Serializes the precomputed colliding fixture transaction; only the
+    /// payload bytes separate the two inputs.
+    fn colliding_tx_bytes(branch: u8, payload: u32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(64);
+        bytes.extend_from_slice(&2_u32.to_le_bytes()); // version
+        bytes.push(1); // one input
+        let mut previous = [branch; 32];
+        previous[0] = 0;
+        bytes.extend_from_slice(&previous); // outpoint txid
+        bytes.extend_from_slice(&0_u32.to_le_bytes()); // vout
+        bytes.push(0); // empty script_sig
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // sequence
+        bytes.push(1); // one output
+        bytes.extend_from_slice(&1_000_u64.to_le_bytes()); // value
+        bytes.push(6); // script len
+        bytes.extend_from_slice(&[0x6a, 0x04]); // OP_RETURN, push 4
+        bytes.extend_from_slice(&payload.to_le_bytes()); // varying payload
+        bytes.extend_from_slice(&0_u32.to_le_bytes()); // lock time
+        bytes
     }
 }
