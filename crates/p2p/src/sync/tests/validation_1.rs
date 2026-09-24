@@ -4,11 +4,12 @@ use super::*;
 fn non_witness_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>>
 {
     let ineligible = PeerInfo {
-        // NODE_NETWORK only — no NODE_WITNESS.
+        // NODE_NETWORK only — no NODE_WITNESS: the peer fails the
+        // block-service clause, so no body path asks it for anything.
         services: 1,
         ..synthetic_peer(test_addr(9210, 0)?, 300)
     };
-    assert_no_bodies_for_ineligible_candidate(ineligible)
+    assert_fallback_refused_to_candidate(ineligible)
 }
 
 #[test]

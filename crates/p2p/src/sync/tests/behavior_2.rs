@@ -267,7 +267,10 @@ fn inbound_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std:
         inbound: true,
         ..synthetic_peer(test_addr(9200, 0)?, 300)
     };
-    assert_no_bodies_for_ineligible_candidate(ineligible)
+    // The inbound peer advertises the full services, so it passes the
+    // block-service clause and keeps the deep fallback batch; it just
+    // never counts toward the fan-out threshold.
+    assert_fallback_served_by_candidate(ineligible)
 }
 
 #[test]
@@ -275,7 +278,7 @@ fn low_chain_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn st
     // Outbound + witness, but its known chain does not reach past our
     // applied tip (genesis, height 0): fails the height clause outright.
     let ineligible = synthetic_peer(test_addr(9220, 0)?, 0);
-    assert_no_bodies_for_ineligible_candidate(ineligible)
+    assert_fallback_refused_to_candidate(ineligible)
 }
 
 #[test]

@@ -890,13 +890,22 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     Ok(())
 }
 
-/// Seven eligible peers plus one candidate that may not serve block bodies:
-/// the ineligible candidate never counts toward the fan-out threshold, and it
-/// never receives a body request either — the highest eligible peer takes the
-/// deep batch. Header requests stay open to it: fetching headers is not
-/// gated by block-service eligibility.
-fn assert_no_bodies_for_ineligible_candidate(
+/// Seven eligible peers plus one candidate that fails a fan-out clause:
+/// were that peer counted, fan-out (many shallow getdatas) would engage;
+/// instead the window collapses to one deep single-peer batch. Header
+/// requests stay open to the candidate: fetching headers is not block
+/// download.
+///
+/// The candidate connects first, so at height 300 it is the highest peer.
+/// When it still passes the block-service clause, the fallback keeps using
+/// it — an inbound-only node must still sync, so the outbound requirement
+/// gates fan-out striping, not the deep request path. When it fails the
+/// service clause itself (no witness, pruned beyond its retained window),
+/// it receives no body request on any path and the highest eligible peer
+/// takes the deep batch.
+fn assert_fallback_with_ineligible_candidate(
     ineligible: PeerInfo,
+    serves_fallback: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
@@ -913,13 +922,38 @@ fn assert_no_bodies_for_ineligible_candidate(
     sync.tick();
 
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    assert_no_getdata(&ineligible_rx)?;
-    let inventory = next_getdata(&rxs[0])?;
+    let deep_rx = if serves_fallback {
+        &ineligible_rx
+    } else {
+        &rxs[0]
+    };
+    let Message::GetData(inventory) = deep_rx.try_recv()? else {
+        return Err(std::io::Error::other("expected one deep fallback getdata").into());
+    };
     assert_eq!(witness_block_inventory(inventory)?, expected);
-    for rx in &rxs[1..] {
+    if !serves_fallback {
+        // Header sync is not block download: the refused peer may still be
+        // the header peer, so only a body request would be a defect.
+        assert_no_getdata(&ineligible_rx)?;
+    }
+    for rx in &rxs[usize::from(!serves_fallback)..] {
         assert_eq!(witness_block_inventory(next_getdata(rx)?)?, expected[..8]);
     }
     Ok(())
+}
+
+/// The candidate passes the block-service clause and holds the deep batch.
+fn assert_fallback_served_by_candidate(
+    candidate: PeerInfo,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fallback_with_ineligible_candidate(candidate, true)
+}
+
+/// The candidate fails the block-service clause and receives no body request.
+fn assert_fallback_refused_to_candidate(
+    candidate: PeerInfo,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_fallback_with_ineligible_candidate(candidate, false)
 }
 
 #[test]
