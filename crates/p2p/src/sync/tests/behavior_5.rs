@@ -50,7 +50,7 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
             .send(crate::InboundBlock::from_decoded(block.clone()))?;
     }
 
-    fixture.sync.drain_inbound_blocks();
+    fixture.sync.drain_inbound_blocks(Instant::now());
 
     assert!(
         fixture.sync.scheduler.lock().stager.received_len() <= max_received_blocks,
