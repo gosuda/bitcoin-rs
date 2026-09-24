@@ -109,7 +109,7 @@ skip = [
     # dashmap 6.2 pins 0.14; metrics-util/quick_cache pin 0.16; the workspace uses 0.17.
     { crate = "hashbrown@0.14.5", reason = "dashmap 6.2 pin" },
     { crate = "hashbrown@0.16.1", reason = "metrics-util 0.20 and quick_cache 0.6" },
-    # bitcoin 0.32 pins hex-conservative 0.2; bitcoin_slices uses 1.x.
+    # bitcoin 0.32 pins hex-conservative 0.2; miniscript uses 1.x.
     { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
     # ahash 0.8 (sonic-rs JSON lane) pins zerocopy 0.7; the workspace uses 0.8.
     { crate = "zerocopy@0.7.35", reason = "ahash 0.8.11 via sonic-rs" },
