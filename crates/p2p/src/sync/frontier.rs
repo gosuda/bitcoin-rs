@@ -95,6 +95,18 @@ impl UsablePeer {
         }
         self.active_height
     }
+
+    /// The height this connection PROVED it can serve by handing us headers
+    /// that entered the block tree. `None` while it has announced nothing we
+    /// accepted, whatever its handshake claimed: Core's eviction rule reads
+    /// `pindexBestKnownBlock`, a tip the peer actually sent, and never the
+    /// version height (`net_processing.cpp:3203-3210`).
+    pub(crate) fn demonstrated_height(&self) -> Option<u32> {
+        if self.demonstrated_tips.is_empty() {
+            return None;
+        }
+        self.active_height
+    }
 }
 
 /// Everything the reconciler needs for one tick, all observed consistently.

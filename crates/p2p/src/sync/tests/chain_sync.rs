@@ -18,7 +18,7 @@ fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
     UsablePeer {
         source: PeerSource::for_test(addr),
         info: eligible_peer(addr, i32::try_from(height).unwrap_or(i32::MAX)),
-        demonstrated_tips: Vec::new(),
+        demonstrated_tips: vec![Hash256::from_le_bytes(&[0x7c; 32])],
         active_height: Some(height),
         role,
         connected_at: at,
@@ -31,6 +31,59 @@ fn inbound(port: u16, height: u32, at: Instant) -> UsablePeer {
     let mut peer = outbound(port, height, PeerRole::FullRelay, at);
     peer.info.inbound = true;
     peer
+}
+
+/// An outbound connection that only CLAIMED `height` in its handshake and
+/// has handed us no headers: Core's `pindexBestKnownBlock` is still null.
+fn claiming(port: u16, height: u32, at: Instant) -> UsablePeer {
+    let mut peer = outbound(port, height, PeerRole::FullRelay, at);
+    peer.demonstrated_tips.clear();
+    peer
+}
+
+/// A handshake claim of the tip height is not evidence. Core protects and
+/// clears only from `pindexBestKnownBlock`, a tip the peer actually sent
+/// (`net_processing.cpp:3203-3210`), so a silent claimant is armed like any
+/// other lagging outbound connection and answers to the timer.
+#[test]
+fn a_claimed_height_without_headers_is_probed_then_retired() {
+    let t0 = Instant::now();
+    let peer = claiming(9_603, 100, t0);
+    let mut state = ChainSyncState::default();
+    let mut protected = 0;
+
+    assert_eq!(
+        consider_eviction(&peer, &mut state, 100, t0, &mut protected),
+        None,
+        "the first tick arms the silent claimant"
+    );
+    assert!(
+        !state.is_protected(),
+        "a height the peer only claimed earns no protection"
+    );
+    assert_eq!(protected, 0, "the protection pool is untouched");
+    assert_eq!(
+        consider_eviction(
+            &peer,
+            &mut state,
+            100,
+            t0 + Duration::from_mins(20),
+            &mut protected
+        ),
+        Some(ChainSyncAction::Probe),
+        "the claimant answers to the timeout"
+    );
+    assert_eq!(
+        consider_eviction(
+            &peer,
+            &mut state,
+            100,
+            t0 + Duration::from_mins(22),
+            &mut protected
+        ),
+        Some(ChainSyncAction::Evict),
+        "and it is retired when the probe goes unanswered"
+    );
 }
 
 /// A connection that never brings a better chain is probed once at the
