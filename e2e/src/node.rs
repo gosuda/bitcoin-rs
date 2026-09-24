@@ -315,6 +315,19 @@ fn launch_command(
     Ok((command, clock))
 }
 
+/// Whether a dead child's stderr reports losing the port-bind race (either
+/// daemon's phrasing), and nothing else — any other startup failure returns
+/// its `ChildExit` untouched.
+fn exited_on_busy_port(evidence: &Path) -> bool {
+    let Ok(stderr) = fs::read_to_string(evidence.join("stderr.log")) else {
+        return false;
+    };
+    stderr.contains("Address already in use")
+        || stderr.contains("os error 98")
+        || stderr.contains("Unable to bind")
+        || stderr.contains("Failed to bind")
+}
+
 impl ProcessNode {
     /// Spawn a node with the default launch profile.
     pub fn spawn(kind: Kind) -> Result<Self> {
@@ -329,9 +342,10 @@ impl ProcessNode {
 
     /// Spawn over an existing datadir (restart scenarios).
     ///
-    /// A reserved port can still be stolen between `loopback_addresses`
-    /// dropping its listeners and the child binding, so an immediate child
-    /// exit is retried with fresh ports a bounded number of times.
+    /// Launches are retried only on the reserve-release port race: the
+    /// loopback port bound for selection can be grabbed by a parallel
+    /// runner in the release-to-bind window, which fd-less spawning
+    /// cannot close. Any other immediate child exit surfaces untouched.
     pub fn spawn_in_datadir(
         kind: Kind,
         options: &SpawnOptions<'_>,
@@ -344,10 +358,17 @@ impl ProcessNode {
                     node.datadir = Some(datadir);
                     return Ok(node);
                 }
-                Err(error @ Error::ChildExit { .. }) if attempt + 1 < MAX_SPAWN_ATTEMPTS => {
-                    last_error = Some(error);
+                Err(error) => {
+                    let port_race = matches!(
+                        &error,
+                        Error::ChildExit { evidence, .. } if exited_on_busy_port(evidence)
+                    );
+                    if attempt + 1 < MAX_SPAWN_ATTEMPTS && port_race {
+                        last_error = Some(error);
+                    } else {
+                        return Err(error);
+                    }
                 }
-                Err(error) => return Err(error),
             }
         }
         Err(last_error.unwrap_or_else(|| Error::Assertion("spawn attempts exhausted".into())))
@@ -736,4 +757,52 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
         let _ = file.write_all(tail.make_contiguous());
         let _ = file.flush();
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Evidence runs that recorded this invalid startup flag as their argv.
+    fn invalid_flag_runs() -> usize {
+        let root = workspace().join("target/process-harness/e2e");
+        let Ok(entries) = fs::read_dir(&root) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
+            .filter(|entry| {
+                fs::read_to_string(entry.path().join("launch.json"))
+                    .is_ok_and(|text| text.contains("--process-harness-invalid-option"))
+            })
+            .count()
+    }
+
+    /// The spawn retry exists for the reserve-release port race only: a
+    /// child that died for any other reason must surface after exactly one
+    /// attempt, not after the whole bounded budget.
+    #[test]
+    fn spawn_retry_does_not_fire_on_a_non_port_bind_startup_failure() {
+        let datadir = tempfile::tempdir().expect("isolated datadir");
+        let before = invalid_flag_runs();
+        let error = ProcessNode::spawn_in_datadir(
+            Kind::BitcoinRs,
+            &SpawnOptions {
+                extra_args: &["--process-harness-invalid-option"],
+                ..Default::default()
+            },
+            datadir,
+        )
+        .expect_err("an unknown startup flag must not produce a ready node");
+        assert!(
+            matches!(error, Error::ChildExit { .. }),
+            "startup must report child exit: {error}"
+        );
+        assert_eq!(
+            invalid_flag_runs() - before,
+            1,
+            "a non-bind startup failure must consume exactly one spawn attempt"
+        );
+    }
 }
