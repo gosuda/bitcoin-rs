@@ -17,11 +17,8 @@ use bitcoin::{
     Amount, Block, CompactTarget, Network, OutPoint, ScriptBuf, Sequence, Target, Transaction,
     TxIn, TxMerkleNode, TxOut, WPubkeyHash, Witness,
 };
+use bitcoin_rs_e2e::{Kind, ProcessNode};
 use serde_json::{Value, json};
-
-mod support;
-
-use support::process_node::{NodeBinary, ProcessNode};
 
 const FEE_SATS: u64 = 10_000;
 const REGTEST_SUBSIDY_SATS: u64 = 5_000_000_000;
@@ -34,7 +31,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 // CONTRACT: docs/contracts/external-api.md#API-14
 // CONTRACT: docs/contracts/external-api.md#API-15
 fn external_miner_assembles_template_and_submits_block() -> TestResult {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
 
     submit_genesis(&mut node)?;
 
