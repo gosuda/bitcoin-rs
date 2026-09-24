@@ -128,7 +128,7 @@ impl BlockSync {
             return false;
         };
         chain_tip.height.saturating_sub(first_height) < COMPACT_RELAY_NEAR_TIP_BLOCKS
-            && self.peer_table.compact_relay_of(request.peer_addr())
+            && self.peer_table.compact_relay_of(request.owner().addr)
     }
 
     /// Requests the next window batch from `source`, a usable peer from the
@@ -156,7 +156,7 @@ impl BlockSync {
             let SchedulerState { window, stager, .. } = &mut *scheduler;
             window.next_peer_request(
                 stager,
-                source.addr,
+                source,
                 allow_expired_retry_from_peer,
                 chain_tip,
                 required.height,
@@ -271,7 +271,7 @@ impl BlockSync {
             eligible
                 .into_iter()
                 .filter(|source| {
-                    !window.peer_has_expired_pending(source.addr, now)
+                    !window.peer_has_expired_pending(*source, now)
                         && !window.peer_in_staller_cooldown(source.addr, now)
                 })
                 .collect()

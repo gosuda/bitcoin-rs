@@ -229,11 +229,11 @@ pub fn configure_request_mode(
         .iter()
         .filter(|candidate| candidate.fanout_eligible)
         .count();
-    let preferred_addr = window.preferred_peer();
-    let preferred_candidate = preferred_addr.and_then(|addr| {
+    let preferred_source = window.preferred_peer();
+    let preferred_candidate = preferred_source.and_then(|source| {
         candidates
             .iter()
-            .find(|candidate| candidate.peer.addr() == addr)
+            .find(|candidate| candidate.peer.source == source)
     });
     let preferred = preferred_candidate
         .filter(|candidate| !candidate.soft_blocked)
@@ -242,7 +242,7 @@ pub fn configure_request_mode(
         window.set_fanout_eligible_peers(0, now);
         return preferred;
     }
-    if preferred_addr.is_some() {
+    if preferred_source.is_some() {
         window.clear_preferred_peer();
     }
     window.set_fanout_eligible_peers(eligible, now);
@@ -303,15 +303,15 @@ pub struct SyncBudget {
 /// A batch of block requests prepared for a single peer.
 #[derive(Clone, Debug)]
 pub struct PeerRequest {
-    peer_addr: SocketAddr,
+    owner: PeerSource,
     entries: Vec<PeerRequestEntry>,
     next_request_height: u32,
 }
 
 impl PeerRequest {
-    /// Returns the peer address this request is directed to.
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
+    /// Returns the exact connection this request is directed to.
+    pub fn owner(&self) -> PeerSource {
+        self.owner
     }
 
     /// Iterates over the `(height, hash)` pairs in this request.
@@ -574,7 +574,7 @@ pub struct DownloadWindow {
     cold_hedged_fronts: SmallVec<[Hash256; MAX_COLD_FRONT_HEDGES]>,
     /// Peer that proved it could deliver a blocked cold front before its
     /// tracked owner. It receives the replacement deep window.
-    preferred_peer: Option<SocketAddr>,
+    preferred_peer: Option<PeerSource>,
     /// One-shot same-prefix race used to select a responsive deep owner
     /// without assigning unique height holes to alternate peers.
     prefix_probe: Option<PrefixProbe>,
@@ -884,11 +884,11 @@ impl DownloadWindow {
             })
     }
 
-    /// Whether `peer_addr` owns a pending block past the re-request timeout —
+    /// Whether `source` owns a pending block past the re-request timeout —
     /// the soft-demotion signal: such a peer gets no new front-of-window
     /// requests unless it is the last-resort peer, and it does not count as
     /// fan-out-eligible (KTD6's "not currently soft-demoted" clause).
-    pub fn peer_has_expired_pending(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+    pub fn peer_has_expired_pending(&self, source: PeerSource, now: Instant) -> bool {
         if self
             .next_pending_deadline
             .is_none_or(|deadline| now < deadline)
@@ -896,7 +896,7 @@ impl DownloadWindow {
             return false;
         }
         self.pending.values().any(|pending| {
-            pending.owner.addr == peer_addr
+            pending.owner == source
                 && now.duration_since(pending.requested_at) >= self.budget.pending_timeout
         })
     }
@@ -1369,7 +1369,7 @@ impl DownloadWindow {
     }
 
     /// Preferred deep-window peer after winning a cold-front race.
-    pub const fn preferred_peer(&self) -> Option<SocketAddr> {
+    pub const fn preferred_peer(&self) -> Option<PeerSource> {
         self.preferred_peer
     }
 
@@ -1531,7 +1531,6 @@ impl DownloadWindow {
     /// only while that exact connection is, so a same-address replacement
     /// never inherits its predecessor's outstanding work.
     pub fn release_disconnected_peers(&mut self, live: &[(SocketAddr, ConnectionId)]) {
-        let live_addr = |addr: &SocketAddr| live.iter().any(|(a, _)| a == addr);
         let live_source = |source: &PeerSource| {
             live.iter()
                 .any(|(a, id)| *a == source.addr && *id == source.connection_id())
@@ -1546,7 +1545,7 @@ impl DownloadWindow {
         if !cold_front_live {
             self.cold_front = None;
         }
-        if self.preferred_peer.is_some_and(|peer| !live_addr(&peer)) {
+        if self.preferred_peer.is_some_and(|peer| !live_source(&peer)) {
             self.preferred_peer = None;
         }
         let cancel_probe = if let Some(probe) = self.prefix_probe.as_mut() {
@@ -1565,7 +1564,10 @@ impl DownloadWindow {
     /// connection before a new connection may reuse its socket address.
     pub fn forget_peer(&mut self, peer_addr: SocketAddr) {
         self.retain_peer_assignments(|owner| owner.addr != peer_addr);
-        if self.preferred_peer == Some(peer_addr) {
+        if self
+            .preferred_peer
+            .is_some_and(|peer| peer.addr == peer_addr)
+        {
             self.preferred_peer = None;
         }
         if self
@@ -1589,10 +1591,6 @@ impl DownloadWindow {
         {
             self.prefix_probe = None;
         }
-    }
-
-    fn release_peer_assignments(&mut self, peer_addr: SocketAddr) {
-        self.retain_peer_assignments(|owner| owner.addr != peer_addr);
     }
 
     fn retain_peer_assignments(&mut self, retain_owner: impl Fn(&PeerSource) -> bool) {
@@ -1639,7 +1637,7 @@ impl DownloadWindow {
     pub fn next_peer_request(
         &mut self,
         stager: &mut BlockStager,
-        peer_addr: SocketAddr,
+        source: PeerSource,
         allow_expired_retry_from_peer: bool,
         chain_tip: &TipSnapshot,
         request_start_height: u32,
@@ -1652,15 +1650,15 @@ impl DownloadWindow {
             return None;
         }
         if !allow_expired_retry_from_peer
-            && (self.peer_has_expired_pending(peer_addr, now)
-                || self.peer_in_staller_cooldown(peer_addr, now))
+            && (self.peer_has_expired_pending(source, now)
+                || self.peer_in_staller_cooldown(source.addr, now))
         {
             return None;
         }
         let mut expired = self.expire_pending(now);
         expired.sort_by_key(|entry| entry.height);
 
-        let owned = self.pending_count_for_addr(peer_addr);
+        let owned = self.pending_count_for(source);
         let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
         // Expiry already ran above, so the count headroom needs no expired
         // credit here: `pending` reflects only live in-flight requests.
@@ -1716,7 +1714,7 @@ impl DownloadWindow {
             };
             if entries.is_empty()
                 && let Some(request) =
-                    self.clean_contiguous_peer_request(stager, peer_addr, chain_tip, tree, scan)
+                    self.clean_contiguous_peer_request(stager, source, chain_tip, tree, scan)
             {
                 return Some(request);
             }
@@ -1730,7 +1728,7 @@ impl DownloadWindow {
                 &mut entries,
             );
         }
-        non_empty_request(peer_addr, entries, next_request_height)
+        non_empty_request(source, entries, next_request_height)
     }
 
     fn retarget_request_branch(
@@ -1878,7 +1876,7 @@ impl DownloadWindow {
     fn clean_contiguous_peer_request(
         &self,
         stager: &BlockStager,
-        peer_addr: SocketAddr,
+        source: PeerSource,
         chain_tip: &TipSnapshot,
         tree: &BlockTree,
         scan: RequestScan,
@@ -1896,7 +1894,7 @@ impl DownloadWindow {
         let next_request_height = scan
             .next_request_height
             .max(request_end_height.saturating_add(1));
-        non_empty_request(peer_addr, entries, next_request_height)
+        non_empty_request(source, entries, next_request_height)
     }
 
     fn record_prefix_probe_delivery(
@@ -1939,7 +1937,7 @@ impl DownloadWindow {
         if winner != owner {
             self.mark_peer_unresponsive(owner.addr, now);
         }
-        self.preferred_peer = Some(winner.addr);
+        self.preferred_peer = Some(winner);
         tracing::info!(
             owner = %owner.addr,
             winner = %winner.addr,
@@ -1976,9 +1974,9 @@ impl DownloadWindow {
                     return;
                 }
                 self.prefix_probe = None;
-                self.release_peer_assignments(owner.addr);
+                self.retain_peer_assignments(|peer| *peer != owner);
                 self.mark_peer_unresponsive(owner.addr, now);
-                self.preferred_peer = Some(alternate.addr);
+                self.preferred_peer = Some(alternate);
                 metrics::counter!("node.sync.cold_front_wins").increment(1);
             }
             _ => {}
@@ -2326,12 +2324,12 @@ impl DownloadWindow {
         }
         if height < self.next_request_height
             || !self.has_request_capacity(stager)
-            || self.pending_count_for_addr(owner.addr) >= self.effective_peer_inflight()
+            || self.pending_count_for(owner) >= self.effective_peer_inflight()
         {
             return;
         }
         let request = PeerRequest {
-            peer_addr: owner.addr,
+            owner,
             entries: vec![PeerRequestEntry { hash, height }],
             next_request_height: 0,
         };
@@ -2353,19 +2351,18 @@ impl DownloadWindow {
         Some(pending)
     }
 
-    /// Live requests whose owner sits at `peer_addr`. Derived from
-    /// `pending`; the window keeps no shadow count.
+    /// Live requests owned by `source`. Derived from `pending`; the window
+    /// keeps no shadow count.
     ///
     /// PRE: expiry has run this tick, so `pending` holds only live in-flight
     ///   requests.
-    /// POST: returns the number of `pending` values whose
-    ///   `owner.addr == peer_addr`.
-    /// INVARIANT: the count equals the number of `getdata` entries this
-    ///   address owns; each pending entry counts once.
-    fn pending_count_for_addr(&self, peer_addr: SocketAddr) -> usize {
+    /// POST: returns the number of `pending` values with `owner == source`.
+    /// INVARIANT: source-exact, so a same-address predecessor's share never
+    ///   reduces a replacement's headroom.
+    fn pending_count_for(&self, source: PeerSource) -> usize {
         self.pending
             .values()
-            .filter(|pending| pending.owner.addr == peer_addr)
+            .filter(|pending| pending.owner == source)
             .count()
     }
 
@@ -2406,12 +2403,12 @@ pub enum RejectDelivery {
 }
 
 fn non_empty_request(
-    peer_addr: SocketAddr,
+    owner: PeerSource,
     entries: Vec<PeerRequestEntry>,
     next_request_height: u32,
 ) -> Option<PeerRequest> {
     (!entries.is_empty()).then_some(PeerRequest {
-        peer_addr,
+        owner,
         entries,
         next_request_height,
     })
@@ -4706,11 +4703,11 @@ mod tests {
         // demotes the tracked owner and selects the replacement deep peer.
         let t1 = t0 + Duration::from_secs(30);
         window.pending_timeout_observation = Some(super::PendingTimeoutObservation {
-            owner: test_source(staller_addr()),
+            owner,
             hash: hash(0x01),
         });
         window.mark_received_from(hash(0x01), 80, Some(alternate), t1);
-        assert_eq!(window.preferred_peer(), Some(healthy_addr()));
+        assert_eq!(window.preferred_peer(), Some(alternate));
         assert!(window.peer_in_staller_cooldown(staller_addr(), t1));
         assert!(window.pending_timeout_observation.is_none());
         assert_eq!(window.front_interval_ewma_ms(), None);
@@ -5061,9 +5058,9 @@ mod tests {
         for byte in 1..=4_u8 {
             window.mark_received_from(hash(byte), 80, Some(winner), now);
         }
-        assert_eq!(window.preferred_peer(), Some(winner.addr));
+        assert_eq!(window.preferred_peer(), Some(winner));
         window.mark_received_from(hash(5), 80, Some(owner), now);
-        assert_eq!(window.preferred_peer(), Some(winner.addr));
+        assert_eq!(window.preferred_peer(), Some(winner));
         release_addrs(&mut window, |a| a != winner.addr);
         assert_eq!(window.preferred_peer(), None);
         assert!(!window.peer_in_staller_cooldown(loser.addr, now));
@@ -5091,12 +5088,12 @@ mod tests {
             window.mark_received_from(hash(byte), 80, Some(owner), now);
         }
 
-        assert_eq!(window.preferred_peer(), Some(owner.addr));
+        assert_eq!(window.preferred_peer(), Some(owner));
         assert!(window.contains_pending(&hash(9)));
-        assert!(window.pending_count_for_addr(owner.addr) > 0);
-        assert!(window.pending_count_for_addr(unrelated.addr) > 0);
+        assert!(window.pending_count_for(owner) > 0);
+        assert!(window.pending_count_for(unrelated) > 0);
         assert!(!window.contains_pending(&hash(10)));
-        assert_eq!(window.pending_count_for_addr(loser.addr), 0);
+        assert_eq!(window.pending_count_for(loser), 0);
         assert!(!window.peer_in_staller_cooldown(owner.addr, now));
         Ok(())
     }
@@ -5123,15 +5120,15 @@ mod tests {
             window.mark_received_from(hash(byte), 80, Some(winner), now);
         }
 
-        assert_eq!(window.preferred_peer(), Some(winner.addr));
+        assert_eq!(window.preferred_peer(), Some(winner));
         for byte in 5..=8_u8 {
             assert!(!window.contains_pending(&hash(byte)));
         }
         assert!(window.contains_pending(&hash(9)));
         assert!(!window.contains_pending(&hash(10)));
-        assert_eq!(window.pending_count_for_addr(owner.addr), 0);
-        assert_eq!(window.pending_count_for_addr(loser.addr), 0);
-        assert!(window.pending_count_for_addr(unrelated.addr) > 0);
+        assert_eq!(window.pending_count_for(owner), 0);
+        assert_eq!(window.pending_count_for(loser), 0);
+        assert!(window.pending_count_for(unrelated) > 0);
         assert_eq!(window.next_request_height, 1);
         assert!(window.next_pending_deadline.is_some());
         assert!(window.peer_in_staller_cooldown(owner.addr, now));
@@ -5184,13 +5181,14 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let now = Instant::now();
-        insert_pending(&mut window, test_source(peer_addr), hash(1), 1, now);
-        window.preferred_peer = Some(peer_addr);
+        let source = test_source(peer_addr);
+        insert_pending(&mut window, source, hash(1), 1, now);
+        window.preferred_peer = Some(source);
         window.mark_peer_unresponsive(peer_addr, now);
 
         window.forget_peer(peer_addr);
 
-        assert_eq!(window.pending_count_for_addr(peer_addr), 0);
+        assert_eq!(window.pending_count_for(source), 0);
         assert!(window.preferred_peer.is_none());
         assert!(window.peer_in_staller_cooldown(peer_addr, now));
     }
@@ -5636,7 +5634,7 @@ mod tests {
         // A real post-drain request still re-arms probe eligibility.
         window.remove_pending(&hash(0xf1));
         let request = super::non_empty_request(
-            compact_peer.addr,
+            compact_peer,
             vec![super::PeerRequestEntry {
                 hash: hash(0xf2),
                 height: 8,
@@ -5670,7 +5668,7 @@ mod tests {
         // down into a re-request sweep of heights already applied.
         let mut window = DownloadWindow::new(test_budget());
         let request = super::non_empty_request(
-            owner.addr,
+            owner,
             vec![super::PeerRequestEntry {
                 hash: hash(0xb0),
                 height: 10,
