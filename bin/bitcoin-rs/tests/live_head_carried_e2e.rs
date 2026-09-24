@@ -1,11 +1,12 @@
-//! E2E: live-head body-carried header admission over the real P2P wire
-//! against a spawned bitcoin-rs daemon (regtest, fjall). A loopback wire peer
-//! announces blocks by `inv` only — never sending a `headers` batch for them —
-//! so the delivered body is the node's only copy of the header and must admit
-//! through the staged-body path (P2P-06). Heights come from the block tree.
+//! E2E: live-head announcement and body-carried header admission over the
+//! real P2P wire against a spawned bitcoin-rs daemon (regtest, fjall). A
+//! loopback wire peer announces blocks by `inv`; the node probes headers
+//! first (the announcement route), and where the peer withholds the ancestry
+//! a delivered body's carried header must still admit through the staged-body
+//! path (P2P-06). Heights come from the block tree.
 //!
-//!  * T1: headers bootstrap, then inv-only live-head blocks apply one after
-//!    another via their carried headers — no stall across the chain.
+//!  * T1: headers bootstrap, then inv-announced live-head blocks apply one
+//!    after another through the announcement route — no stall across the chain.
 //!  * T2: a delivered body whose carried header's parent is unknown triggers a
 //!    recovery `getheaders`; once the ancestors land the staged body applies in
 //!    place and is never re-requested.
@@ -595,12 +596,12 @@ fn assert_clean_stderr(node: &ProcessNode, context: &str) {
     );
 }
 
-/// T1: headers bootstrap proves the baseline pipeline, then blocks announced
-/// ONLY by `inv` (no `headers` batch ever carries them) must still apply —
-/// each delivered body is the node's only copy of its header and admits
-/// through the staged path. Several in a row must keep advancing: no stall.
+/// T1: headers bootstrap proves the baseline pipeline, then each block
+/// announced by `inv` reaches the node through the announcement route: the
+/// node probes `getheaders`, the revealed header admits near the tip, and
+/// the fetched body applies. Several in a row must keep advancing: no stall.
 #[test]
-fn carried_header_live_head_applies_and_continues() -> Result<(), HarnessError> {
+fn announced_live_head_applies_and_continues() -> Result<(), HarnessError> {
     let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
     let mut peer = LivePeer::connect(&node, "t1")?;
 
@@ -615,8 +616,8 @@ fn carried_header_live_head_applies_and_continues() -> Result<(), HarnessError> 
     let genesis = regtest_genesis();
     let chain = build_chain(&genesis, 6, 0xD1, 1);
     peer.offer_bodies(&chain);
-    // `getheaders` answers may only ever reveal h1..h3: h4..h6 must reach the
-    // node exclusively inside delivered bodies (carried headers).
+    // `getheaders` answers start at h1..h3: h4..h6 are revealed one at a
+    // time, each only when its block is announced.
     peer.headers_reply = chain[..3].iter().map(|b| b.header).collect();
     let h3 = chain[2].block_hash();
     let h6 = chain[5].block_hash();
@@ -645,12 +646,14 @@ fn carried_header_live_head_applies_and_continues() -> Result<(), HarnessError> 
     );
     eprintln!("[E2E] bootstrap applied: tip=h3 ({h3}), count=3");
 
-    // Live-head blocks h4,h5,h6 arrive ONLY via inv announcements — the
-    // delivered body is the node's only copy of each header.
+    // Live-head blocks h4,h5,h6 arrive via inv announcements: the
+    // announcement route probes for headers, the revealed header admits near
+    // the tip, and the window asks this peer for the body.
     for (height, block) in chain.iter().enumerate().skip(3) {
         let hash = block.block_hash();
+        peer.headers_reply = chain[..=height].iter().map(|b| b.header).collect();
         peer.send(NetworkMessage::Inv(vec![Inventory::Block(hash)]), deadline)?;
-        eprintln!("[E2E] announced h{} via inv only ({hash})", height + 1);
+        eprintln!("[E2E] announced h{} via inv ({hash})", height + 1);
         assert!(
             pump_until_request(&mut peer, hash, Duration::from_secs(15)),
             "node never requested announced body {hash}"
@@ -669,13 +672,16 @@ fn carried_header_live_head_applies_and_continues() -> Result<(), HarnessError> 
                 &hash.to_string(),
                 Duration::from_secs(20)
             )?,
-            "carried-header block h{}={} never applied (count={:?}, best={:?})",
+            "announced block h{}={} never applied (count={:?}, best={:?})",
             height + 1,
             hash,
             block_count(&mut node),
             best_hash(&mut node)
         );
-        eprintln!("[E2E] h{} applied via carried header ({hash})", height + 1);
+        eprintln!(
+            "[E2E] h{} applied via the announcement route ({hash})",
+            height + 1
+        );
     }
 
     // Every block requested at least once; none re-requested after its
@@ -705,23 +711,24 @@ fn carried_header_live_head_applies_and_continues() -> Result<(), HarnessError> 
     assert_eq!(block_count(&mut node)?, 6, "tip must be h6");
     assert_eq!(best_hash(&mut node)?, h6.to_string());
 
-    assert_clean_stderr(&node, "live-head carried-header chain");
-    eprintln!("[E2E] T1 PASSED: carried headers admitted, tip advanced h3→h6 without stall");
+    assert_clean_stderr(&node, "live-head announcement chain");
+    eprintln!("[E2E] T1 PASSED: announced headers admitted, tip advanced h3→h6 without stall");
     Ok(())
 }
 
-/// T2: a delivered body whose carried header's parent is unknown is not a
+/// T2: an announced block is probed with `getheaders` first; when the body
+/// then arrives with its carried header's parent still unknown that is not a
 /// peer fault — the node must issue a recovery `getheaders`, then apply the
-/// staged body in place once the ancestors land. The staged h4 body keeps
-/// no height of its own; the tree places it once its header lands, so the
-/// node must never re-request h4 and must apply it.
+/// staged body in place once the ancestors land. The staged h4 body keeps no
+/// height of its own; the tree places it once its header lands, so the node
+/// must never re-request h4 and must apply it.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError> {
     let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
-    // start_height=0: the peer advertises no better tip, so the node has no
-    // reason to send discovery getheaders — any getheaders that arrives can
-    // only be the staged-header recovery send.
+    // start_height=0: the peer advertises no better tip, so no discovery
+    // getheaders fires before the announcement; later probes are
+    // attributable by their position in `getheaders_at`.
     let mut peer = LivePeer::connect_with_height(&node, "t2", 0)?;
 
     assert!(
@@ -756,30 +763,32 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
     peer.send(NetworkMessage::Inv(vec![Inventory::Block(h4)]), deadline)?;
     eprintln!("[E2E] announced h4 alone ({h4}); h1..h3 unknown to node");
 
-    // Wait for the inv-echo getdata WITHOUT serving the body yet.
-    let requested = wait_for(Duration::from_secs(15), &mut || {
-        peer.pump(Duration::from_millis(150), &mut |_, _| {});
-        peer.requests_for(&h4) > 0
-    });
-    assert!(requested, "node never requested announced h4 body");
+    // New semantics: the announcement route probes for headers at once, and
+    // no body request may be emitted for a hash the tree has never admitted.
+    peer.pump(Duration::from_secs(2), &mut |_, _| {});
+    assert!(
+        !peer.getheaders_at.is_empty(),
+        "the inv announcement never led to a getheaders probe (announcement route broken)"
+    );
+    assert_eq!(
+        peer.requests_for(&h4),
+        0,
+        "inv alone requested the announced h4 body"
+    );
     assert_eq!(
         peer.plain_block_requests(&h4),
         0,
         "h4 requested as plain MSG_BLOCK"
     );
-    eprintln!("[E2E] node requested h4 as WitnessBlock; withholding body");
+    eprintln!("[E2E] announcement probed for headers; h4 body not requested");
 
-    // Hold ~1.2s with the body withheld: an inv announcement alone must not
-    // produce a getheaders. Anything that fires after the BODY lands is then
-    // unambiguously the staged-header recovery send.
+    // Settle ~1.2s with the body withheld; the probe count after that is the
+    // announcement baseline, so anything new once the body lands is the
+    // staged-header recovery send.
     peer.pump(Duration::from_millis(1200), &mut |_, _| {});
-    assert!(
-        peer.getheaders_at.is_empty(),
-        "getheaders fired with the body still withheld: {:?} — inv alone probed?",
-        peer.getheaders_at
-    );
+    let announcement_probes = peer.getheaders_at.len();
 
-    // Deliver the requested h4 body; its carried header fails admission
+    // Deliver the body unsolicited; its carried header fails admission
     // (parent h3 unknown) and the staged retry must ask us for the gap.
     let body = peer.blocks.get(&h4).cloned().expect("offered block");
     peer.send(NetworkMessage::Block(body), deadline)?;
@@ -788,14 +797,14 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
 
     let recovery_ok = wait_for(Duration::from_secs(6), &mut || {
         peer.pump(Duration::from_millis(100), &mut |_, _| {});
-        !peer.getheaders_at.is_empty()
+        peer.getheaders_at.len() > announcement_probes
     });
     assert!(
         recovery_ok,
         "no getheaders arrived after h4 body delivery (recovery path never fired); \
          body sent at {served_ms}ms",
     );
-    let recovery_at = peer.getheaders_at[0];
+    let recovery_at = peer.getheaders_at[announcement_probes];
     eprintln!(
         "[E2E] recovery getheaders observed at {recovery_at}ms ({}ms after body)",
         recovery_at.saturating_sub(served_ms)
@@ -852,8 +861,9 @@ fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), HarnessError>
         );
     }
 
-    // Post-recovery liveness: announce h5 by inv only — its carried header
-    // admits (h4 now in tree) and the tip keeps advancing.
+    // Post-recovery liveness: announce h5 by inv — the announcement route
+    // probes, the reply reveals h5's header, and the tip keeps advancing.
+    peer.headers_reply = chain[..5].iter().map(|b| b.header).collect();
     peer.send(NetworkMessage::Inv(vec![Inventory::Block(h5)]), deadline)?;
     assert!(
         pump_until_request(&mut peer, h5, Duration::from_secs(15)),
