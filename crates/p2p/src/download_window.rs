@@ -1664,7 +1664,7 @@ impl DownloadWindow {
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
-        self.retarget_request_branch(chain_tip, request_start_height, tree);
+        self.retarget_request_branch(stager, chain_tip, request_start_height, tree);
         if self.staged_bytes_exhausted(stager) {
             return None;
         }
@@ -1755,6 +1755,7 @@ impl DownloadWindow {
 
     fn retarget_request_branch(
         &mut self,
+        stager: &mut BlockStager,
         chain_tip: &TipSnapshot,
         request_start_height: u32,
         tree: &BlockTree,
@@ -1784,6 +1785,23 @@ impl DownloadWindow {
             .collect();
         for hash in stale_pending {
             self.remove_pending(&hash);
+        }
+        // The stager is the single staged-body store: bodies the request
+        // branch left behind are released here, so freed capacity is real
+        // and a late old-branch delivery cannot re-acquire purged state.
+        // A hash the tree cannot resolve is off-branch by definition.
+        let stale_staged: Vec<Hash256> = stager
+            .staged_hashes()
+            .filter(|hash| {
+                let on_branch = tree
+                    .lookup(*hash)
+                    .and_then(|node_id| tree.node(node_id).ok())
+                    .map(|node| is_on_request_branch(node.hash, node.height));
+                on_branch != Some(true)
+            })
+            .collect();
+        for hash in stale_staged {
+            stager.discard(&hash);
         }
 
         self.next_request_height = request_start_height;
