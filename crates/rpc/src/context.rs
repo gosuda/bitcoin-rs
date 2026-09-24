@@ -823,8 +823,17 @@ impl ChainHandles {
         read()
     }
 
-    fn applied_progress_snapshot(&self) -> (Option<Arc<TipSnapshot>>, Option<u64>) {
-        self.with_stable_chainstate(|| (self.applied_tip.load_full(), self.chain_tx_count()))
+    /// Captures the applied publication behind `getblockchaininfo`, with the
+    /// node's connect/disconnect transition excluded.
+    ///
+    /// PRE: none.
+    /// POST: one applied-tip load taken while the transition barrier is held,
+    ///   so the height, hash, work, and count projected from it describe a
+    ///   state the node actually reached.
+    /// INVARIANT: the barrier is still required here; removing it is the status
+    ///   reader's own change, tracked separately from this grouping.
+    fn applied_progress_snapshot(&self) -> AppliedView {
+        self.with_stable_chainstate(|| self.applied_view())
     }
 
     /// Returns the pruning state reported by `getblockchaininfo`.
@@ -839,11 +848,11 @@ impl ChainHandles {
     /// RPC JSON. Chainwork is the applied tip's when one exists.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
-        let (applied_tip, chain_tx_count) = self.applied_progress_snapshot();
-        let applied = applied_tip.as_ref().map_or(0, |tip| tip.height);
+        let applied_tip = self.applied_progress_snapshot();
+        let applied = applied_tip.height();
         let headers = self.height();
         let (difficulty, time, median_time) =
-            applied_tip.as_ref().map_or((0.0, 0_u64, 0_u64), |tip| {
+            applied_tip.tip().map_or((0.0, 0_u64, 0_u64), |tip| {
                 let tree = self.block_tree.read();
                 tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
                     (
@@ -857,7 +866,7 @@ impl ChainHandles {
         // Core's estimate when the verified-transaction count is known, the
         // height ratio when it is not; `None` is a pre-tracking datadir and
         // means unknown, never zero.
-        let verification_progress = chain_tx_count.map_or_else(
+        let verification_progress = applied_tip.chain_tx_count().map_or_else(
             || {
                 if headers > 0 {
                     (f64::from(applied) / f64::from(headers)).min(1.0)
@@ -881,18 +890,18 @@ impl ChainHandles {
             network: self.chain_network,
             blocks: applied,
             headers,
-            best_block_hash: applied_tip.as_ref().map_or_else(
-                || self.chain_network.genesis_block_hash(),
-                |tip| tip.hash,
-            ),
+            best_block_hash: applied_tip.hash(self.chain_network),
             difficulty,
             time,
             median_time,
             verification_progress,
             initial_block_download: self.ibd.is_active(now, self.chain_network),
-            chain_work: applied_tip
-                .as_deref()
-                .map_or_else(|| self.chainwork_hex(), Self::tip_chainwork_hex),
+            // The applied chain's work once one block is connected; before the
+            // first applied tip, the header chain's, which is all such a node has.
+            chain_work: match applied_tip.tip() {
+                Some(_) => applied_tip.chainwork_hex(),
+                None => self.chainwork_hex(),
+            },
             size_on_disk: self
                 .block_storage_disk_usage()
                 .unwrap_or_else(|| self.blocks.read().size_on_disk()),
@@ -966,9 +975,7 @@ impl ChainHandles {
     /// headers are ahead of downloaded blocks).
     #[must_use]
     pub fn applied_height(&self) -> u32 {
-        self.applied_tip
-            .load_full()
-            .map_or(0, |tip| tip.height)
+        self.applied_view().height()
     }
 
     /// Returns the cumulative transaction count of the applied chain, or `None`
@@ -981,9 +988,7 @@ impl ChainHandles {
     /// two differ by an entire chain.
     #[must_use]
     pub fn chain_tx_count(&self) -> Option<u64> {
-        self.applied_tip
-            .load_full()
-            .and_then(|tip| tip.chain_tx_count.get())
+        self.applied_view().chain_tx_count()
     }
 
     /// Returns the current best-applied-block hash.
@@ -994,10 +999,7 @@ impl ChainHandles {
     /// see an all-zero tip for a chain that always has a height-0 block.
     #[must_use]
     pub fn applied_hash(&self) -> Hash256 {
-        self.applied_tip.load_full().map_or_else(
-            || self.chain_network.genesis_block_hash(),
-            |tip| tip.hash,
-        )
+        self.applied_view().hash(self.chain_network)
     }
 
     /// Returns the current best block hash, or the genesis hash before the
@@ -1015,17 +1017,9 @@ impl ChainHandles {
     /// 2-char placeholder matching `bitcoind`'s pre-genesis behavior).
     #[must_use]
     pub fn chainwork_hex(&self) -> String {
-        let Some(tip) = self.chain_tip.load_full() else {
-            return "00".to_owned();
-        };
-        let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use core::fmt::Write as _;
-
-            let _: fmt::Result = write!(&mut out, "{byte:02x}");
-        }
-        out
+        self.chain_tip
+            .load_full()
+            .map_or_else(|| "00".to_owned(), |tip| Self::tip_chainwork_hex(&tip))
     }
 
     fn hash_at_height_from_tip(&self, tip: &TipSnapshot, height: u32) -> Option<Hash256> {
@@ -1043,8 +1037,7 @@ impl ChainHandles {
     /// Returns the applied-chain hash at `height`, from the restored header index.
     #[must_use]
     pub(crate) fn active_hash_at_height(&self, height: u32) -> Option<Hash256> {
-        let tip = self.applied_tip.load_full()?;
-        self.hash_at_height_from_tip(&tip, height)
+        self.active_hash_in_view(&self.applied_view(), height)
     }
 
     fn header_record(&self, hash: Hash256) -> Option<BlockRecord> {
@@ -1135,8 +1128,24 @@ impl ChainHandles {
     /// vector is a cache-only fallback before the first applied-tip publication.
     #[must_use]
     pub(crate) fn block_by_height(&self, height: u32) -> Option<BlockRecord> {
-        if let Some(tip) = self.applied_tip.load_full() {
-            let hash = self.hash_at_height_from_tip(&tip, height)?;
+        self.block_by_height_in_view(&self.applied_view(), height)
+    }
+
+    /// Returns the applied block at `height` within a retained view.
+    ///
+    /// PRE: `view` is the response's retained applied publication.
+    /// POST: that branch's record at `height`; with no applied tip yet, the
+    ///   block-log record, which is the cache-only fallback such contexts use.
+    /// INVARIANT: reads the log as necessary but never reloads `applied_tip`,
+    ///   so one response cannot straddle two applied branches.
+    #[must_use]
+    pub(crate) fn block_by_height_in_view(
+        &self,
+        view: &AppliedView,
+        height: u32,
+    ) -> Option<BlockRecord> {
+        if let Some(tip) = view.tip() {
+            let hash = self.hash_at_height_from_tip(tip, height)?;
             return self.record_for_hash(hash);
         }
         record_at_height(&self.blocks.read(), height).cloned()
@@ -1209,6 +1218,111 @@ impl ChainHandles {
         let node_id = tree.node_at_height_from(tip.tip_id, next_height)?;
         let node = tree.node(node_id).ok()?;
         Some(node.hash)
+    }
+}
+
+/// One retained applied-tip publication.
+///
+/// A response that reports several applied facts builds them from a single
+/// value of this type, so height, hash, work, and count cannot come from
+/// different blocks.
+///
+/// PRE: the publisher stores complete immutable [`TipSnapshot`] values.
+/// POST: the view retains the result of exactly one `applied_tip` load; no
+///   transition mutex, tree lock, UTXO lock, count-register read, or retry
+///   loop occurs in capture.
+/// INVARIANT: the facts projected from this view describe the same
+///   publication even if the publisher advances afterward.
+pub(crate) struct AppliedView {
+    tip: Option<Arc<TipSnapshot>>,
+}
+
+impl ChainHandles {
+    /// Captures the applied publication the response is built from.
+    ///
+    /// PRE: none; this reads the published tip cell.
+    /// POST: a view holding exactly one `applied_tip` load result, empty
+    ///   before the first publication.
+    /// INVARIANT: capture never acquires `chain_transition`, so a response
+    ///   that reports only applied facts does not wait on a block transition.
+    #[must_use]
+    pub(crate) fn applied_view(&self) -> AppliedView {
+        AppliedView {
+            tip: self.applied_tip.load_full(),
+        }
+    }
+
+    /// Returns the applied-chain hash at `height` within a retained view.
+    ///
+    /// PRE: `view` is the response's retained applied publication.
+    /// POST: that tip's ancestor hash at `height`, or `None` for no tip, a
+    ///   height above the tip, or missing ancestry.
+    /// INVARIANT: reads the block tree as necessary but never reloads
+    ///   `applied_tip`, so the answer cannot describe a newer branch.
+    #[must_use]
+    pub(crate) fn active_hash_in_view(&self, view: &AppliedView, height: u32) -> Option<Hash256> {
+        let tip = view.tip()?;
+        self.hash_at_height_from_tip(tip, height)
+    }
+}
+
+impl AppliedView {
+    /// The captured snapshot, or `None` before the first publication.
+    ///
+    /// PRE: use a captured view.
+    /// POST: the retained snapshot.
+    /// INVARIANT: does not reload a publisher.
+    #[must_use]
+    pub(crate) fn tip(&self) -> Option<&TipSnapshot> {
+        self.tip.as_deref()
+    }
+
+    /// The applied height, `0` with no tip.
+    ///
+    /// PRE: use a captured view.
+    /// POST: the captured tip's height, or the empty-tip default `0`.
+    /// INVARIANT: does not reload a publisher.
+    #[must_use]
+    pub(crate) fn height(&self) -> u32 {
+        self.tip.as_ref().map_or(0, |tip| tip.height)
+    }
+
+    /// The applied block hash, genesis with no tip.
+    ///
+    /// PRE: use a captured view and the network the response describes.
+    /// POST: the captured tip's hash, or that network's genesis hash when the
+    ///   view is empty.
+    /// INVARIANT: does not reload a publisher.
+    #[must_use]
+    pub(crate) fn hash(&self, network: Network) -> Hash256 {
+        self.tip
+            .as_ref()
+            .map_or_else(|| network.genesis_block_hash(), |tip| tip.hash)
+    }
+
+    /// The applied-chain transaction count, `None` when unknown.
+    ///
+    /// PRE: use a captured view.
+    /// POST: the captured tip's count, or `None` for an empty view or a tip
+    ///   whose count is not yet known. A present tip with an unknown count is
+    ///   not guessed as zero.
+    /// INVARIANT: does not reload a publisher or read a count register.
+    #[must_use]
+    pub(crate) fn chain_tx_count(&self) -> Option<u64> {
+        self.tip.as_ref().and_then(|tip| tip.chain_tx_count.get())
+    }
+
+    /// The applied chain work as big-endian hex, `"00"` with no tip.
+    ///
+    /// PRE: use a captured view.
+    /// POST: the captured tip's chain work, or the two-character placeholder
+    ///   for a chain with no applied block yet.
+    /// INVARIANT: does not reload a publisher.
+    #[must_use]
+    pub(crate) fn chainwork_hex(&self) -> String {
+        self.tip
+            .as_deref()
+            .map_or_else(|| "00".to_owned(), ChainHandles::tip_chainwork_hex)
     }
 }
 
@@ -1589,11 +1703,107 @@ mod tests {
         );
         drop(transition);
 
-        let (published_tip, published_count) = rx.recv_timeout(Duration::from_secs(1))?;
+        let published = rx.recv_timeout(Duration::from_secs(1))?;
         join.join()
             .map_err(|_| anyhow::anyhow!("snapshot worker panicked"))?;
-        assert_eq!(published_tip.as_deref(), Some(&tip));
-        assert_eq!(published_count, Some(42));
+        assert_eq!(published.tip(), Some(&tip));
+        assert_eq!(published.chain_tx_count(), Some(42));
+        Ok(())
+    }
+
+    /// Every fact projected from one view describes the publication that view
+    /// captured, even after the publisher advances to a new tip.
+    #[test]
+    fn applied_view_uses_one_publication() {
+        use bitcoin_rs_chain::{ChainTxCount, ChainWork, NodeId};
+
+        let ctx = Context::new();
+        let tip = |height: u32, byte: u8, work: u64, count| {
+            Arc::new(TipSnapshot {
+                tip_id: NodeId::new(height),
+                height,
+                chainwork: ChainWork::from(work),
+                hash: Hash256::from_le_bytes(&[byte; 32]),
+                chain_tx_count: count,
+            })
+        };
+
+        // Before the first publication every projection answers with its
+        // documented empty default.
+        let empty = ctx.chain.applied_view();
+        assert_eq!(empty.tip(), None);
+        assert_eq!(empty.height(), 0);
+        assert_eq!(
+            empty.hash(Network::Mainnet),
+            Network::Mainnet.genesis_block_hash()
+        );
+        assert_eq!(empty.chainwork_hex(), "00");
+        assert_eq!(empty.chain_tx_count(), None);
+
+        let a = tip(10, 0xaa, 7, ChainTxCount::established(100));
+        let b = tip(20, 0xbb, 9, ChainTxCount::established(200));
+        ctx.chain.applied_tip.store(Some(Arc::clone(&a)));
+        let view = ctx.chain.applied_view();
+        // The publisher advances while the response is still being built.
+        ctx.chain.applied_tip.store(Some(b));
+
+        assert_eq!(view.height(), 10, "height must stay at the capture");
+        assert_eq!(
+            view.hash(Network::Mainnet),
+            Hash256::from_le_bytes(&[0xaa_u8; 32]),
+            "hash must stay at the capture"
+        );
+        assert_eq!(
+            view.chainwork_hex(),
+            format!("{:064x}", ChainWork::from(7_u64)),
+            "work must stay at the capture"
+        );
+        assert_eq!(view.chain_tx_count(), Some(100), "count must stay");
+
+        // A fresh capture sees the newer publication.
+        assert_eq!(ctx.chain.applied_view().height(), 20);
+
+        // A present tip whose count is unknown stays unknown: it is never
+        // guessed as zero, which would differ from it by an entire chain.
+        ctx.chain
+            .applied_tip
+            .store(Some(tip(30, 0xcc, 11, ChainTxCount::UNKNOWN)));
+        let unknown = ctx.chain.applied_view();
+        assert_eq!(unknown.height(), 30);
+        assert_eq!(unknown.chain_tx_count(), None);
+    }
+
+    /// Capturing a view never waits on the transition barrier. This pins the
+    /// primitive only; the status readers keep their own barrier until their
+    /// separate change.
+    #[test]
+    fn applied_view_does_not_wait_for_transition() -> anyhow::Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let barrier = Arc::new(Mutex::new(()));
+        let ctx = Arc::new(Context::new().with_chain_transition(Arc::clone(&barrier)));
+        ctx.chain.set_applied_tip(TipSnapshot {
+            tip_id: bitcoin_rs_chain::NodeId::new(0),
+            height: 5,
+            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+            hash: bitcoin_rs_primitives::Hash256::default(),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
+        });
+
+        let transition = barrier.lock();
+        let worker = Arc::clone(&ctx);
+        let (tx, rx) = mpsc::channel();
+        let join = std::thread::spawn(move || {
+            let _sent = tx.send(worker.chain.applied_view().height());
+        });
+        let height = rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|_| anyhow::anyhow!("capture blocked behind the transition barrier"))?;
+        assert_eq!(height, 5, "the capture must see the published tip");
+        join.join()
+            .map_err(|_| anyhow::anyhow!("capture worker panicked"))?;
+        drop(transition);
         Ok(())
     }
 
