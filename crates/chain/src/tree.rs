@@ -130,8 +130,8 @@ impl BlockTree {
     /// restore replaces it — would otherwise keep being advertised with the
     /// stale count. Only the published tip is refreshed; tip selection does
     /// not change here.
-    fn refresh_published_tip(&mut self, id: NodeId) {
-        if !self.tip.load_full().is_some_and(|tip| tip.tip_id == id) {
+    fn refresh_published_tip(&self, id: NodeId) {
+        if self.tip.load_full().is_none_or(|tip| tip.tip_id != id) {
             return;
         }
         if let Ok(snapshot) = self.tip_snapshot(id) {
