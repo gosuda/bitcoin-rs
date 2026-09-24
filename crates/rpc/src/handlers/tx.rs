@@ -186,9 +186,12 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         // Spent or never existed: Core-spec returns JSON null.
         return Ok(Value::new_null());
     };
+    // Confirmations count back from the applied tip. The envelope's `bestblock`
+    // is the header tip, a distinct source Core reports deliberately.
     let confirmations = ctx
         .chain
-        .applied_height()
+        .applied_view()
+        .height()
         .saturating_sub(live.height)
         .saturating_add(1);
     txout_typed(ctx, &live.txout, confirmations, live.coinbase)
