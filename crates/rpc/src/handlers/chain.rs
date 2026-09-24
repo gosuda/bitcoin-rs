@@ -18,7 +18,7 @@ use crate::compat::convert::{
     self, compact_target_hex, hex_encode, i32_saturated, i64_saturated, i64_saturated_len,
     sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::{ChainControlError, Context, TxQueryError};
+use crate::context::{AppliedView, ChainControlError, Context, TxQueryError};
 use crate::error::RpcError;
 use crate::handlers::{
     ensure_no_params, optional_bool, params_array, required_i64, required_str, required_u64,
@@ -1005,14 +1005,18 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    let (stats, txouts, transactions, set_hash) = ctx.chain.utxo.with_stable_view(|view| {
-        let stats =
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, ctx.chain.applied_height(), want_muhash)
-                .map_err(|err| RpcError::Internal(err.to_string()))?;
+    // One capture serves the scan height and the reported height/hash, so the
+    // response cannot describe a block that was applied after the scan began.
+    let view = ctx.chain.applied_view();
+    let applied_height = view.height();
+    let (stats, txouts, transactions, set_hash) = ctx.chain.utxo.with_stable_view(|stable| {
+        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
         let set_hash = match hash_type {
             "hash_serialized_3" => Some((
                 "hash_serialized_3",
-                view.hash_serialized_3()
+                stable
+                    .hash_serialized_3()
                     .map_err(|err| RpcError::Internal(err.to_string()))?
                     .to_string_be(),
             )),
@@ -1024,10 +1028,10 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                 ));
             }
         };
-        Ok::<_, RpcError>((stats, view.len(), view.record_count(), set_hash))
+        Ok::<_, RpcError>((stats, stable.len(), stable.record_count(), set_hash))
     })?;
-    let disk_size = ctx.chain.utxo.with_stable_view(|view| {
-        u64::try_from(view.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
+    let disk_size = ctx.chain.utxo.with_stable_view(|stable| {
+        u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
     });
     let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
         if name == "hash_serialized_3" {
@@ -1037,8 +1041,8 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         }
     });
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
-        height: i64::from(ctx.chain.applied_height()),
-        best_block: ctx.chain.applied_hash().to_string_be(),
+        height: i64::from(applied_height),
+        best_block: view.hash(ctx.chain.chain_network).to_string_be(),
         transactions: Some(i64_saturated_len(transactions)),
         tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
         bogo_size: i64_saturated(stats.bogo_size),
@@ -1361,9 +1365,9 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 /// `m_chain` is the connected, fully-validated chain, and header-first sync
 /// keeps headers ahead of it; a block whose header is known but which has not
 /// been connected is not in it, so it is `-1` rather than `0`.
-fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
-    // Membership and depth must come from the same published applied-tip state.
-    let Some(tip) = ctx.chain.applied_tip.load_full() else {
+fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, height: u32) -> i64 {
+    // Membership and depth come from the response's one captured publication.
+    let Some(tip) = view.tip() else {
         return -1;
     };
     if height > tip.height {
@@ -1391,7 +1395,10 @@ fn block_verbose_typed(
     verbosity: u64,
 ) -> Result<Value, RpcError> {
     let header = decode_header(record)?;
-    let block_confirmations = confirmations(ctx, Hash256::from(record.hash), record.height);
+    // One capture serves confirmations and the next-applied-block hash, so the
+    // two cannot describe different applied publications.
+    let view = ctx.chain.applied_view();
+    let block_confirmations = confirmations(ctx, &view, Hash256::from(record.hash), record.height);
     let mediantime = ctx
         .chain
         .median_time_past_for_hash(Hash256::from(record.hash))
@@ -1400,7 +1407,7 @@ fn block_verbose_typed(
         .chain
         .chain_work_hex_for_hash(Hash256::from(record.hash))
         .unwrap_or_else(|| "00".to_owned());
-    let next_block_hash = next_applied_block_hash(ctx, record.height);
+    let next_block_hash = next_applied_block_hash(ctx, &view, record.height);
     if !include_block_fields {
         return typed_to_sonic(&v31::GetBlockHeaderVerbose {
             hash: record.hash.to_string(),
@@ -1488,8 +1495,8 @@ fn block_verbose_typed(
     })
 }
 
-fn next_applied_block_hash(ctx: &Context, height: u32) -> Option<BlockHash> {
-    let tip = ctx.chain.applied_tip.load_full()?;
+fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Option<BlockHash> {
+    let tip = view.tip()?;
     let next_height = height.checked_add(1)?;
     if next_height > tip.height {
         return None;
@@ -2035,6 +2042,85 @@ mod tests {
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
     }
 
+    /// One publication supplies the scan height and the reported height and
+    /// hash, so a tip that lands mid-scan cannot split the response pair.
+    ///
+    /// The swapper moves only the applied-tip cell: the UTXO set is constant,
+    /// so this pins the tip pair, not an atomic UTXO-to-tip coupling, which is
+    /// not claimed.
+    #[test]
+    fn gettxoutsetinfo_pairs_one_height_with_one_hash_across_a_swap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ctx = context_with_tip(
+            bitcoin_rs_primitives::Network::Regtest,
+            0x207f_ffff,
+            &[1_000_000; 6],
+        );
+        let a = ctx
+            .chain
+            .applied_tip
+            .load_full()
+            .expect("fixture publishes an applied tip");
+        let b = Arc::new(TipSnapshot {
+            tip_id: NodeId::new(u32::MAX),
+            height: 7,
+            chainwork: ChainWork::ZERO,
+            hash: Hash256::from_le_bytes(&[0x0b; 32]),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        });
+        assert_ne!(a.height, b.height, "the fixture tips must differ");
+        assert_ne!(a.hash, b.hash, "the fixture tips must differ");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (cell, swap_a, swap_b, flag) = (
+            Arc::clone(&ctx.chain.applied_tip),
+            Arc::clone(&a),
+            Arc::clone(&b),
+            Arc::clone(&stop),
+        );
+        let swapper = std::thread::spawn(move || {
+            let mut flip = false;
+            while !flag.load(Ordering::Relaxed) {
+                flip = !flip;
+                let tip = if flip { &swap_b } else { &swap_a };
+                cell.store(Some(Arc::clone(tip)));
+            }
+        });
+
+        let mut seen_b = 0_usize;
+        for _ in 0..200 {
+            let result = gettxoutsetinfo(&ctx, &json!(null))
+                .unwrap_or_else(|error| panic!("gettxoutsetinfo failed: {error}"));
+            let height = result
+                .get("height")
+                .and_then(Value::as_i64)
+                .expect("height");
+            let best = result
+                .get("bestblock")
+                .and_then(Value::as_str)
+                .expect("best_block");
+            assert!(
+                result.get("hash_serialized_3").is_some(),
+                "the scan must still run and report its hash"
+            );
+            if height == 7 {
+                seen_b += 1;
+                assert_eq!(best, b.hash.to_string_be(), "a foreign hash rode height 7");
+            } else {
+                assert_eq!(height, 5, "the route reported an unpublished height");
+                assert_eq!(best, a.hash.to_string_be(), "a foreign hash rode height 5");
+            }
+            std::thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper thread panicked");
+        assert!(
+            seen_b > 0,
+            "the swap was never observed, so coherence proved nothing"
+        );
+    }
+
     /// A genesis, an applied child at height 1, and a competing branch off the
     /// same genesis whose *header* chain reaches height 2.
     ///
@@ -2119,7 +2205,10 @@ mod tests {
 
         // Header tip is height 2, applied tip height 1. The applied block is one
         // deep, not two: the header chain does not count.
-        assert_eq!(confirmations(&ctx, applied_hash, 1), 1);
+        assert_eq!(
+            confirmations(&ctx, &ctx.chain.applied_view(), applied_hash, 1),
+            1
+        );
         Ok(())
     }
 
@@ -2137,9 +2226,124 @@ mod tests {
         // Same height as the applied block, different chain. Deriving the answer
         // from height alone reports 1 here, which says "in the chain, one deep".
         assert_eq!(
-            confirmations(&ctx, fork_hash, 1),
+            confirmations(&ctx, &ctx.chain.applied_view(), fork_hash, 1),
             -1,
             "a block off the applied chain is not in it at any depth"
+        );
+        Ok(())
+    }
+
+    /// Confirmations and the next-applied-block hash describe one publication.
+    ///
+    /// The genesis has two competing children: `a1` is one applied tip; `b2`
+    /// leads a longer branch. Reporting `a1` while the applied tip swaps
+    /// between the two must never pair one branch's confirmation count with
+    /// the other branch's next-block hash.
+    #[test]
+    fn verbose_block_facts_never_straddle_two_applied_publications()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use bitcoin_rs_chain::NodeStatus;
+
+        let ctx = Context::new();
+        let header = |prev: BlockHash, nonce: u32, time: u32| Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce,
+        };
+        let genesis = header(BlockHash::default(), 0, 1_000_000);
+        let a1 = header(genesis.compute_hash(), 1, 1_000_900);
+        let b1 = header(genesis.compute_hash(), 2, 1_000_901);
+        let b2 = header(b1.compute_hash(), 3, 1_001_800);
+        let (a1_hash, b2_hash) = (a1.compute_hash(), b2.compute_hash());
+
+        let (a_tip, b_tip) = {
+            let mut tree = ctx.chain.block_tree.write();
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let a1_id = tree.insert_node(Some(genesis_id), a1, NodeStatus::Active)?;
+            let b1_id = tree.insert_node(Some(genesis_id), b1, NodeStatus::HeaderValid)?;
+            let b2_id = tree.insert_node(Some(b1_id), b2, NodeStatus::HeaderValid)?;
+            (
+                Arc::new(TipSnapshot {
+                    tip_id: a1_id,
+                    height: 1,
+                    chainwork: ChainWork::ZERO,
+                    hash: a1_hash.0,
+                    chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                }),
+                Arc::new(TipSnapshot {
+                    tip_id: b2_id,
+                    height: 2,
+                    chainwork: ChainWork::ZERO,
+                    hash: b2_hash.0,
+                    chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                }),
+            )
+        };
+        // A log record for `a1`, so the verbose projection has a record to
+        // answer from. The record comes back through the tree, which carries
+        // the header, exactly as a node's record does on the way out.
+        let mut block = fixture_genesis();
+        block.header = a1;
+        ctx.chain.add_block(BlockRecord::from_block(1, &block));
+        let record = ctx
+            .chain
+            .record_for_hash(Hash256::from(a1_hash))
+            .expect("fixture record resolves through the tree");
+        ctx.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (cell, swap_a, swap_b, flag) = (
+            Arc::clone(&ctx.chain.applied_tip),
+            a_tip,
+            b_tip,
+            Arc::clone(&stop),
+        );
+        let swapper = std::thread::spawn(move || {
+            let mut flip = false;
+            while !flag.load(Ordering::Relaxed) {
+                flip = !flip;
+                let tip = if flip { &swap_b } else { &swap_a };
+                cell.store(Some(Arc::clone(tip)));
+            }
+        });
+
+        let ctx = Arc::new(ctx);
+        let b2_text = b2_hash.to_string();
+        let mut seen_b = 0_usize;
+        for _ in 0..200 {
+            let value = block_verbose_typed(&ctx, &record, false, 1)?;
+            let confirmations = value
+                .get("confirmations")
+                .and_then(Value::as_i64)
+                .expect("confirmations");
+            let next = value.get("nextblockhash");
+            match confirmations {
+                1 => assert!(
+                    next.is_none_or(Value::is_null),
+                    "under the a1 tip the next applied height is unmined, yet {next:?} appeared"
+                ),
+                -1 => assert_eq!(
+                    next.and_then(Value::as_str),
+                    Some(b2_text.as_str()),
+                    "off the applied chain, only the b2 branch's next hash is coherent"
+                ),
+                other => panic!("confirmations {other} matches no published branch"),
+            }
+            if confirmations == -1 {
+                seen_b += 1;
+            }
+            std::thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper thread panicked");
+        assert!(
+            seen_b > 0,
+            "the b2 branch was never observed, so coherence proved nothing"
         );
         Ok(())
     }
@@ -2154,7 +2358,10 @@ mod tests {
         } = forked_ctx()?;
 
         // Known header, never connected. Core's m_chain does not contain it.
-        assert_eq!(confirmations(&ctx, header_tip_hash, 2), -1);
+        assert_eq!(
+            confirmations(&ctx, &ctx.chain.applied_view(), header_tip_hash, 2),
+            -1
+        );
         Ok(())
     }
     /// Header-only tree nodes remain addressable even without a log record.
@@ -2209,7 +2416,10 @@ mod tests {
         let Fork { ctx, .. } = forked_ctx()?;
         let unknown = Hash256::from_le_bytes(&[0xab_u8; 32]);
 
-        assert_eq!(confirmations(&ctx, unknown, 1), -1);
+        assert_eq!(
+            confirmations(&ctx, &ctx.chain.applied_view(), unknown, 1),
+            -1
+        );
         Ok(())
     }
 
