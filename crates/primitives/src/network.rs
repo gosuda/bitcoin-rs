@@ -20,6 +20,21 @@ pub struct ChainTxData {
     pub tx_rate: f64,
 }
 
+/// Per-network parameters for the header presync download-twice mechanism.
+///
+/// Core generates these from its memory analysis of an attacked sync; the
+/// values here are those generated numbers, copied from
+/// `bitcoin-core/src/kernel/chainparams.cpp` (mainnet `:229-232`, testnet3
+/// `:337-340`, testnet4 `:450-453`, signet `:572-574`, regtest `:677-679`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeadersSyncParams {
+    /// Headers between two salted commitment bits (`commitment_period`).
+    pub commitment_period: u32,
+    /// Headers the redownload buffer holds back before releasing them
+    /// (`redownload_buffer_size`).
+    pub redownload_buffer_size: usize,
+}
+
 /// Parses 64 hex characters into 32 big-endian bytes at compile time.
 ///
 /// The `nMinimumChainWork` values below are copied from Bitcoin Core as the hex
@@ -437,6 +452,38 @@ impl Network {
             // Core leaves regtest's `nMinimumChainWork` at zero: a regtest chain
             // is meant to be one block old and still count as synced.
             Self::Regtest => [0_u8; 32],
+        }
+    }
+
+    /// Returns the network's header presync parameters.
+    ///
+    /// A peer whose chain has not yet shown [`Self::minimum_chain_work`] is
+    /// synchronized twice: once to build salted commitments, then once more
+    /// to store. These parameters size that mechanism; they are not
+    /// operator-selectable.
+    #[must_use]
+    pub const fn headers_sync_params(self) -> HeadersSyncParams {
+        match self {
+            Self::Mainnet => HeadersSyncParams {
+                commitment_period: 649,
+                redownload_buffer_size: 15_400,
+            },
+            Self::Testnet3 => HeadersSyncParams {
+                commitment_period: 682,
+                redownload_buffer_size: 14_613,
+            },
+            Self::Testnet4 => HeadersSyncParams {
+                commitment_period: 616,
+                redownload_buffer_size: 16_199,
+            },
+            Self::Signet => HeadersSyncParams {
+                commitment_period: 629,
+                redownload_buffer_size: 15_885,
+            },
+            Self::Regtest => HeadersSyncParams {
+                commitment_period: 275,
+                redownload_buffer_size: 7_017,
+            },
         }
     }
 
