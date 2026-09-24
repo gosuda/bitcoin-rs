@@ -9,7 +9,7 @@ use std::{
 };
 
 use bitcoin_rs_primitives::{
-    Block, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    Block, DecodeError, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
     consensus_bytes, encode::double_sha256,
 };
 use parking_lot::{Mutex, RwLock};
@@ -719,6 +719,64 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
             expected,
             actual,
         }) if expected == wrong_hash && actual == hash
+    ));
+    Ok(())
+}
+
+#[test]
+fn prepare_block_for_rejects_a_short_body() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let body = read_fixture(0)?;
+    // Forty bytes cannot hold the fixed 80-byte header the parser requires.
+    let truncated = &body[..40];
+
+    assert!(matches!(
+        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, [0_u8; 32], truncated),
+        Err(IndexError::BlockParse(DecodeError::EndOfData {
+            needed: 40,
+            available: 40,
+        }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn prepare_block_for_rejects_a_truncated_transaction() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let body = read_fixture(0)?;
+    // Cut the coinbase short: the header and the transaction count still
+    // parse, so the failure lands inside a transaction.
+    let truncated = &body[..body.len() - 8];
+
+    assert!(matches!(
+        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, [0_u8; 32], truncated),
+        Err(IndexError::BlockParse(DecodeError::EndOfData { .. }))
+    ));
+    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
+    assert_eq!(store.count(ColumnFamily::Funding), 0);
+    assert_eq!(store.count(ColumnFamily::Spending), 0);
+    assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
+    Ok(())
+}
+
+#[test]
+fn prepare_block_for_rejects_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let mut body = read_fixture(0)?;
+    let hash = block_hash(&body);
+    body.push(0);
+
+    // Preparation takes one complete block, so a structurally complete block
+    // followed by anything else is rejected rather than front-consumed. The
+    // header hashes to `hash`, so only the parse can reject this body.
+    assert!(matches!(
+        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body),
+        Err(IndexError::BlockParse(DecodeError::TrailingBytes {
+            remaining: 1
+        }))
     ));
     Ok(())
 }
