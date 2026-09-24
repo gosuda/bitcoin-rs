@@ -1,9 +1,8 @@
 use std::cell::RefCell;
 
-use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
+use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin::p2p::message_compact_blocks::BlockTxn;
 use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
@@ -61,15 +60,19 @@ pub trait ChainQuery: Send + Sync {
         serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 
-    /// Answers one `getblocktxn` from the active chain under the same
-    /// body-availability rules as full blocks. `Ok(None)` leaves the request
-    /// unanswered (unknown, stale, pruned, or headless block); `Err`
-    /// reports an out-of-range transaction index — a protocol disconnect
-    /// per BIP152 (Core scores misbehavior).
+    /// PRE: `request` carries decoded absolute transaction indexes for one
+    /// block.
+    /// POST: return the reply to send — a `blocktxn` for a block shallow
+    /// enough to reconstruct, or the whole witness-bearing `block` for one
+    /// too deep for a useful hint set (Core 31.1 answers both instead of
+    /// leaving a peer to time out); `Ok(None)` leaves the request unanswered
+    /// (unknown, stale, pruned, or headless block). `Err` reports an
+    /// out-of-range transaction index — a protocol disconnect per BIP152
+    /// (Core scores misbehavior).
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
-    ) -> Result<Option<BlockTransactions>, PeerError>;
+    ) -> Result<Option<Message>, PeerError>;
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the
@@ -272,11 +275,7 @@ pub fn dispatch_inbound_full<S>(
         }
         Message::GetBlockTxn(request) => {
             step(peer, message)?;
-            if let Some(chain) = chain {
-                if let Some(transactions) = chain.block_transactions(&request.txs_request)? {
-                    send(Message::BlockTxn(BlockTxn { transactions }))?;
-                }
-            }
+            serve_block_txn(chain, &request.txs_request, send)?;
         }
         _ => step(peer, message)?,
     }
@@ -419,6 +418,27 @@ fn serve_getdata_blocks(
     }
     Ok(())
 }
+
+/// Answers one `getblocktxn` through the chain view and sends whatever reply
+/// it produces. PRE: the request's indexes are structurally valid. POST: a
+/// servable block gets its `blocktxn`, a block too deep for a compact answer
+/// gets the whole `block`, and an unknown, stale, or headless block — or a
+/// node with no chain view — leaves the request unanswered. INVARIANT: the
+/// dispatch boundary never learns which reply shape the chain chose.
+fn serve_block_txn(
+    chain: Option<&dyn ChainQuery>,
+    request: &BlockTransactionsRequest,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    let Some(chain) = chain else {
+        return Ok(());
+    };
+    if let Some(response) = chain.block_transactions(request)? {
+        send(response)?;
+    }
+    Ok(())
+}
+
 fn ensure_block_locator_within_bounds(
     locator_hashes: &[bitcoin::BlockHash],
     error: &'static str,
@@ -446,6 +466,7 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
+    use bitcoin::p2p::message_compact_blocks::BlockTxn;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
         Witness, Wtxid,
@@ -534,7 +555,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
-        ) -> Result<Option<BlockTransactions>, PeerError> {
+        ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
     }
@@ -580,7 +601,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
-        ) -> Result<Option<BlockTransactions>, PeerError> {
+        ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
     }
@@ -764,11 +785,13 @@ mod tests {
             fn block_transactions(
                 &self,
                 request: &BlockTransactionsRequest,
-            ) -> Result<Option<BlockTransactions>, PeerError> {
-                Ok(Some(BlockTransactions {
-                    block_hash: request.block_hash,
-                    transactions: Vec::new(),
-                }))
+            ) -> Result<Option<Message>, PeerError> {
+                Ok(Some(Message::BlockTxn(BlockTxn {
+                    transactions: BlockTransactions {
+                        block_hash: request.block_hash,
+                        transactions: Vec::new(),
+                    },
+                })))
             }
         }
 
@@ -846,7 +869,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
-        ) -> Result<Option<BlockTransactions>, PeerError> {
+        ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
     }
