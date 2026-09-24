@@ -66,7 +66,7 @@ impl ProcessPeer {
             journal_bytes: 0,
             started: node.evidence_clock(),
         };
-        let services = ServiceFlags::WITNESS;
+        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
         let mut version = VersionMessage::new(
             services,
             i64::try_from(
@@ -253,7 +253,13 @@ fn read_exact(
     deadline: Instant,
 ) -> Result<()> {
     while !bytes.is_empty() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        // The deadline bounds the wait for the next byte, with a floor:
+        // a slice that expires between two chunks of one frame must not
+        // strand the stream mid-frame, and a peer dribbling past the
+        // deadline cannot outrun the floor.
+        let wait = remaining_time(deadline, Instant::now(), "P2P operation deadline")
+            .unwrap_or(Duration::from_millis(1));
+        stream.set_read_timeout(Some(wait))?;
         let count = stream.read(bytes)?;
         if count == 0 {
             return Err(Error::Protocol("truncated P2P frame".to_owned()));
