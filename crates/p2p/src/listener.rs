@@ -237,7 +237,7 @@ impl ConnectionShared {
     ///   [`crate::PeerLease::admit_block_forward`] admits it, and is dropped
     ///   with a log record otherwise.
     /// INVARIANT: one connection holds at most
-    ///   [`crate::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited bodies in the
+    ///   [`crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited bodies in the
     ///   shared channel at once, and a body the download window owns is never
     ///   dropped for that bound, so requested sync traffic always arrives.
 >>>>>>> edb571a3 (Bound unsolicited block forwarding per peer)
@@ -2374,5 +2374,140 @@ mod ready_notify_tests {
         assert!(shared.publish_info_and_notify_ready(addr, &lease, peer_info(addr, 3)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos(), vec![peer_info(addr, 3)]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod block_forward_tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwapOption;
+    use bitcoin_rs_primitives::{Hash256, consensus_bytes};
+    use parking_lot::{Mutex, RwLock};
+
+    use super::test_shared;
+    use crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
+    use crate::sync::BlockSync;
+    use crate::sync::chain::SyncChain;
+    use crate::sync::tests::{
+        TestChain, coinbase_transaction, connect_peer, current_source, eligible_peer,
+        mined_block_with_prev_hash, mined_chain, test_addr,
+    };
+
+    fn genesis_body() -> bitcoin_rs_primitives::Block {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let bytes = bitcoin::consensus::encode::serialize(&genesis);
+        bitcoin_rs_primitives::Block::consensus_decode(&bytes)
+            .expect("regtest genesis block must decode")
+    }
+
+    /// One connection cannot fill the shared inbound block channel with bodies
+    /// it was never asked for, and a body the download window owns is never
+    /// dropped for that bound.
+    #[test]
+    fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::error::Error>> {
+        // Real sync wiring: peer A announces block 2 and the window asks A for
+        // its body, so A's requested delivery must outlive A's exhausted
+        // unsolicited credits.
+        let (tree, blocks) = mined_chain(1, 0)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let peers = Arc::new(crate::PeerTable::new());
+        let (sync_headers_tx, sync_headers_rx) = crossbeam_channel::unbounded();
+        let (sync_blocks_tx, sync_blocks_rx) = crossbeam_channel::unbounded();
+        let chain: Arc<dyn SyncChain> = Arc::new(TestChain::new(
+            chain_tip,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::clone(&block_tree),
+        ));
+        let sync = Arc::new(BlockSync::new(
+            chain,
+            Arc::clone(&peers),
+            Arc::new(Mutex::new(sync_headers_rx)),
+            Arc::new(Mutex::new(sync_blocks_rx)),
+        ));
+        sync_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+        sync.tick();
+
+        let flooded = test_addr(9780, 0)?;
+        // The outbound queue stays alive: a closed queue would cancel the
+        // lease and masquerade as a disconnect.
+        let _rx: crossbeam_channel::Receiver<crate::Message> =
+            connect_peer(&peers, eligible_peer(flooded, 3));
+        let source = current_source(&peers, flooded);
+        let block2 =
+            mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
+        sync_headers_tx.send(crate::InboundHeaders {
+            headers: vec![block2.header],
+            source: Some(source),
+            wire_response: true,
+            body_fetch_owned: false,
+        })?;
+        sync.tick();
+        assert!(
+            sync.owns_body_fetch(source, Hash256::from(block2.block_hash())),
+            "fixture: the window must own block 2's body for this connection"
+        );
+
+        // Listener wiring over the same peer table and sync loop.
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&peers), headers_tx, blocks_tx);
+        shared.block_sync = Some(Arc::clone(&sync));
+        let lease = peers
+            .lease(flooded)
+            .ok_or("flood connection must be registered")?;
+        let unrelated = genesis_body();
+        let unrelated_bytes = bytes::Bytes::from(consensus_bytes(&unrelated));
+
+        for _ in 0..=MAX_UNSOLICITED_BLOCK_FORWARDS {
+            shared.send_block(&lease, flooded, unrelated.clone(), unrelated_bytes.clone());
+        }
+        assert_eq!(
+            blocks_rx.len(),
+            MAX_UNSOLICITED_BLOCK_FORWARDS,
+            "one connection may not exceed its own unsolicited forwarding bound"
+        );
+
+        shared.send_block(
+            &lease,
+            flooded,
+            block2.clone(),
+            bytes::Bytes::from(consensus_bytes(&block2)),
+        );
+        assert_eq!(
+            blocks_rx.len(),
+            MAX_UNSOLICITED_BLOCK_FORWARDS + 1,
+            "a delivery the window owns is never dropped for the unsolicited bound"
+        );
+
+        let other: SocketAddr = test_addr(9781, 0)?;
+        let _other_rx: crossbeam_channel::Receiver<crate::Message> =
+            connect_peer(&peers, eligible_peer(other, 3));
+        let other_lease = peers
+            .lease(other)
+            .ok_or("second connection must be registered")?;
+        shared.send_block(
+            &other_lease,
+            other,
+            unrelated.clone(),
+            unrelated_bytes.clone(),
+        );
+        assert_eq!(
+            blocks_rx.len(),
+            MAX_UNSOLICITED_BLOCK_FORWARDS + 2,
+            "the bound is one connection's share of the channel, not a global cap"
+        );
+
+        while blocks_rx.try_recv().is_ok() {}
+        shared.send_block(&lease, flooded, unrelated, unrelated_bytes);
+        assert_eq!(
+            blocks_rx.len(),
+            1,
+            "a forwarding slot returns once sync has taken the body"
+        );
+        Ok(())
     }
 }

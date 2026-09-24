@@ -52,7 +52,7 @@ struct ScriptedBranchSwitch {
 /// classifier: a second coinbase-shaped transaction is a permanent
 /// `ExtraCoinbase` invalidity, while a body that fails the header binding
 /// (txid merkle root or witness commitment) is `BodyMutated`.
-struct TestChain {
+pub(crate) struct TestChain {
     network: Network,
     block_tree: Arc<RwLock<BlockTree>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -62,7 +62,7 @@ struct TestChain {
 }
 
 impl TestChain {
-    fn new(
+    pub(crate) fn new(
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
         block_tree: Arc<RwLock<BlockTree>>,
@@ -746,7 +746,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::er
             block,
             serialized,
             source: Some(source),
-        forward_credit: None,
+            forward_credit: None,
         })?;
     }
     // Whichever order the pass tries the carried headers, the second drain
@@ -1560,7 +1560,7 @@ impl SyncHarness {
 }
 
 /// Mine real bodies, then extend their header chain without applying anything.
-fn mined_chain(
+pub(crate) fn mined_chain(
     body_height: u32,
     header_only: u32,
 ) -> Result<(BlockTree, Vec<Block>), Box<dyn std::error::Error>> {
@@ -2055,7 +2055,7 @@ fn genesis_header() -> Header {
     Network::Regtest.genesis_block().header
 }
 
-fn coinbase_transaction(height: u32) -> Tx {
+pub(crate) fn coinbase_transaction(height: u32) -> Tx {
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
     let mut script_sig = push_int(i64::from(height));
     script_sig.extend_from_slice(&push_int(1));
@@ -2096,7 +2096,11 @@ fn transaction(seed: u8) -> Tx {
     }
 }
 
-fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Vec<Tx>) -> Block {
+pub(crate) fn mined_block_with_prev_hash(
+    prev_blockhash: BlockHash,
+    height: u32,
+    txdata: Vec<Tx>,
+) -> Block {
     use bitcoin_rs_primitives::CompactTarget;
     let mut block = Block {
         header: Header {
@@ -2162,7 +2166,7 @@ fn assert_applied_genesis(
     Ok(())
 }
 
-fn current_source(peer_table: &Arc<PeerTable>, addr: SocketAddr) -> PeerSource {
+pub(crate) fn current_source(peer_table: &Arc<PeerTable>, addr: SocketAddr) -> PeerSource {
     peer_table.lease(addr).map_or_else(
         || panic!("test peer {addr} must be connected"),
         |lease| lease.source(addr),
@@ -2199,7 +2203,7 @@ fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     }
 }
 
-fn eligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
+pub(crate) fn eligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     PeerInfo {
         // SERVICE_WITNESS (1 << 3) | NODE_NETWORK (1): native peer flags.
         services: 0b1001,
@@ -2211,14 +2215,17 @@ fn eligible_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     }
 }
 
-fn test_addr(base_port: usize, idx: usize) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+pub(crate) fn test_addr(
+    base_port: usize,
+    idx: usize,
+) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     Ok(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         u16::try_from(base_port + idx)?,
     ))
 }
 
-fn connect_peer(
+pub(crate) fn connect_peer(
     peer_table: &Arc<PeerTable>,
     info: PeerInfo,
 ) -> crossbeam_channel::Receiver<Message> {
@@ -2276,3 +2283,121 @@ mod frontier_recovery;
 #[cfg(test)]
 mod frontier_model;
 mod head_sync;
+
+/// A sync loop over an applied chain whose commit fails on command for one
+/// hash, with block 2 announced and its body owed to one live connection.
+///
+/// The fixture is the `SYNC-BR-01` setup: the node has applied block 1, the
+/// header tip is block 2, and the body that will fail is attributable to
+/// `source`.
+struct PunishmentFixture {
+    sync: Arc<BlockSync>,
+    peers: Arc<PeerTable>,
+    chain: Arc<TestChain>,
+    blocks_tx: crossbeam_channel::Sender<crate::InboundBlock>,
+    block2: Block,
+    source: PeerSource,
+    /// The announcing connection's outbound queue, kept alive so a send
+    /// failure can never masquerade as a disconnect.
+    _peer_rx: crossbeam_channel::Receiver<Message>,
+}
+
+fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(1, 0)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let peers = Arc::new(PeerTable::new());
+    let (headers_tx, headers_rx) = unbounded();
+    let (blocks_tx, blocks_rx) = unbounded();
+    let chain = Arc::new(TestChain::new(
+        chain_tip,
+        Arc::new(ArcSwapOption::empty()),
+        Arc::clone(&block_tree),
+    ));
+    let chain_handle: Arc<TestChain> = Arc::clone(&chain);
+    let chain_ref: Arc<dyn SyncChain> = chain_handle;
+    let sync = Arc::new(BlockSync::new(
+        chain_ref,
+        Arc::clone(&peers),
+        Arc::new(Mutex::new(headers_rx)),
+        Arc::new(Mutex::new(blocks_rx)),
+    ));
+    // Apply block 1 so the apply frontier needs block 2's body.
+    blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    sync.tick();
+
+    let addr = test_addr(9770, 0)?;
+    let peer_rx = connect_peer(&peers, eligible_peer(addr, 2));
+    let source = current_source(&peers, addr);
+    let block2 =
+        mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
+    headers_tx.send(InboundHeaders {
+        headers: vec![block2.header],
+        source: Some(source),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    sync.tick();
+    Ok(PunishmentFixture {
+        sync,
+        peers,
+        chain,
+        blocks_tx,
+        block2,
+        source,
+        _peer_rx: peer_rx,
+    })
+}
+
+/// Delivers the fixture's block 2 body from the connection that announced it.
+fn deliver_attributed_body(fixture: &PunishmentFixture) -> Result<(), Box<dyn std::error::Error>> {
+    let mut inbound = crate::InboundBlock::from_decoded(fixture.block2.clone());
+    inbound.source = Some(fixture.source);
+    fixture.blocks_tx.send(inbound)?;
+    fixture.sync.tick();
+    Ok(())
+}
+
+/// A body the chain rejects for a permanent consensus reason is the delivering
+/// connection's fault: Core disconnects its source
+/// (`net_processing.cpp:2031-2068`). At the base of this change the same body
+/// purged its subtree and left the connection serving it.
+#[test]
+fn permanent_consensus_body_disconnects_delivering_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    let fixture = punishment_fixture()?;
+    let hash = Hash256::from(fixture.block2.block_hash());
+    *fixture.chain.scripted_commit_failure.lock() =
+        Some((hash, WindowCommitDisposition::Permanent));
+
+    deliver_attributed_body(&fixture)?;
+
+    assert!(
+        !fixture.peers.is_current(fixture.source),
+        "the connection that served a consensus-invalid block must be disconnected"
+    );
+    Ok(())
+}
+
+/// The exclusions: a body that does not bind to its header and an operational
+/// settlement failure are not the delivering connection's fault, so neither may
+/// end the conversation.
+#[test]
+fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+    for disposition in [
+        WindowCommitDisposition::BodyMutated,
+        WindowCommitDisposition::Operational,
+    ] {
+        let fixture = punishment_fixture()?;
+        let hash = Hash256::from(fixture.block2.block_hash());
+        *fixture.chain.scripted_commit_failure.lock() = Some((hash, disposition));
+
+        deliver_attributed_body(&fixture)?;
+
+        assert!(
+            fixture.peers.is_current(fixture.source),
+            "a {disposition:?} settlement failure must not disconnect the delivering connection"
+        );
+    }
+    Ok(())
+}
