@@ -83,5 +83,5 @@ fn peer_table_owns_handshake_publication_and_replacement() {
 
     let sync = make_sync(Arc::clone(&table));
     sync.tick();
-    assert_eq!(table.live_connections().len(), 1);
+    assert_eq!(table.live_sessions().len(), 1);
 }

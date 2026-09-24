@@ -126,7 +126,12 @@ impl BlockSync {
         // zombie entries are never candidates for fetch work.
         self.peer_table
             .disconnect_matching(|_, lease| lease.is_cancelled());
-        let live = self.peer_table.live_connections();
+        let live: Vec<_> = self
+            .peer_table
+            .live_sessions()
+            .into_iter()
+            .map(|source| (source.addr, source.connection_id()))
+            .collect();
         let mut scheduler = self.scheduler.lock();
         let mut replaced = SmallVec::<[SocketAddr; 8]>::new();
         for (addr, id) in &live {

@@ -102,14 +102,11 @@ impl TxIngressConsumer {
 
     fn process_retries(&self) -> bool {
         let now = unix_time_secs();
-        let live_peers =
-            self.peer_table
-                .live_connections()
-                .into_iter()
-                .map(|(addr, connection_id)| PeerToken {
-                    addr,
-                    connection_id: connection_id.get(),
-                });
+        let live_peers = self
+            .peer_table
+            .live_sessions()
+            .into_iter()
+            .map(PeerToken::from);
         self.mempool_gateway.maintain_orphans(now, live_peers);
         let retries = self.mempool_gateway.retry_orphans(&self.chain_view(), now);
         let made_progress = retries

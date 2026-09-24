@@ -71,6 +71,14 @@ impl std::ops::DerefMut for TableView {
     }
 }
 
+fn live_sessions_of(entries: &TableView) -> Vec<PeerSource> {
+    entries
+        .iter()
+        .filter(|(_, entry)| !entry.lease.is_cancelled())
+        .map(|(addr, entry)| entry.lease.source(*addr))
+        .collect()
+}
+
 /// Authoritative table of live peer connections keyed by remote address.
 #[derive(Debug, Default)]
 pub struct PeerTable {
@@ -404,16 +412,27 @@ impl PeerTable {
         self.entries.read().keys().copied().collect()
     }
 
-    /// Address and connection identity of every live, uncancelled
-    /// connection.
+    /// Identity of every live, uncancelled connection.
+    ///
+    /// PRE: none.
+    /// POST: returns one `PeerSource` per live, uncancelled table entry.
+    /// INVARIANT: every returned source passes `is_current` at snapshot time.
     #[must_use]
-    pub fn live_connections(&self) -> Vec<(SocketAddr, ConnectionId)> {
-        self.entries
-            .read()
-            .iter()
-            .filter(|(_, entry)| !entry.lease.is_cancelled())
-            .map(|(addr, entry)| (*addr, entry.lease.connection_id()))
-            .collect()
+    pub fn live_sessions(&self) -> Vec<PeerSource> {
+        live_sessions_of(&self.entries.read())
+    }
+
+    /// Runs `operation` on the live-session snapshot while the table read
+    /// lock is held, so a same-address replacement cannot register between
+    /// the snapshot and the ownership mutation.
+    ///
+    /// PRE: `operation` does not acquire the peer-table write lock and does
+    ///   not read the table again (the read lock is not reentrant).
+    /// POST: `operation` observed the complete live set atomically.
+    /// INVARIANT: lock order is peer table, then any lock `operation` takes.
+    pub fn with_live_sessions(&self, operation: impl FnOnce(&[PeerSource])) {
+        let entries = self.entries.read();
+        operation(&live_sessions_of(&entries));
     }
 
     /// Calls `f` with every live lease under the table's read lock.
