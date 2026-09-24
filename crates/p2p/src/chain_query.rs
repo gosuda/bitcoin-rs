@@ -215,6 +215,12 @@ impl ChainQuery for ActiveChainQuery {
         let Some((payload, tip_height)) = self.load_active_block(height, hash) else {
             return Ok(None);
         };
+        // The tip may have moved while the body was read; the re-observed
+        // depth decides the reply, so a moving tip cannot keep an old block
+        // eligible for a compact answer.
+        if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
+            return Ok(Some(Message::BlockPayload(payload)));
+        }
         let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
         else {
             return Ok(None);
