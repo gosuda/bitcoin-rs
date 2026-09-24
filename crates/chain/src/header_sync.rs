@@ -389,6 +389,63 @@ fn pow_limit_bits(network: Network) -> CompactTarget {
     target_to_compact(network.max_target())
 }
 
+/// The proof of work one header claims: `~target / (target + 1) + 1`.
+///
+/// This is Bitcoin Core's `GetBlockProof` (`bitcoin-core/src/pow.cpp`), and
+/// it is the same quantity the block tree accumulates into a node's
+/// chainwork, so a header chain's claimed work and its admitted work are
+/// computed by one function.
+#[must_use]
+pub fn block_work(header: &BlockHeader) -> ChainWork {
+    pow::work_from_header(header)
+}
+
+/// Whether a difficulty transition to `new_bits` at `height` is permitted.
+///
+/// PRE: `height` is the height of the header carrying `new_bits`, and
+///   `old_bits` is the bits field of its parent.
+/// POST: return true when the network allows this transition without
+///   consulting any stored chain: test networks permit any transition, a
+///   retarget height permits a target within the fourfold adjustment bound
+///   after the compact round-trip Core applies, and every other height
+///   requires the parent's bits unchanged.
+/// INVARIANT: this is Core's tree-free `PermittedDifficultyTransition`
+///   (`bitcoin-core/src/pow.cpp:89-136`), the check the header presync
+///   state runs while it holds no tree; the contextual check in
+///   [`validate_header_nbits`] remains the full-consensus rule.
+#[must_use]
+pub fn permitted_difficulty_transition(
+    network: Network,
+    height: u32,
+    old_bits: CompactTarget,
+    new_bits: CompactTarget,
+) -> bool {
+    if network.allow_min_difficulty_blocks() {
+        return true;
+    }
+    let interval = network.retarget_interval();
+    if interval == 0 || !height.is_multiple_of(interval) {
+        return old_bits == new_bits;
+    }
+    // A retarget may move the target by at most the clamped timespan ratio:
+    // four times up, four times down, never past the proof-of-work limit,
+    // and the bound is compared after the compact round-trip, exactly as
+    // Core rounds it.
+    let pow_limit = network.max_target();
+    let old_target = pow::compact_to_target(old_bits);
+    let observed = pow::compact_to_target(new_bits);
+    let quarter = ChainWork::from(4_u32);
+    let largest = old_target
+        .checked_mul(quarter)
+        .unwrap_or(pow_limit)
+        .min(pow_limit);
+    if pow::compact_to_target(pow::target_to_compact(largest)) < observed {
+        return false;
+    }
+    let smallest = (old_target / quarter).min(pow_limit);
+    pow::compact_to_target(pow::target_to_compact(smallest)) <= observed
+}
+
 /// Compact proof-of-work target decode/encode and block-work helpers.
 ///
 /// These mirror Bitcoin Core's `arith_uint256::SetCompact`/`GetCompact`
