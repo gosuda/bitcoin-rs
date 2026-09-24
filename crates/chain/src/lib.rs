@@ -77,12 +77,14 @@ pub enum ChainError {
         /// Previous-block hash referenced by the child header.
         prev_hash: Hash256,
     },
-    /// The parent header is present but was previously marked invalid, so no
-    /// descendant may extend it.
-    #[error("parent header {prev_hash} is invalid")]
+    /// The candidate extends a header that this node has marked invalid.
+    ///
+    /// Core refuses it with `bad-prevblk` before any contextual check runs
+    /// (`src/validation.cpp:4228-4231`), so the header never enters the tree.
+    #[error("header extends invalid parent {parent:?}")]
     InvalidParent {
-        /// Previous-block hash referenced by the child header.
-        prev_hash: Hash256,
+        /// Resolved identity of the invalid parent.
+        parent: NodeId,
     },
     /// The header version is below the floor a buried deployment requires.
     ///
@@ -103,7 +105,9 @@ pub enum ChainError {
     ///
     /// Core rejects with `time-timewarp-attack`
     /// (`src/validation.cpp:4100-4110`).
-    #[error("header timestamp {timestamp} at height {height} is below the timewarp floor {minimum}")]
+    #[error(
+        "header timestamp {timestamp} at height {height} is below the timewarp floor {minimum}"
+    )]
     TimewarpAttack {
         /// Candidate header height (a difficulty-adjustment boundary).
         height: u32,

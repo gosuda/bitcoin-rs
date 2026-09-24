@@ -568,7 +568,8 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::TimestampTooEarly { .. }
             | ChainError::TimestampTooFarAhead { .. }
             | ChainError::BadVersion { .. }
-            | ChainError::TimewarpAttack { .. }),
+            | ChainError::TimewarpAttack { .. }
+            | ChainError::InvalidParent { .. }),
         ) => bitcoin_rs_mining::chain_reject_reason(chain),
         ApplyError::Shutdown
         | ApplyError::JournalBackpressure(_)

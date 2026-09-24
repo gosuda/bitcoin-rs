@@ -4,7 +4,7 @@
 // reason strings.
 use super::{chain_reject_reason, consensus_reject_reason, header_reject_reason};
 use crate::MiningControlError;
-use bitcoin_rs_chain::{ChainError, ChainWork};
+use bitcoin_rs_chain::{ChainError, ChainWork, NodeId};
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_primitives::Hash256;
 
@@ -105,6 +105,12 @@ fn header_failures_use_core_bip22_reasons() {
         (ChainError::InvalidParent { prev_hash: hash }, "bad-prevblk"),
         (ChainError::KnownInvalidHeader { hash }, "duplicate-invalid"),
         (
+            ChainError::InvalidParent {
+                parent: NodeId::new(7),
+            },
+            "bad-prevblk",
+        ),
+        (
             ChainError::BadVersion {
                 version: 1,
                 required: 2,
@@ -129,7 +135,6 @@ fn header_failures_use_core_bip22_reasons() {
             },
             "time-timewarp-attack",
         ),
-
     ] {
         assert_eq!(chain_reject_reason(&error), want, "{error:?}");
     }
